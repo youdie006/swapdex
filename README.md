@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/banner.png" alt="swapdex - switch Claude Code and Codex accounts, one command, all local" width="820" />
+<img src="docs/cli-banner.png" alt="swapdex - switch Claude Code and Codex login accounts, one command, all local" width="760" />
 
 [![CI](https://github.com/youdie006/swapdex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/youdie006/swapdex/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
