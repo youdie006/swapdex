@@ -11,3 +11,8 @@ Thumbs.db
 
 # Agent runtime/local config
 .claude/
+
+# Render/codex artifacts
+.playwright-mcp/
+docs/.agents/
+docs/.codex/
