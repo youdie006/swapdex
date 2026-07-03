@@ -252,6 +252,23 @@ pub fn rm(paths: &Paths, name: &str) -> Result<i32> {
     Ok(0)
 }
 
+pub fn sessions(paths: &Paths) -> Result<i32> {
+    match crate::session_link::sessions_by_account(paths) {
+        None => {
+            println!("session data unavailable (install sessionwiki for `sessions --by-account`)");
+        }
+        Some(counts) if counts.is_empty() => {
+            println!("no sessions found");
+        }
+        Some(counts) => {
+            for (account, n) in &counts {
+                println!("{:<20} {n}", account);
+            }
+        }
+    }
+    Ok(0)
+}
+
 fn identity_line(id: &Account) -> String {
     let who = id.email.clone().unwrap_or_else(|| id.display.clone());
     match &id.tier {

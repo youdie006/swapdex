@@ -42,6 +42,8 @@ enum Cmd {
     Status,
     /// Remove a saved profile (never touches a live login)
     Rm { name: String },
+    /// Sessions grouped by the account that was active when they ran
+    Sessions,
 }
 
 fn main() {
@@ -65,6 +67,7 @@ fn main() {
         Cmd::Ls { json } => commands::ls(&paths, *json),
         Cmd::Status => commands::status(&paths),
         Cmd::Rm { name } => commands::rm(&paths, name),
+        Cmd::Sessions => commands::sessions(&paths),
     };
     match result {
         Ok(code) => std::process::exit(code),
