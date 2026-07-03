@@ -21,8 +21,9 @@ pub struct ProfileInfo {
     pub tools: Vec<String>,
 }
 
-/// Holds an exclusive flock for its lifetime (released on drop).
-pub struct LockGuard(fs::File);
+/// Holds an exclusive flock for its lifetime (released on drop). The file is
+/// kept only to keep the lock; it is intentionally never read.
+pub struct LockGuard(#[allow(dead_code)] fs::File);
 
 impl Store {
     pub fn open(paths: &Paths) -> Result<Store> {
