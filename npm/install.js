@@ -12,28 +12,27 @@ const { execFileSync } = require("child_process");
 
 const version = require("./package.json").version;
 
+// swapdex is a Unix tool (Linux, WSL, macOS) - it manages 0600 credential files.
 const TARGETS = {
   "darwin arm64": "aarch64-apple-darwin",
   "darwin x64": "x86_64-apple-darwin",
   "linux x64": "x86_64-unknown-linux-musl",
   "linux arm64": "aarch64-unknown-linux-musl",
-  "win32 x64": "x86_64-pc-windows-msvc",
 };
 
-const isWin = process.platform === "win32";
 const key = `${process.platform} ${process.arch}`;
 const target = TARGETS[key];
 const binDir = path.join(__dirname, "bin");
-const binName = isWin ? "swapdex.exe" : "swapdex";
+const binName = "swapdex";
 
 function bail(msg) {
   console.error(`swapdex: ${msg} Try \`cargo install swapdex\` instead.`);
   process.exit(0); // do not break the whole npm install
 }
 
-if (!target) bail(`no prebuilt binary for ${key}.`);
+if (!target) bail(`no prebuilt binary for ${key} (swapdex supports Linux, WSL, and macOS).`);
 
-const ext = isWin ? "zip" : "tar.gz";
+const ext = "tar.gz";
 const url = `https://github.com/youdie006/swapdex/releases/download/v${version}/swapdex-${target}.${ext}`;
 
 function download(u, dest, cb, redirects = 0) {
@@ -64,12 +63,10 @@ const archive = path.join(os.tmpdir(), `swapdex-${target}.${ext}`);
 download(url, archive, (err) => {
   if (err) bail(`could not download the prebuilt binary (${err.message}).`);
   try {
-    // bsdtar (bundled on modern macOS, Linux, and Windows 10+) extracts both
-    // .tar.gz and .zip.
-    execFileSync("tar", ["-xf", archive, "-C", binDir], { stdio: "ignore" });
+    execFileSync("tar", ["-xzf", archive, "-C", binDir], { stdio: "ignore" });
     const bin = path.join(binDir, binName);
     if (!fs.existsSync(bin)) bail("the downloaded archive did not contain the binary.");
-    if (!isWin) fs.chmodSync(bin, 0o755);
+    fs.chmodSync(bin, 0o755);
     fs.unlinkSync(archive);
     console.log(`swapdex: installed prebuilt binary (${target}).`);
   } catch (e) {

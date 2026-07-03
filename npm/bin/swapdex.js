@@ -5,8 +5,7 @@
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const isWin = process.platform === "win32";
-const bin = path.join(__dirname, isWin ? "swapdex.exe" : "swapdex");
+const bin = path.join(__dirname, "swapdex");
 
 const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
 
