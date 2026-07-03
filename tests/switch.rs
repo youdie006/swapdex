@@ -171,6 +171,32 @@ fn no_args_prints_ascii_banner_plain_when_piped() {
     );
 }
 
+// ls marks a Codex profile whose login has not refreshed in a long time as
+// stale (its refresh token may have rotated) - a cross-tool safety cue.
+#[test]
+fn ls_marks_a_stale_codex_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let d = root.path().join(".codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode":"chatgpt","OPENAI_API_KEY":"sk-X",
+            "tokens":{"id_token":"h.eyJlbWFpbCI6ImFAeC5jb20ifQ.s","access_token":"AT",
+                      "refresh_token":"RT","account_id":"acct-A"},
+            "last_refresh":"2020-01-01T00:00:00Z"}))
+        .unwrap(),
+    )
+    .unwrap();
+    run(root.path(), &["add", "old", "--tool", "codex"]);
+    let (o, _e, c) = run(root.path(), &["ls"]);
+    assert_eq!(c, 0);
+    assert!(
+        o.contains("(stale)"),
+        "old codex login should be flagged stale: {o}"
+    );
+}
+
 // BUG1: right after a fresh Claude login there is no ~/.claude.json yet; add must
 // still work.
 #[test]

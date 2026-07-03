@@ -197,24 +197,34 @@ pub fn use_account(paths: &Paths, name: &str, sel: &ToolSel, dry_run: bool) -> R
     Ok(0)
 }
 
+/// A saved snapshot ages out even before its access token expires, because the
+/// refresh token can rotate; flag one that has not been refreshed in a while.
+const STALE_DAYS: i64 = 30;
+
 /// Identity extracted from a STORED snapshot (no live read, no secrets):
-/// (email, tier, access-token expiry in epoch millis).
+/// (email, tier, marker). marker is "expired" (Claude access token past expiry)
+/// or "stale" (Codex login not refreshed in >STALE_DAYS - its refresh token may
+/// have rotated, so re-run `add --update`), else None.
 fn profile_detail(
     store: &Store,
     name: &str,
     tool: &str,
-) -> Option<(Option<String>, Option<String>, Option<i64>)> {
+) -> Option<(Option<String>, Option<String>, Option<&'static str>)> {
     let snap = store.load(name, tool).ok()??;
     match tool {
         "claude-code" => {
             let creds: Value = serde_json::from_slice(snap.part("credentials")?.expose()).ok()?;
             let oauth: Value = serde_json::from_slice(snap.part("oauth_account")?.expose()).ok()?;
+            let marker = match creds["claudeAiOauth"]["expiresAt"].as_i64() {
+                Some(ms) if ms < now_ms() => Some("expired"),
+                _ => None,
+            };
             Some((
                 oauth["emailAddress"].as_str().map(String::from),
                 creds["claudeAiOauth"]["subscriptionType"]
                     .as_str()
                     .map(String::from),
-                creds["claudeAiOauth"]["expiresAt"].as_i64(),
+                marker,
             ))
         }
         "codex" => {
@@ -222,7 +232,12 @@ fn profile_detail(
             let email = crate::adapters::codex::decode_email_from_id_token(
                 auth["tokens"]["id_token"].as_str(),
             );
-            Some((email, auth["auth_mode"].as_str().map(String::from), None))
+            let marker = auth["last_refresh"]
+                .as_str()
+                .and_then(crate::session_link::rfc3339_to_secs)
+                .filter(|&secs| now_ms() / 1000 - secs > STALE_DAYS * 86400)
+                .map(|_| "stale");
+            Some((email, auth["auth_mode"].as_str().map(String::from), marker))
         }
         _ => None,
     }
@@ -246,7 +261,7 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         let rows: Vec<Value> = profiles
             .iter()
             .map(|p| {
-                let (email, tier, expires) = p
+                let (email, tier, marker) = p
                     .tools
                     .first()
                     .and_then(|t| profile_detail(&store, &p.name, t))
@@ -257,7 +272,7 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
                     "active": active_names.contains(&p.name),
                     "email": email,
                     "tier": tier,
-                    "expired": expires.map(|ms| ms < now_ms()),
+                    "warning": marker,
                 })
             })
             .collect();
@@ -268,28 +283,32 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         println!("no saved profiles yet - run `swapdex add <name>` while logged in");
         return Ok(0);
     }
+    let mut saw_marker = false;
     for p in &profiles {
         let mark = if active_names.contains(&p.name) {
             "* "
         } else {
             "  "
         };
-        let (email, tier, expires) = p
+        let (email, tier, marker) = p
             .tools
             .first()
             .and_then(|t| profile_detail(&store, &p.name, t))
             .unwrap_or((None, None, None));
         let who = email.unwrap_or_default();
         let tier = tier.map(|t| format!(" [{t}]")).unwrap_or_default();
-        let exp = match expires {
-            Some(ms) if ms < now_ms() => "  (expired)",
-            _ => "",
-        };
+        let warn = marker.map(|m| format!("  ({m})")).unwrap_or_default();
+        saw_marker |= marker.is_some();
         println!(
-            "{mark}{:<16} {:<26} [{}]{exp}",
+            "{mark}{:<16} {:<26} [{}]{warn}",
             p.name,
             format!("{who}{tier}"),
             p.tools.join(", ")
+        );
+    }
+    if saw_marker {
+        println!(
+            "  (expired/stale: re-run `swapdex add --update <name>` while logged in to refresh)"
         );
     }
     Ok(0)
