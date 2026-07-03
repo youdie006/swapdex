@@ -1,0 +1,19 @@
+[package]
+name = "swapdex"
+version = "0.1.0"
+edition = "2021"
+description = "Switch between multiple Claude Code and Codex login accounts, locally and safely."
+license = "MIT"
+repository = "https://github.com/youdie006/swapdex"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+secrecy = "0.8"
+zeroize = "1"
+tempfile = "3"
+fs2 = "0.4"
+base64 = "0.22"
