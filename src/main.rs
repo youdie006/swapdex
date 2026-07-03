@@ -41,7 +41,14 @@ enum Cmd {
     /// Show the active account per tool
     Status,
     /// Remove a saved profile (never touches a live login)
-    Rm { name: String },
+    Rm {
+        name: String,
+        /// Confirm the deletion
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Rename a saved profile
+    Rename { old: String, new: String },
     /// Sessions grouped by the account that was active when they ran
     Sessions,
     /// Run as a read-only MCP server over stdio
@@ -68,7 +75,8 @@ fn main() {
         } => commands::use_account(&paths, name, &ToolSel::parse(tool.as_deref()), *dry_run),
         Cmd::Ls { json } => commands::ls(&paths, *json),
         Cmd::Status => commands::status(&paths),
-        Cmd::Rm { name } => commands::rm(&paths, name),
+        Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
+        Cmd::Rename { old, new } => commands::rename(&paths, old, new),
         Cmd::Sessions => commands::sessions(&paths),
         Cmd::Mcp => {
             swapdex::mcp::serve();

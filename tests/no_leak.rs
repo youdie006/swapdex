@@ -84,7 +84,7 @@ fn no_subcommand_leaks_a_token() {
         vec!["status"],
         vec!["sessions"],
         vec!["use", "home", "--dry-run"],
-        vec!["rm", "home"],
+        vec!["rm", "home", "--yes"],
     ] {
         assert_clean(&format!("{args:?}"), &run(root.path(), &args));
     }

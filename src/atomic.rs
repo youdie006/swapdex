@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// Refuse to mutate real credentials as root: euid 0 on a shared box is a
@@ -17,19 +17,38 @@ pub fn ensure_not_root() -> Result<()> {
     Ok(())
 }
 
-fn refuse_symlink(path: &Path) -> Result<()> {
+/// Refuse a symlink, and (if the file exists) a file not owned by the current
+/// user - a planted link or a foreign-owned file could redirect a read/write.
+fn refuse_unsafe_path(path: &Path) -> Result<()> {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
             bail!("refusing to operate on a symlink: {}", path.display());
+        }
+        if meta.uid() != unsafe { libc_geteuid() } {
+            bail!(
+                "refusing: {} is not owned by the current user",
+                path.display()
+            );
         }
     }
     Ok(())
 }
 
-/// Read a whole file, refusing a symlink (a planted link could redirect a read
-/// to another user's file or a device).
+/// Refuse a world-writable parent dir (unless sticky) - anyone could swap files
+/// under it.
+fn refuse_insecure_parent(dir: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::metadata(dir) {
+        let mode = meta.mode();
+        if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+            bail!("refusing: parent dir {} is world-writable", dir.display());
+        }
+    }
+    Ok(())
+}
+
+/// Read a whole file, refusing a symlink or a foreign-owned file.
 pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
-    refuse_symlink(path)?;
+    refuse_unsafe_path(path)?;
     std::fs::read(path).with_context(|| format!("read {}", path.display()))
 }
 
@@ -37,9 +56,10 @@ pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
 /// the destination's OWN directory (so rename is same-filesystem) with mode
 /// 0600 at creation (no create-then-chmod world-readable window).
 pub fn write_secret(dest: &Path, bytes: &[u8]) -> Result<()> {
-    refuse_symlink(dest)?;
+    refuse_unsafe_path(dest)?;
     let dir = dest.parent().context("destination has no parent dir")?;
     std::fs::create_dir_all(dir).ok();
+    refuse_insecure_parent(dir)?;
     let tmp = dir.join(format!(
         ".{}.swapdex.tmp",
         dest.file_name().and_then(|n| n.to_str()).unwrap_or("cred")
@@ -55,8 +75,14 @@ pub fn write_secret(dest: &Path, bytes: &[u8]) -> Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
     }
+    // rename replaces the destination NAME atomically and does not follow a
+    // symlink at the destination, so the write is symlink-safe by construction.
     std::fs::rename(&tmp, dest)
         .with_context(|| format!("atomic rename {} -> {}", tmp.display(), dest.display()))?;
+    // fsync the directory so the rename itself is durable across a crash.
+    if let Ok(dirf) = std::fs::File::open(dir) {
+        let _ = dirf.sync_all();
+    }
     std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600)).ok();
     Ok(())
 }

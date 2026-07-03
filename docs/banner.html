@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --cream: #f6f5f0;
+    --ink: #1e1d1a;
+    --muted: #6f6e69;
+    --faint: #9a998f;
+    --purple: #7a3be0;
+    --line: #e3e1d8;
+    --term-bg: #201f24;
+    --term-cream: #edece6;
+    --term-muted: #8f8e97;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--cream); }
+  .banner {
+    width: 1280px; height: 400px; background: var(--cream);
+    display: grid; grid-template-columns: 1.05fr 0.95fr;
+    align-items: center; gap: 40px; padding: 0 72px;
+    font-family: -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .banner.dark {
+    --cream: #16161b; --ink: #ececf2; --muted: #a0a0a8; --faint: #6f6f78;
+    --purple: #9d6bff; --line: #2a2a31; --term-bg: #0f0f13; --term-cream: #ececf2;
+    --term-muted: #7f7f8a;
+  }
+  .left { display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 16px; margin-bottom: 22px; }
+  .brand svg { width: 60px; height: 60px; display: block; }
+  .wordmark { font-size: 46px; font-weight: 720; letter-spacing: -0.02em; color: var(--ink); }
+  .wordmark .dot { color: var(--purple); }
+  .tag { font-size: 25px; font-weight: 560; line-height: 1.32; color: var(--ink); letter-spacing: -0.01em; }
+  .tag .accent { color: var(--purple); }
+  .sub { margin-top: 18px; font-size: 15.5px; color: var(--muted); letter-spacing: 0.01em; }
+  .sub b { color: var(--purple); font-weight: 620; }
+  .sub .sep { color: var(--faint); margin: 0 8px; }
+
+  .term {
+    background: var(--term-bg); border-radius: 13px; overflow: hidden;
+    box-shadow: 0 18px 40px rgba(30,29,26,0.13);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  }
+  .banner.dark .term { box-shadow: 0 18px 44px rgba(0,0,0,0.5); }
+  .term .bar { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .term .bar i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .term .bar .r { background: #e05a52; } .term .bar .y { background: #e0b23a; } .term .bar .g { background: #3ab85f; }
+  .term .bar span { color: var(--term-muted); font-size: 13px; margin-left: 10px; }
+  .term .body { padding: 20px 22px; font-size: 15px; line-height: 1.85; }
+  .term .cmd { color: var(--term-cream); }
+  .term .p { color: var(--purple); font-weight: 700; margin-right: 9px; }
+  .term .out { color: var(--term-muted); }
+  .term .out .hl { color: var(--term-cream); }
+</style>
+</head>
+<body>
+<div class="banner" id="banner">
+  <div class="left">
+    <div class="brand">
+      <svg viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah" markerWidth="5.4" markerHeight="5.4" refX="3.4" refY="2.7" orient="auto">
+          <path d="M0.6 0.6 L4.8 2.7 L0.6 4.8 Z" fill="#f4f2ec"/></marker></defs>
+        <rect x="6" y="6" width="84" height="84" rx="22" fill="#1e1d1a"/>
+        <g stroke="#f4f2ec" stroke-width="3.2" fill="none" stroke-linecap="round">
+          <path d="M33 51 Q 33 31 51 33" marker-end="url(#ah)"/>
+          <path d="M63 45 Q 63 65 45 63" marker-end="url(#ah)"/>
+        </g>
+        <circle cx="33" cy="61" r="8" fill="#f4f2ec"/>
+        <circle cx="63" cy="35" r="9.5" fill="#7a3be0"/>
+        <circle cx="63" cy="35" r="3.4" fill="#f4f2ec"/>
+      </svg>
+      <div class="wordmark">swapdex<span class="dot">.</span></div>
+    </div>
+    <div class="tag">Switch Claude Code and Codex accounts —<br><span class="accent">one command, all local.</span></div>
+    <div class="sub">add<span class="sep">·</span>use<span class="sep">·</span>status<span class="sep">·</span>works with sessionwiki<span class="sep">·</span><b>100% local</b></div>
+  </div>
+
+  <div class="term">
+    <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>swapdex</span></div>
+    <div class="body">
+      <div><span class="cmd"><span class="p">$</span>swapdex add work</span></div>
+      <div class="out">saved profile '<span class="hl">work</span>' (claude-code, codex)</div>
+      <div><span class="cmd"><span class="p">$</span>swapdex use personal</span></div>
+      <div class="out">switched codex &#8594; <span class="hl">you@personal.com</span></div>
+      <div class="out">(takes effect on your next message)</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

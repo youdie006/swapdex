@@ -24,9 +24,15 @@ impl AuthTool for Claude {
         serde_json::from_slice::<Value>(&cred_bytes)
             .context(".credentials.json is not valid JSON")?;
         // Extract ONLY the oauthAccount block from .claude.json, never the file.
-        let cfg: Value =
-            serde_json::from_slice(&crate::atomic::read_regular(&paths.claude_config_json())?)
-                .context("parse .claude.json")?;
+        // Right after a fresh CLI login .claude.json may not exist yet; treat a
+        // missing config as an absent oauthAccount rather than failing capture.
+        let cfg_path = paths.claude_config_json();
+        let cfg: Value = if cfg_path.exists() {
+            serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?)
+                .context("parse .claude.json")?
+        } else {
+            Value::Null
+        };
         let oauth = cfg.get("oauthAccount").cloned().unwrap_or(Value::Null);
         let oauth_bytes = serde_json::to_vec(&oauth)?;
         Ok(Snapshot {
@@ -45,11 +51,15 @@ impl AuthTool for Claude {
         let oauth = snap
             .part("oauth_account")
             .context("snapshot missing oauth_account")?;
-        // 1) whole-file swap the credentials.
-        crate::atomic::write_secret(&paths.claude_credentials(), cred.expose())?;
-        // 2) READ-MODIFY-WRITE .claude.json: replace ONLY oauthAccount, preserve
-        //    every other key (projects, mcpServers, theme, ...). This is the A1
-        //    guarantee: never clobber the user's whole config.
+        // Validate BOTH blobs before touching any live file, so a corrupt
+        // snapshot can never brick the login (never write unvalidated bytes).
+        serde_json::from_slice::<Value>(cred.expose())
+            .context("saved credentials are not valid JSON; refusing to apply")?;
+        let oauth_val: Value = serde_json::from_slice(oauth.expose())
+            .context("saved oauthAccount is not valid JSON; refusing to apply")?;
+        // Build the new .claude.json bytes (read-modify-write: replace ONLY the
+        // oauthAccount key, preserve projects/mcpServers/theme/... - the A1
+        // guarantee) BEFORE writing anything, so both writes are prepared first.
         let cfg_path = paths.claude_config_json();
         let mut cfg: Value = if cfg_path.exists() {
             serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?)
@@ -57,15 +67,30 @@ impl AuthTool for Claude {
         } else {
             Value::Object(Default::default())
         };
-        let oauth_val: Value = serde_json::from_slice(oauth.expose())?;
         match cfg.as_object_mut() {
             Some(obj) => {
                 obj.insert("oauthAccount".into(), oauth_val);
             }
             None => bail!(".claude.json is not a JSON object"),
         }
-        let out = serde_json::to_vec(&cfg)?;
-        crate::atomic::write_secret(&cfg_path, &out)
+        let new_cfg = serde_json::to_vec(&cfg)?;
+        // Both-or-neither: write credentials, then config. If the config write
+        // fails, roll the credentials back so the login is never left half-
+        // swapped (new credentials + old identity, or vice versa).
+        let cred_path = paths.claude_credentials();
+        let prev_creds = if cred_path.exists() {
+            crate::atomic::read_regular(&cred_path).ok()
+        } else {
+            None
+        };
+        crate::atomic::write_secret(&cred_path, cred.expose())?;
+        if let Err(e) = crate::atomic::write_secret(&cfg_path, &new_cfg) {
+            if let Some(prev) = prev_creds {
+                let _ = crate::atomic::write_secret(&cred_path, &prev);
+            }
+            return Err(e.context("apply aborted; credentials rolled back"));
+        }
+        Ok(())
     }
 
     fn identity(&self, paths: &Paths) -> Result<Option<Account>> {
@@ -132,6 +157,37 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    // C1: if the .claude.json write fails after credentials are written, the
+    // credentials must roll back so the login is never left half-swapped.
+    #[test]
+    fn apply_rolls_back_credentials_when_config_write_fails() {
+        let a = tempfile::tempdir().unwrap();
+        let pa = Paths::rooted(a.path());
+        seed_claude(&pa, "uuid-A", "a@x.com");
+        let snap = Claude.capture(&pa).unwrap();
+
+        let b = tempfile::tempdir().unwrap();
+        let pb = Paths::rooted(b.path());
+        seed_claude(&pb, "uuid-B", "b@y.com");
+        let orig_creds = std::fs::read(pb.claude_credentials()).unwrap();
+
+        // Block the config write: plant a directory at its atomic temp path so
+        // the write fails AFTER the credentials have already been swapped.
+        let cfg = pb.claude_config_json();
+        let tmp = cfg.parent().unwrap().join(format!(
+            ".{}.swapdex.tmp",
+            cfg.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir(&tmp).unwrap();
+
+        assert!(Claude.apply(&pb, &snap).is_err(), "config write must fail");
+        assert_eq!(
+            std::fs::read(pb.claude_credentials()).unwrap(),
+            orig_creds,
+            "credentials must roll back to B - never half-swapped"
+        );
     }
 
     #[test]

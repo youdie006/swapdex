@@ -33,3 +33,7 @@ jobs:
             echo "A network crate is in the dependency graph; swapdex must have none."
             exit 1
           fi
+      - name: Cargo audit
+        run: |
+          cargo install cargo-audit --locked || true
+          cargo audit

@@ -86,8 +86,10 @@ impl Store {
         };
         let mut blobs = Vec::new();
         for e in fs::read_dir(&d)?.flatten() {
-            if e.path().is_file() {
-                let part = e.file_name().to_string_lossy().into_owned();
+            let part = e.file_name().to_string_lossy().into_owned();
+            // Skip a transient ".<name>.swapdex.tmp" from a concurrent write so
+            // it is never mistaken for a snapshot part.
+            if e.path().is_file() && !part.starts_with('.') {
                 let bytes = crate::atomic::read_regular(&e.path())?;
                 blobs.push((part, Secret::new(bytes)));
             }
@@ -135,6 +137,34 @@ impl Store {
         Ok(true)
     }
 
+    /// Rename a profile. Returns false if `old` does not exist; errors if `new`
+    /// already exists. Also repoints any `active.json` hint from old to new.
+    pub fn rename(&self, old: &str, new: &str) -> Result<bool> {
+        let from = self.dir.join("accounts").join(old);
+        let to = self.dir.join("accounts").join(new);
+        if !from.exists() {
+            return Ok(false);
+        }
+        if to.exists() {
+            anyhow::bail!("a profile named '{new}' already exists");
+        }
+        fs::rename(&from, &to).with_context(|| format!("rename profile {old} -> {new}"))?;
+        let path = self.dir.join("active.json");
+        if let Ok(bytes) = crate::atomic::read_regular(&path) {
+            if let Ok(mut map) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(obj) = map.as_object_mut() {
+                    for v in obj.values_mut() {
+                        if v.as_str() == Some(old) {
+                            *v = serde_json::json!(new);
+                        }
+                    }
+                    let _ = crate::atomic::write_secret(&path, &serde_json::to_vec(&map)?);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Back up a live snapshot before a switch; keep only the newest 2 per tool.
     pub fn backup(&self, snap: &Snapshot) -> Result<()> {
         let base = self.dir.join("backups").join(snap.tool);
@@ -158,7 +188,15 @@ impl Store {
             .map(|e| e.path())
             .filter(|p| p.is_dir())
             .collect();
-        stamps.sort();
+        // Sort by the numeric stamp, not lexically, so pruning always drops the
+        // genuinely-oldest backup (lexical sort would misorder across a digit-
+        // length change).
+        stamps.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| s.parse::<u128>().ok())
+                .unwrap_or(0)
+        });
         while stamps.len() > 2 {
             let old = stamps.remove(0);
             overwrite_tree(&old);
@@ -192,6 +230,11 @@ impl Store {
         } else {
             serde_json::json!({})
         };
+        // A hand-edited/corrupt active.json could parse to a non-object; index-
+        // assigning into that panics, so normalize to an object first.
+        if !map.is_object() {
+            map = serde_json::json!({});
+        }
         map[tool] = serde_json::json!(name);
         crate::atomic::write_secret(&path, &serde_json::to_vec(&map)?)
     }
@@ -202,6 +245,17 @@ impl Store {
             serde_json::from_slice(&crate::atomic::read_regular(&path).ok()?).ok()?;
         map[tool].as_str().map(|s| s.to_string())
     }
+}
+
+/// A profile name must be a single safe path component - reject anything that
+/// could escape the store (`/`, `\`, `..`, a leading `.`, control chars, empty,
+/// or absurdly long). Guards `add`/`use`/`rm`/`rename` against path traversal.
+pub fn valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\'])
+        && !name.chars().any(|c| c.is_control())
 }
 
 fn overwrite_tree(dir: &std::path::Path) {

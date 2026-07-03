@@ -70,9 +70,15 @@ pub fn sessions_by_account(paths: &Paths) -> Option<BTreeMap<String, usize>> {
 pub fn status_line(paths: &Paths) -> Option<String> {
     let counts = sessions_by_account(paths)?;
     let total: usize = counts.values().sum();
+    let unattributed = counts.get(UNATTRIBUTED).copied().unwrap_or(0);
     let accounts = counts.keys().filter(|k| *k != UNATTRIBUTED).count();
+    let tail = if unattributed > 0 {
+        format!(", {unattributed} unattributed")
+    } else {
+        String::new()
+    };
     Some(format!(
-        "sessions: {total} across {accounts} account(s) (sessionwiki)"
+        "sessions: {total} across {accounts} account(s){tail} (sessionwiki)"
     ))
 }
 

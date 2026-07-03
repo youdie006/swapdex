@@ -31,6 +31,10 @@ impl AuthTool for Codex {
 
     fn apply(&self, paths: &Paths, snap: &Snapshot) -> Result<()> {
         let part = snap.part("auth").context("snapshot has no codex auth")?;
+        // Never write an unvalidated snapshot over the live login (a corrupt
+        // stored blob would otherwise brick Codex).
+        serde_json::from_slice::<Value>(part.expose())
+            .context("saved codex auth is not valid JSON; refusing to apply")?;
         crate::atomic::write_secret(&paths.codex_auth(), part.expose())
     }
 
@@ -56,7 +60,7 @@ impl AuthTool for Codex {
 
 /// Extract only the `email` claim from a JWT id_token payload - never keep the
 /// token. Best-effort; None on any decode failure.
-fn decode_email_from_id_token(id_token: Option<&str>) -> Option<String> {
+pub(crate) fn decode_email_from_id_token(id_token: Option<&str>) -> Option<String> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let payload = id_token?.split('.').nth(1)?;
     let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -81,6 +85,24 @@ mod tests {
             "last_refresh": "2026-07-03T00:00:00Z"
         });
         std::fs::write(p.codex_auth(), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn apply_refuses_a_garbage_snapshot_and_leaves_live_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(dir.path());
+        seed_codex(&p, "acct-A");
+        let orig = std::fs::read(p.codex_auth()).unwrap();
+        let bad = Snapshot {
+            tool: "codex",
+            blobs: vec![("auth".into(), Secret::new(b"NOT JSON".to_vec()))],
+        };
+        assert!(Codex.apply(&p, &bad).is_err(), "garbage must be refused");
+        assert_eq!(
+            std::fs::read(p.codex_auth()).unwrap(),
+            orig,
+            "live login must be untouched when apply is refused"
+        );
     }
 
     #[test]

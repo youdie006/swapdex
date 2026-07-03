@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 mod claude;
-mod codex;
+pub(crate) mod codex;
 
 /// A tool's live account identity, safe to print/serialize - no tokens.
 #[derive(Serialize, Clone)]
