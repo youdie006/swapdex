@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #16161b; }
+  .card {
+    width: 1280px; height: 640px; background: #16161b;
+    display: grid; grid-template-columns: 1.15fr 0.85fr; align-items: center;
+    font-family: -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; overflow: hidden;
+  }
+  .left { padding: 0 0 0 88px; }
+  .brand { display: flex; align-items: center; gap: 20px; margin-bottom: 30px; }
+  .brand svg { width: 76px; height: 76px; }
+  .wordmark { font-size: 60px; font-weight: 720; letter-spacing: -0.02em; color: #ececf2; }
+  .wordmark .dot { color: #9d6bff; }
+  .tag { font-size: 33px; font-weight: 580; line-height: 1.28; color: #ececf2; letter-spacing: -0.01em; }
+  .tag .accent { color: #9d6bff; }
+  .sub { margin-top: 26px; font-size: 20px; color: #a0a0a8; }
+  .sub b { color: #9d6bff; font-weight: 620; }
+  .sub .sep { color: #6f6f78; margin: 0 9px; }
+  .art { height: 640px; display: flex; align-items: center; justify-content: center; }
+  .art img { width: 640px; height: 640px; object-fit: cover; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="left">
+    <div class="brand">
+      <svg viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ah" markerWidth="5.4" markerHeight="5.4" refX="3.4" refY="2.7" orient="auto">
+          <path d="M0.6 0.6 L4.8 2.7 L0.6 4.8 Z" fill="#f4f2ec"/></marker></defs>
+        <rect x="6" y="6" width="84" height="84" rx="22" fill="#0f0f13"/>
+        <g stroke="#f4f2ec" stroke-width="3.2" fill="none" stroke-linecap="round">
+          <path d="M33 51 Q 33 31 51 33" marker-end="url(#ah)"/>
+          <path d="M63 45 Q 63 65 45 63" marker-end="url(#ah)"/>
+        </g>
+        <circle cx="33" cy="61" r="8" fill="#f4f2ec"/>
+        <circle cx="63" cy="35" r="9.5" fill="#9d6bff"/>
+        <circle cx="63" cy="35" r="3.4" fill="#0f0f13"/>
+      </svg>
+      <div class="wordmark">swapdex<span class="dot">.</span></div>
+    </div>
+    <div class="tag">Switch Claude Code and Codex<br>accounts — <span class="accent">one command.</span></div>
+    <div class="sub">local only<span class="sep">·</span>a switcher, not a rotator<span class="sep">·</span><b>never touches the network</b></div>
+  </div>
+  <div class="art"><img src="social-art.png" alt=""></div>
+</div>
+</body>
+</html>

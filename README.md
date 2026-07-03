@@ -1,14 +1,16 @@
 <div align="center">
 
-# swapdex
+<img src="docs/banner.png" alt="swapdex - switch Claude Code and Codex accounts, one command, all local" width="820" />
 
-**Switch between multiple Claude Code and Codex login accounts, locally and safely.**
+[![CI](https://github.com/youdie006/swapdex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/youdie006/swapdex/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
+[![local only](https://img.shields.io/badge/network-none-7a3be0.svg)](#what-it-will-not-do)
+
+</div>
 
 One command to flip your Claude Code or Codex CLI from your work account to your
 personal one, and back. No re-login, no browser, no copying tokens around.
 100% local. Never touches the network.
-
-</div>
 
 ---
 
