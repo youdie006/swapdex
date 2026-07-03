@@ -44,6 +44,8 @@ enum Cmd {
     Rm { name: String },
     /// Sessions grouped by the account that was active when they ran
     Sessions,
+    /// Run as a read-only MCP server over stdio
+    Mcp,
 }
 
 fn main() {
@@ -68,6 +70,10 @@ fn main() {
         Cmd::Status => commands::status(&paths),
         Cmd::Rm { name } => commands::rm(&paths, name),
         Cmd::Sessions => commands::sessions(&paths),
+        Cmd::Mcp => {
+            swapdex::mcp::serve();
+            return;
+        }
     };
     match result {
         Ok(code) => std::process::exit(code),

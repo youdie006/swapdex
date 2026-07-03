@@ -62,7 +62,7 @@ fn profile_account_id(store: &Store, name: &str, tool: &str) -> Option<String> {
 }
 
 /// Find the stored profile name whose snapshot matches this live account_id.
-fn matched_profile(store: &Store, tool: &str, live_id: &str) -> Option<String> {
+pub(crate) fn matched_profile_name(store: &Store, tool: &str, live_id: &str) -> Option<String> {
     if live_id.is_empty() {
         return None;
     }
@@ -175,7 +175,7 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         .collect();
     let active_names: Vec<String> = live
         .iter()
-        .filter_map(|(tool, id)| matched_profile(&store, tool, &id.account_id))
+        .filter_map(|(tool, id)| matched_profile_name(&store, tool, &id.account_id))
         .collect();
 
     let profiles = store.list();
@@ -215,7 +215,7 @@ pub fn status(paths: &Paths) -> Result<i32> {
         match adapter.identity(paths)? {
             None => println!("{tool}: not logged in"),
             Some(id) => {
-                let name = matched_profile(&store, tool, &id.account_id);
+                let name = matched_profile_name(&store, tool, &id.account_id);
                 let saved = match &name {
                     Some(n) => format!("profile '{n}'"),
                     None => "not saved - run `swapdex add <name>`".to_string(),

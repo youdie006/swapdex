@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod atomic;
 pub mod commands;
+pub mod mcp;
 pub mod paths;
 pub mod secret;
 pub mod session_link;
