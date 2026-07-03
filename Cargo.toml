@@ -5,6 +5,11 @@ edition = "2021"
 description = "Switch between multiple Claude Code and Codex login accounts, locally and safely."
 license = "MIT"
 repository = "https://github.com/youdie006/swapdex"
+homepage = "https://github.com/youdie006/swapdex"
+readme = "README.md"
+keywords = ["cli", "claude", "codex", "accounts", "credentials"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["docs/*", "npm/*", ".github/*"]
 
 [dependencies]
 anyhow = "1"

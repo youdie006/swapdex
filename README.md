@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/cli-banner.png" alt="swapdex - switch Claude Code and Codex login accounts, one command, all local" width="760" />
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/cli-banner.png" alt="swapdex - switch Claude Code and Codex login accounts, one command, all local" width="760" />
 
 [![CI](https://github.com/youdie006/swapdex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/youdie006/swapdex/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
@@ -29,7 +29,14 @@ limit -- see [What it will not do](#what-it-will-not-do).
 ## Install
 
 ```sh
+# crates.io (Rust)
 cargo install swapdex
+
+# Homebrew (macOS / Linux)
+brew install youdie006/tap/swapdex
+
+# npm (downloads the prebuilt binary)
+npm install -g @youdie006/swapdex
 ```
 
 Linux / WSL first (macOS Keychain support is planned). Requires the Claude Code

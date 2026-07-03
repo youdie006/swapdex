@@ -1,0 +1,40 @@
+{
+  "name": "@youdie006/swapdex",
+  "version": "0.1.0",
+  "description": "Switch between multiple Claude Code and Codex login accounts, locally and safely.",
+  "bin": {
+    "swapdex": "bin/swapdex.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/swapdex.js",
+    "install.js"
+  ],
+  "keywords": [
+    "cli",
+    "claude",
+    "codex",
+    "accounts",
+    "credentials"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/youdie006/swapdex.git"
+  },
+  "homepage": "https://github.com/youdie006/swapdex#readme",
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
