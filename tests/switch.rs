@@ -158,6 +158,19 @@ fn corrupt_active_json_does_not_panic() {
     assert_eq!(c, 0);
 }
 
+// The bare `swapdex` prints the ASCII wordmark; piped output carries no ANSI.
+#[test]
+fn no_args_prints_ascii_banner_plain_when_piped() {
+    let root = tempfile::tempdir().unwrap();
+    let (o, _e, c) = run(root.path(), &[]);
+    assert_eq!(c, 0);
+    assert!(o.contains('\u{2588}'), "should print block ASCII art");
+    assert!(
+        !o.contains('\u{1b}'),
+        "no ANSI colour codes when stdout is piped"
+    );
+}
+
 // BUG1: right after a fresh Claude login there is no ~/.claude.json yet; add must
 // still work.
 #[test]

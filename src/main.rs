@@ -10,7 +10,7 @@ use swapdex::paths::Paths;
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(clap::Subcommand)]
@@ -64,7 +64,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let result = match &cli.cmd {
+    let Some(cmd) = &cli.cmd else {
+        // No subcommand: print the ASCII wordmark + a short hint.
+        swapdex::banner::print_banner();
+        return;
+    };
+    let result = match cmd {
         Cmd::Add { name, tool, update } => {
             commands::add(&paths, name, &ToolSel::parse(tool.as_deref()), *update)
         }

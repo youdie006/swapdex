@@ -10,29 +10,30 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: var(--bg); }
   .wrap {
-    width: 1200px; height: 760px; background: var(--bg);
+    width: 1200px; height: 720px; background: var(--bg);
     display: flex; align-items: center; justify-content: center;
-    font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-family: ui-monospace, "DejaVu Sans Mono", "JetBrains Mono", Menlo, monospace;
   }
   .term {
-    width: 1030px; background: var(--term); border-radius: 15px; overflow: hidden;
+    width: 1080px; background: var(--term); border-radius: 15px; overflow: hidden;
     box-shadow: 0 30px 70px rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.05);
   }
-  .bar { height: 48px; display: flex; align-items: center; gap: 9px; padding: 0 20px;
-    background: var(--bar); }
+  .bar { height: 46px; display: flex; align-items: center; gap: 9px; padding: 0 20px; background: var(--bar); }
   .bar i { width: 13px; height: 13px; border-radius: 50%; display: inline-block; }
   .bar .r { background: #e05a52; } .bar .y { background: #e0b23a; } .bar .g { background: #3ab85f; }
   .bar span { color: var(--muted); font-size: 15px; margin-left: 12px; }
-  .body { padding: 52px 56px 48px; }
-  .wordmark { font-size: 116px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
-  .wordmark .a { color: var(--violet); } .wordmark .b { color: var(--gray); }
-  .tag { margin-top: 22px; font-size: 22px; color: var(--muted); letter-spacing: -0.01em; }
-  .cmds { margin-top: 40px; font-size: 21px; line-height: 1.95; }
-  .cmds .p { color: var(--violet); font-weight: 700; margin-right: 12px; }
+  .body { padding: 30px 40px 40px; font-size: 20px; line-height: 1.6; }
+  .prompt { color: var(--cream); margin-bottom: 12px; }
+  .prompt .p { color: var(--violet); font-weight: 700; margin-right: 10px; }
+  pre.art { font-size: 26px; line-height: 1.06; letter-spacing: 0; margin: 6px 0 22px; }
+  pre.art .v { color: var(--violet); }
+  pre.art .d { color: var(--gray); }
+  .tag { color: var(--muted); font-size: 20px; margin-bottom: 26px; }
+  .cmds { line-height: 1.85; font-size: 19px; }
+  .cmds .p { color: var(--violet); font-weight: 700; margin-right: 10px; }
   .cmds .c { color: var(--cream); }
   .cmds .o { color: var(--muted); }
-  .cmds .o .hl { color: var(--gray); }
-  .cmds .o .star { color: var(--violet); }
+  .hint { color: var(--muted); margin-top: 22px; font-size: 18px; }
 </style>
 </head>
 <body>
@@ -40,16 +41,21 @@
   <div class="term">
     <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>swapdex</span></div>
     <div class="body">
-      <div class="wordmark"><span class="a">SWAP</span><span class="b">dex</span></div>
+      <div class="prompt"><span class="p">$</span>swapdex</div>
+<pre class="art"><span class="v">███████╗██╗    ██╗ █████╗ ██████╗ </span><span class="d">██████╗ ███████╗██╗  ██╗</span>
+<span class="v">██╔════╝██║    ██║██╔══██╗██╔══██╗</span><span class="d">██╔══██╗██╔════╝╚██╗██╔╝</span>
+<span class="v">███████╗██║ █╗ ██║███████║██████╔╝</span><span class="d">██║  ██║█████╗   ╚███╔╝ </span>
+<span class="v">╚════██║██║███╗██║██╔══██║██╔═══╝ </span><span class="d">██║  ██║██╔══╝   ██╔██╗ </span>
+<span class="v">███████║╚███╔███╔╝██║  ██║██║     </span><span class="d">██████╔╝███████╗██╔╝ ██╗</span>
+<span class="v">╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝     </span><span class="d">╚═════╝ ╚══════╝╚═╝  ╚═╝</span></pre>
       <div class="tag">Switch Claude Code and Codex login accounts &#8212; locally, one command.</div>
       <div class="cmds">
         <div><span class="c"><span class="p">$</span>swapdex add work</span></div>
-        <div class="o">saved profile '<span class="hl">work</span>' (claude-code, codex)</div>
+        <div class="o">&nbsp;&nbsp;saved profile 'work' (claude-code, codex)</div>
         <div><span class="c"><span class="p">$</span>swapdex use personal</span></div>
-        <div class="o">switched codex &#8594; <span class="hl">you@personal.com</span></div>
-        <div><span class="c"><span class="p">$</span>swapdex ls</span></div>
-        <div class="o"><span class="star">*</span> work&nbsp;&nbsp;&nbsp;&nbsp;<span class="hl">you@work.com</span> [max]&nbsp;&nbsp;&nbsp;claude-code, codex</div>
+        <div class="o">&nbsp;&nbsp;switched codex &#8594; you@personal.com</div>
       </div>
+      <div class="hint">Run `swapdex --help` for all commands.</div>
     </div>
   </div>
 </div>

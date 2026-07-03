@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod atomic;
+pub mod banner;
 pub mod commands;
 pub mod mcp;
 pub mod paths;
