@@ -208,7 +208,6 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
         }
         adapter.apply(paths, &target)?;
         store.append_timeline(tool, name, "use")?;
-        store.set_active(tool, name)?;
         if let Some(id) = adapter.identity(paths)? {
             println!("switched {tool} -> {}", identity_line(&id));
         }
@@ -293,18 +292,42 @@ fn profile_summary(
     (email, tier, marker)
 }
 
-pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
-    let store = Store::open(paths)?;
-    // Active markers come from LIVE identity, matched back to a profile (A2).
-    let active_names: Vec<String> = adapters::all()
+/// Which profile is the LIVE account for each tool (from live identity, A2).
+/// A mixed state (claude on profile X, codex on profile Y) is representable.
+pub(crate) fn active_by_tool(store: &Store, paths: &Paths) -> Vec<(&'static str, String)> {
+    adapters::all()
         .iter()
         .filter_map(|a| {
             a.identity(paths)
                 .ok()
                 .flatten()
-                .and_then(|id| matched_profile_name(&store, a.name(), &id.account_id))
+                .and_then(|id| matched_profile_name(store, a.name(), &id.account_id))
+                .map(|name| (a.name(), name))
         })
-        .collect();
+        .collect()
+}
+
+/// The account column: email if known, else just the tier (never a stray
+/// leading-space " [tier]").
+fn identity_column(email: Option<String>, tier: Option<String>) -> String {
+    match (email.filter(|e| !e.is_empty()), tier) {
+        (Some(e), Some(t)) => format!("{e} [{t}]"),
+        (Some(e), None) => e,
+        (None, Some(t)) => format!("[{t}]"),
+        (None, None) => String::new(),
+    }
+}
+
+pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
+    let store = Store::open(paths)?;
+    let active = active_by_tool(&store, paths);
+    let active_tools_for = |name: &str| -> Vec<&'static str> {
+        active
+            .iter()
+            .filter(|(_, n)| n == name)
+            .map(|(t, _)| *t)
+            .collect()
+    };
 
     let profiles = store.list();
     if json {
@@ -315,7 +338,7 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
                 serde_json::json!({
                     "name": p.name,
                     "tools": p.tools,
-                    "active": active_names.contains(&p.name),
+                    "active_tools": active_tools_for(&p.name),
                     "email": email,
                     "tier": tier,
                     "warning": marker,
@@ -329,29 +352,75 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         println!("no saved profiles yet - run `swapdex add <name>` while logged in");
         return Ok(0);
     }
+    // Two-pass so columns fit the actual content (with a sane cap).
+    struct Row {
+        name: String,
+        ident: String,
+        tools: String,
+        warn: Option<&'static str>,
+        active: bool,
+    }
+    let rows: Vec<Row> = profiles
+        .iter()
+        .map(|p| {
+            let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+            let at = active_tools_for(&p.name);
+            let tools = p
+                .tools
+                .iter()
+                .map(|t| {
+                    if at.contains(&t.as_str()) {
+                        format!("{t}*")
+                    } else {
+                        t.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Row {
+                name: p.name.clone(),
+                ident: identity_column(email, tier),
+                tools,
+                warn: marker,
+                active: !at.is_empty(),
+            }
+        })
+        .collect();
+    let name_w = rows
+        .iter()
+        .map(|r| r.name.len())
+        .max()
+        .unwrap_or(4)
+        .clamp(4, 24);
+    let ident_w = rows
+        .iter()
+        .map(|r| r.ident.len())
+        .max()
+        .unwrap_or(0)
+        .clamp(0, 40);
     let mut saw_marker = false;
-    for p in &profiles {
-        let mark = if active_names.contains(&p.name) {
-            "* "
-        } else {
-            "  "
-        };
-        let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
-        let who = email.unwrap_or_default();
-        let tier = tier.map(|t| format!(" [{t}]")).unwrap_or_default();
-        let warn = marker.map(|m| format!("  ({m})")).unwrap_or_default();
-        saw_marker |= marker.is_some();
+    for r in &rows {
+        let mark = if r.active { "* " } else { "  " };
+        let warn = r.warn.map(|m| format!("  ({m})")).unwrap_or_default();
+        saw_marker |= r.warn.is_some();
         println!(
-            "{mark}{:<16} {:<26} [{}]{warn}",
-            p.name,
-            format!("{who}{tier}"),
-            p.tools.join(", ")
+            "{mark}{:<name_w$} {:<ident_w$} [{}]{warn}",
+            r.name, r.ident, r.tools
         );
     }
     if saw_marker {
         println!(
             "  (expired/stale: re-run `swapdex add --update <name>` while logged in to refresh)"
         );
+    }
+    if active
+        .iter()
+        .map(|(_, n)| n)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        > 1
+    {
+        println!("  (* marks the active account per tool)");
     }
     Ok(0)
 }

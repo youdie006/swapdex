@@ -138,21 +138,20 @@ fn list_accounts(paths: &Paths) -> Value {
         Ok(s) => s,
         Err(_) => return text_result("[]".into()),
     };
-    // Allowlist: name, tools, active. NEVER email/uuid/path/token (A13).
-    let active: Vec<String> = crate::adapters::all()
-        .iter()
-        .filter_map(|a| {
-            a.identity(paths)
-                .ok()
-                .flatten()
-                .map(|id| (a.name().to_string(), id.account_id))
-        })
-        .filter_map(|(tool, acct)| crate::commands::matched_profile_name(&store, &tool, &acct))
-        .collect();
+    // Allowlist: name, tools, active_tools. NEVER email/uuid/path/token (A13).
+    // Per-tool active so a mixed cross-tool state is representable.
+    let active = crate::commands::active_by_tool(&store, paths);
     let rows: Vec<Value> = store
         .list()
         .iter()
-        .map(|p| json!({"name": p.name, "tools": p.tools, "active": active.contains(&p.name)}))
+        .map(|p| {
+            let active_tools: Vec<&str> = active
+                .iter()
+                .filter(|(_, n)| n == &p.name)
+                .map(|(t, _)| *t)
+                .collect();
+            json!({"name": p.name, "tools": p.tools, "active_tools": active_tools})
+        })
         .collect();
     text_result(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()))
 }

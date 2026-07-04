@@ -138,7 +138,7 @@ impl Store {
     }
 
     /// Rename a profile. Returns false if `old` does not exist; errors if `new`
-    /// already exists. Also repoints any `active.json` hint from old to new.
+    /// already exists.
     pub fn rename(&self, old: &str, new: &str) -> Result<bool> {
         let from = self.dir.join("accounts").join(old);
         let to = self.dir.join("accounts").join(new);
@@ -149,19 +149,6 @@ impl Store {
             anyhow::bail!("a profile named '{new}' already exists");
         }
         fs::rename(&from, &to).with_context(|| format!("rename profile {old} -> {new}"))?;
-        let path = self.dir.join("active.json");
-        if let Ok(bytes) = crate::atomic::read_regular(&path) {
-            if let Ok(mut map) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(obj) = map.as_object_mut() {
-                    for v in obj.values_mut() {
-                        if v.as_str() == Some(old) {
-                            *v = serde_json::json!(new);
-                        }
-                    }
-                    let _ = crate::atomic::write_secret(&path, &serde_json::to_vec(&map)?);
-                }
-            }
-        }
         Ok(true)
     }
 
@@ -221,29 +208,6 @@ impl Store {
         buf.extend_from_slice(serde_json::to_string(&line)?.as_bytes());
         buf.push(b'\n');
         crate::atomic::write_secret(&path, &buf)
-    }
-
-    pub fn set_active(&self, tool: &str, name: &str) -> Result<()> {
-        let path = self.dir.join("active.json");
-        let mut map: serde_json::Value = if path.exists() {
-            serde_json::from_slice(&crate::atomic::read_regular(&path)?).unwrap_or_default()
-        } else {
-            serde_json::json!({})
-        };
-        // A hand-edited/corrupt active.json could parse to a non-object; index-
-        // assigning into that panics, so normalize to an object first.
-        if !map.is_object() {
-            map = serde_json::json!({});
-        }
-        map[tool] = serde_json::json!(name);
-        crate::atomic::write_secret(&path, &serde_json::to_vec(&map)?)
-    }
-
-    pub fn active(&self, tool: &str) -> Option<String> {
-        let path = self.dir.join("active.json");
-        let map: serde_json::Value =
-            serde_json::from_slice(&crate::atomic::read_regular(&path).ok()?).ok()?;
-        map[tool].as_str().map(|s| s.to_string())
     }
 }
 
@@ -320,16 +284,14 @@ mod tests {
     }
 
     #[test]
-    fn timeline_and_active_hold_no_secret() {
+    fn timeline_holds_no_secret() {
         let d = tempfile::tempdir().unwrap();
         let p = Paths::rooted(d.path());
         let s = Store::open(&p).unwrap();
         s.append_timeline("codex", "work", "use").unwrap();
-        s.set_active("codex", "work").unwrap();
         let tl = fs::read_to_string(p.store_dir().join("timeline.jsonl")).unwrap();
-        let ac = fs::read_to_string(p.store_dir().join("active.json")).unwrap();
-        assert!(!tl.contains("SENTINEL") && !ac.contains("SENTINEL"));
-        assert_eq!(s.active("codex").as_deref(), Some("work"));
+        assert!(!tl.contains("SENTINEL"));
+        assert!(tl.contains("work") && tl.contains("codex"));
     }
 
     #[test]

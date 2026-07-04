@@ -94,6 +94,12 @@ pub fn status_line(paths: &Paths) -> Option<String> {
 fn sessionwiki_rows() -> Option<Vec<Value>> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
+    // Under a dev/test root, sessionwiki would still read the HOST's real
+    // sessions (it has no notion of SWAPDEX_ROOT), leaking them into an isolated
+    // run. Skip it entirely in that mode.
+    if std::env::var_os("SWAPDEX_ROOT").is_some() {
+        return None;
+    }
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let out = Command::new("sessionwiki")

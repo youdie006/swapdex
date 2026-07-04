@@ -141,9 +141,44 @@ fn rename_moves_the_profile() {
     assert!(o.contains("job"), "ls should show renamed profile: {o}");
 }
 
-// BUG2: a hand-corrupted non-object active.json must not panic on switch.
+// Mixed cross-tool live state: ls --json marks each profile active per-tool, not
+// a flat bool that stars both.
 #[test]
-fn corrupt_active_json_does_not_panic() {
+fn ls_json_reports_active_per_tool_in_mixed_state() {
+    let root = tempfile::tempdir().unwrap();
+    // claude live = uuid-A (profile work); codex live = acct-B (profile home)
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex_tok(root.path(), "acct-A", "AT", "2026-07-04T00:00:00Z");
+    run(root.path(), &["add", "work"]);
+    seed_codex_tok(root.path(), "acct-B", "AT2", "2026-07-04T00:00:00Z");
+    run(root.path(), &["add", "home", "--tool", "codex"]);
+    let (o, _e, c) = run(root.path(), &["ls", "--json"]);
+    assert_eq!(c, 0);
+    let rows: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let get = |name: &str| -> Vec<String> {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["active_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        get("work"),
+        vec!["claude-code"],
+        "work is active only for claude"
+    );
+    assert_eq!(get("home"), vec!["codex"], "home is active only for codex");
+}
+
+// A stray/legacy file in the store dir must not break a switch (swapdex derives
+// the active account from the live login, not any stored hint).
+#[test]
+fn stray_file_in_store_is_ignored() {
     let root = tempfile::tempdir().unwrap();
     seed_codex(root.path(), "acct-A");
     run(root.path(), &["add", "work", "--tool", "codex"]);
@@ -154,7 +189,7 @@ fn corrupt_active_json_does_not_panic() {
     .unwrap();
     seed_codex(root.path(), "acct-B"); // force a real switch
     let (_o, _e, c) = run(root.path(), &["use", "work", "--tool", "codex"]);
-    assert_ne!(c, 101, "must not panic on a non-object active.json");
+    assert_ne!(c, 101, "must not panic on a stray file");
     assert_eq!(c, 0);
 }
 
