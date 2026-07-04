@@ -189,6 +189,106 @@ fn completions_and_status_json() {
     assert!(v.is_array(), "status --json is an array of tools");
 }
 
+fn seed_codex_tok(root: &Path, account_id: &str, access: &str, last_refresh: &str) {
+    let d = root.join(".codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode":"chatgpt","OPENAI_API_KEY":"sk-X",
+            "tokens":{"id_token":"h.eyJlbWFpbCI6ImFAeC5jb20ifQ.s","access_token":access,
+                      "refresh_token":"RT","account_id":account_id},
+            "last_refresh":last_refresh}))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn seed_claude(root: &Path, uuid: &str, email: &str) {
+    let d = root.join(".claude");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join(".credentials.json"),
+        serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+            "accessToken":"AT","refreshToken":"RT","expiresAt":9999999999999i64,
+            "subscriptionType":"max"}}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".claude.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "oauthAccount":{"accountUuid":uuid,"emailAddress":email,"displayName":"X"}}))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+// --tool must reject a typo instead of silently falling through to both.
+#[test]
+fn tool_typo_is_rejected_not_fail_open() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (_o, e, c) = run(root.path(), &["use", "x", "--tool", "cluade"]);
+    assert_ne!(c, 0, "typo'd --tool must be rejected");
+    assert!(e.contains("cluade") || e.contains("possible values"), "{e}");
+}
+
+// Two accounts with an EMPTY account_id must not compare 'already active' - the
+// switch must actually write, never silently keep the wrong account.
+#[test]
+fn empty_account_id_still_switches() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_tok(root.path(), "", "AAA", "2026-07-04T00:00:00Z");
+    run(root.path(), &["add", "p1", "--tool", "codex"]);
+    seed_codex_tok(root.path(), "", "BBB", "2026-07-04T00:00:00Z"); // different live login, same empty id
+    let (o, _e, c) = run(root.path(), &["use", "p1", "--tool", "codex"]);
+    assert_eq!(c, 0);
+    assert!(
+        !o.contains("already active"),
+        "empty ids must not be 'already active': {o}"
+    );
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        live["tokens"]["access_token"], "AAA",
+        "must actually switch to p1"
+    );
+}
+
+// A both-tool profile with a stale Codex snapshot must show (stale) in ls, even
+// though claude-code sorts first.
+#[test]
+fn ls_shows_stale_codex_in_a_both_tool_profile() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex_tok(root.path(), "acct-A", "AT", "2020-01-01T00:00:00Z"); // stale codex
+    run(root.path(), &["add", "work"]); // both tools
+    let (o, _e, c) = run(root.path(), &["ls"]);
+    assert_eq!(c, 0);
+    assert!(
+        o.contains("(stale)"),
+        "codex staleness must surface in a both-tool profile: {o}"
+    );
+}
+
+// add <name> default-both attaches a newly-available tool without --update.
+#[test]
+fn add_default_both_attaches_missing_tool() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com"); // only claude present
+    run(root.path(), &["add", "work"]);
+    seed_codex_tok(root.path(), "acct-A", "AT", "2026-07-04T00:00:00Z"); // now codex too
+    let (o, _e, c) = run(root.path(), &["add", "work"]); // default both, no --update
+    assert_eq!(c, 0, "should attach codex without --update: {o}");
+    let (ls, _e, _c) = run(root.path(), &["ls"]);
+    assert!(
+        ls.contains("codex"),
+        "codex should now be in the profile: {ls}"
+    );
+}
+
 // ls marks a Codex profile whose login has not refreshed in a long time as
 // stale (its refresh token may have rotated) - a cross-tool safety cue.
 #[test]

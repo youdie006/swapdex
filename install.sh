@@ -43,9 +43,11 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 echo "swapdex: downloading ${target} ..." >&2
 curl -fsSL "${base}/swapdex-${target}.tar.gz" -o "${tmp}/swapdex.tar.gz" || fail "download failed"
-curl -fsSL "${base}/swapdex-${target}.sha256" -o "${tmp}/swapdex.sha256" 2>/dev/null || true
+# The release always publishes the checksum; a missing one means a bad download
+# or a tampered mirror, so fail rather than silently skip verification.
+curl -fsSL "${base}/swapdex-${target}.sha256" -o "${tmp}/swapdex.sha256" || fail "checksum file download failed"
 
-# Verify the checksum when both the sums file and a hasher are available.
+# Verify the checksum when a hasher is available.
 if [ -s "${tmp}/swapdex.sha256" ]; then
   want=$(awk '{print $1}' "${tmp}/swapdex.sha256")
   if command -v sha256sum >/dev/null 2>&1; then

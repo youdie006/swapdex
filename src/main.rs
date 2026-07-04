@@ -18,8 +18,8 @@ enum Cmd {
     /// Save the current live login as a named profile
     Add {
         name: String,
-        #[arg(long)]
-        tool: Option<String>,
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
         /// Replace an existing snapshot for the tool
         #[arg(long)]
         update: bool,
@@ -27,8 +27,8 @@ enum Cmd {
     /// Switch the active login to a saved profile
     Use {
         name: String,
-        #[arg(long)]
-        tool: Option<String>,
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
         /// Show what would change without writing
         #[arg(long)]
         dry_run: bool,
@@ -87,14 +87,12 @@ fn main() {
         return;
     }
     let result = match cmd {
-        Cmd::Add { name, tool, update } => {
-            commands::add(&paths, name, &ToolSel::parse(tool.as_deref()), *update)
-        }
+        Cmd::Add { name, tool, update } => commands::add(&paths, name, *tool, *update),
         Cmd::Use {
             name,
             tool,
             dry_run,
-        } => commands::use_account(&paths, name, &ToolSel::parse(tool.as_deref()), *dry_run),
+        } => commands::use_account(&paths, name, *tool, *dry_run),
         Cmd::Ls { json } => commands::ls(&paths, *json),
         Cmd::Status { json } => commands::status(&paths, *json),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),

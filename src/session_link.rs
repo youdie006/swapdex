@@ -68,6 +68,12 @@ pub fn sessions_by_account(paths: &Paths) -> Option<BTreeMap<String, usize>> {
 }
 
 pub fn status_line(paths: &Paths) -> Option<String> {
+    // Until at least one switch is recorded, every session is unattributed and
+    // the count is just the fetch cap - a confusing "N across 0 account(s)".
+    // Say nothing rather than mislead.
+    if read_timeline(paths).is_empty() {
+        return None;
+    }
     let counts = sessions_by_account(paths)?;
     let total: usize = counts.values().sum();
     let unattributed = counts.get(UNATTRIBUTED).copied().unwrap_or(0);
@@ -125,7 +131,19 @@ pub(crate) fn rfc3339_to_secs(s: &str) -> Option<i64> {
     let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146097 + doe - 719468;
-    Some(days * 86400 + h * 3600 + mi * 60 + se)
+    let naive = days * 86400 + h * 3600 + mi * 60 + se;
+    // Normalize a trailing +HH:MM / -HH:MM offset to true UTC (UTC = local -
+    // offset). A trailing "Z" or nothing is already UTC.
+    let off = &s[19..];
+    let offset_secs = if let Some(rest) = off.strip_prefix('+').or_else(|| off.strip_prefix('-')) {
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let oh: i64 = rest.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(0);
+        let om: i64 = rest.get(3..5).and_then(|x| x.parse().ok()).unwrap_or(0);
+        sign * (oh * 3600 + om * 60)
+    } else {
+        0
+    };
+    Some(naive - offset_secs)
 }
 
 #[cfg(test)]

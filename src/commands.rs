@@ -9,39 +9,41 @@ use crate::store::Store;
 use anyhow::Result;
 use serde_json::Value;
 
-/// Which tools a command targets. `--tool claude|codex` is explicit; default is
-/// "both" (act only on tools that apply).
+/// Which tool a `--tool` value targets. A clap `ValueEnum`, so an unknown or
+/// miscased value (`--tool cluade`) is rejected with a did-you-mean instead of
+/// silently falling through to "both" and switching a tool you meant to leave
+/// alone. `None` (no `--tool`) means the default: act on whichever tools apply.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ToolSel {
+    #[value(alias = "claude-code")]
     Claude,
     Codex,
     Both,
 }
 
 impl ToolSel {
-    pub fn parse(s: Option<&str>) -> ToolSel {
-        match s {
-            Some("claude") | Some("claude-code") => ToolSel::Claude,
-            Some("codex") => ToolSel::Codex,
-            _ => ToolSel::Both,
-        }
-    }
-    fn wants(&self, tool: &str) -> bool {
+    fn wants(self, tool: &str) -> bool {
         match self {
             ToolSel::Claude => tool == "claude-code",
             ToolSel::Codex => tool == "codex",
             ToolSel::Both => true,
         }
     }
-    fn explicit(&self) -> bool {
-        !matches!(self, ToolSel::Both)
-    }
 }
 
-fn adapters_for(sel: &ToolSel) -> Vec<Box<dyn AuthTool>> {
+/// The adapters a command targets. `None` and `Some(Both)` mean all; an explicit
+/// single tool narrows it.
+fn selected_adapters(sel: Option<ToolSel>) -> Vec<Box<dyn AuthTool>> {
     adapters::all()
         .into_iter()
-        .filter(|a| sel.wants(a.name()))
+        .filter(|a| sel.map(|s| s.wants(a.name())).unwrap_or(true))
         .collect()
+}
+
+/// Whether the user explicitly asked for one tool (so a missing one is an error,
+/// not a silent skip). `--tool both` is treated as the lenient default.
+fn is_explicit(sel: Option<ToolSel>) -> bool {
+    matches!(sel, Some(ToolSel::Claude) | Some(ToolSel::Codex))
 }
 
 /// The account_id a stored profile's snapshot resolves to, for matching a live
@@ -87,7 +89,7 @@ fn reject_bad_name(name: &str) -> Option<i32> {
     }
 }
 
-pub fn add(paths: &Paths, name: &str, sel: &ToolSel, update: bool) -> Result<i32> {
+pub fn add(paths: &Paths, name: &str, sel: Option<ToolSel>, update: bool) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     if let Some(c) = reject_bad_name(name) {
         return Ok(c);
@@ -103,34 +105,56 @@ pub fn add(paths: &Paths, name: &str, sel: &ToolSel, update: bool) -> Result<i32
         }
     };
     let mut saved = Vec::new();
-    for adapter in adapters_for(sel) {
+    let mut skipped = Vec::new();
+    for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         if !adapter.present(paths) {
-            if sel.explicit() {
+            if is_explicit(sel) {
                 eprintln!("swapdex: not logged in to {tool}");
                 return Ok(3);
             }
             continue;
         }
         if store.load(name, tool)?.is_some() && !update {
-            eprintln!(
-                "swapdex: profile '{name}' already has a {tool} login; pass --update to replace"
-            );
-            return Ok(6);
+            // Explicit --tool on an already-saved tool is an error; in the
+            // default case, just skip it and still attach the missing tool(s).
+            if is_explicit(sel) {
+                eprintln!(
+                    "swapdex: profile '{name}' already has a {tool} login; pass --update to replace"
+                );
+                return Ok(6);
+            }
+            skipped.push(tool);
+            continue;
         }
         let snap = adapter.capture(paths)?;
         store.save(name, &snap)?;
         saved.push(tool);
     }
     if saved.is_empty() {
+        if !skipped.is_empty() {
+            eprintln!(
+                "swapdex: profile '{name}' already has {}; pass --update to replace",
+                skipped.join(", ")
+            );
+            return Ok(6);
+        }
         eprintln!("swapdex: not logged in to any selected tool");
         return Ok(3);
     }
-    println!("saved profile '{name}' ({})", saved.join(", "));
+    let note = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " ({} already saved; --update to replace)",
+            skipped.join(", ")
+        )
+    };
+    println!("saved profile '{name}' ({}){note}", saved.join(", "));
     Ok(0)
 }
 
-pub fn use_account(paths: &Paths, name: &str, sel: &ToolSel, dry_run: bool) -> Result<i32> {
+pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     if let Some(c) = reject_bad_name(name) {
         return Ok(c);
@@ -143,33 +167,36 @@ pub fn use_account(paths: &Paths, name: &str, sel: &ToolSel, dry_run: bool) -> R
             return Ok(4);
         }
     };
-    let mut switched = 0;
-    for adapter in adapters_for(sel) {
+    let mut matched = 0; // profile had a snapshot for this tool
+    let mut changed = 0; // an actual switch was written
+    for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         let target = match store.load(name, tool)? {
             Some(s) => s,
             None => {
-                if sel.explicit() {
+                if is_explicit(sel) {
                     eprintln!("swapdex: profile '{name}' has no {tool} login");
                     return Ok(5);
                 }
                 continue;
             }
         };
-        // Already-active is a no-op success: never re-write the live credential
-        // (which would re-open the refresh-token race), churn backups, or append
-        // a duplicate timeline event (which would skew session attribution).
-        let live_id = adapter.identity(paths)?.map(|i| i.account_id);
-        let target_id = profile_account_id(&store, name, tool);
+        matched += 1;
+        // Already-active is a no-op success. Ignore EMPTY ids: two accounts with
+        // no account_id must never compare equal, or the switch would be skipped
+        // and the WRONG account silently kept active.
+        let live_id = adapter
+            .identity(paths)?
+            .map(|i| i.account_id)
+            .filter(|s| !s.is_empty());
+        let target_id = profile_account_id(&store, name, tool).filter(|s| !s.is_empty());
         if live_id.is_some() && live_id == target_id {
             println!("{tool}: '{name}' is already active");
-            switched += 1;
             continue;
         }
         warn_if_expired(&target, tool);
         if dry_run {
             println!("would switch {tool} -> {name}");
-            switched += 1;
             continue;
         }
         // Safe order (A6): back up the CURRENT live login first (atomic + fsync
@@ -185,13 +212,14 @@ pub fn use_account(paths: &Paths, name: &str, sel: &ToolSel, dry_run: bool) -> R
         if let Some(id) = adapter.identity(paths)? {
             println!("switched {tool} -> {}", identity_line(&id));
         }
-        switched += 1;
+        changed += 1;
     }
-    if switched == 0 {
+    if matched == 0 {
         eprintln!("swapdex: no profile named '{name}'");
         return Ok(5);
     }
-    if !dry_run {
+    // Only when a login was actually written - not for a no-op or a dry-run.
+    if changed > 0 {
         println!("(takes effect on your next message)");
     }
     Ok(0)
@@ -243,6 +271,28 @@ fn profile_detail(
     }
 }
 
+/// Summarize a profile across ALL its tools (not just the first): a marker if
+/// ANY tool is stale/expired, and the first non-empty email/tier. `p.tools` is
+/// alphabetical, so inspecting only the first would always be "claude-code" and
+/// hide Codex entirely.
+fn profile_summary(
+    store: &Store,
+    name: &str,
+    tools: &[String],
+) -> (Option<String>, Option<String>, Option<&'static str>) {
+    let mut email = None;
+    let mut tier = None;
+    let mut marker = None;
+    for t in tools {
+        if let Some((e, ti, m)) = profile_detail(store, name, t) {
+            email = email.or(e);
+            tier = tier.or(ti);
+            marker = marker.or(m);
+        }
+    }
+    (email, tier, marker)
+}
+
 pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
     let store = Store::open(paths)?;
     // Active markers come from LIVE identity, matched back to a profile (A2).
@@ -261,11 +311,7 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         let rows: Vec<Value> = profiles
             .iter()
             .map(|p| {
-                let (email, tier, marker) = p
-                    .tools
-                    .first()
-                    .and_then(|t| profile_detail(&store, &p.name, t))
-                    .unwrap_or((None, None, None));
+                let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
                 serde_json::json!({
                     "name": p.name,
                     "tools": p.tools,
@@ -290,11 +336,7 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         } else {
             "  "
         };
-        let (email, tier, marker) = p
-            .tools
-            .first()
-            .and_then(|t| profile_detail(&store, &p.name, t))
-            .unwrap_or((None, None, None));
+        let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
         let who = email.unwrap_or_default();
         let tier = tier.map(|t| format!(" [{t}]")).unwrap_or_default();
         let warn = marker.map(|m| format!("  ({m})")).unwrap_or_default();

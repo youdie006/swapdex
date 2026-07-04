@@ -18,7 +18,7 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             --title "swapdex ${{ github.ref_name }}" \
-            --notes "Prebuilt binaries for Linux, macOS, and Windows. Install with \`cargo install swapdex\`, \`brew install youdie006/tap/swapdex\`, or \`npm i -g @youdie006/swapdex\`." \
+            --notes "Prebuilt binaries for Linux and macOS. Install with \`cargo install swapdex\`, \`brew install youdie006/tap/swapdex\`, or \`npm i -g @youdie006/swapdex\`." \
             || true
 
   build:
