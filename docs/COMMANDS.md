@@ -10,11 +10,12 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex add <name> [--tool claude\|codex] [--update]` | Save the current live login as a named profile. Snapshots both tools by default; `--tool` limits it. `--update` replaces an existing snapshot. |
 | `swapdex use <name> [--tool ...] [--dry-run]` | Switch the active login to a saved profile. Backs up the current login first, then applies atomically. `--dry-run` prints the change without writing. Switching to the already-active account is a no-op. |
 | `swapdex ls [--json]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` marker. The active profile is marked from the **live** login, not a stored guess. |
-| `swapdex status` | Show the active account per tool, matched back to a saved profile, plus expiry and a session summary (needs sessionwiki). |
+| `swapdex status [--json]` | Show the active account per tool, matched back to a saved profile, plus expiry and a session summary (needs sessionwiki). `--json` for scripting. |
 | `swapdex rm <name> --yes` | Remove a saved profile. Requires `--yes`. Never touches a live login. |
 | `swapdex rename <old> <new>` | Rename a saved profile. |
 | `swapdex sessions` | Sessions grouped by the account active when they ran (best-effort; needs sessionwiki on PATH). |
 | `swapdex mcp` | Run as a read-only MCP server over stdio (`whoami`, `list_accounts`). No switch tool exists. |
+| `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. |
 
 ## Exit codes
 

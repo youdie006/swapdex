@@ -314,8 +314,29 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-pub fn status(paths: &Paths) -> Result<i32> {
+pub fn status(paths: &Paths, json: bool) -> Result<i32> {
     let store = Store::open(paths)?;
+    if json {
+        let rows: Vec<Value> = adapters::all()
+            .iter()
+            .map(|adapter| {
+                let tool = adapter.name();
+                match adapter.identity(paths).ok().flatten() {
+                    None => serde_json::json!({"tool": tool, "logged_in": false}),
+                    Some(id) => serde_json::json!({
+                        "tool": tool,
+                        "logged_in": true,
+                        "email": id.email,
+                        "tier": id.tier,
+                        "profile": matched_profile_name(&store, tool, &id.account_id),
+                        "expired": id.expires_at.map(|ms| ms < now_ms()),
+                    }),
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(0);
+    }
     for adapter in adapters::all() {
         let tool = adapter.name();
         match adapter.identity(paths)? {

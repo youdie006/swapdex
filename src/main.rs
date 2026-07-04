@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use swapdex::commands::{self, ToolSel};
 use swapdex::paths::Paths;
 
@@ -39,7 +39,10 @@ enum Cmd {
         json: bool,
     },
     /// Show the active account per tool
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a saved profile (never touches a live login)
     Rm {
         name: String,
@@ -53,6 +56,8 @@ enum Cmd {
     Sessions,
     /// Run as a read-only MCP server over stdio
     Mcp,
+    /// Print a shell completion script (bash, zsh, fish, ...)
+    Completions { shell: clap_complete::Shell },
 }
 
 fn main() {
@@ -69,6 +74,18 @@ fn main() {
         swapdex::banner::print_banner();
         return;
     };
+    // Completions generate swapdex's OWN tab-completion - they do NOT wrap or
+    // intercept `claude`/`codex` (that is llmux's territory, deliberately out of
+    // scope). Pure codegen, no account access.
+    if let Cmd::Completions { shell } = cmd {
+        clap_complete::generate(
+            *shell,
+            &mut Cli::command(),
+            "swapdex",
+            &mut std::io::stdout(),
+        );
+        return;
+    }
     let result = match cmd {
         Cmd::Add { name, tool, update } => {
             commands::add(&paths, name, &ToolSel::parse(tool.as_deref()), *update)
@@ -79,7 +96,7 @@ fn main() {
             dry_run,
         } => commands::use_account(&paths, name, &ToolSel::parse(tool.as_deref()), *dry_run),
         Cmd::Ls { json } => commands::ls(&paths, *json),
-        Cmd::Status => commands::status(&paths),
+        Cmd::Status { json } => commands::status(&paths, *json),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),
         Cmd::Sessions => commands::sessions(&paths),
@@ -87,6 +104,7 @@ fn main() {
             swapdex::mcp::serve();
             return;
         }
+        Cmd::Completions { .. } => unreachable!("handled before path resolution"),
     };
     match result {
         Ok(code) => std::process::exit(code),

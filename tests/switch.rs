@@ -171,6 +171,24 @@ fn no_args_prints_ascii_banner_plain_when_piped() {
     );
 }
 
+// completions generate a shell script; status --json is valid JSON.
+#[test]
+fn completions_and_status_json() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (o, _e, c) = run(root.path(), &["completions", "bash"]);
+    assert_eq!(c, 0);
+    assert!(
+        o.contains("swapdex"),
+        "completion script should mention swapdex"
+    );
+    let (o2, _e, c2) = run(root.path(), &["status", "--json"]);
+    assert_eq!(c2, 0);
+    let v: serde_json::Value =
+        serde_json::from_str(o2.trim()).expect("status --json must be valid JSON");
+    assert!(v.is_array(), "status --json is an array of tools");
+}
+
 // ls marks a Codex profile whose login has not refreshed in a long time as
 // stale (its refresh token may have rotated) - a cross-tool safety cue.
 #[test]
