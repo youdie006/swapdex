@@ -59,7 +59,8 @@ npm install -g @youdie006/swapdex
 curl -fsSL https://raw.githubusercontent.com/youdie006/swapdex/main/install.sh | sh
 ```
 
-Linux / WSL first (macOS Keychain support is planned). Requires the Claude Code
+Linux / WSL first; on macOS, Codex works today and Claude-via-Keychain is
+[issue #1](https://github.com/youdie006/swapdex/issues/1). Requires the Claude Code
 and/or Codex CLI already installed and logged in. Full command, exit-code, and
 environment reference: [docs/COMMANDS.md](docs/COMMANDS.md).
 
@@ -204,6 +205,12 @@ swapdex is the accounts layer of a small local AI-CLI stack:
   Pro session across agents. swapdex coexists with it without touching its auth.
 
 ## Roadmap
+
+- **Claude Code on macOS (Keychain).** On macOS, Claude Code keeps its login in
+  the Keychain rather than a file; swapdex detects this and refuses honestly
+  instead of half-switching, but switching it is not supported yet. Design and
+  constraints: [issue #1](https://github.com/youdie006/swapdex/issues/1) --
+  contributions from macOS users welcome (Codex already works on macOS).
 
 Being considered, explicitly opt-in and advisory-only:
 

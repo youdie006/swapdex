@@ -299,10 +299,12 @@ impl Store {
 /// could escape the store (`/`, `\`, `..`, a leading `.`, control chars, empty,
 /// or absurdly long). Guards `add`/`use`/`rm`/`rename` against path traversal.
 pub fn valid_profile_name(name: &str) -> bool {
+    // NOTE: "-" is reserved at CREATION time (add/rename reject it) because
+    // `use -` toggles - but it stays valid here so a legacy profile named "-"
+    // can still be rm'd/renamed after an upgrade.
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
-        && name != "-" // reserved: `swapdex use -` toggles to the previous profile
         && !name.contains(['/', '\\'])
         && !name.chars().any(|c| c.is_control())
 }

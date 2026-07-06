@@ -134,6 +134,17 @@ fn reject_bad_name(name: &str) -> Option<i32> {
     }
 }
 
+/// Additionally reject "-" where a profile is CREATED (`use -` toggles, so a
+/// new profile must never take that name; a legacy one stays manageable).
+fn reject_reserved_name(name: &str) -> Option<i32> {
+    if name == "-" {
+        eprintln!("swapdex: '-' is reserved (`swapdex use -` toggles to the previous profile)");
+        Some(2)
+    } else {
+        None
+    }
+}
+
 pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     let store = Store::open(paths)?;
@@ -175,7 +186,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             }
         }
     };
-    if let Some(c) = reject_bad_name(name) {
+    if let Some(c) = reject_bad_name(name).or_else(|| reject_reserved_name(name)) {
         return Ok(c);
     }
     // Take the switch lock so `add --update` can't race a `use` into a torn
@@ -250,7 +261,7 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
     let store = Store::open(paths)?;
     // Resolve the NAME first: `-` toggles to the previous/other profile and a
     // unique prefix expands, so the daily switch is two keystrokes.
-    let name = match resolve_use_name(&store, paths, name)? {
+    let name = match resolve_use_name(&store, paths, name, sel)? {
         Some(n) => n,
         None => return Ok(5),
     };
@@ -283,6 +294,16 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
     let switch_ts = now_secs();
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
+        // A Keychain-mode Claude install (macOS) cannot be switched yet. In
+        // the default both-tools case SKIP it with a note so Codex still
+        // switches; the adapter's own refusal stays for an explicit --tool.
+        if !is_explicit(sel) && macos_keychain_note(paths, tool).is_some() {
+            println!(
+                "{tool}: skipped - the login lives in the macOS Keychain \
+                 (github.com/youdie006/swapdex/issues/1); other tools continue"
+            );
+            continue;
+        }
         let target = match store.load(name, tool)? {
             Some(s) => s,
             None => {
@@ -422,6 +443,15 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
                     continue;
                 }
             }
+            // Keychain-mode Claude (macOS): skip with a note, keep restoring
+            // the other tool (mirror of the `use` skip).
+            if macos_keychain_note(paths, tool).is_some() {
+                println!(
+                    "{tool}: skipped - the login lives in the macOS Keychain \
+                     (github.com/youdie006/swapdex/issues/1); other tools continue"
+                );
+                continue;
+            }
         }
         let Some((stamp, target)) = store.load_backup(tool)? else {
             if is_explicit(sel) {
@@ -498,11 +528,25 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
 /// prefix expands (`use w` -> work); an ambiguous one refuses and lists the
 /// candidates rather than guessing (switching is a write). `Ok(None)` means
 /// "already reported, exit 5".
-fn resolve_use_name(store: &Store, paths: &Paths, raw: &str) -> Result<Option<String>> {
+fn resolve_use_name(
+    store: &Store,
+    paths: &Paths,
+    raw: &str,
+    sel: Option<ToolSel>,
+) -> Result<Option<String>> {
+    // An empty name (an unset shell variable) must fall through to the
+    // invalid-name rejection: every string starts with "", so prefix matching
+    // would otherwise "uniquely" match a single-profile store and switch.
+    if raw.is_empty() {
+        return Ok(Some(raw.to_string()));
+    }
     let profiles: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
     if raw == "-" {
+        // Scope "previous" to the selected tool(s): `use - --tool codex` asks
+        // about codex history, not claude's.
         let mut act: Vec<String> = active_by_tool(store, paths)
             .into_iter()
+            .filter(|(t, _)| sel.map(|s| s.wants(t)).unwrap_or(true))
             .map(|(_, n)| n)
             .collect();
         act.sort();
@@ -514,16 +558,29 @@ fn resolve_use_name(store: &Store, paths: &Paths, raw: &str) -> Result<Option<St
                 return Ok(Some(other.clone()));
             }
         }
-        // Otherwise: the most recent switch to a profile that is not active now.
-        if let Some(prev) = last_switch_name_excluding(paths, &act, &profiles) {
+        // Otherwise: the most recent switch to a profile that is neither
+        // active now nor the destination of the newest switch (when the live
+        // identity is unreadable, that newest destination IS the current
+        // profile - excluding it keeps '-' from re-picking where you already
+        // are).
+        if let Some(prev) = last_switch_name_excluding(paths, &act, &profiles, sel) {
             eprintln!("swapdex: '-' -> '{prev}'");
             return Ok(Some(prev));
         }
-        eprintln!(
-            "swapdex: can't tell which profile '-' means yet (no prior switch on record). \
-             Pick one: swapdex use <{}>",
-            profiles.join("|")
-        );
+        if act.len() > 1 {
+            eprintln!(
+                "swapdex: both profiles are active ({}) - '-' is ambiguous here; \
+                 say which: swapdex use <{}>",
+                act.join(", "),
+                profiles.join("|")
+            );
+        } else {
+            eprintln!(
+                "swapdex: can't tell which profile '-' means yet. \
+                 Pick one: swapdex use <{}>",
+                profiles.join("|")
+            );
+        }
         return Ok(None);
     }
     if profiles.iter().any(|p| p == raw) {
@@ -554,13 +611,17 @@ fn resolve_use_name(store: &Store, paths: &Paths, raw: &str) -> Result<Option<St
 
 /// The most recent `use`/`restore` timeline entry naming a profile that still
 /// exists and is not in `exclude` - i.e. "the profile you were on before".
+/// The destination of the NEWEST switch is also excluded (it is where you are
+/// now, even when the live identity cannot be read), and `sel` scopes which
+/// tools' events count.
 fn last_switch_name_excluding(
     paths: &Paths,
     exclude: &[String],
     profiles: &[String],
+    sel: Option<ToolSel>,
 ) -> Option<String> {
     let text = std::fs::read_to_string(paths.store_dir().join("timeline.jsonl")).ok()?;
-    let mut best: Option<(i64, String)> = None;
+    let mut events: Vec<(i64, String)> = Vec::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -568,10 +629,27 @@ fn last_switch_name_excluding(
         if !matches!(v["action"].as_str(), Some("use") | Some("restore")) {
             continue;
         }
+        if let Some(tool) = v["tool"].as_str() {
+            if !sel.map(|s| s.wants(tool)).unwrap_or(true) {
+                continue;
+            }
+        }
         let (Some(ts), Some(name)) = (v["ts"].as_i64(), v["account"].as_str()) else {
             continue;
         };
-        if exclude.iter().any(|e| e == name) || !profiles.iter().any(|p| p == name) {
+        events.push((ts, name.to_string()));
+    }
+    // Where the newest switch went = where you are now; never "toggle" there.
+    let newest = events
+        .iter()
+        .max_by_key(|(ts, _)| *ts)
+        .map(|(_, n)| n.clone());
+    let mut best: Option<(i64, String)> = None;
+    for (ts, name) in events {
+        if exclude.iter().any(|e| *e == name)
+            || newest.as_deref() == Some(name.as_str())
+            || !profiles.iter().any(|p| *p == name)
+        {
             continue;
         }
         if best.as_ref().map(|(t, _)| ts >= *t).unwrap_or(true) {
@@ -993,6 +1071,11 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
 /// PATH - and never touches the network.
 pub fn doctor(paths: &Paths) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
+    // Stat BEFORE Store::open, which self-heals the mode to 0700 - otherwise
+    // the permission check below could never observe a problem.
+    let pre_mode = std::fs::metadata(paths.store_dir())
+        .ok()
+        .map(|m| m.permissions().mode() & 0o777);
     let store = Store::open(paths)?;
     let mut problems = 0u32;
     let color = crate::util::color_enabled();
@@ -1009,11 +1092,23 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         }
     };
 
-    // Store directory: exists (Store::open made it) + private.
+    // Store directory. Store::open already tightened it to 0700; report what
+    // it FOUND (pre_mode), or "ok" would paper over a store that sat
+    // group-readable until this very run.
     let sd = paths.store_dir();
     let profiles = store.list();
-    match std::fs::metadata(&sd) {
-        Ok(m) if m.permissions().mode() & 0o077 != 0 => report(
+    let count = format!(
+        "{} profile{}",
+        profiles.len(),
+        if profiles.len() == 1 { "" } else { "s" }
+    );
+    match (pre_mode, std::fs::metadata(&sd)) {
+        (Some(m), Ok(now)) if m & 0o077 != 0 && now.permissions().mode() & 0o077 == 0 => report(
+            "store",
+            true,
+            format!("was mode {m:03o} - tightened to 0700 just now; {count}"),
+        ),
+        (_, Ok(now)) if now.permissions().mode() & 0o077 != 0 => report(
             "store",
             false,
             format!(
@@ -1021,16 +1116,8 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 crate::util::redact_path(&sd.display().to_string())
             ),
         ),
-        Ok(_) => report(
-            "store",
-            true,
-            format!(
-                "0700, {} profile{}",
-                profiles.len(),
-                if profiles.len() == 1 { "" } else { "s" }
-            ),
-        ),
-        Err(e) => report("store", false, format!("cannot stat store dir: {e}")),
+        (_, Ok(_)) => report("store", true, format!("0700, {count}")),
+        (_, Err(e)) => report("store", false, format!("cannot stat store dir: {e}")),
     }
 
     // Live logins per tool.
@@ -1088,11 +1175,15 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         p.name
                     ),
                 ),
+                // The precondition matters: `add --update` snapshots whatever
+                // is LIVE, so without "log in to that account first" the
+                // remedy would overwrite this profile with the wrong account.
                 Some((_, _, Some(m))) => report(
                     &format!("profile:{}", p.name),
                     true,
                     format!(
-                        "{tool} snapshot {m} - `swapdex add {} --update` refreshes it",
+                        "{tool} snapshot {m} - log in to that account and run \
+                         `swapdex add {} --tool {tool} --update`",
                         p.name
                     ),
                 ),
@@ -1151,6 +1242,12 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
         return Ok(c);
     }
     let store = Store::open(paths)?;
+    // Existence first - never ask "delete 'ghost'?" about a profile that
+    // does not exist.
+    if !store.list().iter().any(|p| p.name == name) {
+        eprintln!("swapdex: no profile named '{name}'");
+        return Ok(5);
+    }
     if !yes {
         // On a terminal, just ask; --yes stays for scripts (and remains the
         // only path when stdin is not a tty, exit 7 as documented).
@@ -1190,7 +1287,7 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     if let Some(c) = reject_bad_name(old) {
         return Ok(c);
     }
-    if let Some(c) = reject_bad_name(new) {
+    if let Some(c) = reject_bad_name(new).or_else(|| reject_reserved_name(new)) {
         return Ok(c);
     }
     let store = Store::open(paths)?;

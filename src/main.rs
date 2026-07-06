@@ -108,10 +108,13 @@ fn main() {
     let Some(cmd) = &cli.cmd else {
         // No subcommand: the wordmark, a short hint, and - because the person
         // typing a bare `swapdex` usually wants to know where they stand - the
-        // active accounts. Best-effort: a broken store never breaks the banner.
+        // active accounts. Best-effort: a broken store never breaks the banner,
+        // and a bare banner never CREATES the store on a fresh machine.
         swapdex::banner::print_banner();
-        if let Some(line) = commands::short_line(&paths) {
-            println!("  active: {line}");
+        if paths.store_dir().exists() {
+            if let Some(line) = commands::short_line(&paths) {
+                println!("  active: {line}");
+            }
         }
         return;
     };
@@ -132,9 +135,13 @@ fn main() {
     if let Cmd::Manpage = cmd {
         let man = clap_mangen::Man::new(Cli::command());
         let mut buf = Vec::new();
-        if man.render(&mut buf).is_ok() {
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(&buf);
+        if let Err(e) = man.render(&mut buf) {
+            eprintln!("swapdex: manpage render failed: {e}");
+            std::process::exit(1);
+        }
+        use std::io::Write;
+        if std::io::stdout().write_all(&buf).is_err() {
+            std::process::exit(1);
         }
         return;
     }

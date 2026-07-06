@@ -907,8 +907,8 @@ fn add_without_name_asks_on_tty() {
     child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code().unwrap_or(-1), 0);
-    let (ls, _e, _c) = run(root.path(), &["ls"]);
-    assert!(ls.contains("a"), "saved under the suggested name: {ls}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert_eq!(names, "a\n", "saved under the suggested name: {names:?}");
 }
 
 #[test]
@@ -918,4 +918,67 @@ fn add_without_name_errors_helpfully_non_tty() {
     let (_o, e, c) = run(root.path(), &["add"]);
     assert_eq!(c, 2, "non-tty add without a name is an argument error");
     assert!(e.contains("swapdex add <name>"), "guides the fix: {e}");
+}
+
+// REVIEW-1 (must-fix): `use ""` (e.g. an unset shell variable) must NOT match
+// the single profile as a "unique prefix" and switch - it is an invalid name.
+#[test]
+fn use_empty_string_never_switches() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-UNSAVED"); // live: an unsaved account
+    let (_o, _e, c) = run(root.path(), &["use", ""]);
+    assert_eq!(c, 2, "empty name is invalid, never a prefix match");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        live["tokens"]["account_id"], "acct-UNSAVED",
+        "live login untouched"
+    );
+}
+
+// REVIEW-6: `rm ghost` must say "no profile" without first asking y/N.
+#[test]
+fn rm_nonexistent_does_not_prompt() {
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    let out = Command::new(bin())
+        .args(["rm", "ghost"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::null()) // would EOF the prompt if one appeared
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        5,
+        "straight to 'no profile'"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("delete saved profile"),
+        "no confirmation prompt for a ghost"
+    );
+}
+
+// REVIEW-5: with the live identity unreadable/empty, `use -` must not
+// "toggle" right back to the profile of the newest switch (= where you are).
+#[test]
+fn use_dash_never_repicks_the_newest_switch_destination() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "a", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "b", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-C");
+    run(root.path(), &["add", "c", "--tool", "codex"]);
+    run(root.path(), &["use", "a", "--tool", "codex"]);
+    // Live identity degrades (empty account_id): nothing matches a profile.
+    seed_codex(root.path(), "");
+    let (_o, e, _c) = run(root.path(), &["use", "-"]);
+    assert!(
+        !e.contains("'-' -> 'a'"),
+        "must not re-pick the newest switch destination: {e}"
+    );
 }
