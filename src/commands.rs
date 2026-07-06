@@ -181,6 +181,7 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
     };
     let mut matched = 0; // profile had a snapshot for this tool
     let mut changed = 0; // an actual switch was written
+
     // Snapshot running processes once (best-effort) so we can warn if a switch
     // pulls the login out from under a live session. Skipped on a dry-run.
     let running = if dry_run {
