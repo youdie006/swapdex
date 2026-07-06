@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.1.8] - 2026-07-06
+
+### Added
+- `swapdex doctor`: local health check - store permissions, every saved
+  snapshot (unreadable/expired/stale), both live logins (including the
+  corrupt-file case), backups, `.claude.json` permissions, and the CLIs on
+  PATH. Each finding ends with its remedy. Exit 0 healthy, 9 when problems
+  were found. Local only, never the network.
+
+### Changed
+- The switch timeline file is bounded (compacts to the newest 1000 events)
+  instead of growing forever.
+- `add` hints about quoting when a profile name contains spaces.
+
 ## [0.1.7] - 2026-07-06
 
 Findings from a two-track review (adversarial code audit + a new-user
