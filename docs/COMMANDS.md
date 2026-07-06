@@ -7,6 +7,8 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 
 | Command | What it does |
 | --- | --- |
+| `swapdex setup` | Guided first-time setup: saves the account(s) you're logged into, offers to add more (drives `codex login` for you), and shows how to switch. Interactive (needs a terminal). |
+| `swapdex login <name> [--tool claude\|codex]` | Log in and save in one step. For Codex it runs `codex login` (browser) then saves the result; Claude Code signs in inside the app, so it prints the two-step manual path. |
 | `swapdex add <name> [--tool claude\|codex] [--update]` | Save the current live login as a named profile. Snapshots both tools by default; `--tool` limits it. `--update` replaces an existing snapshot. |
 | `swapdex use <name> [--tool ...] [--dry-run]` | Switch the active login to a saved profile. Backs up the current login first, then applies atomically. `--dry-run` prints the change without writing. Switching to the already-active account is a no-op. |
 | `swapdex ls [--json]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` marker. The active profile is marked from the **live** login, not a stored guess. |
@@ -29,6 +31,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `5` | No profile by that name (`use` / `rm` / `rename`). |
 | `6` | The profile already has a snapshot for that tool; pass `--update` (`add`). |
 | `7` | `rm` was called without `--yes`. |
+| `8` | `login` was started but the tool's login flow did not complete. |
 
 ## Tools
 

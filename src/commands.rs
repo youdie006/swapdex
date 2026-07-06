@@ -8,6 +8,18 @@ use crate::paths::Paths;
 use crate::store::Store;
 use anyhow::Result;
 use serde_json::Value;
+use std::process::Command;
+
+/// Is a CLI on PATH and runnable?
+fn command_exists(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 /// Which tool a `--tool` value targets. A clap `ValueEnum`, so an unknown or
 /// miscased value (`--tool cluade`) is rejected with a did-you-mean instead of
@@ -349,7 +361,9 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
         return Ok(0);
     }
     if profiles.is_empty() {
-        println!("no saved profiles yet - run `swapdex add <name>` while logged in");
+        println!("No accounts saved yet.");
+        println!("  guided setup:  swapdex setup");
+        println!("  or add one:    swapdex login <name>");
         return Ok(0);
     }
     // Two-pass so columns fit the actual content (with a sane cap).
@@ -519,6 +533,167 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
         eprintln!("swapdex: no profile named '{old}'");
         Ok(5)
     }
+}
+
+/// Onboarding in one step: run a tool's login flow, then save the result as a
+/// named profile. Codex has a driveable CLI login; Claude Code signs in inside
+/// the app, so for it swapdex guides the two-step manual path.
+pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
+    crate::atomic::ensure_not_root()?;
+    if let Some(c) = reject_bad_name(name) {
+        return Ok(c);
+    }
+    let tool = match sel {
+        Some(ToolSel::Claude) => "claude-code",
+        Some(ToolSel::Codex) => "codex",
+        _ if command_exists("codex") => "codex",
+        _ => "claude-code",
+    };
+
+    if tool == "claude-code" {
+        println!("Claude Code signs in inside the app, so swapdex can't drive it directly.");
+        println!("  1) run `claude` and complete the login (or use /login in a session)");
+        println!("  2) then save it:  swapdex add {name} --tool claude");
+        return Ok(0);
+    }
+
+    if !command_exists("codex") {
+        eprintln!("swapdex: the `codex` CLI is not on your PATH - install it, then retry.");
+        return Ok(3);
+    }
+    println!("Opening `codex login` - sign in with the account to save as '{name}'.");
+    println!("(If it says you're already logged in, run `codex logout` first, then retry.)");
+    // Inherit the terminal so the browser/device prompt shows and no child stdio
+    // is captured into swapdex output.
+    let status = Command::new("codex")
+        .arg("login")
+        .status()
+        .map_err(|e| anyhow::anyhow!("could not run codex login: {e}"))?;
+    if !status.success() {
+        eprintln!("swapdex: codex login did not complete - nothing saved.");
+        return Ok(8);
+    }
+    println!();
+    // update=true so re-running `login <name>` refreshes an existing profile.
+    add(paths, name, Some(ToolSel::Codex), true)
+}
+
+/// Ask a question and read a trimmed line; empty input yields `default`.
+fn prompt(question: &str, default: &str) -> String {
+    use std::io::Write;
+    print!("{question}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return default.to_string();
+    }
+    let t = line.trim();
+    if t.is_empty() {
+        default.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// A default profile name from an email/display (its local part, sanitized).
+fn suggest_name(who: &str) -> String {
+    let base = who.split('@').next().unwrap_or(who);
+    let clean: String = base
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if crate::store::valid_profile_name(&clean) {
+        clean
+    } else {
+        "account".to_string()
+    }
+}
+
+/// Guided first-run onboarding: save whatever you're logged into now, then offer
+/// to add more accounts, then tell you how to switch. Interactive (a TTY).
+pub fn setup(paths: &Paths) -> Result<i32> {
+    use std::io::IsTerminal;
+    crate::atomic::ensure_not_root()?;
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "swapdex setup is interactive - run it in a terminal, or use `swapdex login <name>`."
+        );
+        return Ok(1);
+    }
+    let store = Store::open(paths)?;
+    println!("Welcome to swapdex - switch between your Claude Code and Codex logins.\n");
+
+    // 1) Save the accounts you're currently logged into.
+    for adapter in adapters::all() {
+        let tool = adapter.name();
+        let id = match adapter.identity(paths)? {
+            Some(id) => id,
+            None => continue,
+        };
+        if let Some(existing) = matched_profile_name(&store, tool, &id.account_id) {
+            println!("{tool}: already saved as '{existing}'.\n");
+            continue;
+        }
+        let who = id.email.clone().unwrap_or_else(|| id.display.clone());
+        let default = suggest_name(&who);
+        let ans = prompt(
+            &format!("{tool}: logged in as {who}. Save it? name [{default}] (or 'skip'): "),
+            &default,
+        );
+        if ans.eq_ignore_ascii_case("skip") {
+            println!();
+            continue;
+        }
+        if !crate::store::valid_profile_name(&ans) {
+            println!("  '{ans}' is not a valid name; skipped.\n");
+            continue;
+        }
+        let snap = adapter.capture(paths)?;
+        store.save(&ans, &snap)?;
+        println!("  saved '{ans}'.\n");
+    }
+
+    // 2) Offer to add more Codex accounts (the one with a driveable login).
+    if command_exists("codex") {
+        while prompt("Add another Codex account? [y/N]: ", "n").eq_ignore_ascii_case("y") {
+            let name = prompt("  name for it: ", "");
+            if !crate::store::valid_profile_name(&name) {
+                println!("  invalid name; try again.\n");
+                continue;
+            }
+            println!("  opening a fresh codex login (sign in with the other account)...");
+            let _ = Command::new("codex").arg("logout").status();
+            let ok = Command::new("codex")
+                .arg("login")
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                println!("  login didn't complete; skipped.\n");
+                continue;
+            }
+            if let Some(codex) = adapters::by_name("codex") {
+                if codex.present(paths) {
+                    let snap = codex.capture(paths)?;
+                    store.save(&name, &snap)?;
+                    println!("  saved '{name}'.\n");
+                }
+            }
+        }
+    }
+
+    // 3) Summary.
+    let names: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
+    if names.is_empty() {
+        println!(
+            "No accounts saved. Log into Claude Code or Codex, then run `swapdex setup` again."
+        );
+    } else {
+        println!("Done. Saved: {}.", names.join(", "));
+        println!("  switch:  swapdex use <name>");
+        println!("  list:    swapdex ls");
+    }
+    Ok(0)
 }
 
 fn now_ms() -> i64 {

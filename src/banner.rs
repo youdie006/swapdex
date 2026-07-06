@@ -45,7 +45,10 @@ pub fn print_banner() {
         "\n  {m}Switch Claude Code and Codex login accounts - locally, one command.{r}\n\n"
     ));
     s.push_str(&format!(
-        "  {v}${r} swapdex add <name>     save the current login\n"
+        "  {v}${r} swapdex setup          guided first-time setup\n"
+    ));
+    s.push_str(&format!(
+        "  {v}${r} swapdex login <name>   log in + save an account\n"
     ));
     s.push_str(&format!(
         "  {v}${r} swapdex use <name>     switch to a saved account\n"
@@ -53,6 +56,8 @@ pub fn print_banner() {
     s.push_str(&format!(
         "  {v}${r} swapdex ls | status    see your accounts\n\n"
     ));
-    s.push_str(&format!("  {m}Run `swapdex --help` for all commands.{r}\n"));
+    s.push_str(&format!(
+        "  {m}New here? Run `swapdex setup`.  All commands: `swapdex --help`.{r}\n"
+    ));
     print!("{s}");
 }

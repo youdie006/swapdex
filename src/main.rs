@@ -50,6 +50,14 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Guided first-time setup: save your logins, add more, learn to switch
+    Setup,
+    /// Log in to a tool and save the result as a profile in one step
+    Login {
+        name: String,
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
+    },
     /// Rename a saved profile
     Rename { old: String, new: String },
     /// Sessions grouped by the account that was active when they ran
@@ -96,6 +104,8 @@ fn main() {
         Cmd::Ls { json } => commands::ls(&paths, *json),
         Cmd::Status { json } => commands::status(&paths, *json),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
+        Cmd::Setup => commands::setup(&paths),
+        Cmd::Login { name, tool } => commands::login(&paths, name, *tool),
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),
         Cmd::Sessions => commands::sessions(&paths),
         Cmd::Mcp => {

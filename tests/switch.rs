@@ -92,11 +92,40 @@ fn use_nonexistent_profile_exits_nonzero() {
 }
 
 #[test]
-fn ls_empty_store_is_friendly_exit_0() {
+fn ls_empty_store_guides_onboarding() {
     let root = tempfile::tempdir().unwrap();
     let (o, _e, c) = run(root.path(), &["ls"]);
     assert_eq!(c, 0);
-    assert!(o.contains("no saved profiles"));
+    assert!(o.contains("No accounts saved"));
+    assert!(
+        o.contains("swapdex setup"),
+        "empty state should point to setup: {o}"
+    );
+}
+
+// setup is interactive; piped (non-tty) it degrades instead of hanging.
+#[test]
+fn setup_non_tty_degrades_gracefully() {
+    let root = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(bin())
+        .arg("setup")
+        .env("SWAPDEX_ROOT", root.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("interactive"),
+        "setup should explain it needs a terminal"
+    );
+}
+
+// login --tool claude prints the two-step guidance (Claude has no CLI login).
+#[test]
+fn login_claude_prints_guidance() {
+    let root = tempfile::tempdir().unwrap();
+    let (o, _e, c) = run(root.path(), &["login", "work", "--tool", "claude"]);
+    assert_eq!(c, 0);
+    assert!(o.contains("swapdex add work --tool claude"), "{o}");
 }
 
 // C3: a profile name must not escape the store.
