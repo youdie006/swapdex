@@ -816,6 +816,44 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
+    let rows = crate::usage::tool_usage(paths);
+    if json {
+        let out: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "tool": r.tool,
+                    "last_5h": {"sessions": r.w5h.sessions, "tokens": r.w5h.tokens},
+                    "last_7d": {"sessions": r.w7d.sessions, "tokens": r.w7d.tokens},
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(0);
+    }
+    if rows.iter().all(|r| r.w7d.sessions == 0) {
+        println!("No recent session activity found (reads ~/.claude and ~/.codex, locally).");
+        return Ok(0);
+    }
+    println!("Local usage - this machine, approximate (not the billed quota):");
+    for r in &rows {
+        if r.w7d.sessions == 0 {
+            continue;
+        }
+        println!(
+            "  {:<12} 5h: {:>7} tok / {} sess    7d: {:>8} tok / {} sess",
+            r.tool,
+            crate::usage::human(r.w5h.tokens),
+            r.w5h.sessions,
+            crate::usage::human(r.w7d.tokens),
+            r.w7d.sessions,
+        );
+    }
+    println!("(tokens are summed from local session transcripts; not tagged by account)");
+    Ok(0)
+}
+
 pub fn sessions(paths: &Paths) -> Result<i32> {
     match crate::session_link::sessions_by_account(paths) {
         None => {

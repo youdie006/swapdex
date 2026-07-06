@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Added
+- `swapdex usage [--json]`: recent local token usage per tool over the last 5h
+  and 7d, summed from `~/.claude` and `~/.codex` session logs. A machine-wide
+  activity gauge (not tagged by account, not the billed quota) so you can tell
+  when to switch. Reads local files only - never the network, keeping the
+  switcher-not-rotator stance intact.
+
 ## [0.1.5] - 2026-07-06
 
 ### Changed

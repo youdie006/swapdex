@@ -62,6 +62,12 @@ enum Cmd {
     Rename { old: String, new: String },
     /// Sessions grouped by the account that was active when they ran
     Sessions,
+    /// Recent local token usage per tool (5h/7d), read from session logs
+    Usage {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Run as a read-only MCP server over stdio
     Mcp,
     /// Print a shell completion script (bash, zsh, fish, ...)
@@ -108,6 +114,7 @@ fn main() {
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),
         Cmd::Sessions => commands::sessions(&paths),
+        Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Mcp => {
             swapdex::mcp::serve();
             return;

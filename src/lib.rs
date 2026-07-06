@@ -7,4 +7,5 @@ pub mod paths;
 pub mod secret;
 pub mod session_link;
 pub mod store;
+pub mod usage;
 pub mod util;

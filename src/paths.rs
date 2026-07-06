@@ -62,6 +62,14 @@ impl Paths {
     pub fn store_dir(&self) -> PathBuf {
         self.data.clone()
     }
+    /// Claude Code's session transcripts (for local, no-network usage reads).
+    pub fn claude_projects(&self) -> PathBuf {
+        self.claude_dir.join("projects")
+    }
+    /// Codex's session transcripts.
+    pub fn codex_sessions(&self) -> PathBuf {
+        self.codex_dir.join("sessions")
+    }
 }
 
 #[cfg(test)]

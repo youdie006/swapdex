@@ -16,6 +16,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex rm <name> --yes` | Remove a saved profile. Requires `--yes`. Never touches a live login. |
 | `swapdex rename <old> <new>` | Rename a saved profile. |
 | `swapdex sessions` | Sessions grouped by the account active when they ran (best-effort; needs sessionwiki on PATH). |
+| `swapdex usage [--json]` | Recent local token usage per tool over the last 5h and 7d, summed from `~/.claude` and `~/.codex` session logs. A rough machine-wide activity gauge (not tagged by account, not the billed quota) so you can tell when to switch. Reads local files only - never the network. |
 | `swapdex mcp` | Run as a read-only MCP server over stdio (`whoami`, `list_accounts`). No switch tool exists. |
 | `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. |
 

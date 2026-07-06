@@ -73,6 +73,9 @@ swapdex use work --dry-run          # show what would change, write nothing
 
 # Sessions grouped by the account active when they ran (needs sessionwiki)
 swapdex sessions
+
+# Recent local token usage per tool (5h/7d) -- tells you when to switch
+swapdex usage
 ```
 
 `status` shows the live account per tool, matched back to a saved profile:
@@ -84,6 +87,19 @@ codex: you@personal.com (profile 'personal')
 
 The active account is always read from the **live** login, so if you `/login`
 directly in the CLI, swapdex reports the truth rather than a stale guess.
+
+`usage` reads your local session logs (no network) to gauge how heavily you've
+been using each tool lately, so you know when to switch to a fresher account:
+
+```
+Local usage - this machine, approximate (not the billed quota):
+  claude-code  5h:   8.2M tok / 12 sess    7d:   61.4M tok / 88 sess
+  codex        5h:   1.1M tok / 3 sess     7d:   9.7M tok / 24 sess
+```
+
+It sums tokens from `~/.claude` and `~/.codex` transcripts, which are not tagged
+by account, so this is a machine-wide activity gauge rather than a per-account
+balance -- deliberately a hint, not a quota-dodging auto-rotator.
 
 ## How it works
 
