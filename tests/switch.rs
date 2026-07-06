@@ -175,16 +175,30 @@ fn setup_reprompts_on_an_invalid_name() {
     assert!(ls.contains("good"), "should save the valid retry: {ls}");
 }
 
-// login --tool claude: with Claude already logged in (or its CLI absent) it
-// guides the `swapdex add` step rather than spawning an interactive session.
+// login --tool claude: with Claude already logged in it guides the
+// `swapdex add` step rather than spawning an interactive session. A fake
+// `claude` on PATH makes this deterministic on machines (like CI) that do not
+// have the real CLI installed.
 #[test]
 fn login_claude_guides_the_add_step() {
+    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     // Seed a live Claude login so the "already logged in" guidance path runs and
-    // it never spawns `claude` (which would hang the test).
+    // it never spawns `claude` interactively (which would hang the test).
     seed_claude(root.path(), "uuid-A", "a@x.com");
-    let (o, _e, c) = run(root.path(), &["login", "work", "--tool", "claude"]);
-    assert_eq!(c, 0);
+    let bin_dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake = bin_dir.join("claude");
+    std::fs::write(&fake, "#!/bin/sh\necho 1.0.0\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(bin())
+        .args(["login", "work", "--tool", "claude"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &bin_dir)
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
     assert!(o.contains("swapdex add work --tool claude"), "{o}");
 }
 
