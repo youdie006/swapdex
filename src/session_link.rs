@@ -88,6 +88,72 @@ pub fn status_line(paths: &Paths) -> Option<String> {
     ))
 }
 
+/// A session row for the post-switch continuity hint in `ui`.
+pub struct RecentSession {
+    pub id: String,
+    pub tool: String,
+    pub title: String,
+    pub started: i64,
+}
+
+/// The most recent sessions attributed to `account`, newest first. None when
+/// sessionwiki is absent (the caller simply shows no hint).
+pub fn recent_sessions_for(paths: &Paths, account: &str, n: usize) -> Option<Vec<RecentSession>> {
+    let rows = sessionwiki_rows()?;
+    let events = read_timeline(paths);
+    Some(pick_recent(&rows, &events, account, n))
+}
+
+/// The most recent sessions regardless of account - the honest fallback for a
+/// store with no switch history yet (nothing can be attributed before the
+/// first switch). None when sessionwiki is absent.
+pub fn recent_sessions_any(n: usize) -> Option<Vec<RecentSession>> {
+    let rows = sessionwiki_rows()?;
+    let mut out: Vec<RecentSession> = rows
+        .iter()
+        .filter_map(|row| {
+            Some(RecentSession {
+                id: row["id"].as_str()?.to_string(),
+                tool: row["tool"].as_str()?.to_string(),
+                title: row["title"].as_str().unwrap_or("(untitled)").to_string(),
+                started: row["started"].as_str().and_then(rfc3339_to_secs)?,
+            })
+        })
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.started));
+    out.truncate(n);
+    Some(out)
+}
+
+/// Pure selection: filter rows to those attributed to `account`, newest first,
+/// top `n`. Separated from the sessionwiki shell-out so it is unit-testable.
+pub(crate) fn pick_recent(
+    rows: &[Value],
+    events: &[Event],
+    account: &str,
+    n: usize,
+) -> Vec<RecentSession> {
+    let mut out: Vec<RecentSession> = rows
+        .iter()
+        .filter_map(|row| {
+            let tool = row["tool"].as_str()?;
+            let started = row["started"].as_str().and_then(rfc3339_to_secs)?;
+            if attribute(events, tool, started).as_deref() != Some(account) {
+                return None;
+            }
+            Some(RecentSession {
+                id: row["id"].as_str()?.to_string(),
+                tool: tool.to_string(),
+                title: row["title"].as_str().unwrap_or("(untitled)").to_string(),
+                started,
+            })
+        })
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.started));
+    out.truncate(n);
+    out
+}
+
 /// Run `sessionwiki list --json --no-sync` bounded by a short timeout, parsing
 /// defensively. Any failure (absent binary, non-zero exit, unparseable, slow)
 /// returns None so `status`/`sessions` never hangs or errors.
@@ -204,5 +270,25 @@ mod tests {
         let utc = rfc3339_to_secs("2026-06-10T01:00:00Z").unwrap();
         let kst = rfc3339_to_secs("2026-06-10T10:00:00.123+09:00").unwrap();
         assert_eq!(kst, utc);
+    }
+
+    #[test]
+    fn pick_recent_filters_by_account_and_orders_newest_first() {
+        // Switch timeline: work until t=100, then personal from t=100.
+        let events = vec![ev(50, "codex", "work"), ev(100, "codex", "personal")];
+        let rows: Vec<serde_json::Value> = vec![
+            serde_json::json!({"id":"aaa111","tool":"codex","title":"on work",
+                               "started":"1970-01-01T00:01:00Z"}), // t=60 -> work
+            serde_json::json!({"id":"bbb222","tool":"codex","title":"newer on personal",
+                               "started":"1970-01-01T00:03:00Z"}), // t=180 -> personal
+            serde_json::json!({"id":"ccc333","tool":"codex","title":"older on personal",
+                               "started":"1970-01-01T00:02:00Z"}), // t=120 -> personal
+        ];
+        let got = pick_recent(&rows, &events, "personal", 5);
+        let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["bbb222", "ccc333"], "personal only, newest first");
+        let one = pick_recent(&rows, &events, "personal", 1);
+        assert_eq!(one.len(), 1, "truncates to n");
+        assert_eq!(one[0].id, "bbb222");
     }
 }

@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.3.1] - 2026-07-07
+
+### Added
+- `ui` shows a continuity hint after the switch: the picked account's recent
+  sessions (id, relative age, tool, title) with the one command to reopen one
+  (`sessionwiki resume <id>`) - switch, land back in the work you switched
+  for. Before the first recorded switch, when nothing can be attributed yet,
+  it honestly falls back to the most recent sessions of any account and says
+  so. Requires sessionwiki; silently absent otherwise.
+
 ## [0.3.0] - 2026-07-07
 
 ### Added

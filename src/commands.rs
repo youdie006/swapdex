@@ -1142,7 +1142,43 @@ pub fn ui(paths: &Paths) -> Result<i32> {
             Ok(n) if (1..=profiles.len()).contains(&n) => {
                 let name = profiles[n - 1].name.clone();
                 println!();
-                return use_account(paths, &name, None, false);
+                let rc = use_account(paths, &name, None, false)?;
+                // Continuity hint - the reason you switched: the sessions you
+                // were in on THIS account, and the one command to reopen one.
+                if rc == 0 {
+                    let attributed = crate::session_link::recent_sessions_for(paths, &name, 3);
+                    let (recent, label) = match attributed {
+                        Some(r) if !r.is_empty() => (
+                            Some(r),
+                            format!("recent sessions on '{name}' (sessionwiki):"),
+                        ),
+                        // Nothing attributable yet: attribution starts at the
+                        // first recorded switch - fall back honestly.
+                        Some(_) if crate::session_link::read_timeline(paths).is_empty() => (
+                            crate::session_link::recent_sessions_any(3),
+                            "recent sessions (any account - attribution starts with your \
+                             first switch):"
+                                .to_string(),
+                        ),
+                        _ => (None, String::new()),
+                    };
+                    if let Some(recent) = recent.filter(|r| !r.is_empty()) {
+                        println!("\n{label}");
+                        for s in &recent {
+                            let id6 = &s.id[..s.id.len().min(6)];
+                            let age = age_line((s.started.max(0) as u128) * 1_000_000_000);
+                            let line = format!(
+                                "  {id6}  {:>7}  {}  {}",
+                                age,
+                                fit(&format!("[{}]", s.tool), 13),
+                                fit(&s.title, 44)
+                            );
+                            println!("{}", line.trim_end());
+                        }
+                        println!("  pick up where you left off:  sessionwiki resume <id>");
+                    }
+                }
+                return Ok(rc);
             }
             _ => {
                 println!(
