@@ -275,6 +275,22 @@ impl Store {
         };
         buf.extend_from_slice(serde_json::to_string(&line)?.as_bytes());
         buf.push(b'\n');
+        // Bound the file: session attribution only needs recent history, so
+        // compact to the newest TIMELINE_KEEP events once it doubles that.
+        const TIMELINE_KEEP: usize = 1000;
+        let lines = buf.iter().filter(|&&b| b == b'\n').count();
+        if lines > TIMELINE_KEEP * 2 {
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let tail: Vec<&str> = text
+                .lines()
+                .rev()
+                .take(TIMELINE_KEEP)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            buf = (tail.join("\n") + "\n").into_bytes();
+        }
         crate::atomic::write_secret(&path, &buf)
     }
 }

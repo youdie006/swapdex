@@ -698,3 +698,48 @@ fn status_reports_unreadable_login_file() {
         .unwrap();
     assert_eq!(codex["unreadable"], true, "json marks unreadable: {o}");
 }
+
+// doctor: a healthy setup reports ok per section and exits 0.
+#[test]
+fn doctor_healthy_exits_zero() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    let (o, e, c) = run(root.path(), &["doctor"]);
+    assert_eq!(c, 0, "healthy doctor must exit 0: {o}{e}");
+    assert!(o.contains("ok"), "reports ok sections: {o}");
+    assert!(
+        !o.contains("problem"),
+        "no problems on a healthy setup: {o}"
+    );
+}
+
+// doctor: a corrupt saved snapshot is found, named, and given a remedy; the
+// exit code (9) tells scripts that problems exist.
+#[test]
+fn doctor_flags_corrupt_snapshot_with_remedy() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    // Corrupt the stored snapshot blob.
+    let blob = root
+        .path()
+        .join(".local/share/swapdex/accounts/work/codex/auth");
+    std::fs::write(&blob, b"NOT JSON{{{").unwrap();
+    let (o, _e, c) = run(root.path(), &["doctor"]);
+    assert_eq!(c, 9, "problems -> exit 9: {o}");
+    assert!(o.contains("work"), "names the profile: {o}");
+    assert!(o.contains("--update"), "gives the remedy: {o}");
+}
+
+// doctor: a corrupt LIVE login file is flagged with the use-a-profile remedy.
+#[test]
+fn doctor_flags_corrupt_live_login() {
+    let root = tempfile::tempdir().unwrap();
+    let d = root.path().join(".codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("auth.json"), b"NOT JSON{{{").unwrap();
+    let (o, _e, c) = run(root.path(), &["doctor"]);
+    assert_eq!(c, 9);
+    assert!(o.contains("unreadable"), "{o}");
+}

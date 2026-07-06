@@ -83,6 +83,9 @@ swapdex usage
 
 # Made a bad switch? Put back the login that was live before it
 swapdex restore
+
+# Anything off? Every finding comes with its fix
+swapdex doctor
 ```
 
 `status` shows the live account per tool, matched back to a saved profile:

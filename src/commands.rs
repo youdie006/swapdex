@@ -199,6 +199,11 @@ pub fn add(paths: &Paths, name: &str, sel: Option<ToolSel>, update: bool) -> Res
         )
     };
     println!("saved profile '{name}' ({}){note}", saved.join(", "));
+    if name.contains(char::is_whitespace) {
+        println!(
+            "note: the name has spaces - quote it in later commands (`swapdex use \"{name}\"`)"
+        );
+    }
     Ok(0)
 }
 
@@ -801,6 +806,162 @@ pub fn status(paths: &Paths, json: bool) -> Result<i32> {
     if let Some(line) = crate::session_link::status_line(paths) {
         println!("{line}");
     }
+    Ok(0)
+}
+
+/// `doctor` - local-only health check with a remedy per finding. Exit 0 when
+/// healthy, 9 when any problem was found (scripts can gate on it). Checks the
+/// store, every saved snapshot, both live logins, backups, and the CLIs on
+/// PATH - and never touches the network.
+pub fn doctor(paths: &Paths) -> Result<i32> {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Store::open(paths)?;
+    let mut problems = 0u32;
+    let mut report = |label: &str, ok: bool, msg: String| {
+        println!(
+            "{:<13} {} - {msg}",
+            label,
+            if ok { "ok" } else { "problem" }
+        );
+        if !ok {
+            problems += 1;
+        }
+    };
+
+    // Store directory: exists (Store::open made it) + private.
+    let sd = paths.store_dir();
+    let profiles = store.list();
+    match std::fs::metadata(&sd) {
+        Ok(m) if m.permissions().mode() & 0o077 != 0 => report(
+            "store",
+            false,
+            format!(
+                "directory is group/world-accessible; run `chmod 700 {}`",
+                crate::util::redact_path(&sd.display().to_string())
+            ),
+        ),
+        Ok(_) => report(
+            "store",
+            true,
+            format!(
+                "0700, {} profile{}",
+                profiles.len(),
+                if profiles.len() == 1 { "" } else { "s" }
+            ),
+        ),
+        Err(e) => report("store", false, format!("cannot stat store dir: {e}")),
+    }
+
+    // Live logins per tool.
+    for adapter in adapters::all() {
+        let tool = adapter.name();
+        match adapter.identity(paths) {
+            Ok(Some(id)) => {
+                let saved = matched_profile_name(&store, tool, &id.account_id)
+                    .map(|n| format!("profile '{n}'"))
+                    .unwrap_or_else(|| "not saved - `swapdex add <name>` keeps it".into());
+                report(
+                    tool,
+                    true,
+                    format!("live login {} ({saved})", identity_line(&id)),
+                );
+            }
+            Ok(None) => match macos_keychain_note(paths, tool) {
+                Some(note) => report(tool, true, format!("not manageable - {note}")),
+                None => report(tool, true, "not logged in".into()),
+            },
+            Err(_) => report(
+                tool,
+                false,
+                "live login file unreadable; `swapdex use <profile>` can replace it, \
+                 or log in again in the tool"
+                    .into(),
+            ),
+        }
+    }
+
+    // .claude.json permissions (holds account PII).
+    if let Ok(meta) = std::fs::metadata(paths.claude_config_json()) {
+        if meta.permissions().mode() & 0o077 != 0 {
+            report(
+                "claude-config",
+                false,
+                format!(
+                    "{} is group/world-readable; run `chmod 600` on it",
+                    crate::util::redact_path(&paths.claude_config_json().display().to_string())
+                ),
+            );
+        }
+    }
+
+    // Every saved snapshot must parse.
+    for p in &profiles {
+        for tool in &p.tools {
+            match profile_detail(&store, &p.name, tool) {
+                Some((_, _, Some("unreadable"))) => report(
+                    &format!("profile:{}", p.name),
+                    false,
+                    format!(
+                        "{tool} snapshot unreadable; log in to that account and run \
+                         `swapdex add {} --tool {tool} --update`",
+                        p.name
+                    ),
+                ),
+                Some((_, _, Some(m))) => report(
+                    &format!("profile:{}", p.name),
+                    true,
+                    format!(
+                        "{tool} snapshot {m} - `swapdex add {} --update` refreshes it",
+                        p.name
+                    ),
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    // Backups: newest intact per tool (load_backup already skips torn ones).
+    let mut kept = Vec::new();
+    for tool in ["claude-code", "codex"] {
+        if let Ok(Some((stamp, _))) = store.load_backup(tool) {
+            kept.push(format!("{tool} (newest {})", age_line(stamp)));
+        }
+    }
+    if kept.is_empty() {
+        report(
+            "backups",
+            true,
+            "none yet (one is taken on every `use`; `swapdex restore` brings it back)".into(),
+        );
+    } else {
+        report("backups", true, format!("intact - {}", kept.join(", ")));
+    }
+
+    // CLIs on PATH - informational (a codex-only user is not "broken").
+    let mut found = Vec::new();
+    for cli in ["claude", "codex"] {
+        if command_exists(cli) {
+            found.push(cli);
+        }
+    }
+    report(
+        "tools",
+        true,
+        if found.is_empty() {
+            "neither `claude` nor `codex` found on PATH".into()
+        } else {
+            format!("on PATH: {}", found.join(", "))
+        },
+    );
+
+    if problems > 0 {
+        println!(
+            "\n{problems} problem{} found - each line above ends with its fix.",
+            if problems == 1 { "" } else { "s" }
+        );
+        return Ok(9);
+    }
+    println!("\neverything looks healthy.");
     Ok(0)
 }
 

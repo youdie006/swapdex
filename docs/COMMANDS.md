@@ -18,6 +18,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex rename <old> <new>` | Rename a saved profile. |
 | `swapdex sessions` | Sessions grouped by the account active when they ran (best-effort; needs sessionwiki on PATH). |
 | `swapdex usage [--json]` | Recent local token usage per tool over the last 5h and 7d, summed from `~/.claude` and `~/.codex` session logs. A rough machine-wide activity gauge (not tagged by account, not the billed quota) so you can tell when to switch. Reads local files only - never the network. |
+| `swapdex doctor` | Local health check: store permissions, every saved snapshot, both live logins, backups, and the CLIs on PATH - each finding ends with its fix. Exit 0 healthy, 9 when problems were found. Never touches the network. |
 | `swapdex mcp` | Run as a read-only MCP server over stdio (`whoami`, `list_accounts`). No switch tool exists. |
 | `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. |
 
@@ -34,6 +35,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `6` | The profile already has a snapshot for that tool; pass `--update` (`add`). |
 | `7` | `rm` was called without `--yes`. |
 | `8` | `login` was started but the tool's login flow did not complete. |
+| `9` | `doctor` found at least one problem. |
 
 ## Tools
 
