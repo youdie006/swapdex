@@ -15,6 +15,17 @@ All three must pass. Tests run against an isolated temp `HOME` (via
 `Paths::rooted`) and never touch a real login -- keep it that way: any new path
 resolution must go through `Paths`, never `dirs::home_dir()` directly.
 
+**Manual runs during development must set `SWAPDEX_ROOT`:**
+
+```sh
+export SWAPDEX_ROOT=$(mktemp -d)   # every path resolves under this dir
+cargo run -- status                # safe: reads the empty temp root
+```
+
+Without it, `cargo run -- use x` operates on YOUR real `~/.claude` and
+`~/.codex` logins. Seed fake credentials the way the E2E tests do
+(`seed_codex` / `seed_claude` in `tests/switch.rs` show the exact file shapes).
+
 ## The most useful contribution: a new tool adapter
 
 swapdex supports Claude Code and Codex today. Adding another CLI (Gemini,
@@ -28,6 +39,11 @@ OpenCode, ...) means implementing the `AuthTool` trait in `src/adapters/`:
   field.
 
 Include a capture/apply round-trip test against an isolated `Paths::rooted`.
+
+The most wanted adapter right now is **macOS Keychain support for Claude Code**
+-- design and constraints are written up in
+[issue #1](https://github.com/youdie006/swapdex/issues/1) (needs a macOS dev
+machine).
 
 ## Non-negotiables
 

@@ -11,7 +11,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex login <name> [--tool claude\|codex]` | Log in and save in one step. Codex: runs `codex login` (browser) then saves. Claude: if you're not logged in it opens Claude Code to sign in then auto-saves; if you already are, it guides the `add` step (Claude has no login CLI, so a re-login to a different account is done inside the app). |
 | `swapdex add <name> [--tool claude\|codex] [--update]` | Save the current live login as a named profile. Snapshots both tools by default; `--tool` limits it. `--update` replaces an existing snapshot. |
 | `swapdex use <name> [--tool ...] [--dry-run]` | Switch the active login to a saved profile. Backs up the current login first, then applies atomically. `--dry-run` prints the change without writing. Switching to the already-active account is a no-op. `use -` toggles to the previous/other profile (like `cd -`); a unique prefix works too (`use w` -> `work`), and an ambiguous prefix refuses with the candidates. |
-| `swapdex ls [--json]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` marker. The active profile is marked from the **live** login, not a stored guess. |
+| `swapdex ls [--json] [--names]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` / `(unreadable)` marker. The active profile is marked from the **live** login, not a stored guess. `--names` prints bare names one per line (for scripts and completion). |
 | `swapdex status [--json] [--short]` | Show the active account per tool, matched back to a saved profile, plus expiry and a session summary (needs sessionwiki). `--json` for scripting; `--short` prints one compact `claude:work codex:personal` line for shell prompts and statuslines. |
 | `swapdex restore [--tool ...] [--dry-run]` | Put back the login that was live before the last switch (`use` backs it up first, even when it was never saved as a profile). Backs up the current login before applying, so running it again toggles back. |
 | `swapdex rm <name> [--yes]` | Remove a saved profile. Asks y/N on a terminal; `--yes` skips the question (and is required when stdin is not a tty, e.g. scripts). Never touches a live login. |
@@ -53,6 +53,32 @@ and `codex`.
 | `CODEX_HOME` | Relocates Codex's home dir (honored, same as the CLI). |
 | `SWAPDEX_ROOT` | Dev/test override: resolves every path (Claude, Codex, and the store) under one directory. Used by the test suite so tests never touch a real login. |
 | `HOME` | The base for `~/.claude.json`, `~/.claude/`, `~/.codex/`, and the store when the above are unset. |
+
+## Tab-completing profile names
+
+`swapdex completions <shell>` covers commands and flags. Profile names are
+runtime data, so completing them takes one extra snippet (uses `ls --names`):
+
+```sh
+# bash (~/.bashrc)
+_swapdex_profiles() {
+  local cur=${COMP_WORDS[COMP_CWORD]}
+  case "${COMP_WORDS[1]}" in
+    use|rm|rename) COMPREPLY=($(compgen -W "$(swapdex ls --names 2>/dev/null)" -- "$cur")) ;;
+  esac
+}
+complete -o default -F _swapdex_profiles swapdex
+```
+
+```sh
+# zsh (~/.zshrc, after compinit)
+_swapdex_profiles() {
+  if (( CURRENT >= 3 )) && [[ ${words[2]} == (use|rm|rename) ]]; then
+    compadd -- $(swapdex ls --names 2>/dev/null)
+  fi
+}
+compdef _swapdex_profiles swapdex
+```
 
 ## Where things live
 

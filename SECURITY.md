@@ -33,3 +33,25 @@ Please open a private security advisory on the GitHub repository
 (Security -> Report a vulnerability) rather than a public issue. Include the
 version, platform, and reproduction steps. We aim to acknowledge within a few
 days.
+
+## Scope
+
+Reports in these areas get the fastest turnaround:
+
+- Any way a command or the MCP server prints or exfiltrates a credential byte.
+- Any way a switch can corrupt, half-write, or lose a login (bypassing the
+  backup-then-apply order or the atomic writes).
+- Symlink/ownership/permission games around `~/.claude`, `~/.codex`, or the
+  store.
+- Anything that would make the binary act as a network client.
+
+Verified issues are fixed in a patch release across all four channels
+(crates.io, npm, Homebrew, GitHub binaries) and credited in the CHANGELOG
+unless you prefer otherwise.
+
+## Out of scope
+
+- The security of Claude Code / Codex themselves (report to Anthropic/OpenAI).
+- Attacks requiring root or an already-compromised user account (swapdex
+  refuses to run as root; a same-user attacker already owns the credential
+  files it manages).

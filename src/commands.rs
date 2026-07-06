@@ -134,12 +134,50 @@ fn reject_bad_name(name: &str) -> Option<i32> {
     }
 }
 
-pub fn add(paths: &Paths, name: &str, sel: Option<ToolSel>, update: bool) -> Result<i32> {
+pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
+    let store = Store::open(paths)?;
+    // No name: on a terminal, suggest one from the live account (setup's flow);
+    // non-interactively, error with the fix instead of a bare usage error.
+    let asked;
+    let name: &str = match name {
+        Some(n) => n,
+        None => {
+            use std::io::IsTerminal;
+            let tty =
+                std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+            if !tty {
+                eprintln!(
+                    "swapdex: a profile name is required: swapdex add <name> \
+                     (or run `swapdex setup` for the guided flow)"
+                );
+                return Ok(2);
+            }
+            let who = adapters::all()
+                .iter()
+                .find_map(|a| a.identity(paths).ok().flatten())
+                .map(|id| id.email.unwrap_or(id.display))
+                .unwrap_or_else(|| "account".into());
+            let suggestion = suggest_name(&who);
+            match ask_name(
+                &store,
+                &format!("name for this account [{suggestion}]: "),
+                &suggestion,
+            ) {
+                Some(n) => {
+                    asked = n;
+                    &asked
+                }
+                None => {
+                    println!("nothing saved.");
+                    return Ok(0);
+                }
+            }
+        }
+    };
     if let Some(c) = reject_bad_name(name) {
         return Ok(c);
     }
-    let store = Store::open(paths)?;
     // Take the switch lock so `add --update` can't race a `use` into a torn
     // (mismatched credentials + identity) two-file Claude snapshot.
     let _lock = match store.lock() {
@@ -717,8 +755,16 @@ fn identity_column(email: Option<String>, tier: Option<String>) -> String {
     }
 }
 
-pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
+pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     let store = Store::open(paths)?;
+    if names {
+        // Bare names, one per line (store.list() is sorted) - for scripts and
+        // the profile-name tab-completion snippet in the docs.
+        for p in store.list() {
+            println!("{}", p.name);
+        }
+        return Ok(0);
+    }
     let active = active_by_tool(&store, paths);
     let active_tools_for = |name: &str| -> Vec<&'static str> {
         active
@@ -949,12 +995,15 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
     let store = Store::open(paths)?;
     let mut problems = 0u32;
+    let color = crate::util::color_enabled();
     let mut report = |label: &str, ok: bool, msg: String| {
-        println!(
-            "{:<13} {} - {msg}",
-            label,
-            if ok { "ok" } else { "problem" }
-        );
+        let verdict = match (ok, color) {
+            (true, true) => "\x1b[32mok\x1b[0m".to_string(),
+            (false, true) => "\x1b[31mproblem\x1b[0m".to_string(),
+            (true, false) => "ok".to_string(),
+            (false, false) => "problem".to_string(),
+        };
+        println!("{label:<13} {verdict} - {msg}");
         if !ok {
             problems += 1;
         }
@@ -1225,7 +1274,7 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             return Ok(8);
         }
         println!();
-        return add(paths, name, Some(ToolSel::Claude), true);
+        return add(paths, Some(name), Some(ToolSel::Claude), true);
     }
 
     if !command_exists("codex") {
@@ -1256,7 +1305,7 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     }
     println!();
     // update=true so re-running `login <name>` refreshes an existing profile.
-    add(paths, name, Some(ToolSel::Codex), true)
+    add(paths, Some(name), Some(ToolSel::Codex), true)
 }
 
 /// Ask a question and read a trimmed line; empty input yields `default`.

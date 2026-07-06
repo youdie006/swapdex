@@ -1,9 +1,7 @@
 //! The ASCII wordmark the CLI prints when run with no subcommand. It is the
 //! same art shown in the README banner, so the banner is literally what you see
-//! in your own terminal. ANSI colour is used only when stdout is a TTY, so a
-//! piped invocation stays plain text.
-
-use std::io::IsTerminal;
+//! in your own terminal. ANSI colour is used only when stdout is a TTY and
+//! NO_COLOR is unset, so a piped invocation stays plain text.
 
 // "SWAP" and "dex" in the ansi_shadow block font, kept separate so SWAP can be
 // coloured violet and dex dimmed - the two-tone family wordmark.
@@ -31,7 +29,7 @@ const RESET: &str = "\x1b[0m";
 
 /// Print the wordmark + a short command hint. Called on no-subcommand.
 pub fn print_banner() {
-    let color = std::io::stdout().is_terminal();
+    let color = crate::util::color_enabled();
     let (v, d, m, r) = if color {
         (VIOLET, DIM, MUTED, RESET)
     } else {

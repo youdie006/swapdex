@@ -870,3 +870,52 @@ fn rm_confirms_interactively_on_tty() {
     let (ls, _e, _c) = run(root.path(), &["ls"]);
     assert!(!ls.contains("victim"), "profile removed after y: {ls}");
 }
+
+// `ls --names`: bare profile names, one per line - for scripts and the
+// tab-completion snippet in the docs (no jq needed).
+#[test]
+fn ls_names_prints_bare_names() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]);
+    let (o, _e, c) = run(root.path(), &["ls", "--names"]);
+    assert_eq!(c, 0);
+    assert_eq!(o, "personal\nwork\n", "bare sorted names only: {o:?}");
+}
+
+// `add` with no name: on a terminal it suggests a name from the live account
+// (like setup); non-interactively it errors with guidance instead of a bare
+// clap usage error.
+#[test]
+fn add_without_name_asks_on_tty() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let mut child = Command::new(bin())
+        .arg("add")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Accept the suggested default by pressing enter.
+    child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code().unwrap_or(-1), 0);
+    let (ls, _e, _c) = run(root.path(), &["ls"]);
+    assert!(ls.contains("a"), "saved under the suggested name: {ls}");
+}
+
+#[test]
+fn add_without_name_errors_helpfully_non_tty() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (_o, e, c) = run(root.path(), &["add"]);
+    assert_eq!(c, 2, "non-tty add without a name is an argument error");
+    assert!(e.contains("swapdex add <name>"), "guides the fix: {e}");
+}

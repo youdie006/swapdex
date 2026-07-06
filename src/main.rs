@@ -17,7 +17,8 @@ struct Cli {
 enum Cmd {
     /// Save the current live login as a named profile
     Add {
-        name: String,
+        /// Profile name (omit on a terminal to get a suggestion)
+        name: Option<String>,
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
         /// Replace an existing snapshot for the tool
@@ -39,6 +40,9 @@ enum Cmd {
     Ls {
         #[arg(long)]
         json: bool,
+        /// Bare profile names, one per line (for scripts/completion)
+        #[arg(long)]
+        names: bool,
     },
     /// Show the active account per tool
     Status {
@@ -135,13 +139,13 @@ fn main() {
         return;
     }
     let result = match cmd {
-        Cmd::Add { name, tool, update } => commands::add(&paths, name, *tool, *update),
+        Cmd::Add { name, tool, update } => commands::add(&paths, name.as_deref(), *tool, *update),
         Cmd::Use {
             name,
             tool,
             dry_run,
         } => commands::use_account(&paths, name, *tool, *dry_run),
-        Cmd::Ls { json } => commands::ls(&paths, *json),
+        Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
         Cmd::Setup => commands::setup(&paths),

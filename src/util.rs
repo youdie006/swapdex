@@ -10,3 +10,10 @@ pub fn redact_path(s: &str) -> String {
     }
     s.to_string()
 }
+
+/// ANSI colour is used only on a TTY and never when NO_COLOR is set
+/// (https://no-color.org).
+pub fn color_enabled() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
