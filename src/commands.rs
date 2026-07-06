@@ -646,9 +646,9 @@ fn last_switch_name_excluding(
         .map(|(_, n)| n.clone());
     let mut best: Option<(i64, String)> = None;
     for (ts, name) in events {
-        if exclude.iter().any(|e| *e == name)
+        if exclude.contains(&name)
             || newest.as_deref() == Some(name.as_str())
-            || !profiles.iter().any(|p| *p == name)
+            || !profiles.contains(&name)
         {
             continue;
         }
