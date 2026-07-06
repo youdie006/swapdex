@@ -175,10 +175,14 @@ fn setup_reprompts_on_an_invalid_name() {
     assert!(ls.contains("good"), "should save the valid retry: {ls}");
 }
 
-// login --tool claude prints the two-step guidance (Claude has no CLI login).
+// login --tool claude: with Claude already logged in (or its CLI absent) it
+// guides the `swapdex add` step rather than spawning an interactive session.
 #[test]
-fn login_claude_prints_guidance() {
+fn login_claude_guides_the_add_step() {
     let root = tempfile::tempdir().unwrap();
+    // Seed a live Claude login so the "already logged in" guidance path runs and
+    // it never spawns `claude` (which would hang the test).
+    seed_claude(root.path(), "uuid-A", "a@x.com");
     let (o, _e, c) = run(root.path(), &["login", "work", "--tool", "claude"]);
     assert_eq!(c, 0);
     assert!(o.contains("swapdex add work --tool claude"), "{o}");

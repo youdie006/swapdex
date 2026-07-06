@@ -8,7 +8,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | Command | What it does |
 | --- | --- |
 | `swapdex setup` | Guided first-time setup: saves the account(s) you're logged into, offers to add more (drives `codex login` for you), and shows how to switch. Interactive (needs a terminal). |
-| `swapdex login <name> [--tool claude\|codex]` | Log in and save in one step. For Codex it runs `codex login` (browser) then saves the result; Claude Code signs in inside the app, so it prints the two-step manual path. |
+| `swapdex login <name> [--tool claude\|codex]` | Log in and save in one step. Codex: runs `codex login` (browser) then saves. Claude: if you're not logged in it opens Claude Code to sign in then auto-saves; if you already are, it guides the `add` step (Claude has no login CLI, so a re-login to a different account is done inside the app). |
 | `swapdex add <name> [--tool claude\|codex] [--update]` | Save the current live login as a named profile. Snapshots both tools by default; `--tool` limits it. `--update` replaces an existing snapshot. |
 | `swapdex use <name> [--tool ...] [--dry-run]` | Switch the active login to a saved profile. Backs up the current login first, then applies atomically. `--dry-run` prints the change without writing. Switching to the already-active account is a no-op. |
 | `swapdex ls [--json]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` marker. The active profile is marked from the **live** login, not a stored guess. |

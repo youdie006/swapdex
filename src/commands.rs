@@ -551,10 +551,46 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     };
 
     if tool == "claude-code" {
-        println!("Claude Code signs in inside the app, so swapdex can't drive it directly.");
-        println!("  1) run `claude` and complete the login (or use /login in a session)");
-        println!("  2) then save it:  swapdex add {name} --tool claude");
-        return Ok(0);
+        if !command_exists("claude") {
+            println!("Claude Code isn't on your PATH. Install it, then:");
+            println!("  1) run `claude` and complete the login");
+            println!("  2) then:  swapdex add {name} --tool claude");
+            return Ok(0);
+        }
+        let claude = adapters::by_name("claude-code");
+        let already = claude
+            .as_ref()
+            .and_then(|c| c.identity(paths).ok().flatten())
+            .is_some();
+        if already {
+            // Already logged in. Adding a DIFFERENT account needs /logout + /login
+            // inside a session - spawning `claude` won't re-prompt, so we guide.
+            println!("You're already logged into Claude Code.");
+            println!("  save the current account:  swapdex add {name} --tool claude");
+            println!("  or switch to another account first: run `claude`, use /logout then");
+            println!(
+                "  /login with the other account, exit, then `swapdex add {name} --tool claude`."
+            );
+            return Ok(0);
+        }
+        // Not logged in: drive it. Claude Code has no login subcommand, so run
+        // `claude` itself - its first-run flow does the browser login - then
+        // auto-capture the credentials it writes.
+        println!(
+            "Opening Claude Code to sign in. Complete the login, then exit it (Ctrl-D or /exit)."
+        );
+        Command::new("claude")
+            .status()
+            .map_err(|e| anyhow::anyhow!("could not run claude: {e}"))?;
+        let logged_in = adapters::by_name("claude-code")
+            .and_then(|c| c.identity(paths).ok().flatten())
+            .is_some();
+        if !logged_in {
+            eprintln!("swapdex: no Claude login was completed - nothing saved.");
+            return Ok(8);
+        }
+        println!();
+        return add(paths, name, Some(ToolSel::Claude), true);
     }
 
     if !command_exists("codex") {
