@@ -26,6 +26,10 @@ It is a **switcher, not a rotator.** It manages accounts you already own for
 distinct purposes. It has no feature for cycling accounts to get around a rate
 limit -- see [What it will not do](#what-it-will-not-do).
 
+Safety is the design center: swapdex captures the *live* login before it swaps,
+so a switch can never lose or clobber an account, and it only ever hands the
+official CLI its own credentials -- no wrapper, no proxy, no client spoofing.
+
 ## Concepts
 
 - **Profile** -- a named, point-in-time snapshot of a live login (the credential
@@ -140,11 +144,17 @@ cannot happen:
 - **No auto-rotation.** There is no `--auto`, `--next`, or
   `--when-rate-limited` flag. `use` only ever switches to a name you type.
 - **No token export.** There is no command that prints a saved credential.
+- **No wrapper, no client spoofing.** swapdex swaps the credential file that the
+  official `claude` / `codex` binary already reads, then gets out of the way. It
+  never sits between the CLI and the API, never proxies requests, and never
+  presents itself as the official client. Your traffic is the real CLI's traffic.
 
 Anthropic and OpenAI both permit multiple accounts for genuinely different
 purposes but forbid using multiple accounts to get around a single workload's
-rate limit, and forbid using OAuth tokens outside the official CLI. swapdex is
-built for the former and structurally cannot do the latter. See
+rate limit, and forbid routing subscription OAuth tokens through third-party
+tools or spoofing the official client. swapdex is built for the former and
+structurally cannot do the latter -- it only ever hands the real CLI its own
+credentials. See
 [Anthropic Usage Policy](https://www.anthropic.com/legal/usage-policy) and
 [OpenAI Usage Policies](https://openai.com/policies/usage-policies/).
 

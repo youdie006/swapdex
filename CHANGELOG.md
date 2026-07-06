@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.1.6] - 2026-07-06
 
 ### Added
 - `swapdex usage [--json]`: recent local token usage per tool over the last 5h
