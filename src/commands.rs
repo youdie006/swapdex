@@ -1077,6 +1077,83 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// `ui` - a numbered interactive picker: see every profile (active marked from
+/// the live login), type a number, switch. Plain Enter cancels. Deliberately
+/// stdin-only (no raw-mode/TUI crate pulls a socket library into the graph),
+/// and the switch itself goes through the exact same `use` path - a human
+/// picking a number IS the explicit `swapdex use <name>`.
+pub fn ui(paths: &Paths) -> Result<i32> {
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+    if !tty {
+        eprintln!("swapdex: `ui` is interactive and needs a terminal (try `swapdex use <name>`)");
+        return Ok(2);
+    }
+    let store = Store::open(paths)?;
+    let profiles = store.list();
+    if profiles.is_empty() {
+        println!("No accounts saved yet.");
+        println!("  guided setup:  swapdex setup");
+        return Ok(0);
+    }
+    let active = active_by_tool(&store, paths);
+    let color = crate::util::color_enabled();
+    println!();
+    for (i, p) in profiles.iter().enumerate() {
+        let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+        let at: Vec<&str> = active
+            .iter()
+            .filter(|(_, n)| n == &p.name)
+            .map(|(t, _)| *t)
+            .collect();
+        let star = if at.is_empty() { "  " } else { "* " };
+        let ident = identity_column(email, tier);
+        let warn = marker.map(|m| format!("  ({m})")).unwrap_or_default();
+        let line = format!(
+            "  {}) {star}{} {} [{}]{warn}",
+            i + 1,
+            fit(&p.name, 16),
+            fit(&ident, 32),
+            p.tools.join(", ")
+        );
+        if color && !at.is_empty() {
+            println!("\x1b[1m{line}\x1b[0m");
+        } else {
+            println!("{line}");
+        }
+    }
+    if let Some(line) = crate::session_link::status_line(paths) {
+        println!("\n  {line}");
+    }
+    println!();
+    loop {
+        let Some(ans) = prompt(
+            &format!("switch to [1-{}] (Enter cancels): ", profiles.len()),
+            "",
+        ) else {
+            println!("cancelled - nothing switched.");
+            return Ok(0);
+        };
+        if ans.is_empty() || ans.eq_ignore_ascii_case("q") {
+            println!("cancelled - nothing switched.");
+            return Ok(0);
+        }
+        match ans.parse::<usize>() {
+            Ok(n) if (1..=profiles.len()).contains(&n) => {
+                let name = profiles[n - 1].name.clone();
+                println!();
+                return use_account(paths, &name, None, false);
+            }
+            _ => {
+                println!(
+                    "  pick a number between 1 and {} (Enter cancels)",
+                    profiles.len()
+                );
+            }
+        }
+    }
+}
+
 /// `doctor` - local-only health check with a remedy per finding. Exit 0 when
 /// healthy, 9 when any problem was found (scripts can gate on it). Checks the
 /// store, every saved snapshot, both live logins, backups, and the CLIs on

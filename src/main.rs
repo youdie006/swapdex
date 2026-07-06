@@ -80,6 +80,8 @@ enum Cmd {
     },
     /// Sessions grouped by the account that was active when they ran
     Sessions,
+    /// Interactive picker: see every profile, type a number, switch
+    Ui,
     /// Local health check: store, snapshots, live logins - with a fix per finding
     Doctor,
     /// Recent local token usage per tool (5h/7d), read from session logs
@@ -160,6 +162,7 @@ fn main() {
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),
         Cmd::Restore { tool, dry_run } => commands::restore(&paths, *tool, *dry_run),
         Cmd::Sessions => commands::sessions(&paths),
+        Cmd::Ui => commands::ui(&paths),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Mcp => {

@@ -76,6 +76,7 @@ swapdex ls
 swapdex status
 
 # Switch (takes effect on your next message -- no restart)
+swapdex ui                          # or pick from a list interactively
 swapdex use personal
 swapdex use -                       # toggle back to the previous profile
 swapdex use w                       # a unique prefix is enough

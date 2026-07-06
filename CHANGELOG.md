@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.3.0] - 2026-07-07
+
+### Added
+- `swapdex ui`: an interactive picker - every profile with its account,
+  active marker, and the session summary; type a number to switch, Enter or
+  `q` cancels. The selection runs the exact same safe `use` path (backup,
+  validate, atomic apply), so a human picking a number IS the explicit
+  switch - the no-auto-rotation bright line is untouched. Deliberately
+  stdin-only: no raw-mode TUI crate, nothing socket-shaped enters the
+  dependency graph.
+
 ## [0.2.2] - 2026-07-07
 
 ### Fixed

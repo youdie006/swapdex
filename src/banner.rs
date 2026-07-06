@@ -55,7 +55,7 @@ pub fn print_banner() {
         "  {v}${r} swapdex ls | status    see your accounts\n\n"
     ));
     s.push_str(&format!(
-        "  {m}New here? Run `swapdex setup`.  All commands: `swapdex --help`.{r}\n"
+        "  {m}New here? Run `swapdex setup`.  Switch: `swapdex ui`.  All commands: `swapdex --help`.{r}\n"
     ));
     print!("{s}");
 }

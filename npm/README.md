@@ -116,6 +116,16 @@ e.g. in a starship prompt: `command = "swapdex status --short"` in a
 [custom module](https://starship.rs/config/#custom-commands), or in `PS1`
 via `$(swapdex status --short)`.
 
+It also drops straight into **Claude Code's own status line**, so the active
+account is always visible inside the tool you are switching
+(`~/.claude/settings.json`):
+
+```json
+{
+  "statusLine": { "type": "command", "command": "swapdex status --short" }
+}
+```
+
 `usage` reads your local session logs (no network) to gauge how heavily you've
 been using each tool lately, so you know when to switch to a fresher account:
 
@@ -203,6 +213,25 @@ swapdex is the accounts layer of a small local AI-CLI stack:
   resume your AI coding sessions. `swapdex sessions` groups them by account.
 - [prodex](https://github.com/youdie006/prodex) -- share one logged-in ChatGPT
   Pro session across agents. swapdex coexists with it without touching its auth.
+
+## Alternatives
+
+Good tools exist in this space; they make different trade-offs (each line from
+that project's README, July 2026):
+
+- [claude-swap](https://github.com/realiti4/claude-swap) -- Claude Code only,
+  a TUI with live usage bars, and *optional auto-switching* near your limit.
+  If you want auto-rotation, use it -- swapdex deliberately refuses to have
+  that feature.
+- [aisw](https://github.com/burakdede/aisw) -- cross-tool including Gemini,
+  OS-keyring storage, Windows support. More features, bigger surface.
+- [caam](https://github.com/Dicklesworthstone/coding_agent_account_manager) --
+  cross-tool with a shell wrapper and automatic rotation on rate limits; the
+  philosophical opposite of swapdex.
+
+Pick swapdex if you want the smallest thing that switches Claude Code and
+Codex together, can always undo (`restore`), diagnoses itself (`doctor`),
+and structurally cannot rotate, proxy, or touch the network.
 
 ## Roadmap
 

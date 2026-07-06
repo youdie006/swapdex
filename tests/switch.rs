@@ -1013,3 +1013,101 @@ fn ls_aligns_cjk_names_by_display_width() {
         "email column must align in display columns: {o}"
     );
 }
+
+// `ui`: a numbered interactive picker. Piped "2" selects the second profile
+// and performs the switch; plain Enter cancels without touching anything.
+fn run_ui(root: &Path, input: &str) -> (String, String, i32) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn ui_picker_switches_by_number() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    // live is B (= beta). The list is sorted: 1) alpha 2) beta. Pick 1.
+    let (o, e, c) = run_ui(root.path(), "1\n");
+    assert_eq!(c, 0, "picker switch failed: {o}{e}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-A", "switched to alpha");
+}
+
+#[test]
+fn ui_picker_enter_cancels() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    let (o, _e, c) = run_ui(root.path(), "\n");
+    assert_eq!(c, 0);
+    assert!(
+        o.contains("cancel") || o.contains("nothing"),
+        "says it did nothing: {o}"
+    );
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-B", "nothing switched");
+}
+
+#[test]
+fn ui_picker_rejects_bad_number_then_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    let (o, e, c) = run_ui(root.path(), "9\n1\n");
+    assert_eq!(c, 0, "{o}{e}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        live["tokens"]["account_id"], "acct-A",
+        "re-prompt then switch"
+    );
+}
+
+#[test]
+fn ui_non_tty_degrades_gracefully() {
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    let out = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code().unwrap_or(-1), 0);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("terminal"),
+        "explains it needs a terminal"
+    );
+}
