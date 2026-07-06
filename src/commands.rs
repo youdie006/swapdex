@@ -561,6 +561,16 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         eprintln!("swapdex: the `codex` CLI is not on your PATH - install it, then retry.");
         return Ok(3);
     }
+    // `codex login` DELETES ~/.codex/auth.json before its browser step, so an
+    // interrupted login would otherwise lose the current login. Snapshot it into
+    // the store's backups first (recoverable regardless of how login goes).
+    if let Some(codex) = adapters::by_name("codex") {
+        if codex.present(paths) {
+            if let Ok(snap) = codex.capture(paths) {
+                let _ = Store::open(paths).and_then(|s| s.backup(&snap));
+            }
+        }
+    }
     println!("Opening `codex login` - sign in with the account to save as '{name}'.");
     println!("(If it says you're already logged in, run `codex logout` first, then retry.)");
     // Inherit the terminal so the browser/device prompt shows and no child stdio
@@ -609,67 +619,130 @@ fn suggest_name(who: &str) -> String {
     }
 }
 
-/// Guided first-run onboarding: save whatever you're logged into now, then offer
-/// to add more accounts, then tell you how to switch. Interactive (a TTY).
+/// A friendly tool label for prompts.
+fn pretty_tool(tool: &str) -> &str {
+    match tool {
+        "claude-code" => "Claude Code",
+        "codex" => "Codex",
+        other => other,
+    }
+}
+
+/// A yes/no prompt; empty input takes `default_yes`.
+fn yes_no(question: &str, default_yes: bool) -> bool {
+    let a = prompt(question, if default_yes { "y" } else { "n" });
+    matches!(a.to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Ask for a profile name, re-prompting until it is valid (or the user skips).
+/// An existing name asks whether to replace it. Returns None on skip.
+fn ask_name(store: &Store, question: &str, default: &str) -> Option<String> {
+    loop {
+        let ans = prompt(question, default);
+        if ans.eq_ignore_ascii_case("skip") || ans.is_empty() {
+            return None;
+        }
+        if !crate::store::valid_profile_name(&ans) {
+            println!("  '{ans}' can't be a name (no '/', '..', leading '.', or control chars). Try again.");
+            continue;
+        }
+        if store.list().iter().any(|p| p.name == ans)
+            && !yes_no(
+                &format!("  '{ans}' already exists - replace it? [y/N]: "),
+                false,
+            )
+        {
+            continue;
+        }
+        return Some(ans);
+    }
+}
+
+/// Guided first-run onboarding: save the accounts you're logged into, offer to
+/// add more, and show how to switch. Interactive (needs a TTY).
 pub fn setup(paths: &Paths) -> Result<i32> {
     use std::io::IsTerminal;
     crate::atomic::ensure_not_root()?;
-    if !std::io::stdin().is_terminal() {
+    // SWAPDEX_ASSUME_TTY lets the test suite drive the prompts over a pipe.
+    if !std::io::stdin().is_terminal() && std::env::var_os("SWAPDEX_ASSUME_TTY").is_none() {
         eprintln!(
             "swapdex setup is interactive - run it in a terminal, or use `swapdex login <name>`."
         );
         return Ok(1);
     }
     let store = Store::open(paths)?;
-    println!("Welcome to swapdex - switch between your Claude Code and Codex logins.\n");
+    println!("swapdex keeps several Claude Code / Codex logins and switches between them.");
+    println!(
+        "Let's save the accounts you use. Press Enter to accept a [default], Ctrl-C to quit.\n"
+    );
 
     // 1) Save the accounts you're currently logged into.
     for adapter in adapters::all() {
         let tool = adapter.name();
         let id = match adapter.identity(paths)? {
             Some(id) => id,
-            None => continue,
+            None => {
+                println!("{}: not logged in - skipping.\n", pretty_tool(tool));
+                continue;
+            }
         };
         if let Some(existing) = matched_profile_name(&store, tool, &id.account_id) {
-            println!("{tool}: already saved as '{existing}'.\n");
+            println!("{}: already saved as '{existing}'.\n", pretty_tool(tool));
             continue;
         }
         let who = id.email.clone().unwrap_or_else(|| id.display.clone());
         let default = suggest_name(&who);
-        let ans = prompt(
-            &format!("{tool}: logged in as {who}. Save it? name [{default}] (or 'skip'): "),
+        println!("{}: you're logged in as {who}.", pretty_tool(tool));
+        match ask_name(
+            &store,
+            &format!("  save it as [{default}] (Enter to accept, 'skip' to skip): "),
             &default,
-        );
-        if ans.eq_ignore_ascii_case("skip") {
-            println!();
-            continue;
+        ) {
+            Some(name) => {
+                let snap = adapter.capture(paths)?;
+                store.save(&name, &snap)?;
+                println!("  saved as '{name}'.\n");
+            }
+            None => println!("  skipped.\n"),
         }
-        if !crate::store::valid_profile_name(&ans) {
-            println!("  '{ans}' is not a valid name; skipped.\n");
-            continue;
-        }
-        let snap = adapter.capture(paths)?;
-        store.save(&ans, &snap)?;
-        println!("  saved '{ans}'.\n");
     }
 
     // 2) Offer to add more Codex accounts (the one with a driveable login).
     if command_exists("codex") {
-        while prompt("Add another Codex account? [y/N]: ", "n").eq_ignore_ascii_case("y") {
-            let name = prompt("  name for it: ", "");
-            if !crate::store::valid_profile_name(&name) {
-                println!("  invalid name; try again.\n");
+        println!("You can keep several Codex accounts (e.g. work and personal).");
+        while yes_no("  add another Codex account now? [y/N]: ", false) {
+            let name = match ask_name(&store, "  name for it (e.g. personal): ", "") {
+                Some(n) => n,
+                None => {
+                    println!("  skipped.\n");
+                    continue;
+                }
+            };
+            println!(
+                "  This logs out of the current Codex account and opens a fresh browser login."
+            );
+            println!("  (Your current login is backed up first, so nothing is lost.)");
+            if !yes_no("  continue? [y/N]: ", false) {
+                println!("  cancelled.\n");
                 continue;
             }
-            println!("  opening a fresh codex login (sign in with the other account)...");
+            // Back up the current login before `codex login` deletes it.
+            if let Some(codex) = adapters::by_name("codex") {
+                if codex.present(paths) {
+                    if let Ok(s) = codex.capture(paths) {
+                        let _ = store.backup(&s);
+                    }
+                }
+            }
             let _ = Command::new("codex").arg("logout").status();
+            println!("  opening codex login - complete the sign-in in your browser...");
             let ok = Command::new("codex")
                 .arg("login")
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
             if !ok {
-                println!("  login didn't complete; skipped.\n");
+                println!("  login didn't finish; nothing saved.\n");
                 continue;
             }
             if let Some(codex) = adapters::by_name("codex") {
@@ -684,14 +757,18 @@ pub fn setup(paths: &Paths) -> Result<i32> {
 
     // 3) Summary.
     let names: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
+    println!();
     if names.is_empty() {
         println!(
-            "No accounts saved. Log into Claude Code or Codex, then run `swapdex setup` again."
+            "No accounts saved yet. Log into Claude Code or Codex, then run `swapdex setup` again."
         );
     } else {
-        println!("Done. Saved: {}.", names.join(", "));
-        println!("  switch:  swapdex use <name>");
-        println!("  list:    swapdex ls");
+        println!("You're set - saved: {}.", names.join(", "));
+        println!("  switch:   swapdex use <name>");
+        println!("  see all:  swapdex ls");
+        if names.len() > 1 {
+            println!("Switching takes effect on your next message - no restart needed.");
+        }
     }
     Ok(0)
 }

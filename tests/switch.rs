@@ -119,6 +119,62 @@ fn setup_non_tty_degrades_gracefully() {
     );
 }
 
+// Drive the interactive setup wizard over a pipe (SWAPDEX_ASSUME_TTY bypasses
+// the tty check). Answers are one per line.
+fn run_setup(root: &Path, input: &str) -> (String, i32) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(bin())
+        .arg("setup")
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+// The wizard saves the current login from a typed name.
+#[test]
+fn setup_wizard_saves_account_from_prompts() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (o, c) = run_setup(root.path(), "mycodex\nn\n");
+    assert_eq!(c, 0, "{o}");
+    let (ls, _e, _c) = run(root.path(), &["ls"]);
+    assert!(
+        ls.contains("mycodex"),
+        "setup should save the account: {ls}"
+    );
+}
+
+// The wizard re-prompts on an invalid name instead of skipping it.
+#[test]
+fn setup_reprompts_on_an_invalid_name() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (o, c) = run_setup(root.path(), "bad/name\ngood\nn\n");
+    assert_eq!(c, 0);
+    assert!(
+        o.contains("can't be a name"),
+        "should reject the invalid name: {o}"
+    );
+    let (ls, _e, _c) = run(root.path(), &["ls"]);
+    assert!(ls.contains("good"), "should save the valid retry: {ls}");
+}
+
 // login --tool claude prints the two-step guidance (Claude has no CLI login).
 #[test]
 fn login_claude_prints_guidance() {
