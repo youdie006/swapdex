@@ -186,6 +186,9 @@ cannot happen:
   official `claude` / `codex` binary already reads, then gets out of the way. It
   never sits between the CLI and the API, never proxies requests, and never
   presents itself as the official client. Your traffic is the real CLI's traffic.
+  (Launching the official tool once, on your explicit pick - `login`'s sign-in
+  flow, `ui`'s session resume - is a hand-off, not a wrapper: swapdex `exec`s
+  and is gone.)
 
 Anthropic and OpenAI both permit multiple accounts for genuinely different
 purposes but forbid using multiple accounts to get around a single workload's

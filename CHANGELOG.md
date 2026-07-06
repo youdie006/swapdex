@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.4.0] - 2026-07-07
+
+### Added
+- `ui` completes the loop: pick a recent session by number after the switch
+  and swapdex hands off to `sessionwiki resume <id>` directly (a one-shot
+  `exec` of the official reopen flow - the session's own tool takes over the
+  terminal). Enter skips; nothing ever launches unasked. This is the same
+  precedent as `login` driving the official sign-in: an explicit hand-off is
+  not a wrapper - swapdex `exec`s and is gone.
+
 ## [0.3.1] - 2026-07-07
 
 ### Added

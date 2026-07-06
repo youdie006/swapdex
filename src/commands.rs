@@ -1164,18 +1164,33 @@ pub fn ui(paths: &Paths) -> Result<i32> {
                     };
                     if let Some(recent) = recent.filter(|r| !r.is_empty()) {
                         println!("\n{label}");
-                        for s in &recent {
+                        for (i, s) in recent.iter().enumerate() {
                             let id6 = &s.id[..s.id.len().min(6)];
                             let age = age_line((s.started.max(0) as u128) * 1_000_000_000);
                             let line = format!(
-                                "  {id6}  {:>7}  {}  {}",
+                                "  {}) {id6}  {:>7}  {}  {}",
+                                i + 1,
                                 age,
                                 fit(&format!("[{}]", s.tool), 13),
                                 fit(&s.title, 44)
                             );
                             println!("{}", line.trim_end());
                         }
-                        println!("  pick up where you left off:  sessionwiki resume <id>");
+                        // One-shot handoff on an explicit pick - the same
+                        // precedent as `login` spawning the official CLI.
+                        // Enter skips; swapdex never launches anything unasked.
+                        if let Some(ans) = prompt(
+                            &format!("resume one? [1-{}] (Enter skips): ", recent.len()),
+                            "",
+                        ) {
+                            if let Ok(k) = ans.parse::<usize>() {
+                                if (1..=recent.len()).contains(&k) {
+                                    let id = recent[k - 1].id.clone();
+                                    println!("opening session {id} via sessionwiki...");
+                                    return Err(exec_sessionwiki_resume(&id));
+                                }
+                            }
+                        }
                     }
                 }
                 return Ok(rc);
@@ -1188,6 +1203,15 @@ pub fn ui(paths: &Paths) -> Result<i32> {
             }
         }
     }
+}
+
+/// Replace this process with `sessionwiki resume <id>` - a one-shot handoff to
+/// the official reopen flow (sessionwiki launches the session's own tool).
+/// exec(2) only returns on failure, so this returns the error to propagate.
+fn exec_sessionwiki_resume(id: &str) -> anyhow::Error {
+    use std::os::unix::process::CommandExt;
+    let err = Command::new("sessionwiki").args(["resume", id]).exec();
+    anyhow::anyhow!("could not launch `sessionwiki resume {id}`: {err}")
 }
 
 /// `doctor` - local-only health check with a remedy per finding. Exit 0 when

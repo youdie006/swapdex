@@ -211,7 +211,9 @@ claude mcp add swapdex -s user -- swapdex mcp
 swapdex is the accounts layer of a small local AI-CLI stack:
 
 - [sessionwiki](https://github.com/youdie006/sessionwiki) -- index, search, and
-  resume your AI coding sessions. `swapdex sessions` groups them by account.
+  resume your AI coding sessions. `swapdex sessions` groups them by account,
+  and after a switch in `swapdex ui` you get that account's recent sessions
+  with a `sessionwiki resume <id>` hint -- switch, land back in your work.
 - [prodex](https://github.com/youdie006/prodex) -- share one logged-in ChatGPT
   Pro session across agents. swapdex coexists with it without touching its auth.
 

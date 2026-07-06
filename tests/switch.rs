@@ -1111,3 +1111,97 @@ fn ui_non_tty_degrades_gracefully() {
         "explains it needs a terminal"
     );
 }
+
+// After a switch, picking a numbered session hands off to the official flow:
+// swapdex execs `sessionwiki resume <id>` (one-shot handoff on explicit human
+// action - the same precedent as `login` spawning `codex login`).
+#[test]
+fn ui_resume_pick_execs_sessionwiki() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+
+    // Session fixture + a fake `sessionwiki` that proves the exec happened.
+    let fixture = root.path().join("sessions.json");
+    std::fs::write(
+        &fixture,
+        serde_json::to_vec(&serde_json::json!([
+            {"id":"aaa111","tool":"codex","title":"fix the retry loop",
+             "started":"2099-01-01T00:00:00Z"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let bin_dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake = bin_dir.join("sessionwiki");
+    std::fs::write(&fake, "#!/bin/sh\necho \"RESUMED $2\"\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("SWAPDEX_SESSIONWIKI_JSON", &fixture)
+        .env("PATH", &path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Pick profile 1 (alpha), then resume session 1.
+    child.stdin.as_mut().unwrap().write_all(b"1\n1\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(
+        o.contains("RESUMED aaa111"),
+        "exec'd sessionwiki resume: {o}"
+    );
+}
+
+// Enter at the resume prompt skips - no exec, clean exit.
+#[test]
+fn ui_resume_enter_skips() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    let fixture = root.path().join("sessions.json");
+    std::fs::write(
+        &fixture,
+        serde_json::to_vec(&serde_json::json!([
+            {"id":"aaa111","tool":"codex","title":"t","started":"2099-01-01T00:00:00Z"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("SWAPDEX_SESSIONWIKI_JSON", &fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"1\n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(!o.contains("RESUMED"), "no exec on skip: {o}");
+}

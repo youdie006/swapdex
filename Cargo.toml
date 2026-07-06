@@ -1,6 +1,6 @@
 [package]
 name = "swapdex"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Switch between multiple Claude Code and Codex login accounts, locally and safely."
 license = "MIT"
