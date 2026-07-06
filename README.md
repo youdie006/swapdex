@@ -76,6 +76,8 @@ swapdex status
 
 # Switch (takes effect on your next message -- no restart)
 swapdex use personal
+swapdex use -                       # toggle back to the previous profile
+swapdex use w                       # a unique prefix is enough
 swapdex use work --tool codex
 swapdex use work --dry-run          # show what would change, write nothing
 
@@ -101,6 +103,17 @@ codex: you@personal.com (profile 'personal')
 
 The active account is always read from the **live** login, so if you `/login`
 directly in the CLI, swapdex reports the truth rather than a stale guess.
+
+For your shell prompt or statusline, `status --short` prints one compact line:
+
+```sh
+$ swapdex status --short
+claude:work codex:personal
+```
+
+e.g. in a starship prompt: `command = "swapdex status --short"` in a
+[custom module](https://starship.rs/config/#custom-commands), or in `PS1`
+via `$(swapdex status --short)`.
 
 `usage` reads your local session logs (no network) to gauge how heavily you've
 been using each tool lately, so you know when to switch to a fresher account:

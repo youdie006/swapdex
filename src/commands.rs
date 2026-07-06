@@ -209,10 +209,17 @@ pub fn add(paths: &Paths, name: &str, sel: Option<ToolSel>, update: bool) -> Res
 
 pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
+    let store = Store::open(paths)?;
+    // Resolve the NAME first: `-` toggles to the previous/other profile and a
+    // unique prefix expands, so the daily switch is two keystrokes.
+    let name = match resolve_use_name(&store, paths, name)? {
+        Some(n) => n,
+        None => return Ok(5),
+    };
+    let name = name.as_str();
     if let Some(c) = reject_bad_name(name) {
         return Ok(c);
     }
-    let store = Store::open(paths)?;
     let _lock = match store.lock() {
         Ok(g) => g,
         Err(_) => {
@@ -445,6 +452,95 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         println!("(takes effect on your next message)");
     }
     Ok(0)
+}
+
+/// Resolve `use`'s NAME argument. `-` means "the profile I was on before":
+/// with exactly two profiles it is simply the other one; otherwise the most
+/// recent timeline switch to a profile that is not currently active. A unique
+/// prefix expands (`use w` -> work); an ambiguous one refuses and lists the
+/// candidates rather than guessing (switching is a write). `Ok(None)` means
+/// "already reported, exit 5".
+fn resolve_use_name(store: &Store, paths: &Paths, raw: &str) -> Result<Option<String>> {
+    let profiles: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
+    if raw == "-" {
+        let mut act: Vec<String> = active_by_tool(store, paths)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        act.sort();
+        act.dedup();
+        // The overwhelmingly common case: two profiles, one active.
+        if profiles.len() == 2 && act.len() == 1 {
+            if let Some(other) = profiles.iter().find(|p| **p != act[0]) {
+                eprintln!("swapdex: '-' -> '{other}'");
+                return Ok(Some(other.clone()));
+            }
+        }
+        // Otherwise: the most recent switch to a profile that is not active now.
+        if let Some(prev) = last_switch_name_excluding(paths, &act, &profiles) {
+            eprintln!("swapdex: '-' -> '{prev}'");
+            return Ok(Some(prev));
+        }
+        eprintln!(
+            "swapdex: can't tell which profile '-' means yet (no prior switch on record). \
+             Pick one: swapdex use <{}>",
+            profiles.join("|")
+        );
+        return Ok(None);
+    }
+    if profiles.iter().any(|p| p == raw) {
+        return Ok(Some(raw.to_string()));
+    }
+    let cands: Vec<&String> = profiles.iter().filter(|p| p.starts_with(raw)).collect();
+    match cands.len() {
+        1 => {
+            let n = cands[0].clone();
+            eprintln!("swapdex: '{raw}' matched profile '{n}'");
+            Ok(Some(n))
+        }
+        // No prefix match: fall through so the normal "no profile" error runs.
+        0 => Ok(Some(raw.to_string())),
+        _ => {
+            eprintln!(
+                "swapdex: '{raw}' is ambiguous: {}",
+                cands
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// The most recent `use`/`restore` timeline entry naming a profile that still
+/// exists and is not in `exclude` - i.e. "the profile you were on before".
+fn last_switch_name_excluding(
+    paths: &Paths,
+    exclude: &[String],
+    profiles: &[String],
+) -> Option<String> {
+    let text = std::fs::read_to_string(paths.store_dir().join("timeline.jsonl")).ok()?;
+    let mut best: Option<(i64, String)> = None;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if !matches!(v["action"].as_str(), Some("use") | Some("restore")) {
+            continue;
+        }
+        let (Some(ts), Some(name)) = (v["ts"].as_i64(), v["account"].as_str()) else {
+            continue;
+        };
+        if exclude.iter().any(|e| e == name) || !profiles.iter().any(|p| p == name) {
+            continue;
+        }
+        if best.as_ref().map(|(t, _)| ts >= *t).unwrap_or(true) {
+            best = Some((ts, name.to_string()));
+        }
+    }
+    best.map(|(_, n)| n)
 }
 
 /// The tool(s) the most recent switch (`use` or `restore`) touched, from the
@@ -743,7 +839,37 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-pub fn status(paths: &Paths, json: bool) -> Result<i32> {
+/// One compact line for shell prompts / statuslines: `claude:work codex:personal`.
+/// The value per tool is the matched profile name, falling back to the email.
+/// None when nothing is logged in (or nothing is readable).
+pub fn short_line(paths: &Paths) -> Option<String> {
+    let store = Store::open(paths).ok()?;
+    let parts: Vec<String> = adapters::all()
+        .iter()
+        .filter_map(|a| {
+            let id = a.identity(paths).ok().flatten()?;
+            let tool = match a.name() {
+                "claude-code" => "claude",
+                t => t,
+            };
+            let who = matched_profile_name(&store, a.name(), &id.account_id)
+                .or(id.email)
+                .unwrap_or_else(|| "?".into());
+            Some(format!("{tool}:{who}"))
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
+    if short {
+        println!("{}", short_line(paths).unwrap_or_default());
+        return Ok(0);
+    }
     let store = Store::open(paths)?;
     if json {
         let rows: Vec<Value> = adapters::all()
@@ -977,8 +1103,24 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
     }
     let store = Store::open(paths)?;
     if !yes {
-        eprintln!("swapdex: `rm {name}` deletes the saved profile. Re-run with --yes to confirm.");
-        return Ok(7);
+        // On a terminal, just ask; --yes stays for scripts (and remains the
+        // only path when stdin is not a tty, exit 7 as documented).
+        use std::io::IsTerminal;
+        let tty =
+            std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+        if !tty {
+            eprintln!(
+                "swapdex: `rm {name}` deletes the saved profile. Re-run with --yes to confirm."
+            );
+            return Ok(7);
+        }
+        if !yes_no(
+            &format!("delete saved profile '{name}'? The live login stays. [y/N]: "),
+            false,
+        ) {
+            println!("kept '{name}'.");
+            return Ok(0);
+        }
     }
     let _lock = match store.lock() {
         Ok(g) => g,

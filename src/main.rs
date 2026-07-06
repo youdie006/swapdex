@@ -44,6 +44,9 @@ enum Cmd {
     Status {
         #[arg(long)]
         json: bool,
+        /// One compact line (for shell prompts / statuslines)
+        #[arg(long)]
+        short: bool,
     },
     /// Remove a saved profile (never touches a live login)
     Rm {
@@ -99,8 +102,13 @@ fn main() {
         }
     };
     let Some(cmd) = &cli.cmd else {
-        // No subcommand: print the ASCII wordmark + a short hint.
+        // No subcommand: the wordmark, a short hint, and - because the person
+        // typing a bare `swapdex` usually wants to know where they stand - the
+        // active accounts. Best-effort: a broken store never breaks the banner.
         swapdex::banner::print_banner();
+        if let Some(line) = commands::short_line(&paths) {
+            println!("  active: {line}");
+        }
         return;
     };
     // Completions generate swapdex's OWN tab-completion - they do NOT wrap or
@@ -134,7 +142,7 @@ fn main() {
             dry_run,
         } => commands::use_account(&paths, name, *tool, *dry_run),
         Cmd::Ls { json } => commands::ls(&paths, *json),
-        Cmd::Status { json } => commands::status(&paths, *json),
+        Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
         Cmd::Setup => commands::setup(&paths),
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),

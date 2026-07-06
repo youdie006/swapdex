@@ -1,6 +1,6 @@
 {
   "name": "@youdie006/swapdex",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Switch between multiple Claude Code and Codex login accounts, locally and safely.",
   "bin": {
     "swapdex": "bin/swapdex.js"

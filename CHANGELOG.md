@@ -4,6 +4,28 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.2.0] - 2026-07-06
+
+Daily-driver ergonomics: the goal is a switch in two keystrokes and zero
+guessing about where you stand.
+
+### Added
+- `swapdex use -`: toggle to the previous/other profile, like `cd -` /
+  `git switch -`. With two profiles it is simply the other one; with more it
+  is the profile you were on before (from the switch timeline). `-` is now a
+  reserved name.
+- Unique-prefix matching on `use`: `swapdex use w` resolves to `work` and says
+  so; an ambiguous prefix refuses and lists the candidates (switching is a
+  write - it never guesses).
+- `swapdex status --short`: one compact `claude:work codex:personal` line for
+  shell prompts and statuslines (starship/PS1 snippet in the README).
+- A bare `swapdex` now shows the active accounts under the banner, so the
+  naked command answers "where am I?".
+
+### Changed
+- `rm` asks y/N on a terminal instead of demanding `--yes`; scripts keep the
+  explicit `--yes` requirement (exit 7 when stdin is not a tty).
+
 ## [0.1.9] - 2026-07-06
 
 ### Added

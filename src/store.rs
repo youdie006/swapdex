@@ -302,6 +302,7 @@ pub fn valid_profile_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
+        && name != "-" // reserved: `swapdex use -` toggles to the previous profile
         && !name.contains(['/', '\\'])
         && !name.chars().any(|c| c.is_control())
 }

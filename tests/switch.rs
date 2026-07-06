@@ -758,3 +758,115 @@ fn manpage_emits_roff() {
     );
     assert!(o.contains("restore"), "documents the subcommands");
 }
+
+// `use -` toggles to the other profile (the daily-driver shortcut: most users
+// have exactly work + personal).
+#[test]
+fn use_dash_toggles_between_two_profiles() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]);
+    // live is B (= personal). `use -` must flip to work...
+    let (o, e, c) = run(root.path(), &["use", "-"]);
+    assert_eq!(c, 0, "use - failed: {o}{e}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-A", "toggled to work");
+    // ...and again back to personal.
+    let (_o, _e, c) = run(root.path(), &["use", "-"]);
+    assert_eq!(c, 0);
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-B", "toggled back");
+}
+
+#[test]
+fn use_dash_with_ambiguity_refuses_with_candidates() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "one", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "two", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-C");
+    run(root.path(), &["add", "three", "--tool", "codex"]);
+    // 3 profiles, no prior switch on the timeline -> ambiguous target.
+    let (_o, e, c) = run(root.path(), &["use", "-"]);
+    assert_ne!(c, 0, "ambiguous toggle must refuse");
+    assert!(
+        e.contains("one") || e.contains("swapdex use"),
+        "lists a way out: {e}"
+    );
+}
+
+// Unique-prefix matching on `use`: `use w` finds "work"; an ambiguous prefix
+// refuses and lists the candidates instead of guessing.
+#[test]
+fn use_unique_prefix_matches() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]);
+    let (o, e, c) = run(root.path(), &["use", "w"]);
+    assert_eq!(c, 0, "unique prefix must resolve: {e}");
+    assert!(
+        (o + &e).contains("work"),
+        "says which profile it resolved to"
+    );
+}
+
+#[test]
+fn use_ambiguous_prefix_refuses() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "prod-a", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "prod-b", "--tool", "codex"]);
+    let (_o, e, c) = run(root.path(), &["use", "prod"]);
+    assert_eq!(c, 5, "ambiguous prefix -> no such profile class: {e}");
+    assert!(
+        e.contains("prod-a") && e.contains("prod-b"),
+        "lists candidates: {e}"
+    );
+}
+
+// status --short: one line for shell prompts / statuslines.
+#[test]
+fn status_short_is_one_compact_line() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    let (o, _e, c) = run(root.path(), &["status", "--short"]);
+    assert_eq!(c, 0);
+    assert_eq!(o.trim().lines().count(), 1, "exactly one line: {o}");
+    assert!(o.contains("codex:work"), "tool:profile pairs: {o}");
+}
+
+// On a terminal, `rm` asks y/N instead of demanding --yes (scripts still get
+// exit 7 when stdin is not a tty - covered by rm_requires_yes elsewhere).
+#[test]
+fn rm_confirms_interactively_on_tty() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "victim", "--tool", "codex"]);
+    let mut child = Command::new(bin())
+        .args(["rm", "victim"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"y\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code().unwrap_or(-1), 0);
+    let (ls, _e, _c) = run(root.path(), &["ls"]);
+    assert!(!ls.contains("victim"), "profile removed after y: {ls}");
+}
