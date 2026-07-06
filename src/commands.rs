@@ -808,18 +808,30 @@ pub(crate) fn active_by_tool(store: &Store, paths: &Paths) -> Vec<(&'static str,
         .collect()
 }
 
-/// Pad-or-truncate to `w` display chars; a longer value ends in one '…'.
+/// Pad-or-truncate to `w` DISPLAY columns (CJK chars occupy two; counting
+/// chars would shear the table); a longer value ends in one '…'.
 fn fit(s: &str, w: usize) -> String {
-    let n = s.chars().count();
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let n = UnicodeWidthStr::width(s);
     if n <= w {
         let mut out = String::from(s);
         out.extend(std::iter::repeat_n(' ', w - n));
-        out
-    } else {
-        let mut out: String = s.chars().take(w.saturating_sub(1)).collect();
-        out.push('…');
-        out
+        return out;
     }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > w.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push('…');
+    // Pad if the truncation landed a column short (a wide char didn't fit).
+    out.extend(std::iter::repeat_n(' ', w.saturating_sub(used + 1)));
+    out
 }
 
 /// The account column: email if known, else just the tier (never a stray
@@ -916,13 +928,13 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // cannot un-align every other. Full values stay available in `ls --json`.
     let name_w = rows
         .iter()
-        .map(|r| r.name.chars().count())
+        .map(|r| unicode_width::UnicodeWidthStr::width(r.name.as_str()))
         .max()
         .unwrap_or(4)
         .clamp(4, 24);
     let ident_w = rows
         .iter()
-        .map(|r| r.ident.chars().count())
+        .map(|r| unicode_width::UnicodeWidthStr::width(r.ident.as_str()))
         .max()
         .unwrap_or(0)
         .clamp(0, 40);

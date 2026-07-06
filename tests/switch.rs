@@ -982,3 +982,34 @@ fn use_dash_never_repicks_the_newest_switch_destination() {
         "must not re-pick the newest switch destination: {e}"
     );
 }
+
+// ls aligns by DISPLAY width: a CJK profile name (2 columns per char) must not
+// shear the table for the profiles after it.
+#[test]
+fn ls_aligns_cjk_names_by_display_width() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "회사계정", "--tool", "codex"]); // 4 chars, 8 columns
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]); // 8 chars, 8 columns
+    let (o, _e, c) = run(root.path(), &["ls"]);
+    assert_eq!(c, 0);
+    // Both rows must place the email at the same DISPLAY column (CJK ~ 2).
+    fn disp_prefix(l: &str) -> usize {
+        let idx = l.find("a@x.com").unwrap();
+        l[..idx]
+            .chars()
+            .map(|c| if (c as u32) >= 0x1100 { 2 } else { 1 })
+            .sum()
+    }
+    let widths: Vec<usize> = o
+        .lines()
+        .filter(|l| l.contains("a@x.com"))
+        .map(disp_prefix)
+        .collect();
+    assert_eq!(widths.len(), 2, "both rows visible: {o}");
+    assert_eq!(
+        widths[0], widths[1],
+        "email column must align in display columns: {o}"
+    );
+}

@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.2.2] - 2026-07-07
+
+### Fixed
+- `ls` aligns by display width, so a CJK profile name (two columns per
+  character) no longer shears the table.
+
+### Docs
+- The `status --short` line drops straight into Claude Code's own status line
+  (`statusLine` snippet in the README) - the active account stays visible
+  inside the tool you are switching.
+- An honest Alternatives section (claude-swap, aisw, caam) with each
+  project's trade-offs and when to pick them over swapdex.
+
 ## [0.2.1] - 2026-07-06
 
 Fixes from an adversarial audit of the 0.2.0 delta, plus scripting/completion
