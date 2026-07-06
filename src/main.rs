@@ -85,6 +85,8 @@ enum Cmd {
     Mcp,
     /// Print a shell completion script (bash, zsh, fish, ...)
     Completions { shell: clap_complete::Shell },
+    /// Print the man page (roff) to stdout
+    Manpage,
 }
 
 fn main() {
@@ -113,6 +115,17 @@ fn main() {
         );
         return;
     }
+    // Man page: pure codegen like completions (the Homebrew formula consumes
+    // this at install time).
+    if let Cmd::Manpage = cmd {
+        let man = clap_mangen::Man::new(Cli::command());
+        let mut buf = Vec::new();
+        if man.render(&mut buf).is_ok() {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&buf);
+        }
+        return;
+    }
     let result = match cmd {
         Cmd::Add { name, tool, update } => commands::add(&paths, name, *tool, *update),
         Cmd::Use {
@@ -134,7 +147,7 @@ fn main() {
             swapdex::mcp::serve();
             return;
         }
-        Cmd::Completions { .. } => unreachable!("handled before path resolution"),
+        Cmd::Completions { .. } | Cmd::Manpage => unreachable!("handled above as pure codegen"),
     };
     match result {
         Ok(code) => std::process::exit(code),

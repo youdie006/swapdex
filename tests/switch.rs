@@ -743,3 +743,18 @@ fn doctor_flags_corrupt_live_login() {
     assert_eq!(c, 9);
     assert!(o.contains("unreadable"), "{o}");
 }
+
+// `manpage` prints a roff man page to stdout (consumed by the Homebrew formula
+// at install time; also `swapdex manpage > /usr/local/share/man/man1/swapdex.1`).
+#[test]
+fn manpage_emits_roff() {
+    let root = tempfile::tempdir().unwrap();
+    let (o, _e, c) = run(root.path(), &["manpage"]);
+    assert_eq!(c, 0);
+    assert!(
+        o.contains(".TH swapdex 1"),
+        "roff man header present: {}",
+        &o[..o.len().min(80)]
+    );
+    assert!(o.contains("restore"), "documents the subcommands");
+}

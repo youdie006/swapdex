@@ -20,7 +20,8 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex usage [--json]` | Recent local token usage per tool over the last 5h and 7d, summed from `~/.claude` and `~/.codex` session logs. A rough machine-wide activity gauge (not tagged by account, not the billed quota) so you can tell when to switch. Reads local files only - never the network. |
 | `swapdex doctor` | Local health check: store permissions, every saved snapshot, both live logins, backups, and the CLIs on PATH - each finding ends with its fix. Exit 0 healthy, 9 when problems were found. Never touches the network. |
 | `swapdex mcp` | Run as a read-only MCP server over stdio (`whoami`, `list_accounts`). No switch tool exists. |
-| `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. |
+| `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. Installed automatically by Homebrew. |
+| `swapdex manpage` | Print the man page (roff) to stdout: `swapdex manpage > /usr/local/share/man/man1/swapdex.1`. Installed automatically by Homebrew. |
 
 ## Exit codes
 

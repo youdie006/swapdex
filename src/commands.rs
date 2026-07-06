@@ -225,7 +225,10 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
 
     // Snapshot running processes once (best-effort) so we can warn if a switch
     // pulls the login out from under a live session. Skipped on a dry-run.
-    let running = if dry_run {
+    // Skip the scan on a dry-run, and under SWAPDEX_ROOT: an isolated root's
+    // credentials are not the ones any running session uses, so the warning
+    // would be a false positive there.
+    let running = if dry_run || std::env::var_os("SWAPDEX_ROOT").is_some() {
         Vec::new()
     } else {
         crate::proc::running_process_names()
@@ -351,7 +354,10 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
             return Ok(4);
         }
     };
-    let running = if dry_run {
+    // Skip the scan on a dry-run, and under SWAPDEX_ROOT: an isolated root's
+    // credentials are not the ones any running session uses, so the warning
+    // would be a false positive there.
+    let running = if dry_run || std::env::var_os("SWAPDEX_ROOT").is_some() {
         Vec::new()
     } else {
         crate::proc::running_process_names()

@@ -12,6 +12,10 @@ One command to flip your Claude Code or Codex CLI from your work account to your
 personal one, and back. No re-login, no browser, no copying tokens around.
 100% local. Never touches the network.
 
+<div align="center">
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls, use personal, status, restore, doctor" width="760" />
+</div>
+
 ---
 
 ## Why
