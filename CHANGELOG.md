@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.1.9] - 2026-07-06
+
+### Added
+- `swapdex manpage`: prints the man page (roff) to stdout. Homebrew installs
+  it - and shell completions - automatically.
+- A demo GIF of the core loop (ls -> use -> status -> restore -> doctor) at
+  the top of the README.
+
+### Fixed
+- `use`/`restore` no longer print the running-session warning under
+  `SWAPDEX_ROOT`: an isolated root's credentials are not the ones a live
+  session uses, so the warning was a false positive there.
+
 ## [0.1.8] - 2026-07-06
 
 ### Added
