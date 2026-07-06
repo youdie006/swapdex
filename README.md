@@ -80,6 +80,9 @@ swapdex sessions
 
 # Recent local token usage per tool (5h/7d) -- tells you when to switch
 swapdex usage
+
+# Made a bad switch? Put back the login that was live before it
+swapdex restore
 ```
 
 `status` shows the live account per tool, matched back to a saved profile:
@@ -126,7 +129,8 @@ servers, and settings in that file are never touched.
   switch can never leave a half-written credential that bricks the CLI.
 - Symlinked credential paths and running as root are refused.
 - `use` backs up the current login and verifies the backup before overwriting,
-  so a switch can never lose an un-saved login.
+  so a switch can never lose an un-saved login -- and `swapdex restore` brings
+  that backup back in one command if the switch was a mistake.
 - No token, refresh token, or home path is ever printed.
 
 **The store holds plaintext refresh tokens.** Protect `~/.local/share/swapdex`

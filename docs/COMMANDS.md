@@ -13,6 +13,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex use <name> [--tool ...] [--dry-run]` | Switch the active login to a saved profile. Backs up the current login first, then applies atomically. `--dry-run` prints the change without writing. Switching to the already-active account is a no-op. |
 | `swapdex ls [--json]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` marker. The active profile is marked from the **live** login, not a stored guess. |
 | `swapdex status [--json]` | Show the active account per tool, matched back to a saved profile, plus expiry and a session summary (needs sessionwiki). `--json` for scripting. |
+| `swapdex restore [--tool ...] [--dry-run]` | Put back the login that was live before the last switch (`use` backs it up first, even when it was never saved as a profile). Backs up the current login before applying, so running it again toggles back. |
 | `swapdex rm <name> --yes` | Remove a saved profile. Requires `--yes`. Never touches a live login. |
 | `swapdex rename <old> <new>` | Rename a saved profile. |
 | `swapdex sessions` | Sessions grouped by the account active when they ran (best-effort; needs sessionwiki on PATH). |
@@ -29,7 +30,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `2` | Invalid profile name (contains `/`, `\`, `..`, a leading `.`, or control chars). |
 | `3` | Not logged in to the selected tool (`add`). |
 | `4` | The store is locked - another `swapdex` is mid-switch. |
-| `5` | No profile by that name (`use` / `rm` / `rename`). |
+| `5` | No profile by that name (`use` / `rm` / `rename`), or no backup (`restore`). |
 | `6` | The profile already has a snapshot for that tool; pass `--update` (`add`). |
 | `7` | `rm` was called without `--yes`. |
 | `8` | `login` was started but the tool's login flow did not complete. |

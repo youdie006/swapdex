@@ -457,3 +457,87 @@ fn add_works_without_claude_json() {
     let (_o, e, c) = run(root.path(), &["add", "work", "--tool", "claude"]);
     assert_eq!(c, 0, "add must work without .claude.json: {e}");
 }
+
+// Recovery story: `use` backs up the outgoing login; `restore` must bring it
+// back, and a second `restore` must toggle back again (restore is reversible
+// because it backs up the current login before applying).
+#[test]
+fn restore_brings_back_the_pre_switch_login() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B"); // live login is now B (un-saved)
+
+    let (_o, e, c) = run(root.path(), &["use", "work", "--tool", "codex"]);
+    assert_eq!(c, 0, "use failed: {e}");
+
+    // B was never saved as a profile; restore must still bring it back.
+    let (o, e, c) = run(root.path(), &["restore", "--tool", "codex"]);
+    assert_eq!(c, 0, "restore failed: {e}");
+    assert!(o.contains("restored"), "should say what it did: {o}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-B", "B is live again");
+
+    // Toggle back.
+    let (_o, e, c) = run(root.path(), &["restore", "--tool", "codex"]);
+    assert_eq!(c, 0, "second restore failed: {e}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-A", "toggled back to A");
+}
+
+#[test]
+fn restore_without_backups_is_a_clear_error() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (_o, e, c) = run(root.path(), &["restore", "--tool", "codex"]);
+    assert_eq!(c, 5, "no backup -> exit 5: {e}");
+    assert!(e.contains("no backup"), "message should say why: {e}");
+}
+
+#[test]
+fn restore_dry_run_changes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["use", "work", "--tool", "codex"]);
+
+    let (o, _e, c) = run(root.path(), &["restore", "--tool", "codex", "--dry-run"]);
+    assert_eq!(c, 0);
+    assert!(o.contains("would restore"), "dry-run narrates: {o}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-A", "nothing written");
+}
+
+// Partial profile: `use` on a profile that lacks a tool the user IS logged into
+// must say that tool was left unchanged (silent partial switches confuse).
+#[test]
+fn use_notes_a_tool_left_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    // Logged into codex AND claude, but the profile only saves codex.
+    seed_codex(root.path(), "acct-A");
+    let d = root.path().join(".claude");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join(".credentials.json"),
+        serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+            "accessToken":"AT","refreshToken":"RT","expiresAt":9999999999999i64,
+            "subscriptionType":"max"}}))
+        .unwrap(),
+    )
+    .unwrap();
+    run(root.path(), &["add", "cx", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    let (o, e, c) = run(root.path(), &["use", "cx"]);
+    assert_eq!(c, 0, "use failed: {e}");
+    assert!(
+        (o.clone() + &e).contains("unchanged"),
+        "must note claude-code was left unchanged: {o}{e}"
+    );
+}

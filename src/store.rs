@@ -192,6 +192,50 @@ impl Store {
         Ok(())
     }
 
+    /// The newest backup snapshot for a tool (taken by `use` before each switch),
+    /// with its unix-nanos stamp. `None` when no backup exists.
+    pub fn load_backup(&self, tool: &str) -> Result<Option<(u128, Snapshot)>> {
+        let tool_static: &'static str = match tool {
+            "claude-code" => "claude-code",
+            "codex" => "codex",
+            _ => return Ok(None),
+        };
+        let base = self.dir.join("backups").join(tool);
+        let mut stamps: Vec<(u128, PathBuf)> = fs::read_dir(&base)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter_map(|p| {
+                let s = p.file_name()?.to_str()?.parse::<u128>().ok()?;
+                Some((s, p))
+            })
+            .collect();
+        stamps.sort_by_key(|(s, _)| *s);
+        let Some((stamp, d)) = stamps.pop() else {
+            return Ok(None);
+        };
+        let mut blobs = Vec::new();
+        for e in fs::read_dir(&d)?.flatten() {
+            let part = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_file() && !part.starts_with('.') {
+                let bytes = crate::atomic::read_regular(&e.path())?;
+                blobs.push((part, Secret::new(bytes)));
+            }
+        }
+        if blobs.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((
+            stamp,
+            Snapshot {
+                tool: tool_static,
+                blobs,
+            },
+        )))
+    }
+
     pub fn append_timeline(&self, tool: &str, account: &str, action: &str) -> Result<()> {
         let path = self.dir.join("timeline.jsonl");
         let ts = std::time::SystemTime::now()

@@ -60,6 +60,15 @@ enum Cmd {
     },
     /// Rename a saved profile
     Rename { old: String, new: String },
+    /// Put back the login that was live before the last switch
+    Restore {
+        /// Restore only this tool
+        #[arg(long, value_enum)]
+        tool: Option<commands::ToolSel>,
+        /// Show what would be restored without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Sessions grouped by the account that was active when they ran
     Sessions,
     /// Recent local token usage per tool (5h/7d), read from session logs
@@ -113,6 +122,7 @@ fn main() {
         Cmd::Setup => commands::setup(&paths),
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),
+        Cmd::Restore { tool, dry_run } => commands::restore(&paths, *tool, *dry_run),
         Cmd::Sessions => commands::sessions(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Mcp => {

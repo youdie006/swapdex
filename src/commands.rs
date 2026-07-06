@@ -58,10 +58,36 @@ fn is_explicit(sel: Option<ToolSel>) -> bool {
     matches!(sel, Some(ToolSel::Claude) | Some(ToolSel::Codex))
 }
 
-/// The account_id a stored profile's snapshot resolves to, for matching a live
-/// identity back to a profile name (A2). Reads the snapshot, not `active.json`.
-fn profile_account_id(store: &Store, name: &str, tool: &str) -> Option<String> {
-    let snap = store.load(name, tool).ok()??;
+/// On macOS, Claude Code keeps its OAuth login in the Keychain rather than in
+/// `~/.claude/.credentials.json`, so swapdex sees "not logged in" even when a
+/// login exists. When the config file proves a login is present, explain that
+/// instead of gaslighting the user. (`cfg!` keeps this type-checked on Linux.)
+fn macos_keychain_note(paths: &Paths, tool: &str) -> Option<&'static str> {
+    if !cfg!(target_os = "macos") || tool != "claude-code" {
+        return None;
+    }
+    if paths.claude_credentials().exists() {
+        return None;
+    }
+    let logged_in_by_config = std::fs::read(paths.claude_config_json())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .map(|v| v["oauthAccount"].is_object())
+        .unwrap_or(false);
+    if logged_in_by_config {
+        Some(
+            "Claude Code on macOS keeps its login in the Keychain, which swapdex \
+             cannot snapshot yet - Codex switching works; Claude-on-macOS is on \
+             the roadmap",
+        )
+    } else {
+        None
+    }
+}
+
+/// The account_id inside a snapshot's blobs (works for stored profiles and
+/// backups alike).
+fn snapshot_account_id(snap: &crate::adapters::Snapshot, tool: &str) -> Option<String> {
     match tool {
         "codex" => {
             let v: Value = serde_json::from_slice(snap.part("auth")?.expose()).ok()?;
@@ -73,6 +99,13 @@ fn profile_account_id(store: &Store, name: &str, tool: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The account_id a stored profile's snapshot resolves to, for matching a live
+/// identity back to a profile name (A2). Reads the snapshot, not `active.json`.
+fn profile_account_id(store: &Store, name: &str, tool: &str) -> Option<String> {
+    let snap = store.load(name, tool).ok()??;
+    snapshot_account_id(&snap, tool)
 }
 
 /// Find the stored profile name whose snapshot matches this live account_id.
@@ -123,6 +156,9 @@ pub fn add(paths: &Paths, name: &str, sel: Option<ToolSel>, update: bool) -> Res
         if !adapter.present(paths) {
             if is_explicit(sel) {
                 eprintln!("swapdex: not logged in to {tool}");
+                if let Some(note) = macos_keychain_note(paths, tool) {
+                    eprintln!("swapdex: note - {note}");
+                }
                 return Ok(3);
             }
             continue;
@@ -198,6 +234,12 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
                     eprintln!("swapdex: profile '{name}' has no {tool} login");
                     return Ok(5);
                 }
+                // Not an error in the default case, but if the user IS logged
+                // into this tool, say so - a silent partial switch reads as a
+                // full one and leaves the old account active unnoticed.
+                if adapter.present(paths) {
+                    println!("{tool}: profile '{name}' has no {tool} login - left unchanged");
+                }
                 continue;
             }
         };
@@ -249,6 +291,101 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
         println!("(takes effect on your next message)");
     }
     Ok(0)
+}
+
+/// `restore` - put back the login that was live before the last switch. `use`
+/// backs up the outgoing login before every switch; this is the command that
+/// brings a backup back, so a bad switch is a one-command recovery even when
+/// the outgoing account was never saved as a profile. It backs up the current
+/// login first, so running `restore` twice toggles between the two.
+pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
+    crate::atomic::ensure_not_root()?;
+    let store = Store::open(paths)?;
+    let _lock = match store.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+    };
+    let running = if dry_run {
+        Vec::new()
+    } else {
+        crate::proc::running_process_names()
+    };
+    let mut found = 0; // a backup existed for this tool
+    let mut changed = 0; // an actual restore was written
+    for adapter in selected_adapters(sel) {
+        let tool = adapter.name();
+        let Some((stamp, target)) = store.load_backup(tool)? else {
+            if is_explicit(sel) {
+                eprintln!("swapdex: no backup for {tool} (a backup is taken on every `use`)");
+                return Ok(5);
+            }
+            continue;
+        };
+        found += 1;
+        // Restoring the already-live account is a no-op success.
+        let live_id = adapter
+            .identity(paths)?
+            .map(|i| i.account_id)
+            .filter(|s| !s.is_empty());
+        let backup_id = snapshot_account_id(&target, tool).filter(|s| !s.is_empty());
+        if live_id.is_some() && live_id == backup_id {
+            println!("{tool}: the newest backup is already the active login");
+            continue;
+        }
+        let age = age_line(stamp);
+        if dry_run {
+            println!("would restore {tool} from the backup taken {age}");
+            continue;
+        }
+        // Same safe order as `use`: back up the CURRENT login first, so restore
+        // is itself reversible (run it again to toggle back).
+        if adapter.present(paths) {
+            let live = adapter.capture(paths)?;
+            store.backup(&live)?;
+        }
+        adapter.apply(paths, &target)?;
+        store.append_timeline(tool, "(backup)", "restore")?;
+        match adapter.identity(paths)? {
+            Some(id) => println!("restored {tool} -> {} (backup {age})", identity_line(&id)),
+            None => println!("restored {tool} from the backup taken {age}"),
+        }
+        if crate::proc::tool_running(tool, &running) {
+            eprintln!(
+                "swapdex: note - a {tool} session looks like it's running. Restart it \
+                 to pick up the restored login."
+            );
+        }
+        changed += 1;
+    }
+    if found == 0 {
+        eprintln!("swapdex: no backup to restore (a backup is taken on every `use`)");
+        return Ok(5);
+    }
+    if changed > 0 {
+        println!("(takes effect on your next message)");
+    }
+    Ok(0)
+}
+
+/// "3m ago" / "2h ago" from a unix-nanos backup stamp.
+fn age_line(stamp_nanos: u128) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let secs = (now.saturating_sub(stamp_nanos) / 1_000_000_000) as u64;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
 }
 
 /// A saved snapshot ages out even before its access token expires, because the
@@ -480,7 +617,10 @@ pub fn status(paths: &Paths, json: bool) -> Result<i32> {
     for adapter in adapters::all() {
         let tool = adapter.name();
         match adapter.identity(paths)? {
-            None => println!("{tool}: not logged in"),
+            None => match macos_keychain_note(paths, tool) {
+                Some(note) => println!("{tool}: not manageable - {note}"),
+                None => println!("{tool}: not logged in"),
+            },
             Some(id) => {
                 let name = matched_profile_name(&store, tool, &id.account_id);
                 let saved = match &name {
