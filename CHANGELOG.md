@@ -4,6 +4,39 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.2.1] - 2026-07-06
+
+Fixes from an adversarial audit of the 0.2.0 delta, plus scripting/completion
+polish.
+
+### Fixed
+- `use ""` (an unset shell variable) matched a single profile as a "unique
+  prefix" and performed a real switch; an empty name is now rejected (exit 2)
+  with the live login untouched.
+- `use -` can no longer re-pick the profile you are already on when the live
+  identity is unreadable (the newest switch's destination is excluded); the
+  refusal message says the real reason when both profiles are active; and
+  `--tool` now scopes the `-` resolution.
+- macOS Keychain-mode installs: a bare `use`/`restore` skips claude-code with
+  a note and keeps switching Codex, instead of aborting the whole command.
+- `doctor`: the store-permission check could never fire (the store self-heals
+  its mode on open) - it now reports what it found; the expired/stale remedy
+  says "log in to that account" first, so following it verbatim can no longer
+  overwrite the profile with whatever account happened to be live.
+- `rm` checks the profile exists before asking y/N.
+- `manpage` failures exit 1 instead of printing nothing successfully.
+- A legacy profile literally named `-` stays manageable after the upgrade
+  (`-` is rejected only when creating/renaming).
+- A bare `swapdex` no longer creates the store directory as a side effect.
+
+### Added
+- `ls --names`: bare profile names one per line; the docs gain a verified
+  bash/zsh snippet that tab-completes profile names for `use`/`rm`/`rename`.
+- `add` with no name asks on a terminal (name suggested from the live
+  account); non-interactively it errors with the fix.
+- `doctor` verdicts are colored on a TTY; NO_COLOR is respected everywhere.
+- The demo GIF shows `use -`, `status --short`, and the colored doctor.
+
 ## [0.2.0] - 2026-07-06
 
 Daily-driver ergonomics: the goal is a switch in two keystrokes and zero
