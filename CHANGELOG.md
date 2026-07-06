@@ -12,6 +12,11 @@ All notable changes to swapdex are documented here. This project follows
   activity gauge (not tagged by account, not the billed quota) so you can tell
   when to switch. Reads local files only - never the network, keeping the
   switcher-not-rotator stance intact.
+- `use` now warns (best-effort) when the tool being switched has a live session
+  running: a running session holds the old token and can overwrite the login
+  you just switched to on its next refresh, so it prints a note to restart it.
+  Detection is an exact process-name match (never a false alarm from a stray
+  path), local only.
 
 ## [0.1.5] - 2026-07-06
 

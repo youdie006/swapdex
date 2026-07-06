@@ -4,6 +4,7 @@ pub mod banner;
 pub mod commands;
 pub mod mcp;
 pub mod paths;
+pub mod proc;
 pub mod secret;
 pub mod session_link;
 pub mod store;

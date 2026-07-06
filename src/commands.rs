@@ -181,6 +181,13 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
     };
     let mut matched = 0; // profile had a snapshot for this tool
     let mut changed = 0; // an actual switch was written
+    // Snapshot running processes once (best-effort) so we can warn if a switch
+    // pulls the login out from under a live session. Skipped on a dry-run.
+    let running = if dry_run {
+        Vec::new()
+    } else {
+        crate::proc::running_process_names()
+    };
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         let target = match store.load(name, tool)? {
@@ -222,6 +229,13 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
         store.append_timeline(tool, name, "use")?;
         if let Some(id) = adapter.identity(paths)? {
             println!("switched {tool} -> {}", identity_line(&id));
+        }
+        if crate::proc::tool_running(tool, &running) {
+            eprintln!(
+                "swapdex: note - a {tool} session looks like it's running. Restart it \
+                 to use '{name}'; a live session can overwrite the switched login on \
+                 its next token refresh."
+            );
         }
         changed += 1;
     }
