@@ -225,6 +225,9 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
     } else {
         crate::proc::running_process_names()
     };
+    // One shared timestamp for every tool this invocation switches, so a later
+    // bare `restore` can identify exactly this switch's tool set.
+    let switch_ts = now_secs();
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         let target = match store.load(name, tool)? {
@@ -246,10 +249,13 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
         matched += 1;
         // Already-active is a no-op success. Ignore EMPTY ids: two accounts with
         // no account_id must never compare equal, or the switch would be skipped
-        // and the WRONG account silently kept active.
-        let live_id = adapter
-            .identity(paths)?
-            .map(|i| i.account_id)
+        // and the WRONG account silently kept active. An UNREADABLE live file is
+        // treated as unknown (not an abort): `use <good-profile>` is exactly the
+        // command that can replace a corrupt login.
+        let live = adapter.identity(paths).ok().flatten();
+        let live_id = live
+            .as_ref()
+            .map(|i| i.account_id.clone())
             .filter(|s| !s.is_empty());
         let target_id = profile_account_id(&store, name, tool).filter(|s| !s.is_empty());
         if live_id.is_some() && live_id == target_id {
@@ -258,19 +264,51 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
         }
         warn_if_expired(&target, tool);
         if dry_run {
-            println!("would switch {tool} -> {name}");
+            match profile_detail(&store, name, tool).and_then(|(email, _, _)| email) {
+                Some(email) => println!("would switch {tool} -> {name} ({email})"),
+                None => println!("would switch {tool} -> {name}"),
+            }
             continue;
         }
         // Safe order (A6): back up the CURRENT live login first (atomic + fsync
         // inside write_secret); if the backup fails, `?` aborts BEFORE we touch
-        // the live login.
+        // the live login. An unreadable live file only skips its own backup -
+        // there is nothing usable to save.
         if adapter.present(paths) {
-            let live = adapter.capture(paths)?;
-            store.backup(&live)?;
+            match adapter.capture(paths) {
+                Ok(live_snap) => {
+                    store.backup(&live_snap)?;
+                    // Only the last 2 backups remember an account that is not
+                    // saved as a profile - warn while it is still recoverable.
+                    if let Some(id) = &live_id {
+                        if matched_profile_name(&store, tool, id).is_none() {
+                            let who = live
+                                .as_ref()
+                                .map(identity_line)
+                                .unwrap_or_else(|| "current".into());
+                            eprintln!(
+                                "swapdex: note - the outgoing {tool} login ({who}) is not \
+                                 saved as a profile; only the last 2 backups keep it. \
+                                 `swapdex restore` undoes this switch; `swapdex add <name>` \
+                                 would keep it for good."
+                            );
+                        }
+                    }
+                }
+                Err(e) => eprintln!(
+                    "swapdex: note - the current {tool} login could not be read ({e:#}); \
+                     switching without a backup of it"
+                ),
+            }
         }
-        adapter.apply(paths, &target)?;
-        store.append_timeline(tool, name, "use")?;
-        if let Some(id) = adapter.identity(paths)? {
+        adapter.apply(paths, &target).map_err(|e| {
+            e.context(format!(
+                "profile '{name}' has a bad {tool} snapshot - log in to that account \
+                 and re-save it with `swapdex add {name} --tool {tool} --update`"
+            ))
+        })?;
+        store.append_timeline_at(tool, name, "use", switch_ts)?;
+        if let Some(id) = adapter.identity(paths).ok().flatten() {
             println!("switched {tool} -> {}", identity_line(&id));
         }
         if crate::proc::tool_running(tool, &running) {
@@ -313,10 +351,22 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
     } else {
         crate::proc::running_process_names()
     };
+    // Bare `restore` means "undo the LAST SWITCH" - scope it to the tool(s)
+    // that switch touched, or a codex-only undo would also rewind claude-code
+    // to some older, unrelated backup.
+    let last_switch = last_switch_tools(paths);
+    let restore_ts = now_secs();
     let mut found = 0; // a backup existed for this tool
     let mut changed = 0; // an actual restore was written
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
+        if !is_explicit(sel) {
+            if let Some(tools) = &last_switch {
+                if !tools.iter().any(|t| t == tool) {
+                    continue;
+                }
+            }
+        }
         let Some((stamp, target)) = store.load_backup(tool)? else {
             if is_explicit(sel) {
                 eprintln!("swapdex: no backup for {tool} (a backup is taken on every `use`)");
@@ -325,9 +375,13 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
             continue;
         };
         found += 1;
-        // Restoring the already-live account is a no-op success.
+        // Restoring the already-live account is a no-op success. An unreadable
+        // live file is treated as unknown, not an abort - restore is the
+        // disaster-recovery command.
         let live_id = adapter
-            .identity(paths)?
+            .identity(paths)
+            .ok()
+            .flatten()
             .map(|i| i.account_id)
             .filter(|s| !s.is_empty());
         let backup_id = snapshot_account_id(&target, tool).filter(|s| !s.is_empty());
@@ -343,12 +397,24 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         // Same safe order as `use`: back up the CURRENT login first, so restore
         // is itself reversible (run it again to toggle back).
         if adapter.present(paths) {
-            let live = adapter.capture(paths)?;
-            store.backup(&live)?;
+            match adapter.capture(paths) {
+                Ok(live) => store.backup(&live)?,
+                Err(e) => eprintln!(
+                    "swapdex: note - the current {tool} login could not be read ({e:#}); \
+                     restoring without a backup of it"
+                ),
+            }
         }
         adapter.apply(paths, &target)?;
-        store.append_timeline(tool, "(backup)", "restore")?;
-        match adapter.identity(paths)? {
+        // Attribute the timeline event to the restored account's profile name
+        // when one matches, or `sessions` would blame "(backup)" forever after.
+        let restored = adapter.identity(paths).ok().flatten();
+        let event_name = restored
+            .as_ref()
+            .and_then(|id| matched_profile_name(&store, tool, &id.account_id))
+            .unwrap_or_else(|| "(backup)".into());
+        store.append_timeline_at(tool, &event_name, "restore", restore_ts)?;
+        match restored {
             Some(id) => println!("restored {tool} -> {} (backup {age})", identity_line(&id)),
             None => println!("restored {tool} from the backup taken {age}"),
         }
@@ -368,6 +434,36 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         println!("(takes effect on your next message)");
     }
     Ok(0)
+}
+
+/// The tool(s) the most recent switch (`use` or `restore`) touched, from the
+/// timeline. Every tool of one invocation is written with the SAME ts
+/// (append_timeline_at), so strict ts equality identifies the invocation.
+/// None when no switch is on record - the caller falls back to every tool.
+fn last_switch_tools(paths: &Paths) -> Option<Vec<String>> {
+    let path = paths.store_dir().join("timeline.jsonl");
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut events: Vec<(i64, String)> = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if !matches!(v["action"].as_str(), Some("use") | Some("restore")) {
+            continue;
+        }
+        if let (Some(ts), Some(tool)) = (v["ts"].as_i64(), v["tool"].as_str()) {
+            events.push((ts, tool.to_string()));
+        }
+    }
+    let max_ts = events.iter().map(|(ts, _)| *ts).max()?;
+    let mut tools: Vec<String> = events
+        .into_iter()
+        .filter(|(ts, _)| *ts == max_ts)
+        .map(|(_, tool)| tool)
+        .collect();
+    tools.sort();
+    tools.dedup();
+    Some(tools)
 }
 
 /// "3m ago" / "2h ago" from a unix-nanos backup stamp.
@@ -402,10 +498,23 @@ fn profile_detail(
     tool: &str,
 ) -> Option<(Option<String>, Option<String>, Option<&'static str>)> {
     let snap = store.load(name, tool).ok()??;
+    // From here the snapshot EXISTS: a missing part or unparseable blob is an
+    // UNREADABLE snapshot (surfaced as a marker), not silently "no data" - a
+    // corrupt profile must be visible in `ls` before `use` trips over it.
+    let unreadable = (None, None, Some("unreadable"));
     match tool {
         "claude-code" => {
-            let creds: Value = serde_json::from_slice(snap.part("credentials")?.expose()).ok()?;
-            let oauth: Value = serde_json::from_slice(snap.part("oauth_account")?.expose()).ok()?;
+            let (Some(cred_part), Some(oauth_part)) =
+                (snap.part("credentials"), snap.part("oauth_account"))
+            else {
+                return Some(unreadable);
+            };
+            let (Ok(creds), Ok(oauth)) = (
+                serde_json::from_slice::<Value>(cred_part.expose()),
+                serde_json::from_slice::<Value>(oauth_part.expose()),
+            ) else {
+                return Some(unreadable);
+            };
             let marker = match creds["claudeAiOauth"]["expiresAt"].as_i64() {
                 Some(ms) if ms < now_ms() => Some("expired"),
                 _ => None,
@@ -419,7 +528,12 @@ fn profile_detail(
             ))
         }
         "codex" => {
-            let auth: Value = serde_json::from_slice(snap.part("auth")?.expose()).ok()?;
+            let Some(auth_part) = snap.part("auth") else {
+                return Some(unreadable);
+            };
+            let Ok(auth) = serde_json::from_slice::<Value>(auth_part.expose()) else {
+                return Some(unreadable);
+            };
             let email = crate::adapters::codex::decode_email_from_id_token(
                 auth["tokens"]["id_token"].as_str(),
             );
@@ -469,6 +583,20 @@ pub(crate) fn active_by_tool(store: &Store, paths: &Paths) -> Vec<(&'static str,
                 .map(|name| (a.name(), name))
         })
         .collect()
+}
+
+/// Pad-or-truncate to `w` display chars; a longer value ends in one '…'.
+fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        let mut out = String::from(s);
+        out.extend(std::iter::repeat_n(' ', w - n));
+        out
+    } else {
+        let mut out: String = s.chars().take(w.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }
 
 /// The account column: email if known, else just the tier (never a stray
@@ -552,31 +680,44 @@ pub fn ls(paths: &Paths, json: bool) -> Result<i32> {
             }
         })
         .collect();
+    // Widths in CHARS (not bytes - non-ASCII names must not shear the table),
+    // and content longer than the cap is truncated with '…' so one long row
+    // cannot un-align every other. Full values stay available in `ls --json`.
     let name_w = rows
         .iter()
-        .map(|r| r.name.len())
+        .map(|r| r.name.chars().count())
         .max()
         .unwrap_or(4)
         .clamp(4, 24);
     let ident_w = rows
         .iter()
-        .map(|r| r.ident.len())
+        .map(|r| r.ident.chars().count())
         .max()
         .unwrap_or(0)
         .clamp(0, 40);
-    let mut saw_marker = false;
+    let mut saw_refreshable = false;
+    let mut saw_unreadable = false;
     for r in &rows {
         let mark = if r.active { "* " } else { "  " };
         let warn = r.warn.map(|m| format!("  ({m})")).unwrap_or_default();
-        saw_marker |= r.warn.is_some();
+        saw_unreadable |= r.warn == Some("unreadable");
+        saw_refreshable |= matches!(r.warn, Some("expired") | Some("stale"));
         println!(
-            "{mark}{:<name_w$} {:<ident_w$} [{}]{warn}",
-            r.name, r.ident, r.tools
+            "{mark}{} {} [{}]{warn}",
+            fit(&r.name, name_w),
+            fit(&r.ident, ident_w),
+            r.tools
         );
     }
-    if saw_marker {
+    if saw_refreshable {
         println!(
             "  (expired/stale: re-run `swapdex add --update <name>` while logged in to refresh)"
+        );
+    }
+    if saw_unreadable {
+        println!(
+            "  (unreadable: the saved snapshot is corrupt - log in to that account and \
+             re-save it with `swapdex add <name> --update`)"
         );
     }
     if active
@@ -598,11 +739,21 @@ pub fn status(paths: &Paths, json: bool) -> Result<i32> {
             .iter()
             .map(|adapter| {
                 let tool = adapter.name();
-                match adapter.identity(paths).ok().flatten() {
-                    None => serde_json::json!({"tool": tool, "logged_in": false}),
-                    Some(id) => serde_json::json!({
+                // Stable shape: every key present on every row, null when
+                // unknown, so `jq .[].email` never needs guards.
+                match adapter.identity(paths) {
+                    Err(_) => serde_json::json!({
+                        "tool": tool, "logged_in": false, "unreadable": true,
+                        "email": null, "tier": null, "profile": null, "expired": null,
+                    }),
+                    Ok(None) => serde_json::json!({
+                        "tool": tool, "logged_in": false, "unreadable": false,
+                        "email": null, "tier": null, "profile": null, "expired": null,
+                    }),
+                    Ok(Some(id)) => serde_json::json!({
                         "tool": tool,
                         "logged_in": true,
+                        "unreadable": false,
                         "email": id.email,
                         "tier": id.tier,
                         "profile": matched_profile_name(&store, tool, &id.account_id),
@@ -616,12 +767,16 @@ pub fn status(paths: &Paths, json: bool) -> Result<i32> {
     }
     for adapter in adapters::all() {
         let tool = adapter.name();
-        match adapter.identity(paths)? {
-            None => match macos_keychain_note(paths, tool) {
+        match adapter.identity(paths) {
+            Err(_) => println!(
+                "{tool}: login file unreadable - `swapdex use <profile>` can replace it \
+                 (or log in again in the tool)"
+            ),
+            Ok(None) => match macos_keychain_note(paths, tool) {
                 Some(note) => println!("{tool}: not manageable - {note}"),
                 None => println!("{tool}: not logged in"),
             },
-            Some(id) => {
+            Ok(Some(id)) => {
                 let name = matched_profile_name(&store, tool, &id.account_id);
                 let saved = match &name {
                     Some(n) => format!("profile '{n}'"),
@@ -681,6 +836,20 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
         return Ok(c);
     }
     let store = Store::open(paths)?;
+    // Take the switch lock like every other store mutation, and make the
+    // collision a first-class "already exists" (6) rather than a hard error -
+    // a script must be able to tell "pick another name" from "disk broke".
+    let _lock = match store.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+    };
+    if store.list().iter().any(|p| p.name == new) {
+        eprintln!("swapdex: a profile named '{new}' already exists");
+        return Ok(6);
+    }
     if store.rename(old, new)? {
         println!("renamed profile '{old}' -> '{new}'");
         Ok(0)
@@ -707,10 +876,12 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
 
     if tool == "claude-code" {
         if !command_exists("claude") {
-            println!("Claude Code isn't on your PATH. Install it, then:");
-            println!("  1) run `claude` and complete the login");
-            println!("  2) then:  swapdex add {name} --tool claude");
-            return Ok(0);
+            // stderr + exit 3, same as the codex path: `login x && ...` in a
+            // script must not proceed as if a login was saved.
+            eprintln!("swapdex: Claude Code isn't on your PATH. Install it, then:");
+            eprintln!("  1) run `claude` and complete the login");
+            eprintln!("  2) then:  swapdex add {name} --tool claude");
+            return Ok(3);
         }
         let claude = adapters::by_name("claude-code");
         let already = claude
@@ -780,20 +951,24 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
 }
 
 /// Ask a question and read a trimmed line; empty input yields `default`.
-fn prompt(question: &str, default: &str) -> String {
+/// Ask on stdout, read a line. `None` means the input stream ENDED (Ctrl-D or
+/// a closed pipe) - callers must stop asking, or the wizard would spin forever
+/// re-prompting into a stream that can never answer.
+fn prompt(question: &str, default: &str) -> Option<String> {
     use std::io::Write;
     print!("{question}");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return default.to_string();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => return None, // EOF or broken stream
+        Ok(_) => {}
     }
     let t = line.trim();
-    if t.is_empty() {
+    Some(if t.is_empty() {
         default.to_string()
     } else {
         t.to_string()
-    }
+    })
 }
 
 /// A default profile name from an email/display (its local part, sanitized).
@@ -821,7 +996,10 @@ fn pretty_tool(tool: &str) -> &str {
 
 /// A yes/no prompt; empty input takes `default_yes`.
 fn yes_no(question: &str, default_yes: bool) -> bool {
-    let a = prompt(question, if default_yes { "y" } else { "n" });
+    // EOF answers "no": never take an irreversible step on a dead stream.
+    let Some(a) = prompt(question, if default_yes { "y" } else { "n" }) else {
+        return false;
+    };
     matches!(a.to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
@@ -829,7 +1007,7 @@ fn yes_no(question: &str, default_yes: bool) -> bool {
 /// An existing name asks whether to replace it. Returns None on skip.
 fn ask_name(store: &Store, question: &str, default: &str) -> Option<String> {
     loop {
-        let ans = prompt(question, default);
+        let ans = prompt(question, default)?; // EOF -> skip, never loop
         if ans.eq_ignore_ascii_case("skip") || ans.is_empty() {
             return None;
         }
@@ -971,6 +1149,13 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
     let rows = crate::usage::tool_usage(paths);
     if json {
@@ -1012,7 +1197,9 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
 pub fn sessions(paths: &Paths) -> Result<i32> {
     match crate::session_link::sessions_by_account(paths) {
         None => {
-            println!("session data unavailable (install sessionwiki for `sessions --by-account`)");
+            println!(
+                "session data unavailable (install sessionwiki to see sessions grouped by account)"
+            );
         }
         Some(counts) if counts.is_empty() => {
             println!("no sessions found");

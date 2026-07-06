@@ -37,9 +37,10 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 
 ## Tools
 
-`--tool` accepts `claude` (Claude Code) or `codex`. With no `--tool`, a command
-applies to whichever tools are relevant (both when present). The tool names in
-output are `claude-code` and `codex`.
+`--tool` accepts `claude` (Claude Code; alias `claude-code`), `codex`, or
+`both`. With no `--tool` (same as `both`), a command applies to whichever tools
+are relevant (both when present). The tool names in output are `claude-code`
+and `codex`.
 
 ## Environment
 
@@ -52,9 +53,11 @@ output are `claude-code` and `codex`.
 
 ## Where things live
 
-- Store: `~/.local/share/swapdex/` (mode 0700) - named profile snapshots, a
-  switch `timeline.jsonl`, an `active.json` name hint, and bounded backups. It
-  holds plaintext refresh tokens; protect it like `~/.ssh` and do not sync it.
+- Store: `~/.local/share/swapdex/` on Linux, `~/Library/Application
+  Support/swapdex/` on macOS (mode 0700) - named profile snapshots, a switch
+  `timeline.jsonl`, and the last 2 backups per tool (taken by `use`/`restore`,
+  read back by `restore`). It holds plaintext refresh tokens; protect it like
+  `~/.ssh` and do not sync it.
 - Claude Code login: `~/.claude/.credentials.json` plus the `oauthAccount` block
   inside `~/.claude.json` (only that block is swapped).
 - Codex login: `~/.codex/auth.json`.

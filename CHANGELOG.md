@@ -4,6 +4,65 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.1.7] - 2026-07-06
+
+Findings from a two-track review (adversarial code audit + a new-user
+walkthrough), all fixed and regression-tested.
+
+### Added
+- `swapdex restore [--tool ...] [--dry-run]`: put back the login that was live
+  before the last switch. `use` has always backed up the outgoing login (even
+  one never saved as a profile), but there was no command to bring it back - a
+  bad switch meant hand-copying files. `restore` backs up the current login
+  first, so running it again toggles between the two. A bare `restore` scopes
+  itself to the tool(s) the last switch touched, and it skips a torn backup in
+  favor of an older intact one.
+- `use` warns when the OUTGOING login is not saved as any profile (only the
+  last 2 backups remember it), and when a live session of the switched tool is
+  running.
+
+### Fixed
+- `usage` was wrong in both directions: Codex was undercounted 10-100x (it
+  read the per-request `last_token_usage` as if it were cumulative; now it
+  windows the deltas of the monotonic `total_token_usage` by event time) and
+  Claude was overcounted ~2.5x (one line per content block repeats the same
+  `message.id`, and resumed sessions copy messages into new files; now deduped
+  by message id). Also ~9x faster (streaming + pre-filter instead of
+  whole-file reads; 12.2s -> 1.3s on a 927MB transcript set).
+- A corrupt live credential file no longer blocks recovery: `use <profile>`
+  warns and replaces it (previously it aborted - the one command that could
+  fix the file refused to run), `status` reports "login file unreadable" per
+  tool instead of dying mid-output, and `restore` tolerates it too.
+- macOS: `use`/`add`/`restore` on a Keychain-mode Claude Code install now
+  refuse with an explanation instead of half-switching (writing a credentials
+  file the CLI ignores while flipping the reported identity). `status` and
+  `add` explain the Keychain situation. Codex switching works on macOS.
+- `rename` to an existing name exits 6 ("already exists", like `add`) instead
+  of a generic hard error, and takes the store lock like every other mutation.
+- `login <name> --tool claude` with no CLI on PATH exits 3 on stderr (was:
+  exit 0 on stdout - scripts saw success where nothing was saved).
+- A corrupt saved snapshot is now visible as `(unreadable)` in `ls` with a
+  remedy footer, and a failing `use` names the profile and the fix.
+- Claude apply: if the rollback after a failed config write ALSO fails (e.g.
+  disk full), the error now says so instead of claiming a clean rollback.
+- `restore` attributes its timeline event to the restored profile's name, so
+  `sessions` no longer blames an account literally named "(backup)".
+- setup: Ctrl-D (EOF) at a prompt exits cleanly instead of spinning forever.
+- Timestamps with fractional seconds AND a numeric timezone offset
+  ("...00.123+09:00") now parse the offset instead of ignoring it.
+
+### Changed
+- `use` prints "{tool}: profile 'x' has no {tool} login - left unchanged" when
+  a logged-in tool is skipped, instead of silently half-switching; `--dry-run`
+  shows the target account's email.
+- `ls` aligns by characters (not bytes) and truncates over-long names/emails
+  with an ellipsis so one long row cannot shear the table (full values in
+  `--json`).
+- `status --json` has a stable shape: every key present on every row (null
+  when unknown) plus an `unreadable` flag.
+- Parent directories swapdex creates for credential files (e.g. a fresh
+  `~/.codex`) are 0700, not umask-default.
+
 ## [0.1.6] - 2026-07-06
 
 ### Added

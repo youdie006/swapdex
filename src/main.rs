@@ -26,7 +26,9 @@ enum Cmd {
     },
     /// Switch the active login to a saved profile
     Use {
+        /// The saved profile to switch to (see `swapdex ls`)
         name: String,
+        /// Limit the switch to one tool (default: every tool the profile has)
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
         /// Show what would change without writing

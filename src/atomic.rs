@@ -58,7 +58,12 @@ pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
 pub fn write_secret(dest: &Path, bytes: &[u8]) -> Result<()> {
     refuse_unsafe_path(dest)?;
     let dir = dest.parent().context("destination has no parent dir")?;
-    std::fs::create_dir_all(dir).ok();
+    if !dir.exists() {
+        // A parent we create ourselves (e.g. a fresh ~/.codex) will hold
+        // credential files - 0700 it, not the umask-default 0755.
+        std::fs::create_dir_all(dir).ok();
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
     refuse_insecure_parent(dir)?;
     let tmp = dir.join(format!(
         ".{}.swapdex.tmp",

@@ -6,6 +6,19 @@ use serde_json::Value;
 
 pub struct Claude;
 
+/// Is this a macOS Keychain-mode install? True when there is no credentials
+/// FILE but `.claude.json` proves a login exists (its oauthAccount block).
+/// `cfg!` (not `#[cfg]`) keeps this type-checked on every platform.
+fn keychain_mode(paths: &Paths) -> bool {
+    cfg!(target_os = "macos")
+        && !paths.claude_credentials().exists()
+        && std::fs::read(paths.claude_config_json())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .map(|v| v["oauthAccount"].is_object())
+            .unwrap_or(false)
+}
+
 impl AuthTool for Claude {
     fn name(&self) -> &'static str {
         "claude-code"
@@ -18,6 +31,13 @@ impl AuthTool for Claude {
     fn capture(&self, paths: &Paths) -> Result<Snapshot> {
         let cred = paths.claude_credentials();
         if !cred.exists() {
+            if keychain_mode(paths) {
+                bail!(
+                    "Claude Code on macOS keeps its login in the Keychain, which swapdex \
+                     cannot snapshot yet (Codex switching works; Claude-on-macOS is on \
+                     the roadmap)"
+                );
+            }
             bail!("not logged in to Claude Code (no {})", cred.display());
         }
         let cred_bytes = crate::atomic::read_regular(&cred)?;
@@ -45,6 +65,17 @@ impl AuthTool for Claude {
     }
 
     fn apply(&self, paths: &Paths, snap: &Snapshot) -> Result<()> {
+        // On a Keychain-mode macOS install, writing .credentials.json would be
+        // ignored by Claude Code while the oauthAccount swap would still change
+        // what swapdex REPORTS - a half-switch that lies about the live login.
+        // Refuse up front instead.
+        if keychain_mode(paths) {
+            bail!(
+                "Claude Code on macOS keeps its login in the Keychain, which swapdex \
+                 cannot write yet - refusing to switch claude-code (Codex switching \
+                 works; Claude-on-macOS is on the roadmap)"
+            );
+        }
         let cred = snap
             .part("credentials")
             .context("snapshot missing credentials")?;
@@ -85,10 +116,21 @@ impl AuthTool for Claude {
         };
         crate::atomic::write_secret(&cred_path, cred.expose())?;
         if let Err(e) = crate::atomic::write_secret(&cfg_path, &new_cfg) {
-            if let Some(prev) = prev_creds {
-                let _ = crate::atomic::write_secret(&cred_path, &prev);
-            }
-            return Err(e.context("apply aborted; credentials rolled back"));
+            // Report what the rollback actually did - if it also failed (e.g.
+            // disk full broke both writes), saying "rolled back" would be a lie
+            // about a half-swapped login.
+            let msg = match prev_creds {
+                Some(prev) => match crate::atomic::write_secret(&cred_path, &prev) {
+                    Ok(()) => "apply aborted; credentials rolled back",
+                    Err(_) => {
+                        "apply aborted and the rollback FAILED - the login may be \
+                         half-swapped; run `swapdex restore --tool claude` once the \
+                         underlying problem (e.g. disk space) is fixed"
+                    }
+                },
+                None => "apply aborted; no previous credentials existed",
+            };
+            return Err(e.context(msg));
         }
         Ok(())
     }

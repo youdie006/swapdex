@@ -213,35 +213,59 @@ impl Store {
             })
             .collect();
         stamps.sort_by_key(|(s, _)| *s);
-        let Some((stamp, d)) = stamps.pop() else {
-            return Ok(None);
-        };
-        let mut blobs = Vec::new();
-        for e in fs::read_dir(&d)?.flatten() {
-            let part = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_file() && !part.starts_with('.') {
-                let bytes = crate::atomic::read_regular(&e.path())?;
-                blobs.push((part, Secret::new(bytes)));
+        // Newest first, but skip a torn candidate (a crash between mkdir and
+        // the blob writes leaves an empty/partial dir) - an older intact backup
+        // is better than "no backup".
+        while let Some((stamp, d)) = stamps.pop() {
+            let mut blobs = Vec::new();
+            for e in fs::read_dir(&d)?.flatten() {
+                let part = e.file_name().to_string_lossy().into_owned();
+                if e.path().is_file() && !part.starts_with('.') {
+                    let bytes = crate::atomic::read_regular(&e.path())?;
+                    blobs.push((part, Secret::new(bytes)));
+                }
             }
+            let complete = match tool_static {
+                // A claude backup needs both parts or apply() will refuse it.
+                "claude-code" => {
+                    blobs.iter().any(|(n, _)| n == "credentials")
+                        && blobs.iter().any(|(n, _)| n == "oauth_account")
+                }
+                _ => !blobs.is_empty(),
+            };
+            if !complete {
+                continue;
+            }
+            return Ok(Some((
+                stamp,
+                Snapshot {
+                    tool: tool_static,
+                    blobs,
+                },
+            )));
         }
-        if blobs.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((
-            stamp,
-            Snapshot {
-                tool: tool_static,
-                blobs,
-            },
-        )))
+        Ok(None)
     }
 
     pub fn append_timeline(&self, tool: &str, account: &str, action: &str) -> Result<()> {
-        let path = self.dir.join("timeline.jsonl");
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        self.append_timeline_at(tool, account, action, ts)
+    }
+
+    /// Append with an explicit timestamp so every tool touched by ONE `use` /
+    /// `restore` invocation shares the same ts - that shared ts is what lets a
+    /// bare `restore` scope itself to exactly the last switch.
+    pub fn append_timeline_at(
+        &self,
+        tool: &str,
+        account: &str,
+        action: &str,
+        ts: u64,
+    ) -> Result<()> {
+        let path = self.dir.join("timeline.jsonl");
         let line =
             serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action});
         let mut buf = if path.exists() {

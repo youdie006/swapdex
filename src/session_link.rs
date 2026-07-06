@@ -139,8 +139,13 @@ pub(crate) fn rfc3339_to_secs(s: &str) -> Option<i64> {
     let days = era * 146097 + doe - 719468;
     let naive = days * 86400 + h * 3600 + mi * 60 + se;
     // Normalize a trailing +HH:MM / -HH:MM offset to true UTC (UTC = local -
-    // offset). A trailing "Z" or nothing is already UTC.
-    let off = &s[19..];
+    // offset). A trailing "Z" or nothing is already UTC. Skip past fractional
+    // seconds first ("...:00.123+09:00") or the offset would be missed.
+    let mut off = &s[19..];
+    if let Some(rest) = off.strip_prefix('.') {
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        off = &rest[digits..];
+    }
     let offset_secs = if let Some(rest) = off.strip_prefix('+').or_else(|| off.strip_prefix('-')) {
         let sign = if off.starts_with('-') { -1 } else { 1 };
         let oh: i64 = rest.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -190,5 +195,14 @@ mod tests {
         let b = rfc3339_to_secs("2026-06-10T10:00:01+00:00").unwrap();
         assert_eq!(b - a, 1);
         assert!(rfc3339_to_secs("2027-01-01T00:00:00Z").unwrap() > a);
+    }
+
+    #[test]
+    fn rfc3339_offset_applies_after_fractional_seconds() {
+        // A +09:00 offset behind fractional seconds must still normalize to
+        // UTC (it used to be silently ignored).
+        let utc = rfc3339_to_secs("2026-06-10T01:00:00Z").unwrap();
+        let kst = rfc3339_to_secs("2026-06-10T10:00:00.123+09:00").unwrap();
+        assert_eq!(kst, utc);
     }
 }

@@ -128,9 +128,11 @@ servers, and settings in that file are never touched.
 - Writes are atomic (temp file created `0600`, then renamed) so an interrupted
   switch can never leave a half-written credential that bricks the CLI.
 - Symlinked credential paths and running as root are refused.
-- `use` backs up the current login and verifies the backup before overwriting,
-  so a switch can never lose an un-saved login -- and `swapdex restore` brings
-  that backup back in one command if the switch was a mistake.
+- `use` writes a backup of the current login (fsynced, or the switch aborts)
+  before overwriting anything, and `swapdex restore` brings it back in one
+  command if the switch was a mistake. The store keeps the last 2 backups per
+  tool, and `use` warns when the outgoing login is not saved as a profile --
+  so save accounts you care about with `add`.
 - No token, refresh token, or home path is ever printed.
 
 **The store holds plaintext refresh tokens.** Protect `~/.local/share/swapdex`

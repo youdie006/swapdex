@@ -541,3 +541,146 @@ fn use_notes_a_tool_left_unchanged() {
         "must note claude-code was left unchanged: {o}{e}"
     );
 }
+
+fn claude_live_uuid(root: &Path) -> String {
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join(".claude.json")).unwrap()).unwrap();
+    v["oauthAccount"]["accountUuid"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+// Bare `restore` must undo the LAST SWITCH only - not rewind every tool to its
+// newest backup. A codex-only switch followed by a bare restore must leave
+// claude-code untouched even though claude has an (older) backup.
+#[test]
+fn bare_restore_scopes_to_the_last_switch() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-C1", "c1@x.com");
+    seed_codex(root.path(), "acct-X");
+    run(root.path(), &["add", "p1"]); // saves both tools
+
+    seed_claude(root.path(), "uuid-C2", "c2@x.com"); // live claude now C2
+    seed_codex(root.path(), "acct-Y"); // live codex now Y
+    let (_o, e, c) = run(root.path(), &["use", "p1"]); // both switch; backups: claude=C2, codex=Y
+    assert_eq!(c, 0, "use p1 failed: {e}");
+    std::thread::sleep(std::time::Duration::from_millis(1100)); // separate timeline seconds
+
+    seed_codex(root.path(), "acct-Z"); // fresh codex login appears
+    let (_o, e, c) = run(root.path(), &["use", "p1", "--tool", "codex"]); // codex-only switch; backup=Z
+    assert_eq!(c, 0, "codex-only use failed: {e}");
+
+    let (o, e, c) = run(root.path(), &["restore"]);
+    assert_eq!(c, 0, "bare restore failed: {e}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["tokens"]["account_id"], "acct-Z", "codex undone: {o}");
+    assert_eq!(
+        claude_live_uuid(root.path()),
+        "uuid-C1",
+        "claude-code was NOT part of the last switch and must stay: {o}{e}"
+    );
+}
+
+// `use` must warn when the OUTGOING live login is not saved as any profile -
+// only the last 2 backups will remember it.
+#[test]
+fn use_warns_when_outgoing_login_is_unsaved() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-PRECIOUS"); // logged in, never saved
+    let (o, e, c) = run(root.path(), &["use", "work", "--tool", "codex"]);
+    assert_eq!(c, 0, "use failed: {e}");
+    assert!(
+        (o + &e).contains("not saved"),
+        "must warn the outgoing login is unsaved"
+    );
+}
+
+#[test]
+fn rename_collision_exits_6() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    run(
+        root.path(),
+        &["add", "personal", "--tool", "codex", "--update"],
+    );
+    let (_o, e, c) = run(root.path(), &["rename", "work", "personal"]);
+    assert_eq!(
+        c, 6,
+        "collision is 'already exists' (6), not a hard error: {e}"
+    );
+}
+
+#[test]
+fn login_claude_missing_cli_exits_3() {
+    let root = tempfile::tempdir().unwrap();
+    let out = Command::new(bin())
+        .args(["login", "x", "--tool", "claude"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", "/nonexistent")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        3,
+        "missing claude CLI must exit 3 like codex"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("PATH"),
+        "guidance goes to stderr"
+    );
+}
+
+// A corrupt live credential file must not block the one command that can fix
+// it: `use <good-profile>` should warn, skip the backup, and apply.
+#[test]
+fn use_replaces_a_corrupt_live_login() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    std::fs::write(root.path().join(".codex/auth.json"), b"NOT JSON{{{").unwrap();
+
+    let (_o, e, c) = run(root.path(), &["use", "work", "--tool", "codex"]);
+    assert_eq!(c, 0, "use must recover from a corrupt live file: {e}");
+    assert!(
+        e.contains("could not be read"),
+        "warns about the skipped backup: {e}"
+    );
+    let live: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        live["tokens"]["account_id"], "acct-A",
+        "good snapshot applied"
+    );
+}
+
+// status must report an unreadable login file per tool instead of dying
+// mid-output, and status --json must mark it rather than claim logged_in:false.
+#[test]
+fn status_reports_unreadable_login_file() {
+    let root = tempfile::tempdir().unwrap();
+    let d = root.path().join(".codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("auth.json"), b"NOT JSON{{{").unwrap();
+
+    let (o, e, c) = run(root.path(), &["status"]);
+    assert_eq!(c, 0, "status must not abort: {e}");
+    assert!(o.contains("unreadable"), "says the file is unreadable: {o}");
+
+    let (o, _e, c) = run(root.path(), &["status", "--json"]);
+    assert_eq!(c, 0);
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let codex = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["tool"] == "codex")
+        .unwrap();
+    assert_eq!(codex["unreadable"], true, "json marks unreadable: {o}");
+}
