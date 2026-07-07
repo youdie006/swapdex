@@ -4,6 +4,52 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.13.0] - 2026-07-08
+
+Four new audit lenses (upgrade compatibility, environment torture, parser
+fuzzing, docs-vs-behavior contracts) plus real-machine profiling.
+
+### Performance
+- **`usage` on a heavy machine: ~20s -> ~0.5s.** A heavy week holds ~1GB of
+  transcripts inside the 7-day window; usage reparsed all of it every run.
+  Files are now parsed once into a per-file events cache (keyed by
+  mtime+size, pruned to the window, atomic 0600) and cache misses parse
+  across up to 8 threads. Cached and uncached outputs are byte-identical.
+
+### Fixed
+- **A future-stamped backup no longer hijacks `restore`.** One switch under
+  clock skew (NTP jump, VM resume) wrote a backup stamp that shadowed every
+  real backup forever - restore could silently no-op or restore a stale
+  THIRD account, and the ghost survived pruning. Stamps more than an hour
+  in the future now sort as the oldest everywhere.
+- An unwritable store says so ("store is not writable: ...") instead of the
+  unwinnable "another swapdex is mid-switch; try again"; doctor-adjacent
+  lock errors are distinguished from real contention.
+- A legacy all-whitespace profile (0.2.x allowed creating them) is
+  manageable again - the whitespace rule moved to creation time, like the
+  `-` reservation, so `rm`/`rename`/`use` still work on it after upgrade.
+- Two separate invocations inside one wall-clock second no longer collide
+  in `restore`'s last-switch scoping: timeline events carry a
+  per-invocation discriminator (legacy events fall back to ts grouping).
+- `TERM=dumb` (or empty) on a real terminal gets the plain numbered prompt
+  instead of raw ANSI escapes.
+- The MCP server's oversized-line resync is constant-memory - a 200MB
+  no-newline request used to allocate 200MB just to skip it.
+- Seven doc/string drifts from the contract audit (76 contracts verified
+  OK): the ui pipe-fallback claim, exit-code rows 2 and 3, the backup
+  guarantee's unreadable-live exception, the ui --help text, the two-tool
+  top help/banner, and the status sample's missing tier.
+
+### Verified (no changes needed)
+- Upgrade compatibility is fully clean: stores created by 0.2.1 / 0.5.0 /
+  0.9.2 read perfectly (and 0.12-created stores read back on old binaries);
+  timeline compaction stays bounded through 2,200 events; backups stay at
+  2 per tool.
+- Fuzzing: 890 mutants / ~3,000 invocations across all four credential
+  parsers, store snapshots, timeline, native session files, MCP JSON-RPC,
+  and every --json output - zero panics, zero hangs, zero secret leaks,
+  zero wrong-account results.
+
 ## [0.12.1] - 2026-07-08
 
 A delta audit on the bug-sweep itself (fixes breed bugs) plus the last
