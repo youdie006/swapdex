@@ -4,6 +4,47 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.12.0] - 2026-07-07
+
+The bug-sweep release: three independent adversarial audits (a fresh-user
+walkthrough of every command, a logic review of the newest code, and the
+add-a-second-account journey run for each tool) plus the unified login flow.
+24 defects fixed, each with a regression test.
+
+### The big ones
+- **Adding a second account now truly works for ALL four tools.** The
+  save-current / sign-out / fresh-sign-in / capture flow existed only for
+  Claude; gemini and antigravity dead-ended in guidance whose instruction
+  saved the WRONG account under the new name, and codex's "already logged
+  in" no-op did the same silently. One tool-generic flow now, with
+  automatic restore on any failure - including a shell Ctrl+C mid-sign-in,
+  which used to leave you signed out of everything.
+- **A corrupt live ~/.claude.json is diagnosed as such** - previously every
+  switch blamed the profile snapshot, both suggested remedies failed, and
+  doctor said everything was ok.
+- **Multi-tool switches no longer abort on the first failing tool** - the
+  others proceed and a summary names what failed (exit 1).
+- **Enter-through setup saves all four tools** - the "replace it?" prompt
+  silently skipped every tool after the first.
+- **The ui no longer panics after deleting the last profile.**
+
+### Also fixed
+- login guards repointing an existing profile to a different account, and
+  rejects the reserved name `-`; non-TTY login-while-logged-in exits 3.
+- rename rewrites timeline attribution (usage/sessions no longer report a
+  dead profile name forever).
+- Multi-tool ls/ui prefer Claude's real plan tier over antigravity's
+  auth_method; Antigravity saves print an honest "cannot confirm WHICH
+  Google account" note (no identity exists on disk).
+- doctor checks live credential file permissions for all four tools, its
+  backups/tools lines cover all four, and it diagnoses corrupt
+  .claude.json by name.
+- A `use` typo prints one line; ls hides crash-debris dirs and unknown
+  tool subdirs; whitespace-only names are rejected; the invalid-name
+  message states the real rules; fresh-install apply failures clean up
+  the half-written file; bare `~` expands in folder prompts; native
+  session titles no longer drop real prompts starting with `<`.
+
 ## [0.11.0] - 2026-07-07
 
 Deep account dig, round 2: the rotation invariant ("a profile always holds
