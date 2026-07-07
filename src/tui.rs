@@ -10,14 +10,78 @@
 //! through [`TuiCtx`].
 
 use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use std::path::PathBuf;
 
 const VIOLET: Color = Color::Rgb(157, 107, 255); // the brand accent (#9d6bff)
+const DEXGRAY: Color = Color::Rgb(150, 150, 160); // the dimmed "dex" half
+const MUTED: Color = Color::Rgb(139, 138, 149); // subtitles / hints
+
+/// Same rounded panel, but with an owned (dynamic) title.
+fn list_block_titled(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(96, 94, 116)))
+        .title(Span::styled(
+            title.to_string(),
+            Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// A rounded, violet-titled panel border - the shared frame for every list.
+fn list_block(title: &'static str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(96, 94, 116)))
+        .title(Span::styled(
+            title,
+            Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// The two-tone wordmark as ratatui lines (violet SWAP + dim dex), shared with
+/// the CLI banner so the TUI header IS the brand mark. Empty when the terminal
+/// is too short to spare the rows.
+fn logo_lines() -> Vec<Line<'static>> {
+    crate::banner::SWAP
+        .iter()
+        .zip(crate::banner::DEX.iter())
+        .map(|(sw, dx)| {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    *sw,
+                    Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(*dx, Style::default().fg(DEXGRAY)),
+            ])
+        })
+        .collect()
+}
+
+/// A key-hint footer where the keys are violet and the labels muted, so the
+/// eye lands on the keys (lazygit/gitui idiom).
+fn key_hints(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (key, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", Style::default().fg(MUTED)));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(*label, Style::default().fg(MUTED)));
+    }
+    Line::from(spans)
+}
 
 pub struct Row {
     pub name: String,
@@ -41,6 +105,17 @@ pub trait TuiCtx {
     fn delete(&mut self, name: &str) -> String;
     /// (label, session entries) for the just-switched profile.
     fn sessions(&mut self, name: &str) -> (String, Vec<SessionEntry>);
+    /// Rename a profile (subprocess). Returns (ok, message).
+    fn rename(&mut self, old: &str, new: &str) -> (bool, String);
+    /// Save the accounts you're currently logged into as a new profile
+    /// (subprocess `add <name>` - captures live logins, no sign-out). This is
+    /// the onboarding action: a fresh machine is usually already logged in.
+    fn save_current(&mut self, name: &str) -> (bool, String);
+    /// Run `doctor` and return its output lines for a read-only panel.
+    fn doctor(&mut self) -> Vec<String>;
+    /// Display names of the tools you're logged into RIGHT NOW (for the
+    /// empty-state onboarding: "save these as a profile").
+    fn live_tools(&mut self) -> Vec<String>;
 }
 
 /// What finally leaves the UI. Executed by the caller AFTER the terminal is
@@ -65,6 +140,12 @@ const NEW_CONV: [(&str, &str); 4] = [
     ("open a NEW Antigravity conversation", "antigravity"),
 ];
 
+/// What a text-input screen is collecting.
+enum InputKind {
+    Rename(String), // rename this existing profile
+    SaveCurrent,    // save the current live logins as a new profile
+}
+
 enum Screen {
     Main,
     Open {
@@ -78,12 +159,32 @@ enum Screen {
         back: (String, Vec<SessionEntry>),
     },
     ToolPick,
+    /// A single-line text prompt (rename / save-current / new-account name).
+    Input {
+        kind: InputKind,
+        value: String,
+    },
+    /// Read-only `doctor` output. `pending` = the (slow, tool-probing) check
+    /// has not run yet; we draw a "checking..." frame first so the UI never
+    /// looks frozen.
+    Doctor {
+        lines: Vec<String>,
+        scroll: u16,
+        pending: bool,
+    },
 }
 
 /// The persistent loop. Enters the alternate screen once and stays there
 /// until an [`Outcome`] leaves it.
 pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     let mut terminal = ratatui::try_init()?;
+    // Mouse: scroll to move, click to select/switch - the "manage by clicking"
+    // the picker was asked for. Best-effort; key control is unaffected if the
+    // terminal refuses.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableMouseCapture
+    );
     let mut rows = ctx.rows();
     let mut state = ListState::default();
     state.select(Some(rows.iter().position(|r| r.active).unwrap_or(0)));
@@ -91,6 +192,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     let mut status = String::new();
     let mut confirm_delete: Option<usize> = None;
     let mut screen = Screen::Main;
+    // Cached only while the list is empty (onboarding); cheap to recompute.
+    let mut onboard_live: Vec<String> = if rows.is_empty() {
+        ctx.live_tools()
+    } else {
+        Vec::new()
+    };
+    // The list-body Rect from the last draw, so a mouse click can map its row
+    // to a selection index.
+    let mut main_area = Rect::default();
 
     let outcome = 'ui: loop {
         terminal.draw(|f| {
@@ -100,73 +210,150 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 Constraint::Length(1),
             ])
             .areas(f.area());
+            main_area = main;
             match &screen {
                 Screen::Main => {
+                    // A tall terminal gets the full wordmark header; a short
+                    // one drops it so the list keeps its room.
+                    let show_logo = main.height >= 14;
+                    let head_h = if show_logo { 8 } else { 0 };
+                    let [header, body] =
+                        Layout::vertical([Constraint::Length(head_h), Constraint::Min(3)])
+                            .areas(main);
+                    if show_logo {
+                        let mut lines = logo_lines();
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "  Claude Code \u{b7} Codex \u{b7} Gemini \u{b7} Antigravity - one command, all local",
+                            Style::default().fg(MUTED),
+                        )));
+                        f.render_widget(Paragraph::new(lines), header);
+                    }
+
                     let items: Vec<ListItem> = rows
                         .iter()
                         .map(|r| {
-                            let marker = if r.active { "* " } else { "  " };
+                            // Filled dot = the active profile, hollow = the
+                            // rest - the eye finds the live account fast.
+                            let (glyph, gstyle) = if r.active {
+                                ("\u{25cf} ", Style::default().fg(VIOLET))
+                            } else {
+                                ("\u{25cb} ", Style::default().fg(Color::DarkGray))
+                            };
                             let name_style = if r.active {
                                 Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)
                             } else {
                                 Style::default().add_modifier(Modifier::BOLD)
                             };
-                            let warn =
-                                r.warn.map(|w| format!("  ({w})")).unwrap_or_default();
+                            let mut top = vec![
+                                Span::styled(glyph, gstyle),
+                                Span::styled(r.name.clone(), name_style),
+                                Span::raw("  "),
+                                Span::styled(r.ident.clone(), Style::default().fg(DEXGRAY)),
+                            ];
+                            if let Some(w) = r.warn {
+                                top.push(Span::styled(
+                                    format!("  ({w})"),
+                                    Style::default().fg(Color::Rgb(200, 150, 90)),
+                                ));
+                            }
                             ListItem::new(vec![
-                                Line::from(vec![
-                                    Span::raw(marker),
-                                    Span::styled(r.name.clone(), name_style),
-                                    Span::raw("  "),
-                                    Span::raw(r.ident.clone()),
-                                ]),
+                                Line::from(top),
                                 Line::from(Span::styled(
-                                    format!("    {}{warn}", r.tools),
+                                    format!("    {}", r.tools),
                                     Style::default().fg(Color::DarkGray),
                                 )),
+                                Line::from(""),
                             ])
                         })
                         .collect();
                     if rows.is_empty() {
-                        // Deleting the last profile lands here - say what to
-                        // do instead of showing an empty box.
+                        // Onboarding. A fresh machine is usually ALREADY logged
+                        // into some tools - the fastest first step is to save
+                        // those, so lead with it when they exist.
+                        let mut lines = vec![
+                            Line::from(""),
+                            Line::from(Span::styled(
+                                "  Welcome to swapdex.",
+                                Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                            )),
+                            Line::from(""),
+                        ];
+                        if onboard_live.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                "  You're not logged into any tool yet. Sign in to Claude Code,",
+                                Style::default().fg(MUTED),
+                            )));
+                            lines.push(Line::from(Span::styled(
+                                "  Codex, Gemini, or Antigravity first, then come back.",
+                                Style::default().fg(MUTED),
+                            )));
+                            lines.push(Line::from(""));
+                            lines.push(key_hints(&[
+                                ("a", "log in to a new account"),
+                                ("q", "quit"),
+                            ]));
+                        } else {
+                            lines.push(Line::from(vec![
+                                Span::styled("  You're logged into ", Style::default().fg(MUTED)),
+                                Span::styled(
+                                    onboard_live.join(", "),
+                                    Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(".", Style::default().fg(MUTED)),
+                            ]));
+                            lines.push(Line::from(""));
+                            lines.push(key_hints(&[
+                                ("s", "save these as your first profile"),
+                                ("a", "add a different account"),
+                                ("q", "quit"),
+                            ]));
+                        }
                         f.render_widget(
-                            Paragraph::new("\n  No saved profiles.\n\n  a - add an account\n  q - quit")
-                                .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                                    " swapdex ",
-                                    Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
-                                ))),
-                            main,
+                            Paragraph::new(lines).block(list_block(" welcome ")),
+                            body,
                         );
                     } else {
                         let list = List::new(items)
-                            .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                                " swapdex ",
-                                Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
-                            )))
-                            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-                            .highlight_symbol("> ");
-                        f.render_stateful_widget(list, main, &mut state);
+                            .block(list_block(" accounts "))
+                            .highlight_style(
+                                Style::default()
+                                    .bg(Color::Rgb(50, 47, 68))
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                            .highlight_symbol("\u{2503} ");
+                        f.render_stateful_widget(list, body, &mut state);
                     }
-                    let foot_text = if let Some(i) = confirm_delete {
-                        format!(
-                            "delete saved profile '{}'? the live login stays. y/N",
-                            rows[i].name
-                        )
+                    let foot_line = if let Some(i) = confirm_delete {
+                        Line::from(Span::styled(
+                            format!(
+                                "  delete saved profile '{}'? the live login stays.  y / N",
+                                rows[i].name
+                            ),
+                            Style::default().fg(Color::Rgb(200, 150, 90)),
+                        ))
                     } else {
-                        status.clone()
+                        Line::from(Span::styled(
+                            format!("  {}", status),
+                            Style::default().fg(MUTED),
+                        ))
                     };
-                    f.render_widget(
-                        Paragraph::new(foot_text).style(Style::default().fg(Color::DarkGray)),
-                        foot,
-                    );
-                    f.render_widget(
-                        Paragraph::new(
-                            "enter switch   o open conversation   a add account   r restore   d delete   q quit",
-                        )
-                        .style(Style::default().fg(Color::DarkGray)),
-                        help,
-                    );
+                    f.render_widget(Paragraph::new(foot_line), foot);
+                    let hints: &[(&str, &str)] = if rows.is_empty() {
+                        &[("?", "health"), ("q", "quit")]
+                    } else {
+                        &[
+                            ("\u{21b5}", "switch"),
+                            ("o", "open"),
+                            ("a", "add"),
+                            ("n", "rename"),
+                            ("r", "restore"),
+                            ("d", "delete"),
+                            ("?", "health"),
+                            ("q", "quit"),
+                        ]
+                    };
+                    f.render_widget(Paragraph::new(key_hints(hints)), help);
                 }
                 Screen::Open { label, entries } => {
                     let mut items: Vec<ListItem> = entries
@@ -180,21 +367,23 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         ))));
                     }
                     let list = List::new(items)
-                        .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                            format!(" {label} "),
-                            Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
-                        )))
-                        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-                        .highlight_symbol("> ");
+                        .block(list_block_titled(&format!(" {label} ")))
+                        .highlight_style(
+                            Style::default()
+                                .bg(Color::Rgb(50, 47, 68))
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .highlight_symbol("\u{2503} ");
                     f.render_stateful_widget(list, main, &mut open_state);
                     f.render_widget(
-                        Paragraph::new(status.clone())
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Paragraph::new(Line::from(Span::styled(
+                            format!("  {status}"),
+                            Style::default().fg(MUTED),
+                        ))),
                         foot,
                     );
                     f.render_widget(
-                        Paragraph::new("enter open   esc back")
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Paragraph::new(key_hints(&[("\u{21b5}", "open"), ("esc", "back")])),
                         help,
                     );
                 }
@@ -205,17 +394,36 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         .map(|(l, _)| *l)
                         .unwrap_or("open");
                     f.render_widget(
-                        Paragraph::new(format!("{name}\n\nfolder [current dir]: {input}_"))
-                            .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                                " which folder? ",
-                                Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
-                            ))),
+                        Paragraph::new(vec![
+                            Line::from(""),
+                            Line::from(Span::styled(
+                                format!("  {name}"),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            )),
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled("  folder ", Style::default().fg(MUTED)),
+                                Span::styled(
+                                    "[current dir]".to_string(),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                                Span::raw(": "),
+                                Span::styled(
+                                    format!("{input}\u{2588}"),
+                                    Style::default().fg(VIOLET),
+                                ),
+                            ]),
+                        ])
+                        .block(list_block(" which folder? ")),
                         main,
                     );
                     f.render_widget(Paragraph::new(""), foot);
                     f.render_widget(
-                        Paragraph::new("enter open   esc back   (empty = current dir, ~ ok)")
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Paragraph::new(key_hints(&[
+                            ("\u{21b5}", "open"),
+                            ("esc", "back"),
+                            ("~", "home ok, empty = current"),
+                        ])),
                         help,
                     );
                 }
@@ -226,29 +434,156 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .map(|l| ListItem::new(Line::from(*l)))
                             .collect();
                     let list = List::new(items)
-                        .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                            " add a new account - which tool? ",
-                            Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
-                        )))
-                        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-                        .highlight_symbol("> ");
+                        .block(list_block(" add an account - which tool? "))
+                        .highlight_style(
+                            Style::default()
+                                .bg(Color::Rgb(50, 47, 68))
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .highlight_symbol("\u{2503} ");
                     f.render_stateful_widget(list, main, &mut open_state);
                     f.render_widget(Paragraph::new(""), foot);
                     f.render_widget(
-                        Paragraph::new("enter choose   esc back")
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Paragraph::new(key_hints(&[("\u{21b5}", "choose"), ("esc", "back")])),
+                        help,
+                    );
+                }
+                Screen::Input { kind, value } => {
+                    let (title, prompt) = match kind {
+                        InputKind::Rename(old) => (
+                            " rename profile ".to_string(),
+                            format!("new name for '{old}'"),
+                        ),
+                        InputKind::SaveCurrent => (
+                            " save current logins ".to_string(),
+                            "name for this profile".to_string(),
+                        ),
+                    };
+                    f.render_widget(
+                        Paragraph::new(vec![
+                            Line::from(""),
+                            Line::from(vec![
+                                Span::styled(format!("  {prompt}"), Style::default().fg(MUTED)),
+                                Span::raw(": "),
+                                Span::styled(
+                                    format!("{value}\u{2588}"),
+                                    Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                                ),
+                            ]),
+                        ])
+                        .block(list_block_titled(&title)),
+                        main,
+                    );
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            format!("  {status}"),
+                            Style::default().fg(MUTED),
+                        ))),
+                        foot,
+                    );
+                    f.render_widget(
+                        Paragraph::new(key_hints(&[("\u{21b5}", "confirm"), ("esc", "cancel")])),
+                        help,
+                    );
+                }
+                Screen::Doctor { lines, scroll, .. } => {
+                    let text: Vec<Line> = lines
+                        .iter()
+                        .map(|l| {
+                            // Colour the verdict word so problems stand out.
+                            let style = if l.contains("problem") {
+                                Style::default().fg(Color::Rgb(210, 140, 90))
+                            } else if l.contains(" ok ") || l.contains("healthy") {
+                                Style::default().fg(Color::Rgb(120, 190, 140))
+                            } else {
+                                Style::default().fg(DEXGRAY)
+                            };
+                            Line::from(Span::styled(format!("  {l}"), style))
+                        })
+                        .collect();
+                    f.render_widget(
+                        Paragraph::new(text)
+                            .scroll((*scroll, 0))
+                            .block(list_block(" doctor - health check ")),
+                        main,
+                    );
+                    f.render_widget(Paragraph::new(""), foot);
+                    f.render_widget(
+                        Paragraph::new(key_hints(&[
+                            ("\u{2191}\u{2193}", "scroll"),
+                            ("esc", "back"),
+                        ])),
                         help,
                     );
                 }
             }
         })?;
 
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
+        // A pending health check runs AFTER its "checking..." frame is drawn,
+        // so the UI shows feedback instead of freezing on the old screen.
+        if let Screen::Doctor { pending: true, .. } = &screen {
+            let lines = ctx.doctor();
+            screen = Screen::Doctor {
+                lines,
+                scroll: 0,
+                pending: false,
+            };
             continue;
         }
+        // A left click on a menu item both selects AND activates it; treat
+        // that as a synthesized Enter so the key handler below does the work.
+        let mut click_activate = false;
+        let key = match event::read()? {
+            Event::Key(k) if k.kind == KeyEventKind::Press => k,
+            Event::Mouse(m) => {
+                use ratatui::crossterm::event::{MouseButton, MouseEventKind as MK};
+                let list_len = match &screen {
+                    Screen::Main => rows.len(),
+                    Screen::Open { entries, .. } => entries.len() + NEW_CONV.len(),
+                    Screen::ToolPick => 4,
+                    _ => 0,
+                };
+                let is_main = matches!(screen, Screen::Main);
+                let sel = if is_main { &mut state } else { &mut open_state };
+                match m.kind {
+                    MK::ScrollDown if list_len > 0 => {
+                        let i = sel.selected().unwrap_or(0);
+                        sel.select(Some((i + 1).min(list_len - 1)));
+                    }
+                    MK::ScrollUp if list_len > 0 => {
+                        let i = sel.selected().unwrap_or(0);
+                        sel.select(Some(i.saturating_sub(1)));
+                    }
+                    MK::Down(MouseButton::Left) if list_len > 0 => {
+                        // The list box's first row = main.y + logo-header + border.
+                        let header = if is_main && main_area.height >= 14 {
+                            8u16
+                        } else {
+                            0
+                        };
+                        let per = if is_main { 3 } else { 1 }; // Main rows are 3 lines
+                        let top = main_area.y + header + 1;
+                        if m.row >= top {
+                            let idx = ((m.row - top) / per) as usize;
+                            if idx < list_len {
+                                sel.select(Some(idx));
+                                // Click activates a MENU item; on Main it only
+                                // selects (Enter switches) so a stray click
+                                // never switches accounts by surprise.
+                                click_activate = !is_main;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if click_activate {
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
         // Ctrl+C quits from ANY screen - raw mode swallows the signal, and it
         // is the first key a user in trouble reaches for.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -302,12 +637,35 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         open_state.select(Some(0));
                         screen = Screen::ToolPick;
                     }
+                    KeyCode::Char('s') if rows.is_empty() && !onboard_live.is_empty() => {
+                        // Onboarding: save the accounts you're already logged
+                        // into as your first profile.
+                        screen = Screen::Input {
+                            kind: InputKind::SaveCurrent,
+                            value: String::new(),
+                        };
+                    }
+                    KeyCode::Char('n') if !rows.is_empty() => {
+                        if let Some(i) = state.selected() {
+                            screen = Screen::Input {
+                                kind: InputKind::Rename(rows[i].name.clone()),
+                                value: String::new(),
+                            };
+                        }
+                    }
                     KeyCode::Char('r') => {
                         status = ctx.restore();
                         rows = ctx.rows();
                     }
                     KeyCode::Char('d') if !rows.is_empty() => {
                         confirm_delete = state.selected();
+                    }
+                    KeyCode::Char('?') => {
+                        screen = Screen::Doctor {
+                            lines: vec!["running health check...".into()],
+                            scroll: 0,
+                            pending: true,
+                        };
                     }
                     _ => {}
                 }
@@ -395,8 +753,51 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 }
                 _ => {}
             },
+            Screen::Input { kind, value } => match key.code {
+                KeyCode::Esc => screen = Screen::Main,
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(c) => value.push(c),
+                KeyCode::Enter => {
+                    let name = value.trim().to_string();
+                    if name.is_empty() {
+                        screen = Screen::Main;
+                    } else {
+                        let (ok, msg) = match kind {
+                            InputKind::Rename(old) => ctx.rename(old, &name),
+                            InputKind::SaveCurrent => ctx.save_current(&name),
+                        };
+                        status = msg;
+                        rows = ctx.rows();
+                        onboard_live = if rows.is_empty() {
+                            ctx.live_tools()
+                        } else {
+                            Vec::new()
+                        };
+                        if ok {
+                            state.select(rows.iter().position(|r| r.name == name).or(Some(0)));
+                        }
+                        screen = Screen::Main;
+                    }
+                }
+                _ => {}
+            },
+            Screen::Doctor { lines, scroll, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => screen = Screen::Main,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = (lines.len() as u16).saturating_sub(1);
+                    *scroll = (*scroll + 1).min(max);
+                }
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                _ => {}
+            },
         }
     };
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableMouseCapture
+    );
     ratatui::restore();
     Ok(outcome)
 }

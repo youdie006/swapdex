@@ -1738,6 +1738,39 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => format!("delete failed: {e}"),
             }
         }
+        fn rename(&mut self, old: &str, new: &str) -> (bool, String) {
+            run_self(&["rename", old, new])
+        }
+        fn save_current(&mut self, name: &str) -> (bool, String) {
+            // `add <name>` captures the CURRENT live logins (all tools) - no
+            // sign-out, no interactive spawn - so it is safe to run in-loop.
+            run_self(&["add", name])
+        }
+        fn doctor(&mut self) -> Vec<String> {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => return vec![format!("cannot find own binary: {e}")],
+            };
+            match Command::new(exe)
+                .arg("doctor")
+                .stdin(std::process::Stdio::null())
+                .output()
+            {
+                Ok(out) => {
+                    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                    text.lines().map(|l| l.to_string()).collect()
+                }
+                Err(e) => vec![format!("doctor failed: {e}")],
+            }
+        }
+        fn live_tools(&mut self) -> Vec<String> {
+            adapters::all()
+                .iter()
+                .filter(|a| a.present(self.paths))
+                .map(|a| pretty_tool(a.name()).to_string())
+                .collect()
+        }
         fn sessions(&mut self, name: &str) -> (String, Vec<crate::tui::SessionEntry>) {
             let first_time = self.pre_switch_first;
             let (sessions, label) = recent_menu_sessions(self.paths, name, first_time, 5);
@@ -1774,10 +1807,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         pre_switch_first: crate::session_link::read_timeline(paths).is_empty(),
     };
     loop {
-        // Empty store: fall back to the guided path rather than an empty box.
-        if Store::open(paths)?.list().is_empty() {
-            println!("No accounts saved yet.");
-            println!("  guided setup:  swapdex setup");
+        // An empty store is fine now: the TUI draws an onboarding welcome
+        // (offers to save the accounts you're already logged into). Only fall
+        // back to text if there is truly nothing to do AND nothing to save.
+        if Store::open(paths)?.list().is_empty()
+            && adapters::all().iter().all(|a| !a.present(paths))
+        {
+            println!("No accounts saved yet, and you're not logged into any tool.");
+            println!("  sign in to Claude Code / Codex / Gemini / Antigravity, then run `swapdex`.");
             return Ok(0);
         }
         match crate::tui::run(&mut ctx)? {

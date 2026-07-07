@@ -135,7 +135,10 @@ fn main() {
             && swapdex::store::Store::open(&paths)
                 .map(|st| !st.list().is_empty())
                 .unwrap_or(false);
-        if interactive && has_profiles {
+        // Also open the UI for a fresh-but-logged-in user: the onboarding
+        // screen offers to save the accounts they're already signed into.
+        let logged_in = swapdex::adapters::all().iter().any(|a| a.present(&paths));
+        if interactive && (has_profiles || logged_in) {
             match commands::ui(&paths) {
                 Ok(code) => std::process::exit(code),
                 Err(e) => {
