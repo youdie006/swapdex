@@ -1879,3 +1879,82 @@ fn store_open_tightens_loose_permissions() {
     assert_eq!(dmode, 0o700, "dir tightened");
     assert_eq!(fmode, 0o600, "token file tightened");
 }
+
+// Deep-dig round 2: the rotation invariant must hold on EVERY path that
+// touches the live login, not just `use` switching away.
+#[test]
+fn restore_refreshes_outgoing_matched_profile() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]);
+    // Live is personal (B) after its add; switch to work so a backup of B
+    // exists and A is live.
+    run(root.path(), &["use", "work"]);
+    // Rotation while on work.
+    let auth = root.path().join(".codex/auth.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth).unwrap()).unwrap();
+    v["tokens"]["refresh_token"] = "RT-ROTATED".into();
+    std::fs::write(&auth, serde_json::to_string(&v).unwrap()).unwrap();
+    // restore = undo the switch (back to personal); outgoing work must be
+    // refreshed with the rotated tokens.
+    let (_o, e, c) = run(root.path(), &["restore"]);
+    assert_eq!(c, 0, "{e}");
+    let (_o, e, c) = run(root.path(), &["use", "work"]);
+    assert_eq!(c, 0, "{e}");
+    let live = std::fs::read_to_string(&auth).unwrap();
+    assert!(
+        live.contains("RT-ROTATED"),
+        "restore refreshed 'work': {live}"
+    );
+}
+
+#[test]
+fn use_noop_still_refreshes_profile() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    let auth = root.path().join(".codex/auth.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth).unwrap()).unwrap();
+    v["tokens"]["refresh_token"] = "RT-ROTATED".into();
+    std::fs::write(&auth, serde_json::to_string(&v).unwrap()).unwrap();
+    let (o, _e, c) = run(root.path(), &["use", "work"]);
+    assert_eq!(c, 0);
+    assert!(o.contains("already active"), "{o}");
+    // The no-op must still sync the profile snapshot with the live tokens.
+    let stored = std::fs::read_to_string(
+        root.path()
+            .join(".local/share/swapdex/accounts/work/codex/auth"),
+    )
+    .unwrap();
+    assert!(
+        stored.contains("RT-ROTATED"),
+        "no-op use refreshed the snapshot: {stored}"
+    );
+}
+
+// `add --update` while logged into a DIFFERENT account must not silently
+// repoint the profile - that changes what the name means.
+#[test]
+fn add_update_refuses_account_change_noninteractive() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    let (_o, e, c) = run(root.path(), &["add", "work", "--tool", "codex", "--update"]);
+    assert_eq!(c, 7, "refused: {e}");
+    assert!(
+        e.contains("different account"),
+        "says WHY and what it holds: {e}"
+    );
+    // Profile still holds acct-A.
+    let stored = std::fs::read_to_string(
+        root.path()
+            .join(".local/share/swapdex/accounts/work/codex/auth"),
+    )
+    .unwrap();
+    assert!(stored.contains("acct-A"), "unchanged: {stored}");
+}

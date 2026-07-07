@@ -4,6 +4,25 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.11.0] - 2026-07-07
+
+Deep account dig, round 2: the rotation invariant ("a profile always holds
+this account's newest known login") now holds on EVERY path that touches the
+live login, and a profile's identity can no longer change silently.
+
+### Fixed
+- **`restore` refreshes the outgoing account's profile** with its latest
+  (possibly rotated) tokens before undoing a switch - the same stale-token
+  fix 0.10.0 gave `use`.
+- **A no-op `use` is now a sync point**: switching to the already-active
+  profile refreshes its snapshot from the live login (tokens rotate while
+  you work). No backup and no timeline event - nothing is switching.
+- **`add --update` no longer silently repoints a profile** to a different
+  account. Logged into B while updating a profile that holds A: on a
+  terminal it asks; non-interactively it refuses with exit 7 and shows both
+  the keep-both and the explicit-repoint commands. Same-account updates
+  (the documented stale-token refresh) pass through unchanged.
+
 ## [0.10.0] - 2026-07-07
 
 A deep dig into account handling itself.

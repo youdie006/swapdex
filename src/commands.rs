@@ -11,6 +11,15 @@ use serde_json::Value;
 use std::process::Command;
 
 /// Is a CLI on PATH and runnable?
+/// The `--tool` flag value for a tool name (claude-code -> claude).
+fn pretty_tool_flag(tool: &str) -> &str {
+    if tool == "claude-code" {
+        "claude"
+    } else {
+        tool
+    }
+}
+
 fn command_exists(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
@@ -250,6 +259,43 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             }
             continue;
         }
+        if update {
+            // Updating must not silently REPOINT the profile to a different
+            // account - that changes what the name means. Same-account
+            // updates (the documented stale-token refresh) pass through.
+            let stored_id = profile_account_id(&store, name, tool).filter(|s| !s.is_empty());
+            let live_id = adapter
+                .identity(paths)
+                .ok()
+                .flatten()
+                .map(|i| i.account_id)
+                .filter(|s| !s.is_empty());
+            if let (Some(stored), Some(live)) = (&stored_id, &live_id) {
+                if stored != live {
+                    use std::io::IsTerminal;
+                    let tty = std::io::stdin().is_terminal()
+                        || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+                    let msg = format!(
+                        "profile '{name}' holds a different account for {tool} than the one                          you're logged into"
+                    );
+                    if !tty {
+                        eprintln!("swapdex: {msg}.");
+                        eprintln!(
+                            "  keep both: swapdex add <new-name> --tool {}  |  really repoint:                              swapdex rm {name} && swapdex add {name}",
+                            pretty_tool_flag(tool)
+                        );
+                        return Ok(7);
+                    }
+                    if !yes_no(
+                        &format!("{msg}. Repoint '{name}' to the current login? [y/N]: "),
+                        false,
+                    ) {
+                        println!("skipped {tool}.");
+                        continue;
+                    }
+                }
+            }
+        }
         if store.load(name, tool)?.is_some() && !update {
             // Explicit --tool on an already-saved tool is an error; in the
             // default case, just skip it and still attach the missing tool(s).
@@ -404,6 +450,16 @@ fn use_account_inner(
         let target_id = profile_account_id(&store, name, tool).filter(|s| !s.is_empty());
         if live_id.is_some() && live_id == target_id {
             println!("{tool}: '{name}' is already active");
+            // Still a sync point: the live login IS this profile's account
+            // and its tokens may have rotated since the last save. No backup
+            // and no timeline event - nothing is switching.
+            if !dry_run {
+                if let (Ok(snap), Some(id)) = (adapter.capture(paths), &live_id) {
+                    for pname in matching_profile_names(&store, tool, id) {
+                        store.save(&pname, &snap)?;
+                    }
+                }
+            }
             continue;
         }
         warn_if_expired(&target, tool);
@@ -568,7 +624,16 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         // is itself reversible (run it again to toggle back).
         if adapter.present(paths) {
             match adapter.capture(paths) {
-                Ok(live) => store.backup(&live)?,
+                Ok(live_snap) => {
+                    store.backup(&live_snap)?;
+                    // Same rotation invariant as `use`: the outgoing live
+                    // login carries this account's freshest tokens.
+                    if let Some(id) = &live_id {
+                        for pname in matching_profile_names(&store, tool, id) {
+                            store.save(&pname, &live_snap)?;
+                        }
+                    }
+                }
                 Err(e) => eprintln!(
                     "swapdex: note - the current {tool} login could not be read ({e:#}); \
                      restoring without a backup of it"
