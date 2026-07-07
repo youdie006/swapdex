@@ -12,6 +12,25 @@ const KNOWN_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18", "202
 const LATEST_VERSION: &str = "2025-11-25";
 const MAX_LINE_BYTES: u64 = 1024 * 1024;
 
+/// Consume input up to and including the next newline using only the
+/// reader's fixed internal buffer - constant memory however long the line.
+fn skip_to_newline<R: std::io::BufRead>(reader: &mut R) {
+    loop {
+        let (found, used) = match reader.fill_buf() {
+            Ok([]) => return, // EOF
+            Ok(chunk) => match chunk.iter().position(|&b| b == b'\n') {
+                Some(i) => (true, i + 1),
+                None => (false, chunk.len()),
+            },
+            Err(_) => return,
+        };
+        reader.consume(used);
+        if found {
+            return;
+        }
+    }
+}
+
 fn ok_response(id: Value, result: Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
 }
@@ -172,8 +191,11 @@ pub fn serve() {
             Err(_) => break,
         };
         if buf.last() != Some(&b'\n') && n as u64 == MAX_LINE_BYTES {
-            let mut discard = Vec::new();
-            let _ = reader.read_until(b'\n', &mut discard);
+            // Resync to the next newline WITHOUT buffering the tail: an
+            // unbounded read_until here would let a client stream N bytes
+            // with no newline into an N-byte allocation, defeating the very
+            // cap above (fuzzing: a 200MB line drove RSS to 207MB).
+            skip_to_newline(&mut reader);
             let msg = err_response(Value::Null, -32700, "message too large");
             if write_line(&mut out, &msg).is_err() {
                 break;
@@ -197,6 +219,21 @@ fn write_line<W: Write>(out: &mut W, msg: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn skip_to_newline_is_constant_memory_and_resyncs() {
+        // A 5MB no-newline head followed by a real line: the skip must land
+        // exactly at the start of the next line. Constant memory holds by
+        // construction (only fill_buf's fixed buffer is touched).
+        let mut data = vec![b'x'; 5 * 1024 * 1024];
+        data.push(b'\n');
+        data.extend_from_slice(b"next-line\n");
+        let mut r = std::io::BufReader::new(std::io::Cursor::new(data));
+        super::skip_to_newline(&mut r);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut r, &mut line).unwrap();
+        assert_eq!(line, "next-line\n");
+    }
+
     use super::*;
 
     fn call(line: &str) -> Option<Value> {
