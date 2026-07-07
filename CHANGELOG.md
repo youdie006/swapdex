@@ -4,6 +4,27 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.4.1] - 2026-07-07
+
+Fixes from an adversarial audit of the 0.4.0 delta.
+
+### Fixed
+- `ui` no longer panics on a session id with multibyte characters (the id
+  prefix was a byte slice; now char-based).
+- The "any account" continuity fallback now fires on the FIRST real switch -
+  the very case it was written for. (The empty-timeline check ran after the
+  switch had already written its own event, so it only ever fired on a no-op
+  pick.)
+- `exec` handoff passes the session id after a `--` separator, so an id that
+  begins with `-` can never be parsed as a flag.
+- The `SWAPDEX_SESSIONWIKI_JSON` test fixture hook is only honored together
+  with `SWAPDEX_ROOT` - a stray env var can no longer redirect a production
+  run.
+
+### Docs
+- The README demo now shows the full integrated loop: `ui` -> switch ->
+  recent sessions -> resume handoff -> `status --short`.
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

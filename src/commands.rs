@@ -1142,6 +1142,10 @@ pub fn ui(paths: &Paths) -> Result<i32> {
             Ok(n) if (1..=profiles.len()).contains(&n) => {
                 let name = profiles[n - 1].name.clone();
                 println!();
+                // Timeline state BEFORE the switch below appends its own
+                // event - otherwise the first-ever switch would skip the
+                // fallback written exactly for it.
+                let first_time = crate::session_link::read_timeline(paths).is_empty();
                 let rc = use_account(paths, &name, None, false)?;
                 // Continuity hint - the reason you switched: the sessions you
                 // were in on THIS account, and the one command to reopen one.
@@ -1154,7 +1158,7 @@ pub fn ui(paths: &Paths) -> Result<i32> {
                         ),
                         // Nothing attributable yet: attribution starts at the
                         // first recorded switch - fall back honestly.
-                        Some(_) if crate::session_link::read_timeline(paths).is_empty() => (
+                        Some(_) if first_time => (
                             crate::session_link::recent_sessions_any(3),
                             "recent sessions (any account - attribution starts with your \
                              first switch):"
@@ -1165,7 +1169,7 @@ pub fn ui(paths: &Paths) -> Result<i32> {
                     if let Some(recent) = recent.filter(|r| !r.is_empty()) {
                         println!("\n{label}");
                         for (i, s) in recent.iter().enumerate() {
-                            let id6 = &s.id[..s.id.len().min(6)];
+                            let id6: String = s.id.chars().take(6).collect();
                             let age = age_line((s.started.max(0) as u128) * 1_000_000_000);
                             let line = format!(
                                 "  {}) {id6}  {:>7}  {}  {}",
@@ -1210,7 +1214,9 @@ pub fn ui(paths: &Paths) -> Result<i32> {
 /// exec(2) only returns on failure, so this returns the error to propagate.
 fn exec_sessionwiki_resume(id: &str) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
-    let err = Command::new("sessionwiki").args(["resume", id]).exec();
+    let err = Command::new("sessionwiki")
+        .args(["resume", "--", id])
+        .exec();
     anyhow::anyhow!("could not launch `sessionwiki resume {id}`: {err}")
 }
 

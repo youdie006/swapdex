@@ -161,8 +161,11 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     // Test hook: a fixture file stands in for the shell-out so the ui flow is
-    // E2E-testable inside an isolated root.
-    if let Some(p) = std::env::var_os("SWAPDEX_SESSIONWIKI_JSON") {
+    // E2E-testable inside an isolated root. Only honored WITH SWAPDEX_ROOT so
+    // a stray env var can never redirect a production run.
+    if let Some(p) = std::env::var_os("SWAPDEX_SESSIONWIKI_JSON")
+        .filter(|_| std::env::var_os("SWAPDEX_ROOT").is_some())
+    {
         let v: Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
         return v.as_array().cloned();
     }

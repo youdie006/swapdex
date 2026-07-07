@@ -1140,7 +1140,7 @@ fn ui_resume_pick_execs_sessionwiki() {
     let bin_dir = root.path().join("fakebin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let fake = bin_dir.join("sessionwiki");
-    std::fs::write(&fake, "#!/bin/sh\necho \"RESUMED $2\"\n").unwrap();
+    std::fs::write(&fake, "#!/bin/sh\necho \"RESUMED $3\"\n").unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let path = format!(
@@ -1204,4 +1204,84 @@ fn ui_resume_enter_skips() {
     let o = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
     assert!(!o.contains("RESUMED"), "no exec on skip: {o}");
+}
+
+// REVIEW: a multibyte session id must not panic the ui hint (byte-6 slice).
+#[test]
+fn ui_hint_survives_multibyte_session_id() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    let fixture = root.path().join("sessions.json");
+    std::fs::write(
+        &fixture,
+        serde_json::to_vec(&serde_json::json!([
+            {"id":"a日本語id","tool":"codex","title":"t","started":"2099-01-01T00:00:00Z"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("SWAPDEX_SESSIONWIKI_JSON", &fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"1\n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        0,
+        "no panic on multibyte id: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// REVIEW: the any-account fallback must fire on the FIRST real switch (the
+// timeline check has to happen before use_account writes the switch event).
+#[test]
+fn ui_hint_fallback_fires_on_first_real_switch() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    // A session that PREDATES every switch (nothing attributable).
+    let fixture = root.path().join("sessions.json");
+    std::fs::write(
+        &fixture,
+        serde_json::to_vec(&serde_json::json!([
+            {"id":"aaa111","tool":"codex","title":"old work","started":"2000-01-01T00:00:00Z"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("SWAPDEX_SESSIONWIKI_JSON", &fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Pick alpha = a REAL switch (live is beta).
+    child.stdin.as_mut().unwrap().write_all(b"1\n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        o.contains("recent sessions"),
+        "fallback hint must appear on the first real switch: {o}"
+    );
 }
