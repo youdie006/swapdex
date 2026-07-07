@@ -76,6 +76,11 @@ pub fn status_line(paths: &Paths) -> Option<String> {
     }
     let counts = sessions_by_account(paths)?;
     let total: usize = counts.values().sum();
+    if total == 0 {
+        // Fresh install: sessionwiki is present but never synced. Point at
+        // the cure instead of claiming "0 sessions" on a full disk.
+        return Some("sessions: index empty - run `sessionwiki sync` once".into());
+    }
     let unattributed = counts.get(UNATTRIBUTED).copied().unwrap_or(0);
     let accounts = counts.keys().filter(|k| *k != UNATTRIBUTED).count();
     let tail = if unattributed > 0 {
@@ -178,7 +183,7 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let out = Command::new("sessionwiki")
-            .args(["list", "--json", "--no-sync", "-n", "1000"])
+            .args(["list", "--json", "--no-sync", "-n", "50000"])
             .stdin(Stdio::null())
             .output();
         let _ = tx.send(out);

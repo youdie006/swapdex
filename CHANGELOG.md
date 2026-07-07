@@ -4,6 +4,24 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.4.2] - 2026-07-07
+
+Ecosystem-walkthrough fixes: the integrated flows, from a fresh user's chair.
+
+### Fixed
+- The `ui` resume handoff passes `--no-sync`: on a large store the exec used
+  to kick off a full index sync - minutes of progress spam that looked like a
+  hang in the flagship flow. sessionwiki still self-syncs when the id is not
+  yet indexed.
+- A present-but-never-synced sessionwiki no longer reads as "0 sessions":
+  `sessions` and `status` say "index empty - run `sessionwiki sync` once".
+- The sessionwiki read cap rose 1000 -> 50000, so the status summary cannot
+  silently understate a large store.
+
+### Added
+- `sessions --json`: {"available", "accounts", "total"} for scripting
+  (available=false distinguishes "no sessionwiki" from "zero sessions").
+
 ## [0.4.1] - 2026-07-07
 
 Fixes from an adversarial audit of the 0.4.0 delta.

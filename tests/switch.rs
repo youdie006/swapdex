@@ -1140,7 +1140,7 @@ fn ui_resume_pick_execs_sessionwiki() {
     let bin_dir = root.path().join("fakebin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let fake = bin_dir.join("sessionwiki");
-    std::fs::write(&fake, "#!/bin/sh\necho \"RESUMED $3\"\n").unwrap();
+    std::fs::write(&fake, "#!/bin/sh\necho \"RESUMED $4\"\n").unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let path = format!(

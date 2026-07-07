@@ -79,7 +79,11 @@ enum Cmd {
         dry_run: bool,
     },
     /// Sessions grouped by the account that was active when they ran
-    Sessions,
+    Sessions {
+        /// Emit JSON ({"available", "accounts", "total"})
+        #[arg(long)]
+        json: bool,
+    },
     /// Interactive picker: see every profile, type a number, switch
     Ui,
     /// Local health check: store, snapshots, live logins - with a fix per finding
@@ -161,7 +165,7 @@ fn main() {
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),
         Cmd::Restore { tool, dry_run } => commands::restore(&paths, *tool, *dry_run),
-        Cmd::Sessions => commands::sessions(&paths),
+        Cmd::Sessions { json } => commands::sessions(&paths, *json),
         Cmd::Ui => commands::ui(&paths),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),

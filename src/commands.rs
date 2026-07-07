@@ -1215,7 +1215,7 @@ pub fn ui(paths: &Paths) -> Result<i32> {
 fn exec_sessionwiki_resume(id: &str) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
     let err = Command::new("sessionwiki")
-        .args(["resume", "--", id])
+        .args(["resume", "--no-sync", "--", id])
         .exec();
     anyhow::anyhow!("could not launch `sessionwiki resume {id}`: {err}")
 }
@@ -1804,7 +1804,20 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-pub fn sessions(paths: &Paths) -> Result<i32> {
+pub fn sessions(paths: &Paths, json: bool) -> Result<i32> {
+    if json {
+        // Scripting parity with the human view: {"accounts": {...}, "total": N}.
+        // available=false distinguishes "no sessionwiki" from "zero sessions".
+        let out = match crate::session_link::sessions_by_account(paths) {
+            None => serde_json::json!({"available": false, "accounts": {}, "total": 0}),
+            Some(counts) => {
+                let total: usize = counts.values().sum();
+                serde_json::json!({"available": true, "accounts": counts, "total": total})
+            }
+        };
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(0);
+    }
     match crate::session_link::sessions_by_account(paths) {
         None => {
             println!(
@@ -1812,7 +1825,9 @@ pub fn sessions(paths: &Paths) -> Result<i32> {
             );
         }
         Some(counts) if counts.is_empty() => {
-            println!("no sessions found");
+            // sessionwiki responded but its index is empty - the fresh-install
+            // landmine. Say the one command that fixes it.
+            println!("no sessions found (sessionwiki index empty - run `sessionwiki sync` once)");
         }
         Some(counts) => {
             for (account, n) in &counts {
