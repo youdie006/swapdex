@@ -35,7 +35,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `4` | The store is locked - another `swapdex` is mid-switch. |
 | `5` | No profile by that name (`use` / `rm` / `rename`), or no backup (`restore`). |
 | `6` | The profile already has a snapshot for that tool; pass `--update` (`add`). |
-| `7` | `rm` was called without `--yes`. |
+| `7` | `rm` was called without `--yes`; or `add --update` refused to repoint a profile to a DIFFERENT account (repointing must be explicit). |
 | `8` | `login` was started but the tool's login flow did not complete. |
 | `9` | `doctor` found at least one problem. |
 
