@@ -2214,8 +2214,12 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         store.save(&pname, &stash)?;
     }
     if matched_profile_name(&store, tool, &cur.account_id).is_none() {
-        let who = cur.email.clone().unwrap_or_else(|| cur.display.clone());
-        let suggestion = suggest_name(&who);
+        // No email on disk (antigravity): suggest a plain name instead of a
+        // sanitized display string like "GoogleaccountAntigravity".
+        let suggestion = match &cur.email {
+            Some(e) => suggest_name(e),
+            None => "main".to_string(),
+        };
         while let Some(keep) = ask_name(
             &store,
             &format!("name to keep the CURRENT account under [{suggestion}]: "),
@@ -2492,9 +2496,16 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         // - never scare with "replace it?" for it, and never skip it.
         if let Some(p) = store.list().into_iter().find(|p| p.name == default) {
             if !p.tools.iter().any(|t| t == tool) {
-                let snap = adapter.capture(paths)?;
-                store.save(&default, &snap)?;
-                println!("  attached {} to '{default}'.\n", pretty_tool(tool));
+                // One unreadable tool must not abort the whole wizard.
+                match adapter.capture(paths) {
+                    Ok(snap) => {
+                        store.save(&default, &snap)?;
+                        println!("  attached {} to '{default}'.\n", pretty_tool(tool));
+                    }
+                    Err(e) => {
+                        eprintln!("  could not read this login ({e:#}) - skipped.\n");
+                    }
+                }
                 continue;
             }
         }
@@ -2503,11 +2514,15 @@ pub fn setup(paths: &Paths) -> Result<i32> {
             &format!("  save it as [{default}] (Enter to accept, 'skip' to skip): "),
             &default,
         ) {
-            Some(name) => {
-                let snap = adapter.capture(paths)?;
-                store.save(&name, &snap)?;
-                println!("  saved as '{name}'.\n");
-            }
+            Some(name) => match adapter.capture(paths) {
+                Ok(snap) => {
+                    store.save(&name, &snap)?;
+                    println!("  saved as '{name}'.\n");
+                }
+                Err(e) => {
+                    eprintln!("  could not read this login ({e:#}) - skipped.\n");
+                }
+            },
             None => println!("  skipped.\n"),
         }
     }
@@ -2640,6 +2655,23 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
                 crate::usage::human(rest),
             );
         }
+    }
+    // Honesty for the two tools usage CANNOT cover: they keep no token
+    // transcripts on disk, so a gemini/antigravity-heavy user must not read
+    // the silence as "no usage".
+    let uncovered: Vec<&str> = ["gemini", "antigravity"]
+        .into_iter()
+        .filter(|t| {
+            adapters::by_name(t)
+                .map(|a| a.present(paths))
+                .unwrap_or(false)
+        })
+        .collect();
+    if !uncovered.is_empty() {
+        println!(
+            "note: {} not shown - those CLIs keep no local token transcripts to read",
+            uncovered.join(" and ")
+        );
     }
     println!("(summed locally from session transcripts; accounts via the switch timeline)");
     Ok(0)

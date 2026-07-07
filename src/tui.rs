@@ -127,14 +127,27 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             ])
                         })
                         .collect();
-                    let list = List::new(items)
-                        .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                            " swapdex ",
-                            Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
-                        )))
-                        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-                        .highlight_symbol("> ");
-                    f.render_stateful_widget(list, main, &mut state);
+                    if rows.is_empty() {
+                        // Deleting the last profile lands here - say what to
+                        // do instead of showing an empty box.
+                        f.render_widget(
+                            Paragraph::new("\n  No saved profiles.\n\n  a - add an account\n  q - quit")
+                                .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                                    " swapdex ",
+                                    Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                                ))),
+                            main,
+                        );
+                    } else {
+                        let list = List::new(items)
+                            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+                                " swapdex ",
+                                Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                            )))
+                            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                            .highlight_symbol("> ");
+                        f.render_stateful_widget(list, main, &mut state);
+                    }
                     let foot_text = if let Some(i) = confirm_delete {
                         format!(
                             "delete saved profile '{}'? the live login stays. y/N",
