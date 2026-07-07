@@ -4,6 +4,32 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.15.0] - 2026-07-08
+
+A full UI overhaul, by user request: the picker is now a designed interface,
+not a plain list.
+
+### Added
+- **A logo header.** The two-tone `swapdex` wordmark (violet SWAP + dimmed
+  dex - the same mark the CLI prints) crowns a rounded, violet-titled panel.
+  The active profile shows a filled dot, plan tier and warnings are
+  colour-coded, and the key hints render the keys in violet. The logo drops
+  automatically on short terminals so the list keeps its room.
+- **Every feature is reachable in the UI now**: `n` renames the selected
+  profile, `?` opens a read-only `doctor` health panel (with a "checking..."
+  frame so it never looks frozen), alongside the existing switch / open /
+  add / restore / delete.
+- **Onboarding.** An empty store opens a welcome screen that detects the
+  tools you're already logged into and offers to save them as your first
+  profile with one key (`s`). A bare `swapdex` opens this for a
+  fresh-but-logged-in user too.
+- **Mouse.** Scroll to move the selection, click a menu item to choose it,
+  click a profile row to select it (Enter still performs the switch, so a
+  stray click never switches by surprise).
+
+Every UI action runs the same subprocess command path as the CLI, so there
+is still exactly one implementation of each.
+
 ## [0.14.0] - 2026-07-08
 
 Three more lenses (a threat-model security audit, a model-based random-walk
