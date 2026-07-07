@@ -81,8 +81,31 @@ pub fn tool_usage(paths: &Paths) -> Vec<ToolUsage> {
     // ones: each event is attributed to the profile active at its timestamp
     // (the same join `sessions` uses).
     let events = crate::session_link::read_timeline(paths);
-    let (c5, c7, ca) = claude_usage(&paths.claude_projects(), now, &events);
-    let (x5, x7, xa) = codex_usage(&paths.codex_sessions(), now, &events);
+    // Per-file parsed-events cache: a heavy week holds ~1GB of transcripts,
+    // and only files whose (mtime,size) changed need reparsing.
+    let cache_path = paths.store_dir().join("usage-cache.json");
+    let mut cache: UsageCache = std::fs::read(&cache_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let before = cache.len();
+    let (c5, c7, ca) = claude_usage(&paths.claude_projects(), now, &events, &mut cache);
+    let (x5, x7, xa) = codex_usage(&paths.codex_sessions(), now, &events, &mut cache);
+    // Prune entries that fell out of the 7d window or were deleted, then
+    // persist (atomic, 0600) - best-effort: usage must work without a store.
+    let live: std::collections::HashSet<String> = {
+        let mut f = Vec::new();
+        recent_jsonl(&paths.claude_projects(), now, D7, &mut f);
+        recent_jsonl(&paths.codex_sessions(), now, D7, &mut f);
+        f.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+    };
+    let had_misses = cache.len() != before || cache.keys().any(|k| !live.contains(k));
+    cache.retain(|k, _| live.contains(k));
+    if had_misses && std::fs::create_dir_all(paths.store_dir()).is_ok() {
+        if let Ok(bytes) = serde_json::to_vec(&cache) {
+            let _ = crate::atomic::write_secret(&cache_path, &bytes);
+        }
+    }
     vec![
         ToolUsage {
             tool: "claude-code",
@@ -134,6 +157,167 @@ fn line_ts(d: &Value) -> Option<u64> {
     (t >= 0).then_some(t as u64)
 }
 
+/// One transcript file's parsed usage events - the cacheable unit. `id` is
+/// the claude message id ("" when absent / codex); `toks` is claude's total
+/// or codex's per-event DELTA (per-file local state, so safe to cache).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+pub struct FileEvents {
+    pub mtime: u64,
+    pub size: u64,
+    pub ev: Vec<(String, u64, u64)>, // (id, ts, toks)
+}
+
+pub type UsageCache = std::collections::HashMap<String, FileEvents>;
+
+fn file_sig(p: &Path) -> (u64, u64) {
+    let m = std::fs::metadata(p).ok();
+    (
+        m.as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        m.map(|m| m.len()).unwrap_or(0),
+    )
+}
+
+/// Fetch each file's events, from the cache when (mtime,size) match, parsing
+/// (in parallel) otherwise. The 7-day window holds ~1GB of transcripts on a
+/// heavy machine - reparsing all of it on every `usage` took ~20s cold.
+fn events_for_files(
+    files: &[PathBuf],
+    cache: &mut UsageCache,
+    parse: fn(&Path) -> Vec<(String, u64, u64)>,
+) -> Vec<(String, FileEvents)> {
+    let mut out = Vec::with_capacity(files.len());
+    let mut misses: Vec<(String, u64, u64, &PathBuf)> = Vec::new();
+    for f in files {
+        let key = f.to_string_lossy().into_owned();
+        let (mtime, size) = file_sig(f);
+        match cache.get(&key) {
+            Some(c) if c.mtime == mtime && c.size == size => {}
+            _ => misses.push((key, mtime, size, f)),
+        }
+    }
+    let threads = misses.len().clamp(1, 8);
+    let chunks: Vec<Vec<(String, u64, u64, PathBuf)>> = {
+        let mut cs: Vec<Vec<(String, u64, u64, PathBuf)>> =
+            (0..threads).map(|_| Vec::new()).collect();
+        for (i, (k, m, sz, f)) in misses.into_iter().enumerate() {
+            cs[i % threads].push((k, m, sz, f.clone()));
+        }
+        cs
+    };
+    let parsed: Vec<(String, FileEvents)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .into_iter()
+                        .map(|(k, mtime, size, f)| {
+                            (
+                                k,
+                                FileEvents {
+                                    mtime,
+                                    size,
+                                    ev: parse(&f),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    for (k, fe) in parsed {
+        cache.insert(k, fe);
+    }
+    // Emit in the CALLER'S file order, not hits-then-misses: claude's global
+    // message-id dedupe is first-wins, so ordering decides which FILE's
+    // session buckets get a duplicated message - totals must not depend on
+    // what happened to be cached.
+    out.clear();
+    for f in files {
+        let key = f.to_string_lossy().into_owned();
+        if let Some(fe) = cache.get(&key) {
+            out.push((key, fe.clone()));
+        }
+    }
+    out
+}
+
+fn parse_claude_file(f: &Path) -> Vec<(String, u64, u64)> {
+    let Ok(file) = std::fs::File::open(f) else {
+        return Vec::new();
+    };
+    let mut ev = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        if !line.contains("\"usage\"") {
+            continue;
+        }
+        let d: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let u = &d["message"]["usage"];
+        if !u.is_object() {
+            continue;
+        }
+        let Some(ts) = line_ts(&d) else { continue };
+        let toks = u["input_tokens"].as_u64().unwrap_or(0)
+            + u["output_tokens"].as_u64().unwrap_or(0)
+            + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+        let id = d["message"]["id"].as_str().unwrap_or("").to_string();
+        ev.push((id, ts, toks));
+    }
+    ev
+}
+
+fn parse_codex_file(f: &Path) -> Vec<(String, u64, u64)> {
+    let Ok(file) = std::fs::File::open(f) else {
+        return Vec::new();
+    };
+    let mut ev = Vec::new();
+    let mut prev = 0u64;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        if !line.contains("total_token_usage") {
+            continue;
+        }
+        let d: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let tot = &d["payload"]["info"]["total_token_usage"];
+        if !tot.is_object() {
+            continue;
+        }
+        let cur = match tot["total_tokens"].as_u64() {
+            Some(t) => t,
+            None => {
+                tot["input_tokens"].as_u64().unwrap_or(0)
+                    + tot["output_tokens"].as_u64().unwrap_or(0)
+            }
+        };
+        // Duplicate token_count lines repeat the same running sum; the
+        // saturating delta makes them contribute zero.
+        let delta = cur.saturating_sub(prev);
+        prev = prev.max(cur);
+        if delta == 0 {
+            continue;
+        }
+        let ts = line_ts(&d).unwrap_or_else(|| mtime_secs(f));
+        ev.push((String::new(), ts, delta));
+    }
+    ev
+}
+
 /// Claude: one API call = one `message.id`; a call's usage may be repeated on
 /// several lines (one per content block) and whole messages reappear in resumed
 /// sessions, so count each id once globally. Window by the message timestamp.
@@ -141,6 +325,7 @@ fn claude_usage(
     dir: &Path,
     now: u64,
     events: &[crate::session_link::Event],
+    cache: &mut UsageCache,
 ) -> (
     Bucket,
     Bucket,
@@ -148,38 +333,17 @@ fn claude_usage(
 ) {
     let mut files = Vec::new();
     recent_jsonl(dir, now, D7, &mut files);
+    let per_file = events_for_files(&files, cache, parse_claude_file);
     let mut seen: HashSet<String> = HashSet::new();
     let mut accounts = std::collections::BTreeMap::new();
     let (mut b5, mut b7) = (Bucket::default(), Bucket::default());
-    for f in &files {
-        let Ok(file) = std::fs::File::open(f) else {
-            continue;
-        };
+    for (_key, fe) in &per_file {
         let (mut t5, mut t7, mut in5, mut in7) = (0u64, 0u64, false, false);
-        for line in std::io::BufReader::new(file).lines() {
-            let Ok(line) = line else { break };
-            // Cheap pre-filter: most lines carry no usage at all.
-            if !line.contains("\"usage\"") {
-                continue;
+        for (id, ts, toks) in &fe.ev {
+            if !id.is_empty() && !seen.insert(id.clone()) {
+                continue; // repeated content-block line or resumed-session copy
             }
-            let d: Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let u = &d["message"]["usage"];
-            if !u.is_object() {
-                continue;
-            }
-            if let Some(id) = d["message"]["id"].as_str() {
-                if !seen.insert(id.to_string()) {
-                    continue; // repeated content-block line or resumed-session copy
-                }
-            }
-            let Some(ts) = line_ts(&d) else { continue };
-            let toks = u["input_tokens"].as_u64().unwrap_or(0)
-                + u["output_tokens"].as_u64().unwrap_or(0)
-                + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-            let age = now.saturating_sub(ts);
+            let age = now.saturating_sub(*ts);
             if age <= D7 {
                 t7 += toks;
                 in7 = true;
@@ -188,7 +352,7 @@ fn claude_usage(
                 t5 += toks;
                 in5 = true;
             }
-            credit(&mut accounts, events, "claude-code", ts, now, toks);
+            credit(&mut accounts, events, "claude-code", *ts, now, *toks);
         }
         b7.tokens += t7;
         b7.sessions += in7 as u64;
@@ -205,6 +369,7 @@ fn codex_usage(
     dir: &Path,
     now: u64,
     events: &[crate::session_link::Event],
+    cache: &mut UsageCache,
 ) -> (
     Bucket,
     Bucket,
@@ -212,43 +377,13 @@ fn codex_usage(
 ) {
     let mut files = Vec::new();
     recent_jsonl(dir, now, D7, &mut files);
+    let per_file = events_for_files(&files, cache, parse_codex_file);
     let mut accounts = std::collections::BTreeMap::new();
     let (mut b5, mut b7) = (Bucket::default(), Bucket::default());
-    for f in &files {
-        let Ok(file) = std::fs::File::open(f) else {
-            continue;
-        };
+    for (_key, fe) in &per_file {
         let (mut t5, mut t7, mut in5, mut in7) = (0u64, 0u64, false, false);
-        let mut prev = 0u64;
-        for line in std::io::BufReader::new(file).lines() {
-            let Ok(line) = line else { break };
-            if !line.contains("total_token_usage") {
-                continue;
-            }
-            let d: Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let tot = &d["payload"]["info"]["total_token_usage"];
-            if !tot.is_object() {
-                continue;
-            }
-            let cur = match tot["total_tokens"].as_u64() {
-                Some(t) => t,
-                None => {
-                    tot["input_tokens"].as_u64().unwrap_or(0)
-                        + tot["output_tokens"].as_u64().unwrap_or(0)
-                }
-            };
-            // Duplicate token_count lines repeat the same running sum; the
-            // saturating delta makes them contribute zero.
-            let delta = cur.saturating_sub(prev);
-            prev = prev.max(cur);
-            if delta == 0 {
-                continue;
-            }
-            let ts = line_ts(&d).unwrap_or_else(|| mtime_secs(f));
-            let age = now.saturating_sub(ts);
+        for (_id, ts, delta) in &fe.ev {
+            let age = now.saturating_sub(*ts);
             if age <= D7 {
                 t7 += delta;
                 in7 = true;
@@ -257,7 +392,7 @@ fn codex_usage(
                 t5 += delta;
                 in5 = true;
             }
-            credit(&mut accounts, events, "codex", ts, now, delta);
+            credit(&mut accounts, events, "codex", *ts, now, *delta);
         }
         b7.tokens += t7;
         b7.sessions += in7 as u64;
@@ -310,12 +445,38 @@ mod tests {
         std::fs::write(proj.join("s.jsonl"), format!("{m1}\n{m1}\n{old}\n")).unwrap();
         // A resumed session copies msg_1 into a second file: still counted once.
         std::fs::write(proj.join("resumed.jsonl"), format!("{m1}\n")).unwrap();
-        let (b5, b7, _a) = claude_usage(dir.path(), now, &[]);
+        let (b5, b7, _a) = claude_usage(dir.path(), now, &[], &mut UsageCache::default());
         assert_eq!(
             b5.tokens, 150,
             "duplicate lines and resumed copies count once"
         );
         assert_eq!(b7.tokens, 150, "the 7d-old message is excluded");
+    }
+
+    #[test]
+    fn cache_hits_give_identical_totals_and_invalidate_on_change() {
+        let now = crate::session_link::rfc3339_to_secs("2026-07-06T12:00:00Z").unwrap() as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).unwrap();
+        let m1 = serde_json::json!({"timestamp": "2026-07-06T11:59:00Z",
+            "message": {"id": "msg_1", "usage": {"input_tokens": 100, "output_tokens": 50}}});
+        std::fs::write(proj.join("s.jsonl"), format!("{m1}\n")).unwrap();
+        let mut cache = UsageCache::default();
+        let (_b5, b7, _a) = claude_usage(dir.path(), now, &[], &mut cache);
+        assert_eq!(b7.tokens, 150);
+        assert_eq!(cache.len(), 1, "file cached");
+        // Second run: cache hit, identical totals (the parse fn is not
+        // consulted for unchanged files - prove by corrupting the FILE but
+        // keeping mtime+size... simpler: same totals from the same cache).
+        let (_b5, b7b, _a) = claude_usage(dir.path(), now, &[], &mut cache);
+        assert_eq!(b7b.tokens, 150, "cached run identical");
+        // Change the file (size changes) -> reparse picks up the new event.
+        let m2 = serde_json::json!({"timestamp": "2026-07-06T11:58:00Z",
+            "message": {"id": "msg_2", "usage": {"input_tokens": 10, "output_tokens": 0}}});
+        std::fs::write(proj.join("s.jsonl"), format!("{m1}\n{m2}\n")).unwrap();
+        let (_b5, b7c, _a) = claude_usage(dir.path(), now, &[], &mut cache);
+        assert_eq!(b7c.tokens, 160, "size change invalidates the entry");
     }
 
     #[test]
@@ -336,7 +497,7 @@ mod tests {
             format!("{l1}\n{l2}\n{l2}\n"),
         )
         .unwrap();
-        let (b5, b7, _a) = codex_usage(dir.path(), now, &[]);
+        let (b5, b7, _a) = codex_usage(dir.path(), now, &[], &mut UsageCache::default());
         assert_eq!(b5.tokens, 1800, "cumulative total, duplicates ignored");
         assert_eq!(b7.tokens, 1800);
         assert_eq!(b5.sessions, 1);
@@ -369,7 +530,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let (_b5, b7, accounts) = claude_usage(dir.path(), now, &events);
+        let (_b5, b7, accounts) =
+            claude_usage(dir.path(), now, &events, &mut UsageCache::default());
         assert_eq!(b7.tokens, 140);
         assert_eq!(
             accounts.get("work"),
@@ -378,7 +540,7 @@ mod tests {
         );
         assert_eq!(accounts.get("personal"), Some(&(40, 40)));
         // No events -> no attribution at all (never a guess).
-        let (_b5, _b7, none) = claude_usage(dir.path(), now, &[]);
+        let (_b5, _b7, none) = claude_usage(dir.path(), now, &[], &mut UsageCache::default());
         assert!(none.is_empty());
     }
 
@@ -398,7 +560,7 @@ mod tests {
             format!("{l1}\n{l2}\n"),
         )
         .unwrap();
-        let (b5, b7, _a) = codex_usage(dir.path(), now, &[]);
+        let (b5, b7, _a) = codex_usage(dir.path(), now, &[], &mut UsageCache::default());
         assert_eq!(b5.tokens, 500, "only the in-window delta");
         assert_eq!(b7.tokens, 1500);
     }
