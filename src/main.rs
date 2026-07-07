@@ -6,7 +6,7 @@ use swapdex::paths::Paths;
 #[command(
     name = "swapdex",
     version,
-    about = "Switch Claude Code / Codex login accounts, locally and safely."
+    about = "Switch Claude Code / Codex / Gemini / Antigravity login accounts, locally and safely."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -90,7 +90,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Interactive picker: see every profile, type a number, switch
+    /// Full-screen picker: switch, open a conversation, add accounts
     Ui,
     /// Local health check: store, snapshots, live logins - with a fix per finding
     Doctor,

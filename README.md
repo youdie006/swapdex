@@ -104,7 +104,7 @@ swapdex doctor
 
 ```
 claude-code: you@work.com [max] (profile 'work')
-codex: you@personal.com (profile 'personal')
+codex: you@personal.com [chatgpt] (profile 'personal')
 ```
 
 The active account is always read from the **live** login, so if you `/login`
@@ -168,7 +168,9 @@ servers, and settings in that file are never touched.
 - Writes are atomic (temp file created `0600`, then renamed) so an interrupted
   switch can never leave a half-written credential that bricks the CLI.
 - Symlinked credential paths and running as root are refused.
-- `use` writes a backup of the current login (fsynced, or the switch aborts)
+- `use` writes a backup of the current login (fsynced, or the switch aborts;
+  exception: an unreadable/corrupt live file is skipped with a warning - `use`
+  is exactly the command that can replace a corrupt login)
   before overwriting anything, and `swapdex restore` brings it back in one
   command if the switch was a mistake. The store keeps the last 2 backups per
   tool, and `use` warns when the outgoing login is not saved as a profile --

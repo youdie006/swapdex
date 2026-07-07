@@ -40,7 +40,7 @@ pub fn print_banner() {
         s.push_str(&format!("  {v}{}{d}{}{r}\n", SWAP[i], DEX[i]));
     }
     s.push_str(&format!(
-        "\n  {m}Switch Claude Code and Codex login accounts - locally, one command.{r}\n\n"
+        "\n  {m}Switch Claude Code / Codex / Gemini / Antigravity accounts - locally, one command.{r}\n\n"
     ));
     s.push_str(&format!(
         "  {v}${r} swapdex setup          guided first-time setup\n"
