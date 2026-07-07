@@ -4,6 +4,39 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.14.0] - 2026-07-08
+
+Three more lenses (a threat-model security audit, a model-based random-walk
+soak, and a distribution-surface pass) plus a direct user report.
+
+### Changed
+- **A bare `swapdex` on an interactive terminal now opens the picker** when
+  you have saved accounts, instead of printing a banner that flashes and
+  returns (which read as "it opened and closed"). Pipes, dumb terminals,
+  and fresh machines still get the banner + hints, and a bare run never
+  creates the store.
+
+### Fixed
+- **Security (symlink escape):** a symlinked `accounts/<name>` or store
+  directory could redirect a credential write OUTSIDE the 0700 store - the
+  symlink refusal only checked the final path component. Every store
+  read/write now verifies each component under the store root.
+- **Security (MCP):** the read-only MCP server no longer reflects an
+  attacker-controlled tool/method name back into its JSON-RPC error text.
+- Declining the `add --update` repoint prompt printed "not logged in to any
+  selected tool" and exited 3 - a lie; it now says nothing was saved
+  because you declined, and exits 0. (Found by the soak.)
+- The CI "no network" guard is broadened from 5 HTTP-client names to also
+  fail on tokio/rustls/native-tls/openssl/socket2/hickory/quinn/h2, so a
+  future socket-capable dependency can't slip the "100% local" promise.
+
+### Verified by the security audit (no changes needed)
+- The usage cache holds no token text (only ids/timestamps/counts); error
+  messages are secret-free even when the token itself is malformed; the MCP
+  server is strictly read-only and exposes no token, uuid, or path; the
+  atomic temp file is created 0600 with no widening window; `ensure_not_root`
+  guards every credential-mutating entry point.
+
 ## [0.13.0] - 2026-07-08
 
 Four new audit lenses (upgrade compatibility, environment torture, parser
