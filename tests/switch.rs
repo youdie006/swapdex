@@ -198,7 +198,9 @@ fn login_claude_guides_the_add_step() {
         .output()
         .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    // Exit 3: guidance only, nothing saved - `login x && use x` in a
+    // script must not proceed.
+    assert_eq!(out.status.code().unwrap_or(-1), 3, "{o}");
     assert!(o.contains("swapdex add work --tool claude"), "{o}");
 }
 

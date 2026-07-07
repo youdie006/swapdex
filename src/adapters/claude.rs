@@ -135,7 +135,9 @@ impl AuthTool for Claude {
                     match std::fs::remove_file(&cred_path) {
                         Ok(()) => "apply aborted; the just-written credentials were removed",
                         Err(_) => {
-                            "apply aborted and cleanup FAILED - a credentials file was                              written without its identity; run `swapdex restore --tool                              claude` once the underlying problem is fixed"
+                            "apply aborted and cleanup FAILED - a credentials file was written \
+                             without its identity; run `swapdex restore --tool claude` \
+                             once the underlying problem is fixed"
                         }
                     }
                 }

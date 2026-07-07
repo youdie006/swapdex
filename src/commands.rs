@@ -276,12 +276,14 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
                     let tty = std::io::stdin().is_terminal()
                         || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
                     let msg = format!(
-                        "profile '{name}' holds a different account for {tool} than the one                          you're logged into"
+                        "profile '{name}' holds a different account for {tool} \
+                         than the one you're logged into"
                     );
                     if !tty {
                         eprintln!("swapdex: {msg}.");
                         eprintln!(
-                            "  keep both: swapdex add <new-name> --tool {}  |  really repoint:                              swapdex rm {name} && swapdex add {name}",
+                            "  keep both: swapdex add <new-name> --tool {}  |  really \
+                             repoint: swapdex rm {name} && swapdex add {name}",
                             pretty_tool_flag(tool)
                         );
                         return Ok(7);
@@ -2089,7 +2091,9 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         println!(
             "  add a DIFFERENT account:   swapdex login {name} --tool {flag}  (on a terminal)"
         );
-        return Ok(0);
+        // Exit 3, not 0: `login x && use x` in a script must not proceed as
+        // if a login was saved (nothing was).
+        return Ok(3);
     }
     println!("Currently logged in as {}.", identity_line(&cur));
     if !yes_no(
@@ -2155,13 +2159,29 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     // 4) Capture, or restore the stash on any failure.
     let new_id = adapter.identity(paths).ok().flatten();
     match (spawn, new_id) {
-        (Ok(_), Some(new)) if !new.account_id.is_empty() => {
+        (Ok(status), Some(new)) if !new.account_id.is_empty() => {
             if new.account_id == cur.account_id {
                 println!("note: you signed back into the same account.");
             }
             let snap = adapter.capture(paths)?;
             store.save(name, &snap)?;
             println!("saved profile '{name}' ({}).", identity_line(&new));
+            if tool == "antigravity" {
+                // Honesty over silence: the token file stores no email or
+                // account id, so the same-account check above can never fire
+                // here and ls cannot show WHO this is.
+                println!(
+                    "note: Antigravity stores no account identity on disk - swapdex \
+                     cannot confirm WHICH Google account this is; verify inside agy."
+                );
+            }
+            if !status.success() {
+                println!(
+                    "note: {} exited with an error after signing in - if anything \
+                     looks off, `swapdex restore --tool {flag}` undoes this.",
+                    pretty_tool(tool)
+                );
+            }
             println!("switch back any time:  swapdex use <name>  (or `swapdex ui`)");
             Ok(0)
         }
