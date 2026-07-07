@@ -10,7 +10,7 @@
 //! through [`TuiCtx`].
 
 use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -235,6 +235,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         };
         if key.kind != KeyEventKind::Press {
             continue;
+        }
+        // Ctrl+C quits from ANY screen - raw mode swallows the signal, and it
+        // is the first key a user in trouble reaches for.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            break 'ui Outcome::Quit;
         }
         match &mut screen {
             Screen::Main => {

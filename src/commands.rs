@@ -1919,14 +1919,17 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             }
             println!("Which tool do you want to log '{name}' into?");
             println!("  1) Claude Code   2) Codex   3) Gemini CLI   4) Antigravity");
-            match prompt("pick [1-4] (Enter cancels): ", "").as_deref() {
-                Some("1") => "claude-code",
-                Some("2") => "codex",
-                Some("3") => "gemini",
-                Some("4") => "antigravity",
-                _ => {
-                    println!("cancelled.");
-                    return Ok(0);
+            loop {
+                match prompt("pick [1-4] (Enter cancels): ", "").as_deref() {
+                    Some("1") => break "claude-code",
+                    Some("2") => break "codex",
+                    Some("3") => break "gemini",
+                    Some("4") => break "antigravity",
+                    Some("") | None => {
+                        println!("cancelled.");
+                        return Ok(0);
+                    }
+                    _ => println!("pick a number between 1 and 4 (Enter cancels)"),
                 }
             }
         }
@@ -2213,7 +2216,9 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         return Ok(1);
     }
     let store = Store::open(paths)?;
-    println!("swapdex keeps several Claude Code / Codex logins and switches between them.");
+    println!(
+        "swapdex keeps several Claude Code / Codex / Gemini / Antigravity logins and switches between them."
+    );
     println!(
         "Let's save the accounts you use. Press Enter to accept a [default], Ctrl-C to quit.\n"
     );
@@ -2249,52 +2254,37 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         }
     }
 
-    // 2) Offer to add more Codex accounts (the one with a driveable login).
-    if command_exists("codex") {
-        println!("You can keep several Codex accounts (e.g. work and personal).");
-        while yes_no("  add another Codex account now? [y/N]: ", false) {
-            let name = match ask_name(&store, "  name for it (e.g. personal): ", "") {
-                Some(n) => n,
-                None => {
-                    println!("  skipped.\n");
-                    continue;
-                }
-            };
-            println!(
-                "  This logs out of the current Codex account and opens a fresh browser login."
-            );
-            println!("  (Your current login is backed up first, so nothing is lost.)");
-            if !yes_no("  continue? [y/N]: ", false) {
-                println!("  cancelled.\n");
-                continue;
-            }
-            // Back up the current login before `codex login` deletes it.
-            if let Some(codex) = adapters::by_name("codex") {
-                if codex.present(paths) {
-                    if let Ok(s) = codex.capture(paths) {
-                        let _ = store.backup(&s);
-                    }
-                }
-            }
-            let _ = Command::new("codex").arg("logout").status();
-            println!("  opening codex login - complete the sign-in in your browser...");
-            let ok = Command::new("codex")
-                .arg("login")
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok {
-                println!("  login didn't finish; nothing saved.\n");
-                continue;
-            }
-            if let Some(codex) = adapters::by_name("codex") {
-                if codex.present(paths) {
-                    let snap = codex.capture(paths)?;
-                    store.save(&name, &snap)?;
-                    println!("  saved '{name}'.\n");
-                }
-            }
+    // 2) Offer to add more accounts - ANY tool, through the same one-flow
+    //    login (save current, sign out locally, fresh sign-in, capture).
+    println!("You can keep several accounts per tool (e.g. work and personal).");
+    loop {
+        if !yes_no("  add another account now? [y/N]: ", false) {
+            break;
         }
+        println!("  which tool?  1) Claude Code   2) Codex   3) Gemini CLI   4) Antigravity");
+        let sel = loop {
+            match prompt("  pick [1-4] (Enter cancels): ", "").as_deref() {
+                Some("1") => break Some(ToolSel::Claude),
+                Some("2") => break Some(ToolSel::Codex),
+                Some("3") => break Some(ToolSel::Gemini),
+                Some("4") => break Some(ToolSel::Antigravity),
+                Some("") | None => break None,
+                _ => println!("  pick a number between 1 and 4 (Enter cancels)"),
+            }
+        };
+        let Some(sel) = sel else {
+            println!("  skipped.\n");
+            continue;
+        };
+        let name = match ask_name(&store, "  name for it (e.g. personal): ", "") {
+            Some(n) => n,
+            None => {
+                println!("  skipped.\n");
+                continue;
+            }
+        };
+        let _ = login(paths, &name, Some(sel))?;
+        println!();
     }
 
     // 3) Summary.

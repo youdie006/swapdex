@@ -4,6 +4,27 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.9.2] - 2026-07-07
+
+Another angle-testing round as a user (tiny terminals, Unicode names, wrong
+keys, error paths, full journeys through a pty). Four fixes.
+
+### Fixed
+- **Ctrl+C now quits the ui** from any screen. Raw mode swallows the signal,
+  so the key was silently ignored - and it is the first key a user in
+  trouble reaches for.
+- **setup's "add another account" step asks WHICH tool** (all four) and runs
+  the same one-flow login. The old block was Codex-only - the root of "it
+  keeps asking about Codex accounts" in real use.
+- setup's intro line names all four tools, not "Claude Code / Codex".
+- `login` without `--tool`: a wrong number at the tool question re-prompts
+  instead of silently cancelling.
+
+### Verified in the same round (no changes needed)
+- 4-line terminals render without panicking; Unicode/CJK profile names align;
+  `--open`/`--dir` error paths exit non-zero with clear messages; the full
+  ui add-account journey returns to the picker with the new profile active.
+
 ## [0.9.1] - 2026-07-07
 
 ### Fixed

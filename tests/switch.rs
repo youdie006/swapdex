@@ -1718,3 +1718,66 @@ fn post_switch_native_sessions_without_sessionwiki() {
         "opened in the session's own folder: {o}"
     );
 }
+
+// Real-use angle-testing round: setup's "add another" must ask WHICH tool
+// (the old block was Codex-only - the root of "it keeps asking about Codex"),
+// and the login tool question must re-prompt on garbage instead of bailing.
+#[test]
+fn setup_add_another_asks_which_tool() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let mut child = Command::new(bin())
+        .arg("setup")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // name the found login, say yes to "add another", then cancel at the
+    // tool question, then no to the loop.
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"work\ny\n\nn\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        o.contains("which tool?") && o.contains("4) Antigravity"),
+        "add-another asks the tool, all four listed: {o}"
+    );
+    assert!(
+        !o.contains("add another Codex account"),
+        "the Codex-only prompt is gone: {o}"
+    );
+}
+
+#[test]
+fn login_tool_question_reprompts_on_garbage() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    let mut child = Command::new(bin())
+        .args(["login", "newone"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"7\n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(
+        o.contains("pick a number between 1 and 4"),
+        "garbage re-prompts: {o}"
+    );
+    assert!(o.contains("cancelled"), "Enter cancels: {o}");
+}
