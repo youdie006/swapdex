@@ -4,6 +4,31 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.10.0] - 2026-07-07
+
+A deep dig into account handling itself.
+
+### Fixed
+- **Stale-profile token rotation** - the deepest account bug a switcher can
+  have. Providers ROTATE refresh tokens while an account is in use, so a
+  profile snapshot goes stale the moment you work on that account; switching
+  away and back later could restore a refresh token the provider had already
+  revoked, forcing a re-login and making the switch look broken. Now `use`
+  (and the `login` flow's stash) write the outgoing live capture - the
+  freshest known tokens - back into EVERY profile holding that account
+  before switching. A profile now always means "this account's newest known
+  login", not "the login as of the day you saved it".
+- **Store permissions self-tighten.** Snapshots are tokens, and doctor's
+  store check only looked at the top-level directory - `cp -r`, backup
+  tools, or a loose umask could leave a world-readable token file inside
+  unnoticed. Opening the store now walks it and re-tightens every dir to
+  0700 and every file to 0600, best-effort, on every command.
+
+### Verified in the same dig (no changes needed)
+- Symlinked credential files are refused with a non-zero exit.
+- Two profiles holding the same account both stay fresh under the new
+  rotation rule; the active marker points at the first match.
+
 ## [0.9.2] - 2026-07-07
 
 Another angle-testing round as a user (tiny terminals, Unicode names, wrong

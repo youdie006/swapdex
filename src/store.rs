@@ -25,6 +25,20 @@ pub struct ProfileInfo {
 /// kept only to keep the lock; it is intentionally never read.
 pub struct LockGuard(#[allow(dead_code)] fs::File);
 
+/// chmod 0700/0600 everything under `dir` (dirs/files), best-effort.
+fn tighten_tree(dir: &std::path::Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).ok();
+            tighten_tree(&p);
+        } else {
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
+}
+
 impl Store {
     pub fn open(paths: &Paths) -> Result<Store> {
         let dir = paths.store_dir();
@@ -35,6 +49,11 @@ impl Store {
             let d = dir.join(sub);
             fs::create_dir_all(&d).ok();
             fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).ok();
+            // Snapshots ARE tokens: tighten everything under them too. cp -r,
+            // backup tools, or a loose umask can widen modes after the fact,
+            // and doctor's top-level check would miss it. Best-effort, tiny
+            // tree (profiles x tools), runs on every open.
+            tighten_tree(&d);
         }
         Ok(Store { dir })
     }

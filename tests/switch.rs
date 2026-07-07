@@ -1489,7 +1489,9 @@ fn login_claude_adds_a_second_account_in_one_flow() {
     seed_claude(root.path(), "uuid-A", "a@x.com");
     run(root.path(), &["add", "old", "--tool", "claude"]);
     // Fake claude: simulates the user signing into account B inside the app.
+    // Must answer the `claude --version` probe without touching credentials.
     let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; esac
 mkdir -p "$SWAPDEX_ROOT/.claude"
 cat > "$SWAPDEX_ROOT/.claude/.credentials.json" <<'CRED'
 {"claudeAiOauth":{"accessToken":"AT-B","refreshToken":"RT-B","expiresAt":9999999999999,"subscriptionType":"pro"}}
@@ -1780,4 +1782,100 @@ fn login_tool_question_reprompts_on_garbage() {
         "garbage re-prompts: {o}"
     );
     assert!(o.contains("cancelled"), "Enter cancels: {o}");
+}
+
+// THE deep account bug: refresh tokens ROTATE while you use an account. If
+// switching away only writes the outgoing login to the backup ring, the
+// matched profile keeps day-one tokens - and switching back later restores a
+// refresh token the provider may have already revoked. Switching away must
+// refresh the matched profile's snapshot with the live capture.
+#[test]
+fn switch_away_refreshes_matched_profile_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]);
+    run(root.path(), &["use", "work"]);
+    // Simulate the provider rotating acct-A's tokens during a long session.
+    let auth = root.path().join(".codex/auth.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth).unwrap()).unwrap();
+    v["tokens"]["access_token"] = "AT-ROTATED".into();
+    v["tokens"]["refresh_token"] = "RT-ROTATED".into();
+    std::fs::write(&auth, serde_json::to_string(&v).unwrap()).unwrap();
+    // Switch away, then back.
+    let (_o, e, c) = run(root.path(), &["use", "personal"]);
+    assert_eq!(c, 0, "{e}");
+    let (_o, e, c) = run(root.path(), &["use", "work"]);
+    assert_eq!(c, 0, "{e}");
+    let live = std::fs::read_to_string(&auth).unwrap();
+    assert!(
+        live.contains("RT-ROTATED"),
+        "switching back restores the ROTATED tokens, not day-one ones: {live}"
+    );
+}
+
+// Same invariant for the login flow's stash: if the current login matches a
+// saved profile, the stash (its freshest tokens) must refresh that profile.
+#[test]
+fn login_flow_refreshes_matched_profile_from_stash() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "old", "--tool", "claude"]);
+    // Rotate the live tokens after the profile was saved.
+    let cred = root.path().join(".claude/.credentials.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cred).unwrap()).unwrap();
+    v["claudeAiOauth"]["refreshToken"] = "RT-ROTATED".into();
+    std::fs::write(&cred, serde_json::to_string(&v).unwrap()).unwrap();
+    // Add account B through the login flow. The fake must answer --version
+    // WITHOUT touching credentials - swapdex probes `claude --version` first.
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.claude"
+cat > "$SWAPDEX_ROOT/.claude/.credentials.json" <<'CRED'
+{"claudeAiOauth":{"accessToken":"AT-B","refreshToken":"RT-B","expiresAt":9999999999999,"subscriptionType":"pro"}}
+CRED
+cat > "$SWAPDEX_ROOT/.claude.json" <<'CFG'
+{"oauthAccount":{"accountUuid":"uuid-B","emailAddress":"b@x.com","displayName":"B"},"projects":{}}
+CFG
+"#;
+    let bin_dir = fake_claude(root.path(), script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "newacc", "--tool", "claude"],
+        "y\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    // Back to the old account: must carry the rotated token.
+    let (_o, e, c) = run(root.path(), &["use", "old"]);
+    assert_eq!(c, 0, "{e}");
+    let live = std::fs::read_to_string(&cred).unwrap();
+    assert!(
+        live.contains("RT-ROTATED"),
+        "profile 'old' was refreshed from the stash: {live}"
+    );
+}
+
+// Deep account-security angle: snapshots ARE tokens. If anything loosens a
+// mode inside the store (backup tools, cp -r, umask accidents), opening the
+// store must tighten it back - 0700 dirs, 0600 files, all the way down.
+#[test]
+fn store_open_tightens_loose_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    let dir = root.path().join(".local/share/swapdex/accounts/work/codex");
+    let file = dir.join("auth");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // Any store-opening command repairs the modes.
+    run(root.path(), &["ls"]);
+    let dmode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    let fmode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dmode, 0o700, "dir tightened");
+    assert_eq!(fmode, 0o600, "token file tightened");
 }

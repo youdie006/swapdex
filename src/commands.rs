@@ -144,6 +144,23 @@ pub(crate) fn matched_profile_name(store: &Store, tool: &str, live_id: &str) -> 
         .map(|p| p.name)
 }
 
+/// Every profile holding this tool+account - refresh targets when the live
+/// login (with its freshest, possibly rotated tokens) is switched away.
+fn matching_profile_names(store: &Store, tool: &str, live_id: &str) -> Vec<String> {
+    if live_id.is_empty() {
+        return Vec::new();
+    }
+    store
+        .list()
+        .into_iter()
+        .filter(|p| {
+            p.tools.iter().any(|t| t == tool)
+                && profile_account_id(store, &p.name, tool).as_deref() == Some(live_id)
+        })
+        .map(|p| p.name)
+        .collect()
+}
+
 /// Reject a profile name that could escape the store (path traversal). Returns
 /// the exit code to use if invalid.
 fn reject_bad_name(name: &str) -> Option<i32> {
@@ -405,9 +422,16 @@ fn use_account_inner(
             match adapter.capture(paths) {
                 Ok(live_snap) => {
                     store.backup(&live_snap)?;
-                    // Only the last 2 backups remember an account that is not
-                    // saved as a profile - warn while it is still recoverable.
+                    // Refresh tokens ROTATE while an account is in use, so a
+                    // profile snapshot goes stale the moment you work on that
+                    // account. Write the live capture (the freshest known
+                    // tokens) back into every profile holding this account -
+                    // otherwise switching back later restores a refresh token
+                    // the provider may have already revoked.
                     if let Some(id) = &live_id {
+                        for pname in matching_profile_names(&store, tool, id) {
+                            store.save(&pname, &live_snap)?;
+                        }
                         if matched_profile_name(&store, tool, id).is_none() {
                             let who = live
                                 .as_ref()
@@ -2022,6 +2046,11 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             //    can always bring it back) and - if unmatched - a profile.
             let stash = adapter.capture(paths)?;
             store.backup(&stash)?;
+            // Same rotation rule as `use`: the stash holds this account's
+            // freshest tokens - refresh every profile that stores it.
+            for pname in matching_profile_names(&store, "claude-code", &cur.account_id) {
+                store.save(&pname, &stash)?;
+            }
             if matched_profile_name(&store, "claude-code", &cur.account_id).is_none() {
                 let who = cur.email.clone().unwrap_or_else(|| cur.display.clone());
                 let suggestion = suggest_name(&who);
