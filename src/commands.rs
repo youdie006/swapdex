@@ -1256,36 +1256,128 @@ pub fn ui(paths: &Paths) -> Result<i32> {
     }
 }
 
+/// One session row for the post-switch menu, whatever the source.
+pub(crate) enum MenuSession {
+    Wiki(crate::session_link::RecentSession),
+    Native(crate::native_sessions::NativeSession),
+}
+
+impl MenuSession {
+    pub(crate) fn describe(&self) -> (String, i64, String, String) {
+        match self {
+            MenuSession::Wiki(s) => (
+                s.id.chars().take(6).collect(),
+                s.started,
+                s.tool.clone(),
+                s.title.clone(),
+            ),
+            MenuSession::Native(s) => (
+                s.id.chars().take(6).collect(),
+                s.started,
+                s.tool.to_string(),
+                s.title.clone(),
+            ),
+        }
+    }
+}
+
+/// Recent sessions for the just-switched profile - sessionwiki when present
+/// (cross-tool, richer), the tools' own on-disk stores otherwise. Never
+/// requires sessionwiki (real-use feedback).
+pub(crate) fn recent_menu_sessions(
+    paths: &Paths,
+    name: &str,
+    first_time: bool,
+    n: usize,
+) -> (Vec<MenuSession>, String) {
+    // sessionwiki path (attributed, then honest any-account fallback).
+    if let Some(r) = crate::session_link::recent_sessions_for(paths, name, n) {
+        if !r.is_empty() {
+            return (
+                r.into_iter().map(MenuSession::Wiki).collect(),
+                format!("recent sessions on '{name}' (sessionwiki):"),
+            );
+        }
+        if first_time {
+            if let Some(any) = crate::session_link::recent_sessions_any(n) {
+                if !any.is_empty() {
+                    return (
+                        any.into_iter().map(MenuSession::Wiki).collect(),
+                        "recent sessions (any account - attribution starts with your first switch):"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        return (Vec::new(), String::new());
+    }
+    // Native path: straight from ~/.claude and ~/.codex.
+    let events = crate::session_link::read_timeline(paths);
+    let all = crate::native_sessions::recent(paths, n * 4);
+    let mine: Vec<crate::native_sessions::NativeSession> = all
+        .iter()
+        .filter(|s| {
+            crate::session_link::attribute(&events, s.tool, s.started).as_deref() == Some(name)
+        })
+        .map(|s| crate::native_sessions::NativeSession {
+            tool: s.tool,
+            id: s.id.clone(),
+            title: s.title.clone(),
+            cwd: s.cwd.clone(),
+            started: s.started,
+        })
+        .take(n)
+        .collect();
+    if !mine.is_empty() {
+        return (
+            mine.into_iter().map(MenuSession::Native).collect(),
+            format!("recent sessions on '{name}':"),
+        );
+    }
+    if first_time {
+        let any: Vec<MenuSession> = all.into_iter().take(n).map(MenuSession::Native).collect();
+        if !any.is_empty() {
+            return (
+                any,
+                "recent sessions (any account - attribution starts with your first switch):"
+                    .to_string(),
+            );
+        }
+    }
+    (Vec::new(), String::new())
+}
+
+/// Exec the resume for a picked menu session (never returns on success).
+fn exec_menu_resume(s: &MenuSession) -> anyhow::Error {
+    match s {
+        MenuSession::Wiki(w) => {
+            println!("opening session {} via sessionwiki...", w.id);
+            exec_sessionwiki_resume(&w.id)
+        }
+        MenuSession::Native(nat) => {
+            println!("resuming {} session {}...", pretty_tool(nat.tool), nat.id);
+            crate::native_sessions::exec_resume(nat)
+        }
+    }
+}
+
 /// Post-switch continuity: recent sessions of the picked account + the
 /// numbered resume handoff. Shared by the numbered picker and the TUI.
 fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
     // `first_time` is captured by the CALLER before the switch writes its own
-    // timeline event (audit fix - re-reading here would kill the fallback on
-    // the very first switch, the case it exists for).
-    let attributed = crate::session_link::recent_sessions_for(paths, name, 3);
-    let (recent, label) = match attributed {
-        Some(r) if !r.is_empty() => (
-            Some(r),
-            format!("recent sessions on '{name}' (sessionwiki):"),
-        ),
-        Some(_) if first_time => (
-            crate::session_link::recent_sessions_any(3),
-            "recent sessions (any account - attribution starts with your first switch):"
-                .to_string(),
-        ),
-        _ => (None, String::new()),
-    };
-    if let Some(recent) = recent.filter(|r| !r.is_empty()) {
+    // timeline event.
+    let (recent, label) = recent_menu_sessions(paths, name, first_time, 3);
+    if !recent.is_empty() {
         println!("\n{label}");
         for (i, s) in recent.iter().enumerate() {
-            let id6: String = s.id.chars().take(6).collect();
-            let age = age_line((s.started.max(0) as u128) * 1_000_000_000);
+            let (id6, started, tool, title) = s.describe();
+            let age = age_line((started.max(0) as u128) * 1_000_000_000);
             let line = format!(
                 "  {}) {id6}  {:>7}  {}  {}",
                 i + 1,
                 age,
-                fit(&format!("[{}]", s.tool), 13),
-                fit(&s.title, 44)
+                fit(&format!("[{tool}]"), 13),
+                fit(&title, 44)
             );
             println!("{}", line.trim_end());
         }
@@ -1298,9 +1390,7 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
         ) {
             if let Ok(k) = ans.parse::<usize>() {
                 if (1..=recent.len()).contains(&k) {
-                    let id = recent[k - 1].id.clone();
-                    println!("opening session {id} via sessionwiki...");
-                    return Err(exec_sessionwiki_resume(&id));
+                    return Err(exec_menu_resume(&recent[k - 1]));
                 }
             }
             if let Some(tool) = launch_letter(&ans) {
@@ -1311,8 +1401,6 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
         "open now? c/x/g/a = new claude/codex/gemini/agy (Enter skips): ",
         "",
     ) {
-        // No sessionwiki (or nothing attributable): still land in a
-        // conversation - the reason you switched.
         if let Some(tool) = launch_letter(&ans) {
             return Err(launch_in_folder(tool));
         }
@@ -1326,7 +1414,6 @@ fn launch_in_folder(tool: &str) -> anyhow::Error {
     let dir = prompt("folder to open in [current dir]: ", "")
         .filter(|d| !d.is_empty())
         .map(|d| {
-            // ~ expansion, the one shell nicety a folder prompt needs.
             if let Some(rest) = d.strip_prefix("~/") {
                 if let Some(home) = dirs::home_dir() {
                     return home.join(rest);
@@ -1354,98 +1441,174 @@ fn launch_letter(ans: &str) -> Option<&'static str> {
     }
 }
 
-/// The full-screen ui loop: render -> action -> run the SAME command path the
-/// CLI uses -> re-enter (llmux-style stay-in-the-ui), except a switch, which
-/// exits to print the switch result and the session continuity flow.
+/// The persistent full-screen ui: one alternate-screen session, everything
+/// inside it. Switch/restore run this same binary as a subprocess (output
+/// condensed into the status line - no second switching implementation);
+/// opening a conversation is the one action that leaves.
 fn ui_tui(paths: &Paths) -> Result<i32> {
+    struct Ctx<'a> {
+        paths: &'a Paths,
+        last_sessions: Vec<MenuSession>,
+    }
+    fn run_self(args: &[&str]) -> (bool, String) {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => return (false, format!("cannot find own binary: {e}")),
+        };
+        match Command::new(exe)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(out) => {
+                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                text.push_str(&String::from_utf8_lossy(&out.stderr));
+                let mut msg = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("  |  ");
+                if msg.chars().count() > 160 {
+                    msg = msg.chars().take(159).collect::<String>() + "…";
+                }
+                (out.status.success(), msg)
+            }
+            Err(e) => (false, format!("failed: {e}")),
+        }
+    }
+    impl crate::tui::TuiCtx for Ctx<'_> {
+        fn rows(&mut self) -> Vec<crate::tui::Row> {
+            let Ok(store) = Store::open(self.paths) else {
+                return Vec::new();
+            };
+            let active = active_by_tool(&store, self.paths);
+            store
+                .list()
+                .iter()
+                .map(|p| {
+                    let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+                    let at: Vec<&str> = active
+                        .iter()
+                        .filter(|(_, n)| n == &p.name)
+                        .map(|(t, _)| *t)
+                        .collect();
+                    crate::tui::Row {
+                        name: p.name.clone(),
+                        ident: identity_column(email, tier),
+                        tools: p
+                            .tools
+                            .iter()
+                            .map(|t| {
+                                if at.contains(&t.as_str()) {
+                                    format!("{t}*")
+                                } else {
+                                    t.clone()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        active: !at.is_empty(),
+                        warn: marker,
+                    }
+                })
+                .collect()
+        }
+        fn switch(&mut self, name: &str) -> (bool, String) {
+            run_self(&["use", name])
+        }
+        fn restore(&mut self) -> String {
+            run_self(&["restore"]).1
+        }
+        fn delete(&mut self, name: &str) -> String {
+            match Store::open(self.paths).and_then(|s| s.remove(name)) {
+                Ok(true) => format!("removed profile '{name}' (the live login stays)"),
+                Ok(false) => format!("no profile named '{name}'"),
+                Err(e) => format!("delete failed: {e}"),
+            }
+        }
+        fn sessions(&mut self, name: &str) -> (String, Vec<crate::tui::SessionEntry>) {
+            // The switch already wrote its own timeline event by the time this
+            // runs, so "first time" here means: the timeline holds nothing
+            // BUT that one switch (at most one event per tool).
+            let first_time =
+                crate::session_link::read_timeline(self.paths).len() <= adapters::all().len();
+            let (sessions, label) = recent_menu_sessions(self.paths, name, first_time, 5);
+            let entries = sessions
+                .iter()
+                .map(|s| {
+                    let (id6, started, tool, title) = s.describe();
+                    let age = age_line((started.max(0) as u128) * 1_000_000_000);
+                    crate::tui::SessionEntry {
+                        line: format!(
+                            "{id6}  {:>7}  {}  {}",
+                            age,
+                            fit(&format!("[{tool}]"), 13),
+                            fit(&title, 44)
+                        )
+                        .trim_end()
+                        .to_string(),
+                    }
+                })
+                .collect();
+            self.last_sessions = sessions;
+            let label = if label.is_empty() {
+                format!("open a conversation on '{name}'")
+            } else {
+                label.trim_end_matches(':').to_string()
+            };
+            (label, entries)
+        }
+    }
+
+    let mut ctx = Ctx {
+        paths,
+        last_sessions: Vec::new(),
+    };
     loop {
-        let store = Store::open(paths)?;
-        let profiles = store.list();
-        if profiles.is_empty() {
+        // Empty store: fall back to the guided path rather than an empty box.
+        if Store::open(paths)?.list().is_empty() {
             println!("No accounts saved yet.");
             println!("  guided setup:  swapdex setup");
             return Ok(0);
         }
-        let active = active_by_tool(&store, paths);
-        let rows: Vec<crate::tui::Row> = profiles
-            .iter()
-            .map(|p| {
-                let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
-                let at: Vec<&str> = active
-                    .iter()
-                    .filter(|(_, n)| n == &p.name)
-                    .map(|(t, _)| *t)
-                    .collect();
-                crate::tui::Row {
-                    name: p.name.clone(),
-                    ident: identity_column(email, tier),
-                    tools: p
-                        .tools
-                        .iter()
-                        .map(|t| {
-                            if at.contains(&t.as_str()) {
-                                format!("{t}*")
-                            } else {
-                                t.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    active: !at.is_empty(),
-                    warn: marker,
-                }
-            })
-            .collect();
-        let summary = crate::session_link::status_line(paths);
-        drop(store);
-        match crate::tui::pick(&rows, summary.as_deref())? {
-            crate::tui::Action::Quit => return Ok(0),
-            crate::tui::Action::Switch(name) => {
-                let first_time = crate::session_link::read_timeline(paths).is_empty();
-                let rc = use_account(paths, &name, None, false)?;
-                if rc == 0 {
-                    ui_session_hints(paths, &name, first_time)?;
-                }
-                return Ok(rc);
+        match crate::tui::run(&mut ctx)? {
+            crate::tui::Outcome::Quit => return Ok(0),
+            crate::tui::Outcome::OpenSession(i) => {
+                let Some(sess) = ctx.last_sessions.get(i) else {
+                    return Ok(0);
+                };
+                return Err(exec_menu_resume(sess));
             }
-            crate::tui::Action::AddAccount => {
-                if let Some(tool) = crate::tui::pick_tool()? {
-                    let sel = match tool {
-                        "claude-code" => Some(ToolSel::Claude),
-                        "codex" => Some(ToolSel::Codex),
-                        "gemini" => Some(ToolSel::Gemini),
-                        _ => Some(ToolSel::Antigravity),
-                    };
-                    let who = adapters::by_name(tool)
-                        .and_then(|a| a.identity(paths).ok().flatten())
-                        .and_then(|id| id.email)
-                        .unwrap_or_else(|| "account".into());
-                    let store = Store::open(paths)?;
-                    let Some(name) = ask_name(
-                        &store,
-                        &format!("name for the new account [{}]: ", suggest_name(&who)),
-                        &suggest_name(&who),
-                    ) else {
-                        continue;
-                    };
-                    drop(store);
-                    let rc = login(paths, &name, sel)?;
-                    if rc != 0 {
-                        return Ok(rc);
-                    }
-                    println!("(press Enter to go back to the picker)");
-                    let _ = prompt("", "");
-                }
+            crate::tui::Outcome::NewConv { tool, dir } => {
+                println!("opening {}...", pretty_tool(tool));
+                return Err(exec_tool(tool, dir.as_deref()));
             }
-            crate::tui::Action::Restore => {
-                restore(paths, None, false)?;
+            crate::tui::Outcome::AddAccount(tool) => {
+                let sel = match tool {
+                    "claude-code" => Some(ToolSel::Claude),
+                    "codex" => Some(ToolSel::Codex),
+                    "gemini" => Some(ToolSel::Gemini),
+                    _ => Some(ToolSel::Antigravity),
+                };
+                let who = adapters::by_name(tool)
+                    .and_then(|a| a.identity(paths).ok().flatten())
+                    .and_then(|id| id.email)
+                    .unwrap_or_else(|| "account".into());
+                let store = Store::open(paths)?;
+                let Some(name) = ask_name(
+                    &store,
+                    &format!("name for the new account [{}]: ", suggest_name(&who)),
+                    &suggest_name(&who),
+                ) else {
+                    continue;
+                };
+                drop(store);
+                let rc = login(paths, &name, sel)?;
+                if rc != 0 {
+                    return Ok(rc);
+                }
                 println!("(press Enter to go back to the picker)");
                 let _ = prompt("", "");
-            }
-            crate::tui::Action::Delete(name) => {
-                let store = Store::open(paths)?;
-                store.remove(&name)?;
-                drop(store);
             }
         }
     }

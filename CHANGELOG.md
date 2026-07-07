@@ -4,6 +4,27 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.9.0] - 2026-07-07
+
+Two more real-use asks, same day.
+
+### Added
+- **Sessions without sessionwiki.** The post-switch menu now reads recent
+  sessions STRAIGHT from each tool's own store (`~/.claude/projects`,
+  `~/.codex/sessions`) when sessionwiki is absent - titles from the first
+  user message, resume via the tool's native mechanism (`claude --resume
+  <id>` in the session's own folder, `codex resume <id>`). A session's
+  recorded cwd is only trusted when it exists as a real local directory.
+  sessionwiki, when installed, still provides the richer cross-tool view.
+- **The ui stays up** (ccusage-style): one persistent full-screen session.
+  Switching shows its condensed result in the status line and refreshes the
+  list in place; `o` opens the conversation menu for the selected profile
+  (recent sessions + new-conversation entries with an in-UI folder prompt);
+  Esc returns to the list. Opening a conversation is the one action that
+  leaves - that is the point of a switch. Internally a switch runs this same
+  binary as a subprocess, so there is still exactly one switching
+  implementation.
+
 ## [0.8.0] - 2026-07-07
 
 ### Added

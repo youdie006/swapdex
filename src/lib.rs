@@ -3,6 +3,7 @@ pub mod atomic;
 pub mod banner;
 pub mod commands;
 pub mod mcp;
+pub mod native_sessions;
 pub mod paths;
 pub mod proc;
 pub mod secret;

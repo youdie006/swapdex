@@ -1654,3 +1654,67 @@ fn use_open_dir_launches_in_that_folder() {
         "launched in the chosen folder: {o}"
     );
 }
+
+// No sessionwiki anywhere: the post-switch menu still lists recent sessions
+// (read natively from ~/.claude / ~/.codex) and resumes via the tool's own
+// mechanism, in the session's own folder.
+#[test]
+fn post_switch_native_sessions_without_sessionwiki() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    // A native claude session on disk, with a real cwd recorded.
+    let proj_dir = root.path().join("myproj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let store = root.path().join(".claude/projects/-myproj");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join("0a000000-0000-4000-8000-0000000000aa.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"user","cwd":proj_dir.to_str().unwrap(),
+                "message":{"content":[{"type":"text","text":"fix the flaky retry test"}]}}),
+        ),
+    )
+    .unwrap();
+    // Fake claude proves the native resume exec: prints its args and pwd.
+    let bin_dir = fake_claude(
+        root.path(),
+        "#!/bin/sh\necho \"RESUME-ARGS $@\"\necho \"RESUME-PWD $(pwd)\"\n",
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("PATH", &path) // no sessionwiki in this PATH
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"1\n1\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(
+        o.contains("fix the flaky retry"),
+        "native session listed: {o}"
+    );
+    assert!(
+        o.contains("RESUME-ARGS --resume 0a000000-0000-4000-8000-0000000000aa"),
+        "claude --resume exec'd: {o}"
+    );
+    assert!(
+        o.contains(&format!("RESUME-PWD {}", proj_dir.display())),
+        "opened in the session's own folder: {o}"
+    );
+}
