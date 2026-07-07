@@ -2024,112 +2024,175 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         }
     };
 
-    if tool == "antigravity" {
-        let already = adapters::by_name("antigravity")
-            .and_then(|a| a.identity(paths).ok().flatten())
-            .is_some();
-        if already {
-            println!("Antigravity is already logged in. To save it:");
-            println!("  swapdex add {name} --tool antigravity");
-            return Ok(0);
-        }
-        eprintln!("swapdex: no Antigravity login found. Sign in first, then save it:");
-        eprintln!("  1) run `agy` once and complete the Google sign-in");
-        eprintln!("  2) then:  swapdex add {name} --tool antigravity");
+    // One flow for all four tools from here on.
+    let bin = match tool {
+        "claude-code" => "claude",
+        "codex" => "codex",
+        "gemini" => "gemini",
+        _ => "agy",
+    };
+    if !command_exists(bin) {
+        // stderr + exit 3: `login x && ...` in a script must not proceed as
+        // if a login was saved.
+        eprintln!("swapdex: `{bin}` isn't on your PATH. Install it, then retry.");
         return Ok(3);
     }
-    if tool == "gemini" {
-        // Gemini CLI signs in inside the app (first run opens the browser
-        // OAuth), so guide the two-step path like Claude.
-        let already = adapters::by_name("gemini")
-            .and_then(|g| g.identity(paths).ok().flatten())
-            .is_some();
-        if already {
-            println!("Gemini CLI is already logged in. To save it:");
-            println!("  swapdex add {name} --tool gemini");
-            return Ok(0);
+    let adapter = adapters::by_name(tool).expect("known tool");
+    let flag = pretty_tool_flag(tool);
+
+    let Some(cur) = adapter.identity(paths).ok().flatten() else {
+        // Not logged in at all: run the tool's own sign-in, then capture.
+        // (codex has a real `login` subcommand; the others sign in on first
+        // run of the app itself.)
+        println!(
+            "Opening {} to sign in. Complete the login{}",
+            pretty_tool(tool),
+            if tool == "codex" {
+                " in your browser.".to_string()
+            } else {
+                ", then exit it.".to_string()
+            }
+        );
+        spawn_tool_login(bin, tool)?;
+        if adapter.identity(paths).ok().flatten().is_none() {
+            eprintln!(
+                "swapdex: no {} login was completed - nothing saved.",
+                pretty_tool(tool)
+            );
+            return Ok(8);
         }
-        eprintln!("swapdex: no Gemini login found. Sign in first, then save it:");
-        eprintln!("  1) run `gemini` once and complete the Google sign-in");
-        eprintln!("  2) then:  swapdex add {name} --tool gemini");
-        return Ok(3);
+        println!();
+        // update=true so re-running `login <name>` refreshes an existing profile.
+        return add(paths, Some(name), sel_for_tool(tool), true);
+    };
+
+    // Already logged in - the user wants to ADD a different account. Do the
+    // whole thing: save the current login, sign out locally, run the tool's
+    // sign-in, capture the new account. The original login is stashed in the
+    // store and restored on any failure, so this can never lose an account.
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+    if !tty {
+        // Scripts get guidance - this flow is interactive.
+        println!(
+            "You're already logged into {} ({}).",
+            pretty_tool(tool),
+            identity_line(&cur)
+        );
+        println!("  save the current account:  swapdex add {name} --tool {flag}");
+        println!(
+            "  add a DIFFERENT account:   swapdex login {name} --tool {flag}  (on a terminal)"
+        );
+        return Ok(0);
     }
-    if tool == "claude-code" {
-        if !command_exists("claude") {
-            // stderr + exit 3, same as the codex path: `login x && ...` in a
-            // script must not proceed as if a login was saved.
-            eprintln!("swapdex: Claude Code isn't on your PATH. Install it, then:");
-            eprintln!("  1) run `claude` and complete the login");
-            eprintln!("  2) then:  swapdex add {name} --tool claude");
-            return Ok(3);
+    println!("Currently logged in as {}.", identity_line(&cur));
+    if !yes_no(
+        &format!(
+            "Sign in to a DIFFERENT account as '{name}'? swapdex will save the \
+             current login, sign you out locally, and open {} for the \
+             new sign-in. [Y/n]: ",
+            pretty_tool(tool)
+        ),
+        true,
+    ) {
+        println!("cancelled - nothing changed.");
+        return Ok(0);
+    }
+    let store = Store::open(paths)?;
+    let _lock = match store.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
         }
-        let claude = adapters::by_name("claude-code");
-        let already = claude
-            .as_ref()
-            .and_then(|c| c.identity(paths).ok().flatten())
-            .is_some();
-        if already {
-            // Already logged in - the user wants to ADD a different account.
-            // Do the whole thing: save the current login, sign out locally,
-            // run claude for the fresh sign-in, capture the new account. The
-            // original login is stashed in the store and restored on any
-            // failure, so this can never lose an account.
-            use std::io::IsTerminal;
-            let tty =
-                std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
-            let adapter = claude.expect("claude adapter exists");
-            let cur = adapter.identity(paths)?.expect("already checked");
-            if !tty {
-                // Scripts get the old guidance - this flow is interactive.
-                println!(
-                    "You're already logged into Claude Code ({}).",
-                    identity_line(&cur)
-                );
-                println!("  save the current account:  swapdex add {name} --tool claude");
-                println!("  add a DIFFERENT account:   swapdex login {name} --tool claude  (on a terminal)");
-                return Ok(0);
+    };
+    // 1) The current login, saved twice over: a store backup (restore can
+    //    always bring it back) plus a refresh of every profile holding it -
+    //    and, if unmatched, an offer to keep it under a name.
+    let stash = adapter.capture(paths)?;
+    store.backup(&stash)?;
+    for pname in matching_profile_names(&store, tool, &cur.account_id) {
+        store.save(&pname, &stash)?;
+    }
+    if matched_profile_name(&store, tool, &cur.account_id).is_none() {
+        let who = cur.email.clone().unwrap_or_else(|| cur.display.clone());
+        let suggestion = suggest_name(&who);
+        if let Some(keep) = ask_name(
+            &store,
+            &format!("name to keep the CURRENT account under [{suggestion}]: "),
+            &suggestion,
+        ) {
+            store.save(&keep, &stash)?;
+            println!("saved current login as '{keep}'.");
+        }
+    }
+    // 2) Local sign-out, so the tool's own flow prompts a FRESH sign-in.
+    sign_out_locally(paths, tool);
+    // 3) Fresh sign-in inside the official app.
+    println!(
+        "Opening {} - sign in with the OTHER account{}",
+        pretty_tool(tool),
+        if tool == "codex" {
+            " in your browser.".to_string()
+        } else {
+            ", then exit it.".to_string()
+        }
+    );
+    let spawn = spawn_tool_login(bin, tool);
+    // 4) Capture, or restore the stash on any failure.
+    let new_id = adapter.identity(paths).ok().flatten();
+    match (spawn, new_id) {
+        (Ok(_), Some(new)) if !new.account_id.is_empty() => {
+            if new.account_id == cur.account_id {
+                println!("note: you signed back into the same account.");
             }
-            println!("Currently logged in as {}.", identity_line(&cur));
-            if !yes_no(
-                &format!(
-                    "Sign in to a DIFFERENT account as '{name}'? swapdex will save the                      current login, sign you out locally, and open Claude Code for the                      new sign-in. [Y/n]: "
-                ),
-                true,
-            ) {
-                println!("cancelled - nothing changed.");
-                return Ok(0);
-            }
-            let store = Store::open(paths)?;
-            let _lock = match store.lock() {
-                Ok(g) => g,
-                Err(_) => {
-                    eprintln!("swapdex: another swapdex is mid-switch; try again");
-                    return Ok(4);
-                }
-            };
-            // 1) The current login, saved twice over: a store backup (restore
-            //    can always bring it back) and - if unmatched - a profile.
-            let stash = adapter.capture(paths)?;
-            store.backup(&stash)?;
-            // Same rotation rule as `use`: the stash holds this account's
-            // freshest tokens - refresh every profile that stores it.
-            for pname in matching_profile_names(&store, "claude-code", &cur.account_id) {
-                store.save(&pname, &stash)?;
-            }
-            if matched_profile_name(&store, "claude-code", &cur.account_id).is_none() {
-                let who = cur.email.clone().unwrap_or_else(|| cur.display.clone());
-                let suggestion = suggest_name(&who);
-                if let Some(keep) = ask_name(
-                    &store,
-                    &format!("name to keep the CURRENT account under [{suggestion}]: "),
-                    &suggestion,
-                ) {
-                    store.save(&keep, &stash)?;
-                    println!("saved current login as '{keep}'.");
-                }
-            }
-            // 2) Local sign-out: remove the credential file and the
-            //    oauthAccount block (everything else in .claude.json stays).
+            let snap = adapter.capture(paths)?;
+            store.save(name, &snap)?;
+            println!("saved profile '{name}' ({}).", identity_line(&new));
+            println!("switch back any time:  swapdex use <name>  (or `swapdex ui`)");
+            Ok(0)
+        }
+        _ => {
+            adapter.apply(paths, &stash)?;
+            eprintln!(
+                "swapdex: no new {} login was completed - your previous \
+                 login ({}) was restored.",
+                pretty_tool(tool),
+                identity_line(&cur)
+            );
+            Ok(8)
+        }
+    }
+}
+
+/// The ToolSel a canonical tool name maps back to.
+fn sel_for_tool(tool: &str) -> Option<ToolSel> {
+    match tool {
+        "claude-code" => Some(ToolSel::Claude),
+        "codex" => Some(ToolSel::Codex),
+        "gemini" => Some(ToolSel::Gemini),
+        "antigravity" => Some(ToolSel::Antigravity),
+        _ => None,
+    }
+}
+
+/// Run the tool's own sign-in command, terminal inherited. codex has a real
+/// `login` subcommand; the other three sign in on first run of the app.
+fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
+    let mut cmd = Command::new(bin);
+    if tool == "codex" {
+        cmd.arg("login");
+    }
+    cmd.status()
+        .map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))
+}
+
+/// Remove the live credential files so the tool's next run prompts a fresh
+/// sign-in. Claude keeps the rest of .claude.json (projects, settings) - only
+/// the oauthAccount block goes.
+fn sign_out_locally(paths: &Paths, tool: &str) {
+    match tool {
+        "claude-code" => {
             std::fs::remove_file(paths.claude_credentials()).ok();
             if let Ok(bytes) = std::fs::read(paths.claude_config_json()) {
                 if let Ok(mut cfg) = serde_json::from_slice::<Value>(&bytes) {
@@ -2141,81 +2204,18 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
                     }
                 }
             }
-            // 3) Fresh sign-in inside the official app.
-            println!("Opening Claude Code - sign in with the OTHER account, then exit (/exit).");
-            let spawn = Command::new("claude").status();
-            // 4) Capture, or restore the stash on any failure.
-            let new_id = adapter.identity(paths).ok().flatten();
-            match (spawn, new_id) {
-                (Ok(_), Some(new)) if !new.account_id.is_empty() => {
-                    if new.account_id == cur.account_id {
-                        println!("note: you signed back into the same account.");
-                    }
-                    let snap = adapter.capture(paths)?;
-                    store.save(name, &snap)?;
-                    println!("saved profile '{name}' ({}).", identity_line(&new));
-                    println!("switch back any time:  swapdex use <name>  (or `swapdex ui`)");
-                    return Ok(0);
-                }
-                _ => {
-                    adapter.apply(paths, &stash)?;
-                    eprintln!(
-                        "swapdex: no new Claude login was completed - your previous                          login ({}) was restored.",
-                        identity_line(&cur)
-                    );
-                    return Ok(8);
-                }
-            }
         }
-        // Not logged in: drive it. Claude Code has no login subcommand, so run
-        // `claude` itself - its first-run flow does the browser login - then
-        // auto-capture the credentials it writes.
-        println!(
-            "Opening Claude Code to sign in. Complete the login, then exit it (Ctrl-D or /exit)."
-        );
-        Command::new("claude")
-            .status()
-            .map_err(|e| anyhow::anyhow!("could not run claude: {e}"))?;
-        let logged_in = adapters::by_name("claude-code")
-            .and_then(|c| c.identity(paths).ok().flatten())
-            .is_some();
-        if !logged_in {
-            eprintln!("swapdex: no Claude login was completed - nothing saved.");
-            return Ok(8);
+        "codex" => {
+            std::fs::remove_file(paths.codex_auth()).ok();
         }
-        println!();
-        return add(paths, Some(name), Some(ToolSel::Claude), true);
-    }
-
-    if !command_exists("codex") {
-        eprintln!("swapdex: the `codex` CLI is not on your PATH - install it, then retry.");
-        return Ok(3);
-    }
-    // `codex login` DELETES ~/.codex/auth.json before its browser step, so an
-    // interrupted login would otherwise lose the current login. Snapshot it into
-    // the store's backups first (recoverable regardless of how login goes).
-    if let Some(codex) = adapters::by_name("codex") {
-        if codex.present(paths) {
-            if let Ok(snap) = codex.capture(paths) {
-                let _ = Store::open(paths).and_then(|s| s.backup(&snap));
-            }
+        "gemini" => {
+            std::fs::remove_file(paths.gemini_oauth()).ok();
+            std::fs::remove_file(paths.gemini_accounts()).ok();
+        }
+        _ => {
+            std::fs::remove_file(paths.antigravity_token()).ok();
         }
     }
-    println!("Opening `codex login` - sign in with the account to save as '{name}'.");
-    println!("(If it says you're already logged in, run `codex logout` first, then retry.)");
-    // Inherit the terminal so the browser/device prompt shows and no child stdio
-    // is captured into swapdex output.
-    let status = Command::new("codex")
-        .arg("login")
-        .status()
-        .map_err(|e| anyhow::anyhow!("could not run codex login: {e}"))?;
-    if !status.success() {
-        eprintln!("swapdex: codex login did not complete - nothing saved.");
-        return Ok(8);
-    }
-    println!();
-    // update=true so re-running `login <name>` refreshes an existing profile.
-    add(paths, Some(name), Some(ToolSel::Codex), true)
 }
 
 /// Ask a question and read a trimmed line; empty input yields `default`.

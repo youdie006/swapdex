@@ -1958,3 +1958,96 @@ fn add_update_refuses_account_change_noninteractive() {
     .unwrap();
     assert!(stored.contains("acct-A"), "unchanged: {stored}");
 }
+
+// THE core journey must work for ALL FOUR tools, not just claude: already
+// logged into A, `login <name> --tool T` adds account B in one flow (save
+// current, sign out locally, run the tool's own sign-in, capture B).
+fn fake_tool(root: &Path, bin: &str, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = root.join("fakebin").join(bin);
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake = bin_dir.join(bin);
+    std::fs::write(&fake, script).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir
+}
+
+#[test]
+fn login_gemini_adds_a_second_account_in_one_flow() {
+    let root = tempfile::tempdir().unwrap();
+    seed_gemini(root.path(), "a@x.com", "sub-A");
+    run(root.path(), &["add", "old", "--tool", "gemini"]);
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.gemini"
+printf '%s' '{"access_token":"AT-B","refresh_token":"RT-B","id_token":"h.eyJlbWFpbCI6ImJAeC5jb20iLCJzdWIiOiJzdWItQiJ9.s","expiry_date":9999999999999}' > "$SWAPDEX_ROOT/.gemini/oauth_creds.json"
+printf '%s' '{"active":"b@x.com"}' > "$SWAPDEX_ROOT/.gemini/google_accounts.json"
+"#;
+    let bin_dir = fake_tool(root.path(), "gemini", script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "gemini"],
+        "y\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(names.contains("second"), "B saved: {names}");
+    // Old account one command away, with its original identity.
+    let (_o, e, c) = run(root.path(), &["use", "old"]);
+    assert_eq!(c, 0, "{e}");
+    let creds = std::fs::read_to_string(root.path().join(".gemini/oauth_creds.json")).unwrap();
+    assert!(creds.contains("RT-SENTINEL"), "A restored: {creds}");
+}
+
+#[test]
+fn login_antigravity_adds_a_second_account_in_one_flow() {
+    let root = tempfile::tempdir().unwrap();
+    seed_antigravity(root.path(), "RT-A");
+    run(root.path(), &["add", "old", "--tool", "antigravity"]);
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.gemini/antigravity-cli"
+printf '%s' '{"token":{"access_token":"AT-B","refresh_token":"RT-B","expiry":"2027-01-01T00:00:00Z","token_type":"Bearer"},"auth_method":"consumer"}' > "$SWAPDEX_ROOT/.gemini/antigravity-cli/antigravity-oauth-token"
+"#;
+    let bin_dir = fake_tool(root.path(), "agy", script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "antigravity"],
+        "y\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(names.contains("second") && names.contains("old"), "{names}");
+    let (_o, e, c) = run(root.path(), &["use", "old"]);
+    assert_eq!(c, 0, "{e}");
+    let tok = std::fs::read_to_string(
+        root.path()
+            .join(".gemini/antigravity-cli/antigravity-oauth-token"),
+    )
+    .unwrap();
+    assert!(tok.contains("RT-A"), "A restored: {tok}");
+}
+
+#[test]
+fn login_gemini_restores_original_when_no_new_signin() {
+    let root = tempfile::tempdir().unwrap();
+    seed_gemini(root.path(), "a@x.com", "sub-A");
+    run(root.path(), &["add", "old", "--tool", "gemini"]);
+    let bin_dir = fake_tool(
+        root.path(),
+        "gemini",
+        "#!/bin/sh\ncase \"$1\" in --version) echo 1.0.0; exit 0;; esac\nexit 0\n",
+    );
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "gemini"],
+        "y\n",
+    );
+    assert_eq!(c, 8, "incomplete: {o}{e}");
+    let creds = std::fs::read_to_string(root.path().join(".gemini/oauth_creds.json")).unwrap();
+    // The original seed's tokens, byte-identical (ids live inside JWT b64).
+    assert!(creds.contains("RT-SENTINEL"), "A NEVER lost: {creds}");
+}
