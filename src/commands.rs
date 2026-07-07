@@ -20,6 +20,13 @@ fn pretty_tool_flag(tool: &str) -> &str {
     }
 }
 
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 fn command_exists(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
@@ -190,6 +197,11 @@ fn reject_reserved_name(name: &str) -> Option<i32> {
     if name == "-" {
         eprintln!("swapdex: '-' is reserved (`swapdex use -` toggles to the previous profile)");
         Some(2)
+    } else if name.trim().is_empty() {
+        // CREATION-time only (like '-'): a legacy all-whitespace profile from
+        // 0.2.x must stay rm-able/renamable after an upgrade.
+        eprintln!("swapdex: a profile name cannot be only whitespace");
+        Some(2)
     } else {
         None
     }
@@ -243,8 +255,15 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
     // (mismatched credentials + identity) two-file Claude snapshot.
     let _lock = match store.lock() {
         Ok(g) => g,
-        Err(_) => {
+        Err(crate::store::LockError::Busy) => {
             eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
             return Ok(4);
         }
     };
@@ -407,8 +426,15 @@ fn use_account_inner(
     }
     let _lock = match store.lock() {
         Ok(g) => g,
-        Err(_) => {
+        Err(crate::store::LockError::Busy) => {
             eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
             return Ok(4);
         }
     };
@@ -435,6 +461,7 @@ fn use_account_inner(
     // One shared timestamp for every tool this invocation switches, so a later
     // bare `restore` can identify exactly this switch's tool set.
     let switch_ts = now_secs();
+    let switch_inv = now_nanos();
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         // A Keychain-mode Claude install (macOS) cannot be switched yet. In
@@ -548,7 +575,7 @@ fn use_account_inner(
             failed.push(tool);
             continue;
         }
-        store.append_timeline_at(tool, name, "use", switch_ts)?;
+        store.append_timeline_inv(tool, name, "use", switch_ts, switch_inv)?;
         if let Some(id) = adapter.identity(paths).ok().flatten() {
             println!("switched {tool} -> {}", identity_line(&id));
         }
@@ -598,8 +625,15 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
     let store = Store::open(paths)?;
     let _lock = match store.lock() {
         Ok(g) => g,
-        Err(_) => {
+        Err(crate::store::LockError::Busy) => {
             eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
             return Ok(4);
         }
     };
@@ -616,6 +650,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
     // to some older, unrelated backup.
     let last_switch = last_switch_tools(paths);
     let restore_ts = now_secs();
+    let restore_inv = now_nanos();
     let mut found = 0; // a backup existed for this tool
     let mut changed = 0; // an actual restore was written
     for adapter in selected_adapters(sel) {
@@ -691,7 +726,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
             .as_ref()
             .and_then(|id| matched_profile_name(&store, tool, &id.account_id))
             .unwrap_or_else(|| "(backup)".into());
-        store.append_timeline_at(tool, &event_name, "restore", restore_ts)?;
+        store.append_timeline_inv(tool, &event_name, "restore", restore_ts, restore_inv)?;
         match restored {
             Some(id) => println!("restored {tool} -> {} (backup {age})", identity_line(&id)),
             None => println!("restored {tool} from the backup taken {age}"),
@@ -858,7 +893,7 @@ fn last_switch_name_excluding(
 fn last_switch_tools(paths: &Paths) -> Option<Vec<String>> {
     let path = paths.store_dir().join("timeline.jsonl");
     let text = std::fs::read_to_string(path).ok()?;
-    let mut events: Vec<(i64, String)> = Vec::new();
+    let mut events: Vec<(i64, String, String)> = Vec::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -867,14 +902,27 @@ fn last_switch_tools(paths: &Paths) -> Option<Vec<String>> {
             continue;
         }
         if let (Some(ts), Some(tool)) = (v["ts"].as_i64(), v["tool"].as_str()) {
-            events.push((ts, tool.to_string()));
+            let inv = v["inv"].as_str().unwrap_or("").to_string();
+            events.push((ts, inv, tool.to_string()));
         }
     }
-    let max_ts = events.iter().map(|(ts, _)| *ts).max()?;
+    // Group by the last event's INVOCATION id when it has one - whole-second
+    // ts equality collides when two separate invocations run inside one
+    // second. Legacy events (no inv) fall back to ts grouping.
+    let (last_ts, last_inv) = events
+        .iter()
+        .map(|(ts, inv, _)| (*ts, inv.clone()))
+        .next_back()?;
     let mut tools: Vec<String> = events
         .into_iter()
-        .filter(|(ts, _)| *ts == max_ts)
-        .map(|(_, tool)| tool)
+        .filter(|(ts, inv, _)| {
+            if last_inv.is_empty() {
+                *ts == last_ts && inv.is_empty()
+            } else {
+                *inv == last_inv
+            }
+        })
+        .map(|(_, _, tool)| tool)
         .collect();
     tools.sort();
     tools.dedup();
@@ -1318,8 +1366,13 @@ pub fn ui(paths: &Paths) -> Result<i32> {
         return Ok(2);
     }
     // A real terminal gets the full-screen picker; the pipe-driven path (tests,
-    // SWAPDEX_ASSUME_TTY) keeps the plain numbered prompt below.
-    if real_tty {
+    // SWAPDEX_ASSUME_TTY) keeps the plain numbered prompt below. TERM=dumb /
+    // empty (Emacs shell, some CI) cannot render ANSI - crossterm never checks
+    // TERM, so we do.
+    let dumb = std::env::var("TERM")
+        .map(|t| t.is_empty() || t == "dumb")
+        .unwrap_or(true);
+    if real_tty && !dumb {
         return ui_tui(paths);
     }
     let store = Store::open(paths)?;
@@ -2035,8 +2088,15 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
     }
     let _lock = match store.lock() {
         Ok(g) => g,
-        Err(_) => {
+        Err(crate::store::LockError::Busy) => {
             eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
             return Ok(4);
         }
     };
@@ -2061,8 +2121,15 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     // a script must be able to tell "pick another name" from "disk broke".
     let _lock = match store.lock() {
         Ok(g) => g,
-        Err(_) => {
+        Err(crate::store::LockError::Busy) => {
             eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
             return Ok(4);
         }
     };
@@ -2209,8 +2276,15 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     let store = Store::open(paths)?;
     let _lock = match store.lock() {
         Ok(g) => g,
-        Err(_) => {
+        Err(crate::store::LockError::Busy) => {
             eprintln!("swapdex: another swapdex is mid-switch; try again");
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
             return Ok(4);
         }
     };

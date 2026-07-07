@@ -2413,3 +2413,106 @@ fn login_survives_sigquit_and_restores() {
     assert_eq!(c, 8, "survived SIGQUIT: {o}{e}");
     assert_eq!(claude_live_uuid(root.path()), "uuid-A", "restored");
 }
+
+// Upgrade/environment audit findings.
+
+// A future-stamped backup (clock skew during one switch) must not shadow the
+// real newest backup forever - restore must undo the LAST switch.
+#[test]
+fn future_stamped_backup_does_not_hijack_restore() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal", "--tool", "codex"]);
+    run(root.path(), &["use", "work"]); // backup: B
+                                        // Ghost: a backup stamped in 2030 holding account C.
+    let ghost = root
+        .path()
+        .join(".local/share/swapdex/backups/codex/1900000000000000000");
+    std::fs::create_dir_all(&ghost).unwrap();
+    std::fs::write(
+        ghost.join("auth"),
+        serde_json::to_vec(&serde_json::json!({"auth_mode":"chatgpt",
+            "tokens":{"id_token":"h.eyJlbWFpbCI6ImNAei5jb20ifQ.s","access_token":"AT-C",
+                      "refresh_token":"RT-C","account_id":"acct-C"},
+            "last_refresh":"2026-07-01T00:00:00Z"}))
+        .unwrap(),
+    )
+    .unwrap();
+    let (o, e, c) = run(root.path(), &["restore", "--tool", "codex"]);
+    assert_eq!(c, 0, "{e}");
+    let live = std::fs::read_to_string(root.path().join(".codex/auth.json")).unwrap();
+    assert!(
+        live.contains("acct-B"),
+        "restore undoes the LAST switch (B), never the future ghost (C): {o}{live}"
+    );
+}
+
+// An unwritable store must say WHY, not claim another swapdex is mid-switch.
+#[test]
+fn unwritable_store_reports_the_real_problem() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    let lock = root.path().join(".local/share/swapdex/.lock");
+    std::fs::write(&lock, b"").ok();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (_o, e, c) = run(root.path(), &["use", "work"]);
+    assert_ne!(c, 0);
+    assert!(
+        !e.contains("mid-switch"),
+        "EACCES is not a lock contention: {e}"
+    );
+    assert!(
+        e.to_lowercase().contains("perm") || e.to_lowercase().contains("writable"),
+        "says the real cause: {e}"
+    );
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+// A legacy all-whitespace profile (0.2.x allowed them) must stay MANAGEABLE:
+// rm/rename/use may act on it even though creation now rejects it.
+#[test]
+fn legacy_whitespace_profile_is_manageable() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    // Simulate the 0.2.x-created profile by renaming the store dir directly.
+    std::fs::rename(
+        root.path().join(".local/share/swapdex/accounts/work"),
+        root.path().join(".local/share/swapdex/accounts/ "),
+    )
+    .unwrap();
+    let (_o, e, c) = run(root.path(), &["rename", " ", "fixed"]);
+    assert_eq!(c, 0, "legacy name must be renamable: {e}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(names.contains("fixed"), "{names}");
+}
+
+// Two separate single-tool switches inside the same wall-clock second must
+// NOT be treated as one invocation - a bare restore undoes only the LAST one.
+#[test]
+fn restore_scopes_to_last_invocation_not_same_second() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work"]);
+    seed_claude(root.path(), "uuid-B", "b@x.com");
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "personal"]);
+    run(root.path(), &["use", "work"]);
+    // Two back-to-back single-tool switches (same second, near-certainly).
+    run(root.path(), &["use", "personal", "--tool", "codex"]);
+    run(root.path(), &["use", "personal", "--tool", "claude"]);
+    let (o, e, c) = run(root.path(), &["restore"]);
+    assert_eq!(c, 0, "{e}");
+    assert!(
+        o.contains("claude") && !o.contains("restored codex"),
+        "only the LAST invocation (claude) is undone: {o}"
+    );
+    // codex stays on personal (B).
+    let auth = std::fs::read_to_string(root.path().join(".codex/auth.json")).unwrap();
+    assert!(auth.contains("acct-B"), "codex untouched: {auth}");
+}

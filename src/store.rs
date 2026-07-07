@@ -23,6 +23,14 @@ pub struct ProfileInfo {
 
 /// Holds an exclusive flock for its lifetime (released on drop). The file is
 /// kept only to keep the lock; it is intentionally never read.
+/// Why the store lock could not be taken: contention is retryable, an
+/// unwritable store is not - the messages must differ.
+#[derive(Debug)]
+pub enum LockError {
+    Busy,
+    Unwritable(String),
+}
+
 pub struct LockGuard(#[allow(dead_code)] fs::File);
 
 /// chmod 0700/0600 everything under `dir` (dirs/files), best-effort.
@@ -60,7 +68,7 @@ impl Store {
 
     /// Exclusive lock around the read-current -> backup -> apply compound; refuse
     /// (rather than block) if another swapdex is mid-switch.
-    pub fn lock(&self) -> Result<LockGuard> {
+    pub fn lock(&self) -> std::result::Result<LockGuard, LockError> {
         let path = self.dir.join(".lock");
         let f = fs::OpenOptions::new()
             .write(true)
@@ -68,9 +76,8 @@ impl Store {
             .truncate(false)
             .mode(0o600)
             .open(&path)
-            .context("open store lock")?;
-        f.try_lock_exclusive()
-            .context("another swapdex is mid-switch (store is locked)")?;
+            .map_err(|e| LockError::Unwritable(format!("{e}")))?;
+        f.try_lock_exclusive().map_err(|_| LockError::Busy)?;
         Ok(LockGuard(f))
     }
 
@@ -239,10 +246,12 @@ impl Store {
         // genuinely-oldest backup (lexical sort would misorder across a digit-
         // length change).
         stamps.sort_by_key(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|s| s.parse::<u128>().ok())
-                .unwrap_or(0)
+            backup_order_key(
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|s| s.parse::<u128>().ok())
+                    .unwrap_or(0),
+            )
         });
         while stamps.len() > 2 {
             let old = stamps.remove(0);
@@ -274,7 +283,7 @@ impl Store {
                 Some((s, p))
             })
             .collect();
-        stamps.sort_by_key(|(s, _)| *s);
+        stamps.sort_by_key(|(s, _)| backup_order_key(*s));
         // Newest first, but skip a torn candidate (a crash between mkdir and
         // the blob writes leaves an empty/partial dir) - an older intact backup
         // is better than "no backup".
@@ -327,9 +336,27 @@ impl Store {
         action: &str,
         ts: u64,
     ) -> Result<()> {
+        self.append_timeline_inv(tool, account, action, ts, 0)
+    }
+
+    /// `inv` is a per-INVOCATION discriminator (nanos): whole-second `ts`
+    /// alone collides when two separate invocations run inside one second,
+    /// and bare `restore` scopes to "the last invocation's tools" by it.
+    /// 0 = legacy/unknown (grouping falls back to ts equality).
+    pub fn append_timeline_inv(
+        &self,
+        tool: &str,
+        account: &str,
+        action: &str,
+        ts: u64,
+        inv: u128,
+    ) -> Result<()> {
         let path = self.dir.join("timeline.jsonl");
-        let line =
-            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action});
+        let line = if inv > 0 {
+            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action, "inv": inv.to_string()})
+        } else {
+            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action})
+        };
         let mut buf = if path.exists() {
             crate::atomic::read_regular(&path)?
         } else {
@@ -360,13 +387,29 @@ impl Store {
 /// A profile name must be a single safe path component - reject anything that
 /// could escape the store (`/`, `\`, `..`, a leading `.`, control chars, empty,
 /// or absurdly long). Guards `add`/`use`/`rm`/`rename` against path traversal.
+/// Ordering key for backup stamps: a stamp more than an hour in the FUTURE
+/// (clock skew during one switch - NTP jump, VM resume) sorts as the OLDEST,
+/// so a ghost can neither shadow real backups in load_backup nor survive
+/// pruning forever.
+fn backup_order_key(stamp: u128) -> u128 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    if stamp > now + 3_600_000_000_000 {
+        0
+    } else {
+        stamp
+    }
+}
+
 pub const KNOWN_TOOLS: [&str; 4] = ["claude-code", "codex", "gemini", "antigravity"];
 
 pub fn valid_profile_name(name: &str) -> bool {
     // NOTE: "-" is reserved at CREATION time (add/rename reject it) because
     // `use -` toggles - but it stays valid here so a legacy profile named "-"
     // can still be rm'd/renamed after an upgrade.
-    !name.trim().is_empty()
+    !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
         && !name.contains(['/', '\\'])
