@@ -77,7 +77,9 @@ swapdex ls
 swapdex status
 
 # Switch (takes effect on your next message -- no restart)
-swapdex ui                          # full-screen picker: switch, add, restore
+swapdex ui                          # full-screen picker: switch, then open a
+                                    # conversation right there (resume or new)
+swapdex use work --tool claude --open --dir ~/proj   # switch + launch in one
 swapdex login personal --tool claude  # sign in to a NEW account and save it
 swapdex use personal
 swapdex use -                       # toggle back to the previous profile

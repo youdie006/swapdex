@@ -278,6 +278,38 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
 }
 
 pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
+    use_account_inner(paths, name, sel, dry_run, false, None)
+}
+
+/// `open`: after a successful switch, exec the tool (the --open flag; needs an
+/// explicit --tool so there is never a guess about WHICH conversation opens).
+pub fn use_account_open(
+    paths: &Paths,
+    name: &str,
+    sel: Option<ToolSel>,
+    dir: Option<&std::path::Path>,
+) -> Result<i32> {
+    if !is_explicit(sel) {
+        eprintln!("swapdex: --open needs --tool <claude|codex|gemini|antigravity> so it knows what to launch");
+        return Ok(2);
+    }
+    if let Some(d) = dir {
+        if !d.is_dir() {
+            eprintln!("swapdex: --dir is not a directory: {}", d.display());
+            return Ok(2);
+        }
+    }
+    use_account_inner(paths, name, sel, false, true, dir)
+}
+
+fn use_account_inner(
+    paths: &Paths,
+    name: &str,
+    sel: Option<ToolSel>,
+    dry_run: bool,
+    open: bool,
+    open_dir: Option<&std::path::Path>,
+) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     let store = Store::open(paths)?;
     // Resolve the NAME first: `-` toggles to the previous/other profile and a
@@ -422,6 +454,13 @@ pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: boo
     // Only when a login was actually written - not for a no-op or a dry-run.
     if changed > 0 {
         println!("(takes effect on your next message)");
+    }
+    if open {
+        if let Some(adapter) = selected_adapters(sel).into_iter().next() {
+            let tool = adapter.name();
+            println!("opening {}...", pretty_tool(tool));
+            return Err(exec_tool(tool, open_dir));
+        }
     }
     Ok(0)
 }
@@ -1251,7 +1290,10 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
             println!("{}", line.trim_end());
         }
         if let Some(ans) = prompt(
-            &format!("resume one? [1-{}] (Enter skips): ", recent.len()),
+            &format!(
+                "open: [1-{}] resume that session, c/x/g/a new claude/codex/gemini/agy, Enter skips: ",
+                recent.len()
+            ),
             "",
         ) {
             if let Ok(k) = ans.parse::<usize>() {
@@ -1261,9 +1303,55 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
                     return Err(exec_sessionwiki_resume(&id));
                 }
             }
+            if let Some(tool) = launch_letter(&ans) {
+                return Err(launch_in_folder(tool));
+            }
+        }
+    } else if let Some(ans) = prompt(
+        "open now? c/x/g/a = new claude/codex/gemini/agy (Enter skips): ",
+        "",
+    ) {
+        // No sessionwiki (or nothing attributable): still land in a
+        // conversation - the reason you switched.
+        if let Some(tool) = launch_letter(&ans) {
+            return Err(launch_in_folder(tool));
         }
     }
     Ok(())
+}
+
+/// Ask for the project folder (conversations are per-directory), then exec.
+/// Enter keeps the current directory.
+fn launch_in_folder(tool: &str) -> anyhow::Error {
+    let dir = prompt("folder to open in [current dir]: ", "")
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            // ~ expansion, the one shell nicety a folder prompt needs.
+            if let Some(rest) = d.strip_prefix("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    return home.join(rest);
+                }
+            }
+            std::path::PathBuf::from(d)
+        });
+    if let Some(d) = &dir {
+        if !d.is_dir() {
+            return anyhow::anyhow!("not a directory: {}", d.display());
+        }
+    }
+    println!("opening {}...", pretty_tool(tool));
+    exec_tool(tool, dir.as_deref())
+}
+
+/// c/x/g/a -> the tool a post-switch launch letter means.
+fn launch_letter(ans: &str) -> Option<&'static str> {
+    match ans.to_ascii_lowercase().as_str() {
+        "c" => Some("claude-code"),
+        "x" => Some("codex"),
+        "g" => Some("gemini"),
+        "a" => Some("antigravity"),
+        _ => None,
+    }
 }
 
 /// The full-screen ui loop: render -> action -> run the SAME command path the
@@ -1361,6 +1449,25 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
     }
+}
+
+/// Replace this process with the official tool - the "switch and land in a
+/// conversation" handoff. Only returns on exec failure.
+fn exec_tool(tool: &str, dir: Option<&std::path::Path>) -> anyhow::Error {
+    use std::os::unix::process::CommandExt;
+    let bin = match tool {
+        "claude-code" => "claude",
+        "codex" => "codex",
+        "gemini" => "gemini",
+        "antigravity" => "agy",
+        other => return anyhow::anyhow!("unknown tool '{other}'"),
+    };
+    let mut cmd = Command::new(bin);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let err = cmd.exec();
+    anyhow::anyhow!("could not launch `{bin}`: {err}")
 }
 
 /// Replace this process with `sessionwiki resume <id>` - a one-shot handoff to

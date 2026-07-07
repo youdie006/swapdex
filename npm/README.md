@@ -77,7 +77,8 @@ swapdex ls
 swapdex status
 
 # Switch (takes effect on your next message -- no restart)
-swapdex ui                          # or pick from a list interactively
+swapdex ui                          # full-screen picker: switch, add, restore
+swapdex login personal --tool claude  # sign in to a NEW account and save it
 swapdex use personal
 swapdex use -                       # toggle back to the previous profile
 swapdex use w                       # a unique prefix is enough

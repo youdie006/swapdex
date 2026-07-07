@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.8.0] - 2026-07-07
+
+### Added
+- **Switch, land in a conversation.** The post-switch menu now opens the tool
+  itself: pick a recent session by number to resume it in its own folder
+  (via sessionwiki), or `c`/`x`/`g`/`a` to open a NEW claude/codex/gemini/agy
+  conversation - it asks which project folder (Enter keeps the current one,
+  `~` expands). And `swapdex use <name> --tool claude --open [--dir <path>]`
+  does switch-and-launch in one command. Real-use feedback: switching is not
+  done until the conversation is open.
+
 ## [0.7.0] - 2026-07-07
 
 Real-use feedback release: the three things that actually hurt.

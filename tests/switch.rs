@@ -1541,3 +1541,116 @@ fn login_claude_restores_original_when_no_new_signin() {
         "original login restored - NEVER lost: {o}{e}"
     );
 }
+
+// Switch -> conversation opens immediately: 'c' at the post-switch menu execs
+// claude; `use --open --tool codex` execs codex right after the switch.
+#[test]
+fn ui_post_switch_c_opens_claude() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    let bin_dir = fake_claude(root.path(), "#!/bin/sh\necho CLAUDE-OPENED\n");
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("PATH", &path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"1\nc\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(
+        o.contains("CLAUDE-OPENED"),
+        "claude exec'd after switch: {o}"
+    );
+}
+
+#[test]
+fn use_open_execs_the_tool() {
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    // fake codex binary
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake = bin_dir.join("codex");
+    std::fs::write(&fake, "#!/bin/sh\necho CODEX-OPENED\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(bin())
+        .args(["use", "alpha", "--tool", "codex", "--open"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(o.contains("switched codex"), "{o}");
+    assert!(o.contains("CODEX-OPENED"), "codex exec'd after switch: {o}");
+}
+
+// Folder choice: the launched conversation opens IN the chosen directory
+// (Claude/Codex sessions are per-directory).
+#[test]
+fn use_open_dir_launches_in_that_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    let bin_dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake = bin_dir.join("codex");
+    std::fs::write(&fake, "#!/bin/sh\necho \"OPENED-IN $(pwd)\"\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let proj = root.path().join("myproject");
+    std::fs::create_dir_all(&proj).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(bin())
+        .args([
+            "use",
+            "alpha",
+            "--tool",
+            "codex",
+            "--open",
+            "--dir",
+            proj.to_str().unwrap(),
+        ])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        o.contains(&format!("OPENED-IN {}", proj.display())),
+        "launched in the chosen folder: {o}"
+    );
+}

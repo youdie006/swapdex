@@ -35,6 +35,12 @@ enum Cmd {
         /// Show what would change without writing
         #[arg(long)]
         dry_run: bool,
+        /// After switching, open the tool right away (needs --tool)
+        #[arg(long)]
+        open: bool,
+        /// Folder to open the conversation in (with --open; default: current dir)
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
     },
     /// List saved profiles (active marked from the live login)
     Ls {
@@ -157,7 +163,15 @@ fn main() {
             name,
             tool,
             dry_run,
-        } => commands::use_account(&paths, name, *tool, *dry_run),
+            open,
+            dir,
+        } => {
+            if *open {
+                commands::use_account_open(&paths, name, *tool, dir.as_deref())
+            } else {
+                commands::use_account(&paths, name, *tool, *dry_run)
+            }
+        }
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
