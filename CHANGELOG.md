@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.9.1] - 2026-07-07
+
+### Fixed
+- Esc in the folder prompt goes back ONE step (to the conversation menu),
+  not two - a double-tapped Esc could accidentally quit the whole ui.
+  Found by driving the ui end-to-end as a user through a pty.
+
 ## [0.9.0] - 2026-07-07
 
 Two more real-use asks, same day.

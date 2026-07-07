@@ -74,6 +74,8 @@ enum Screen {
     Folder {
         tool: &'static str,
         input: String,
+        /// The Open screen to return to on Esc (one step back, not two).
+        back: (String, Vec<SessionEntry>),
     },
     ToolPick,
 }
@@ -183,7 +185,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         help,
                     );
                 }
-                Screen::Folder { tool, input } => {
+                Screen::Folder { tool, input, .. } => {
                     let name = NEW_CONV
                         .iter()
                         .find(|(_, t)| t == tool)
@@ -310,17 +312,26 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         break 'ui Outcome::OpenSession(i);
                     }
                     let tool = NEW_CONV[i - entries.len()].1;
-                    screen = Screen::Folder {
-                        tool,
-                        input: String::new(),
-                    };
+                    if let Screen::Open { label, entries } = std::mem::replace(
+                        &mut screen,
+                        Screen::Folder {
+                            tool,
+                            input: String::new(),
+                            back: (String::new(), Vec::new()),
+                        },
+                    ) {
+                        if let Screen::Folder { back, .. } = &mut screen {
+                            *back = (label, entries);
+                        }
+                    }
                 }
                 _ => {}
             },
-            Screen::Folder { tool, input } => match key.code {
+            Screen::Folder { tool, input, back } => match key.code {
                 KeyCode::Esc => {
-                    rows = ctx.rows();
-                    screen = Screen::Main;
+                    // One step back to the Open menu, not two.
+                    let (label, entries) = std::mem::take(back);
+                    screen = Screen::Open { label, entries };
                 }
                 KeyCode::Backspace => {
                     input.pop();
