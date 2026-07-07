@@ -2066,7 +2066,16 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
             return Ok(4);
         }
     };
-    if store.list().iter().any(|p| p.name == new) {
+    // Source must be a REAL profile (ghost dirs with no known tools are
+    // hidden from ls - acting on them here would contradict it)...
+    if !store.list().iter().any(|p| p.name == old) {
+        eprintln!("swapdex: no profile named '{old}'");
+        return Ok(5);
+    }
+    // ...while the TARGET collision checks the directory itself: colliding
+    // with a hidden ghost dir must still be a clean "exists" (6), not a
+    // hard error from the rename syscall.
+    if store.profile_dir_exists(new) {
         eprintln!("swapdex: a profile named '{new}' already exists");
         return Ok(6);
     }
@@ -2256,26 +2265,54 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             if new.account_id == cur.account_id {
                 println!("note: you signed back into the same account.");
             }
-            // Same repoint rule as `add --update`: if '{name}' already exists
-            // and holds a DIFFERENT account, changing what the name means must
-            // be explicit (we are interactive here by construction).
-            if let Some(stored) = profile_account_id(&store, name, tool).filter(|s| !s.is_empty()) {
-                if stored != new.account_id
-                    && !yes_no(
-                        &format!(
-                            "profile '{name}' already holds a different {tool} account. \
-                             Repoint it to this new login? [y/N]: "
-                        ),
-                        false,
-                    )
-                {
-                    adapter.apply(paths, &stash)?;
-                    println!(
-                        "not saved - your previous login was restored. Re-run with a \
-                         different name to keep both accounts."
-                    );
-                    return Ok(0);
+            // Same repoint rule as `add --update`: if '{name}' already has a
+            // snapshot for this tool, changing what the name means must be
+            // explicit. An UNREADABLE snapshot counts as "different" - corrupt
+            // and absent must not be conflated, or the guard is bypassable.
+            let has_tool_snapshot = store
+                .list()
+                .iter()
+                .any(|p| p.name == name && p.tools.iter().any(|t| t == tool));
+            let same_account = profile_account_id(&store, name, tool)
+                .filter(|s| !s.is_empty())
+                .as_deref()
+                == Some(new.account_id.as_str());
+            if has_tool_snapshot
+                && !same_account
+                && !yes_no(
+                    &format!(
+                        "profile '{name}' already holds a different (or unreadable) \
+                         {tool} account. Repoint it to this new login? [y/N]: "
+                    ),
+                    false,
+                )
+            {
+                // The user completed a REAL sign-in - never discard it
+                // silently. Offer a different name; skipping restores the
+                // stash and honestly says the new sign-in is gone.
+                if let Some(rescue) = ask_name(
+                    &store,
+                    "save the NEW account under a different name instead (Enter discards it): ",
+                    "",
+                ) {
+                    if rescue != name {
+                        let snap = adapter.capture(paths)?;
+                        store.save(&rescue, &snap)?;
+                        println!(
+                            "saved profile '{rescue}' ({}). '{name}' is untouched.",
+                            identity_line(&new)
+                        );
+                        println!("switch back any time:  swapdex use <name>  (or `swapdex ui`)");
+                        return Ok(0);
+                    }
                 }
+                adapter.apply(paths, &stash)?;
+                println!(
+                    "the new sign-in was DISCARDED and your previous login restored - \
+                     '{name}' is untouched. Re-run `swapdex login <other-name>` to \
+                     redo it under another name."
+                );
+                return Ok(0);
             }
             let snap = adapter.capture(paths)?;
             store.save(name, &snap)?;
@@ -2334,13 +2371,18 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
     // ride it out; the child keeps normal Ctrl+C behavior.
     unsafe extern "C" fn ride_out(_: libc::c_int) {}
     #[allow(function_casts_as_integer)]
-    let prev = unsafe { libc::signal(libc::SIGINT, ride_out as libc::sighandler_t) };
+    let prev_int = unsafe { libc::signal(libc::SIGINT, ride_out as libc::sighandler_t) };
+    #[allow(function_casts_as_integer)]
+    let prev_quit = unsafe { libc::signal(libc::SIGQUIT, ride_out as libc::sighandler_t) };
     let mut cmd = Command::new(bin);
     if tool == "codex" {
         cmd.arg("login");
     }
     let status = cmd.status();
-    unsafe { libc::signal(libc::SIGINT, prev) };
+    unsafe {
+        libc::signal(libc::SIGINT, prev_int);
+        libc::signal(libc::SIGQUIT, prev_quit);
+    }
     status.map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))
 }
 

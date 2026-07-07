@@ -4,6 +4,33 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.12.1] - 2026-07-08
+
+A delta audit on the bug-sweep itself (fixes breed bugs) plus the last
+"observation" items.
+
+### Fixed
+- **The login repoint guard could be bypassed** when the target profile's
+  saved snapshot was unreadable - corrupt and absent were conflated, so a
+  corrupt snapshot let the new sign-in silently overwrite the profile. An
+  unreadable snapshot now counts as "different" and asks.
+- **Refusing a repoint no longer discards your completed sign-in.** You get
+  to save the NEW account under a different name; only skipping that
+  explicitly discards it, and the message now says so honestly (the old one
+  claimed "keep both accounts" while destroying one).
+- The interactive sign-in also rides out **SIGQUIT** (Ctrl+backslash), not
+  just Ctrl+C.
+- Ghost profile dirs (no known tools; hidden from `ls`) are treated
+  consistently by `rename`: not a valid source (exit 5), and colliding with
+  one as target is a clean "already exists" (exit 6, was a hard error).
+- `usage` prints an honest note when gemini/antigravity are logged in -
+  those CLIs keep no local token transcripts, and silence must not read as
+  zero usage.
+- setup skips a tool whose login cannot be read instead of aborting the
+  whole wizard; the login flow's keep-name suggestion falls back to `main`
+  when no email exists on disk; the ui shows what to do after the last
+  profile is deleted instead of an empty box.
+
 ## [0.12.0] - 2026-07-07
 
 The bug-sweep release: three independent adversarial audits (a fresh-user

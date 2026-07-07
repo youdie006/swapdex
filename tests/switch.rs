@@ -2301,3 +2301,115 @@ fn doctor_flags_loose_live_cred_perms() {
         "names the loose live file with the remedy: {o}"
     );
 }
+
+// Delta-hunt findings on the bug-sweep itself.
+
+// F1: an UNREADABLE target snapshot must not bypass the repoint guard -
+// corrupt-or-absent must not be conflated when the profile dir exists.
+#[test]
+fn login_repoint_guard_holds_for_unreadable_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-C");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/accounts/work/codex/auth"),
+        b"corrupt{{",
+    )
+    .unwrap();
+    seed_codex(root.path(), "acct-A");
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.codex"
+printf '%s' '{"auth_mode":"chatgpt","tokens":{"id_token":"h.eyJlbWFpbCI6ImJAeC5jb20ifQ.s","access_token":"AT-B","refresh_token":"RT-B","account_id":"acct-B"},"last_refresh":"2026-07-08T00:00:00Z"}' > "$SWAPDEX_ROOT/.codex/auth.json"
+"#;
+    let bin_dir = fake_tool(root.path(), "codex", script);
+    // y = flow, Enter = skip keep-current, n = refuse repoint, Enter = skip rescue.
+    let (o, e, _c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "work", "--tool", "codex"],
+        "y\n\nn\n\n",
+    );
+    assert!(
+        o.contains("Repoint"),
+        "guard must fire even when the stored snapshot is unreadable: {o}{e}"
+    );
+    let stored = std::fs::read_to_string(
+        root.path()
+            .join(".local/share/swapdex/accounts/work/codex/auth"),
+    )
+    .unwrap();
+    assert!(
+        !stored.contains("acct-B"),
+        "refusing must keep 'work' un-repointed: {stored}"
+    );
+}
+
+// F2: refusing the repoint must OFFER to save the completed sign-in under a
+// different name - a real browser login must not be silently discarded.
+#[test]
+fn login_repoint_refusal_offers_rescue_name() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-C");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-A");
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.codex"
+printf '%s' '{"auth_mode":"chatgpt","tokens":{"id_token":"h.eyJlbWFpbCI6ImJAeC5jb20ifQ.s","access_token":"AT-B","refresh_token":"RT-B","account_id":"acct-B"},"last_refresh":"2026-07-08T00:00:00Z"}' > "$SWAPDEX_ROOT/.codex/auth.json"
+"#;
+    let bin_dir = fake_tool(root.path(), "codex", script);
+    // y = flow, Enter = skip keeping the (unmatched) current account,
+    // n = refuse repoint, "rescued" = save B under that name.
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "work", "--tool", "codex"],
+        "y\n\nn\nrescued\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(
+        names.contains("rescued"),
+        "B saved under the rescue name: {names}"
+    );
+    assert!(names.contains("work"), "work untouched: {names}");
+}
+
+// F3/F4: ghost dirs (no known tools) are not profiles - rename must not act
+// on them as source, and colliding with one as target is a clean exit 6.
+#[test]
+fn rename_treats_ghost_dirs_consistently() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    std::fs::create_dir_all(
+        root.path()
+            .join(".local/share/swapdex/accounts/legacy/some-old-tool"),
+    )
+    .unwrap();
+    let (_o, e, c) = run(root.path(), &["rename", "legacy", "revived"]);
+    assert_eq!(c, 5, "hidden source is not a profile: {e}");
+    std::fs::create_dir_all(root.path().join(".local/share/swapdex/accounts/ghost/junk")).unwrap();
+    let (_o, e, c) = run(root.path(), &["rename", "work", "ghost"]);
+    assert_eq!(c, 6, "hidden target collision is a clean 'exists' (6): {e}");
+}
+
+// F5: SIGQUIT (Ctrl+backslash) must be ridden out like SIGINT.
+#[test]
+fn login_survives_sigquit_and_restores() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "old", "--tool", "claude"]);
+    let script = "#!/bin/sh\ncase \"$1\" in --version) echo 1.0.0; exit 0;; esac\nkill -QUIT $PPID\nsleep 0.3\nexit 131\n";
+    let bin_dir = fake_claude(root.path(), script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "claude"],
+        "y\n",
+    );
+    assert_eq!(c, 8, "survived SIGQUIT: {o}{e}");
+    assert_eq!(claude_live_uuid(root.path()), "uuid-A", "restored");
+}

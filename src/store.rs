@@ -168,6 +168,12 @@ impl Store {
 
     /// Rename a profile. Returns false if `old` does not exist; errors if `new`
     /// already exists.
+    /// Whether ANY directory (even a ghost one hidden from `list()`) claims
+    /// this name - the collision test for rename targets.
+    pub fn profile_dir_exists(&self, name: &str) -> bool {
+        self.dir.join("accounts").join(name).exists()
+    }
+
     pub fn rename(&self, old: &str, new: &str) -> Result<bool> {
         let from = self.dir.join("accounts").join(old);
         let to = self.dir.join("accounts").join(new);
