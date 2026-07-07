@@ -60,6 +60,7 @@ pub fn tool_running(tool: &str, comms: &[String]) -> bool {
         "claude-code" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "antigravity" => "agy",
         _ => return false,
     };
     comms.iter().any(|c| c == want)

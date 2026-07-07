@@ -1379,3 +1379,61 @@ fn three_tool_profile_switches_together() {
     assert_eq!(g["active"], "a@gmail.com");
     assert_eq!(o.matches("switched").count(), 3, "all three switched: {o}");
 }
+
+fn seed_antigravity(root: &Path, refresh: &str) {
+    let d = root.join(".gemini").join("antigravity-cli");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("antigravity-oauth-token"),
+        serde_json::to_vec(&serde_json::json!({
+            "token": {"access_token":"AT-SENTINEL","token_type":"Bearer",
+                       "refresh_token": refresh,
+                       "expiry":"2026-07-06T10:09:19.638+09:00"},
+            "auth_method":"consumer"}))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+// Antigravity: single-file swap roundtrip; identity has no email (none is
+// stored on disk) but a stable token fingerprint matches profiles.
+#[test]
+fn antigravity_add_use_roundtrip() {
+    let root = tempfile::tempdir().unwrap();
+    seed_antigravity(root.path(), "RT-SENTINEL-A");
+    let (_o, e, c) = run(root.path(), &["add", "aw", "--tool", "antigravity"]);
+    assert_eq!(c, 0, "add failed: {e}");
+    seed_antigravity(root.path(), "RT-SENTINEL-B");
+    run(root.path(), &["add", "ah", "--tool", "antigravity"]);
+
+    let (o, e, c) = run(root.path(), &["use", "aw", "--tool", "antigravity"]);
+    assert_eq!(c, 0, "use failed: {o}{e}");
+    let tok: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.path()
+                .join(".gemini/antigravity-cli/antigravity-oauth-token"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(tok["token"]["refresh_token"], "RT-SENTINEL-A", "swapped");
+
+    // Already-active no-op works via the fingerprint (no email/id on disk).
+    let (o, _e, c) = run(root.path(), &["use", "aw", "--tool", "antigravity"]);
+    assert_eq!(c, 0);
+    assert!(o.contains("already active"), "{o}");
+
+    // Egress: the refresh token never appears in any output.
+    for args in [
+        vec!["ls"],
+        vec!["status"],
+        vec!["ls", "--json"],
+        vec!["status", "--json"],
+    ] {
+        let (o, e, _c) = run(root.path(), &args);
+        assert!(
+            !o.contains("SENTINEL") && !e.contains("SENTINEL"),
+            "token leak in {args:?}: {o}{e}"
+        );
+    }
+}

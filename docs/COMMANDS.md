@@ -42,9 +42,9 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 ## Tools
 
 `--tool` accepts `claude` (Claude Code; alias `claude-code`), `codex`,
-`gemini`, or `all` (alias `both`). With no `--tool` (same as `all`), a command
-applies to whichever tools are relevant. The tool names in output are
-`claude-code`, `codex`, and `gemini`.
+`gemini`, `antigravity`, or `all` (alias `both`). With no `--tool` (same as
+`all`), a command applies to whichever tools are relevant. The tool names in
+output are `claude-code`, `codex`, `gemini`, and `antigravity`.
 
 ## Environment
 
@@ -93,3 +93,4 @@ compdef _swapdex_profiles swapdex
 - Codex login: `~/.codex/auth.json`.
 - Gemini CLI login: `~/.gemini/oauth_creds.json` plus
   `~/.gemini/google_accounts.json` (swapped together).
+- Antigravity login: `~/.gemini/antigravity-cli/antigravity-oauth-token`.

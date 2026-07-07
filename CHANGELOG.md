@@ -4,6 +4,21 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.6.0] - 2026-07-07
+
+### Added
+- **Antigravity support** (Google's agentic CLI, binary `agy`): its token at
+  `~/.gemini/antigravity-cli/antigravity-oauth-token` is a fourth switchable
+  tool - one profile can hold Claude Code + Codex + Gemini + Antigravity and
+  a single `use` switches all four. No email or account id is stored on disk,
+  so the profile match uses a one-way fingerprint of the refresh token (a
+  fresh re-login honestly degrades to "not saved" until you re-add).
+
+### Changed
+- Gemini's `ls` marker is `stale` (snapshot refreshed >30 days ago, like
+  Codex) instead of `expired`: Gemini access tokens live about an hour and
+  the CLI refreshes them silently, so "expired right now" was pure noise.
+
 ## [0.5.0] - 2026-07-07
 
 Two headline features: a third tool, and per-account usage.

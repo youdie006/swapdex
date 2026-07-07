@@ -1,7 +1,7 @@
 {
   "name": "@youdie006/swapdex",
-  "version": "0.5.0",
-  "description": "Switch between multiple Claude Code, Codex, and Gemini CLI login accounts, locally and safely.",
+  "version": "0.6.0",
+  "description": "Switch between multiple Claude Code, Codex, Gemini, and Antigravity login accounts, locally and safely.",
   "bin": {
     "swapdex": "bin/swapdex.js"
   },
@@ -19,6 +19,7 @@
     "claude",
     "codex",
     "gemini",
+    "antigravity",
     "accounts",
     "credentials"
   ],

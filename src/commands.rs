@@ -31,6 +31,7 @@ pub enum ToolSel {
     Claude,
     Codex,
     Gemini,
+    Antigravity,
     /// Every tool (the default when --tool is omitted)
     #[value(alias = "both")]
     All,
@@ -42,6 +43,7 @@ impl ToolSel {
             ToolSel::Claude => tool == "claude-code",
             ToolSel::Codex => tool == "codex",
             ToolSel::Gemini => tool == "gemini",
+            ToolSel::Antigravity => tool == "antigravity",
             ToolSel::All => true,
         }
     }
@@ -61,7 +63,10 @@ fn selected_adapters(sel: Option<ToolSel>) -> Vec<Box<dyn AuthTool>> {
 fn is_explicit(sel: Option<ToolSel>) -> bool {
     matches!(
         sel,
-        Some(ToolSel::Claude) | Some(ToolSel::Codex) | Some(ToolSel::Gemini)
+        Some(ToolSel::Claude)
+            | Some(ToolSel::Codex)
+            | Some(ToolSel::Gemini)
+            | Some(ToolSel::Antigravity)
     )
 }
 
@@ -107,6 +112,11 @@ fn snapshot_account_id(snap: &crate::adapters::Snapshot, tool: &str) -> Option<S
         "gemini" => {
             let v: Value = serde_json::from_slice(snap.part("oauth")?.expose()).ok()?;
             crate::adapters::gemini_jwt_claim(v["id_token"].as_str(), "sub")
+        }
+        "antigravity" => {
+            let v: Value = serde_json::from_slice(snap.part("token")?.expose()).ok()?;
+            let fp = crate::adapters::antigravity_fingerprint(&v);
+            (!fp.is_empty()).then_some(fp)
         }
         _ => None,
     }
@@ -785,11 +795,26 @@ fn profile_detail(
                 .and_then(|a| serde_json::from_slice::<Value>(a.expose()).ok())
                 .and_then(|v| v["active"].as_str().map(String::from))
                 .or_else(|| crate::adapters::gemini_jwt_claim(oauth["id_token"].as_str(), "email"));
-            let marker = match oauth["expiry_date"].as_i64() {
-                Some(ms) if ms < now_ms() => Some("expired"),
-                _ => None,
-            };
+            // Gemini access tokens live ~1h and the CLI refreshes them
+            // silently, so "expired right now" is noise. Meaningful signal:
+            // a snapshot whose expiry is ANCIENT was refreshed long ago and
+            // its refresh token may be revoked - same idea as codex's stale.
+            let marker = oauth["expiry_date"]
+                .as_i64()
+                .filter(|ms| now_ms() - ms > STALE_DAYS * 86400 * 1000)
+                .map(|_| "stale");
             Some((email, None, marker))
+        }
+        "antigravity" => {
+            let v: Value = serde_json::from_slice(snap.part("token")?.expose()).ok()?;
+            // A snapshot whose token expiry is ancient was refreshed long ago;
+            // its refresh token may be revoked - same idea as codex's stale.
+            let marker = v["token"]["expiry"]
+                .as_str()
+                .and_then(crate::session_link::rfc3339_to_secs)
+                .filter(|&secs| now_ms() / 1000 - secs > STALE_DAYS * 86400)
+                .map(|_| "stale");
+            Some((None, v["auth_method"].as_str().map(String::from), marker))
         }
         _ => None,
     }
@@ -1390,7 +1415,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
 
     // CLIs on PATH - informational (a codex-only user is not "broken").
     let mut found = Vec::new();
-    for cli in ["claude", "codex", "gemini"] {
+    for cli in ["claude", "codex", "gemini", "agy"] {
         if command_exists(cli) {
             found.push(cli);
         }
@@ -1505,10 +1530,25 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         Some(ToolSel::Claude) => "claude-code",
         Some(ToolSel::Codex) => "codex",
         Some(ToolSel::Gemini) => "gemini",
+        Some(ToolSel::Antigravity) => "antigravity",
         _ if command_exists("codex") => "codex",
         _ => "claude-code",
     };
 
+    if tool == "antigravity" {
+        let already = adapters::by_name("antigravity")
+            .and_then(|a| a.identity(paths).ok().flatten())
+            .is_some();
+        if already {
+            println!("Antigravity is already logged in. To save it:");
+            println!("  swapdex add {name} --tool antigravity");
+            return Ok(0);
+        }
+        eprintln!("swapdex: no Antigravity login found. Sign in first, then save it:");
+        eprintln!("  1) run `agy` once and complete the Google sign-in");
+        eprintln!("  2) then:  swapdex add {name} --tool antigravity");
+        return Ok(3);
+    }
     if tool == "gemini" {
         // Gemini CLI signs in inside the app (first run opens the browser
         // OAuth), so guide the two-step path like Claude.
@@ -1642,6 +1682,7 @@ fn pretty_tool(tool: &str) -> &str {
         "claude-code" => "Claude Code",
         "codex" => "Codex",
         "gemini" => "Gemini CLI",
+        "antigravity" => "Antigravity",
         other => other,
     }
 }

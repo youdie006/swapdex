@@ -69,6 +69,12 @@ impl Paths {
     pub fn gemini_accounts(&self) -> PathBuf {
         self.gemini_dir.join("google_accounts.json")
     }
+    /// Antigravity CLI keeps its own token under the gemini dir.
+    pub fn antigravity_token(&self) -> PathBuf {
+        self.gemini_dir
+            .join("antigravity-cli")
+            .join("antigravity-oauth-token")
+    }
     pub fn store_dir(&self) -> PathBuf {
         self.data.clone()
     }

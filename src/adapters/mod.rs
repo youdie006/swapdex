@@ -7,8 +7,10 @@ use crate::secret::Secret;
 use anyhow::Result;
 use serde::Serialize;
 
+mod antigravity;
 mod claude;
 mod gemini;
+pub(crate) use antigravity::token_fingerprint as antigravity_fingerprint;
 pub(crate) use gemini::jwt_claim as gemini_jwt_claim;
 pub(crate) mod codex;
 
@@ -46,6 +48,7 @@ pub trait AuthTool: Send + Sync {
 
 pub fn all() -> Vec<Box<dyn AuthTool>> {
     vec![
+        Box::new(antigravity::Antigravity),
         Box::new(claude::Claude),
         Box::new(codex::Codex),
         Box::new(gemini::Gemini),

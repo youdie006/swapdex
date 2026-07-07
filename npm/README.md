@@ -8,9 +8,9 @@
 
 </div>
 
-One command to flip your Claude Code or Codex CLI from your work account to your
-personal one, and back. No re-login, no browser, no copying tokens around.
-100% local. Never touches the network.
+One command to flip your Claude Code, Codex, or Gemini CLI from your work
+account to your personal one, and back. No re-login, no browser, no copying
+tokens around. 100% local. Never touches the network.
 
 <div align="center">
 <img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls, use personal, status, restore, doctor" width="760" />
@@ -20,7 +20,7 @@ personal one, and back. No re-login, no browser, no copying tokens around.
 
 ## Why
 
-If you run Claude Code or Codex under more than one account -- a work seat and a
+If you run Claude Code, Codex, or Gemini CLI under more than one account -- a work seat and a
 personal subscription, a client's org and your own -- switching means logging
 out and back in every time. swapdex snapshots each logged-in account once, then
 swaps between them in place: the running CLI picks up the new account on your
@@ -133,12 +133,14 @@ been using each tool lately, so you know when to switch to a fresher account:
 ```
 Local usage - this machine, approximate (not the billed quota):
   claude-code  5h:   8.2M tok / 12 sess    7d:   61.4M tok / 88 sess
-  codex        5h:   1.1M tok / 3 sess     7d:   9.7M tok / 24 sess
+    @work        5h:   6.0M tok           7d:    40.1M tok
+    @personal    5h:   2.2M tok           7d:    19.3M tok
 ```
 
-It sums tokens from `~/.claude` and `~/.codex` transcripts, which are not tagged
-by account, so this is a machine-wide activity gauge rather than a per-account
-balance -- deliberately a hint, not a quota-dodging auto-rotator.
+Once a switch history exists, tokens are attributed to the profile active at
+each event's timestamp (the same honest join `sessions` uses); anything before
+your first switch stays untagged. Still deliberately a hint, not a
+quota-dodging auto-rotator.
 
 ## How it works
 
@@ -147,6 +149,7 @@ Each CLI keeps its login in a small on-disk file:
 - Claude Code: `~/.claude/.credentials.json` plus the `oauthAccount` block inside
   `~/.claude.json`
 - Codex: `~/.codex/auth.json`
+- Gemini CLI: `~/.gemini/oauth_creds.json` plus `~/.gemini/google_accounts.json`
 
 `add` copies the current login into a private store at
 `~/.local/share/swapdex`. `use` writes a saved snapshot back into place

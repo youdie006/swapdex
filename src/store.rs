@@ -83,6 +83,7 @@ impl Store {
             "claude-code" => "claude-code",
             "codex" => "codex",
             "gemini" => "gemini",
+            "antigravity" => "antigravity",
             _ => return Ok(None),
         };
         let mut blobs = Vec::new();
@@ -200,6 +201,7 @@ impl Store {
             "claude-code" => "claude-code",
             "codex" => "codex",
             "gemini" => "gemini",
+            "antigravity" => "antigravity",
             _ => return Ok(None),
         };
         let base = self.dir.join("backups").join(tool);
