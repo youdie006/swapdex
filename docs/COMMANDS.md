@@ -18,7 +18,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex rm <name> [--yes]` | Remove a saved profile. Asks y/N on a terminal; `--yes` skips the question (and is required when stdin is not a tty, e.g. scripts). Never touches a live login. |
 | `swapdex rename <old> <new>` | Rename a saved profile. |
 | `swapdex sessions` | Sessions grouped by the account active when they ran (best-effort; needs sessionwiki on PATH). |
-| `swapdex usage [--json]` | Recent local token usage per tool over the last 5h and 7d, summed from `~/.claude` and `~/.codex` session logs. A rough machine-wide activity gauge (not tagged by account, not the billed quota) so you can tell when to switch. Reads local files only - never the network. |
+| `swapdex usage [--json]` | Recent local token usage per tool over the last 5h and 7d, summed from `~/.claude` and `~/.codex` session logs - **per account** once a switch history exists (each event is attributed to the profile active at its timestamp; what predates your first switch shows as untagged). A rough activity gauge, not the billed quota. Reads local files only - never the network. |
 | `swapdex doctor` | Local health check: store permissions, every saved snapshot, both live logins, backups, and the CLIs on PATH - each finding ends with its fix. Exit 0 healthy, 9 when problems were found. Never touches the network. |
 | `swapdex mcp` | Run as a read-only MCP server over stdio (`whoami`, `list_accounts`). No switch tool exists. |
 | `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. Installed automatically by Homebrew. |
@@ -41,10 +41,10 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 
 ## Tools
 
-`--tool` accepts `claude` (Claude Code; alias `claude-code`), `codex`, or
-`both`. With no `--tool` (same as `both`), a command applies to whichever tools
-are relevant (both when present). The tool names in output are `claude-code`
-and `codex`.
+`--tool` accepts `claude` (Claude Code; alias `claude-code`), `codex`,
+`gemini`, or `all` (alias `both`). With no `--tool` (same as `all`), a command
+applies to whichever tools are relevant. The tool names in output are
+`claude-code`, `codex`, and `gemini`.
 
 ## Environment
 
@@ -91,3 +91,5 @@ compdef _swapdex_profiles swapdex
 - Claude Code login: `~/.claude/.credentials.json` plus the `oauthAccount` block
   inside `~/.claude.json` (only that block is swapped).
 - Codex login: `~/.codex/auth.json`.
+- Gemini CLI login: `~/.gemini/oauth_creds.json` plus
+  `~/.gemini/google_accounts.json` (swapped together).

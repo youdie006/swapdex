@@ -30,7 +30,10 @@ pub enum ToolSel {
     #[value(alias = "claude-code")]
     Claude,
     Codex,
-    Both,
+    Gemini,
+    /// Every tool (the default when --tool is omitted)
+    #[value(alias = "both")]
+    All,
 }
 
 impl ToolSel {
@@ -38,7 +41,8 @@ impl ToolSel {
         match self {
             ToolSel::Claude => tool == "claude-code",
             ToolSel::Codex => tool == "codex",
-            ToolSel::Both => true,
+            ToolSel::Gemini => tool == "gemini",
+            ToolSel::All => true,
         }
     }
 }
@@ -55,7 +59,10 @@ fn selected_adapters(sel: Option<ToolSel>) -> Vec<Box<dyn AuthTool>> {
 /// Whether the user explicitly asked for one tool (so a missing one is an error,
 /// not a silent skip). `--tool both` is treated as the lenient default.
 fn is_explicit(sel: Option<ToolSel>) -> bool {
-    matches!(sel, Some(ToolSel::Claude) | Some(ToolSel::Codex))
+    matches!(
+        sel,
+        Some(ToolSel::Claude) | Some(ToolSel::Codex) | Some(ToolSel::Gemini)
+    )
 }
 
 /// On macOS, Claude Code keeps its OAuth login in the Keychain rather than in
@@ -96,6 +103,10 @@ fn snapshot_account_id(snap: &crate::adapters::Snapshot, tool: &str) -> Option<S
         "claude-code" => {
             let v: Value = serde_json::from_slice(snap.part("oauth_account")?.expose()).ok()?;
             v["accountUuid"].as_str().map(|s| s.to_string())
+        }
+        "gemini" => {
+            let v: Value = serde_json::from_slice(snap.part("oauth")?.expose()).ok()?;
+            crate::adapters::gemini_jwt_claim(v["id_token"].as_str(), "sub")
         }
         _ => None,
     }
@@ -767,6 +778,19 @@ fn profile_detail(
                 .map(|_| "stale");
             Some((email, auth["auth_mode"].as_str().map(String::from), marker))
         }
+        "gemini" => {
+            let oauth: Value = serde_json::from_slice(snap.part("oauth")?.expose()).ok()?;
+            let email = snap
+                .part("accounts")
+                .and_then(|a| serde_json::from_slice::<Value>(a.expose()).ok())
+                .and_then(|v| v["active"].as_str().map(String::from))
+                .or_else(|| crate::adapters::gemini_jwt_claim(oauth["id_token"].as_str(), "email"));
+            let marker = match oauth["expiry_date"].as_i64() {
+                Some(ms) if ms < now_ms() => Some("expired"),
+                _ => None,
+            };
+            Some((email, None, marker))
+        }
         _ => None,
     }
 }
@@ -1366,7 +1390,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
 
     // CLIs on PATH - informational (a codex-only user is not "broken").
     let mut found = Vec::new();
-    for cli in ["claude", "codex"] {
+    for cli in ["claude", "codex", "gemini"] {
         if command_exists(cli) {
             found.push(cli);
         }
@@ -1480,10 +1504,27 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     let tool = match sel {
         Some(ToolSel::Claude) => "claude-code",
         Some(ToolSel::Codex) => "codex",
+        Some(ToolSel::Gemini) => "gemini",
         _ if command_exists("codex") => "codex",
         _ => "claude-code",
     };
 
+    if tool == "gemini" {
+        // Gemini CLI signs in inside the app (first run opens the browser
+        // OAuth), so guide the two-step path like Claude.
+        let already = adapters::by_name("gemini")
+            .and_then(|g| g.identity(paths).ok().flatten())
+            .is_some();
+        if already {
+            println!("Gemini CLI is already logged in. To save it:");
+            println!("  swapdex add {name} --tool gemini");
+            return Ok(0);
+        }
+        eprintln!("swapdex: no Gemini login found. Sign in first, then save it:");
+        eprintln!("  1) run `gemini` once and complete the Google sign-in");
+        eprintln!("  2) then:  swapdex add {name} --tool gemini");
+        return Ok(3);
+    }
     if tool == "claude-code" {
         if !command_exists("claude") {
             // stderr + exit 3, same as the codex path: `login x && ...` in a
@@ -1600,6 +1641,7 @@ fn pretty_tool(tool: &str) -> &str {
     match tool {
         "claude-code" => "Claude Code",
         "codex" => "Codex",
+        "gemini" => "Gemini CLI",
         other => other,
     }
 }
@@ -1772,10 +1814,21 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
         let out: Vec<Value> = rows
             .iter()
             .map(|r| {
+                let accounts: serde_json::Map<String, Value> = r
+                    .accounts
+                    .iter()
+                    .map(|(name, (t5, t7))| {
+                        (
+                            name.clone(),
+                            serde_json::json!({"last_5h_tokens": t5, "last_7d_tokens": t7}),
+                        )
+                    })
+                    .collect();
                 serde_json::json!({
                     "tool": r.tool,
                     "last_5h": {"sessions": r.w5h.sessions, "tokens": r.w5h.tokens},
                     "last_7d": {"sessions": r.w7d.sessions, "tokens": r.w7d.tokens},
+                    "accounts": accounts,
                 })
             })
             .collect();
@@ -1799,8 +1852,27 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
             crate::usage::human(r.w7d.tokens),
             r.w7d.sessions,
         );
+        // Per-account rows via the switch timeline; the untagged remainder is
+        // whatever predates the first switch.
+        for (name, (t5, t7)) in &r.accounts {
+            println!(
+                "    @{:<11} 5h: {:>7} tok           7d: {:>8} tok",
+                name,
+                crate::usage::human(*t5),
+                crate::usage::human(*t7),
+            );
+        }
+        let attributed7: u64 = r.accounts.values().map(|(_, t7)| *t7).sum();
+        let rest = r.w7d.tokens.saturating_sub(attributed7);
+        if !r.accounts.is_empty() && rest > 0 {
+            println!(
+                "    {:<12} 5h:                       7d: {:>8} tok (before your first switch)",
+                "(untagged)",
+                crate::usage::human(rest),
+            );
+        }
     }
-    println!("(tokens are summed from local session transcripts; not tagged by account)");
+    println!("(summed locally from session transcripts; accounts via the switch timeline)");
     Ok(0)
 }
 

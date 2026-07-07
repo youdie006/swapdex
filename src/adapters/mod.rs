@@ -8,6 +8,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 mod claude;
+mod gemini;
+pub(crate) use gemini::jwt_claim as gemini_jwt_claim;
 pub(crate) mod codex;
 
 /// A tool's live account identity, safe to print/serialize - no tokens.
@@ -43,7 +45,11 @@ pub trait AuthTool: Send + Sync {
 }
 
 pub fn all() -> Vec<Box<dyn AuthTool>> {
-    vec![Box::new(claude::Claude), Box::new(codex::Codex)]
+    vec![
+        Box::new(claude::Claude),
+        Box::new(codex::Codex),
+        Box::new(gemini::Gemini),
+    ]
 }
 
 pub fn by_name(name: &str) -> Option<Box<dyn AuthTool>> {

@@ -59,6 +59,7 @@ pub fn tool_running(tool: &str, comms: &[String]) -> bool {
     let want = match tool {
         "claude-code" => "claude",
         "codex" => "codex",
+        "gemini" => "gemini",
         _ => return false,
     };
     comms.iter().any(|c| c == want)

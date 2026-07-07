@@ -1285,3 +1285,97 @@ fn ui_hint_fallback_fires_on_first_real_switch() {
         "fallback hint must appear on the first real switch: {o}"
     );
 }
+
+fn seed_gemini(root: &Path, sub: &str, email: &str) {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let d = root.join(".gemini");
+    std::fs::create_dir_all(&d).unwrap();
+    let payload = URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&serde_json::json!({"sub": sub, "email": email})).unwrap());
+    std::fs::write(
+        d.join("oauth_creds.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "access_token":"AT-SENTINEL","refresh_token":"RT-SENTINEL",
+            "id_token": format!("h.{payload}.s"),
+            "expiry_date": 9999999999999i64,
+            "scope":"openid","token_type":"Bearer"}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("google_accounts.json"),
+        serde_json::to_vec(&serde_json::json!({"active": email, "old": []})).unwrap(),
+    )
+    .unwrap();
+}
+
+// Gemini: add/use roundtrip switches BOTH files together, ls shows the email,
+// and no command leaks the sentinel tokens.
+#[test]
+fn gemini_add_use_roundtrip() {
+    let root = tempfile::tempdir().unwrap();
+    seed_gemini(root.path(), "sub-A", "a@gmail.com");
+    let (_o, e, c) = run(root.path(), &["add", "gwork", "--tool", "gemini"]);
+    assert_eq!(c, 0, "add failed: {e}");
+    seed_gemini(root.path(), "sub-B", "b@gmail.com");
+    run(root.path(), &["add", "ghome", "--tool", "gemini"]);
+
+    let (o, e, c) = run(root.path(), &["use", "gwork", "--tool", "gemini"]);
+    assert_eq!(c, 0, "use failed: {o}{e}");
+    let oauth: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.path().join(".gemini/oauth_creds.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        oauth["id_token"].as_str().unwrap().contains("."),
+        "oauth swapped"
+    );
+    let accounts: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.path().join(".gemini/google_accounts.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        accounts["active"], "a@gmail.com",
+        "accounts swapped together"
+    );
+
+    let (ls, _e, _c) = run(root.path(), &["ls"]);
+    assert!(ls.contains("a@gmail.com"), "identity shown: {ls}");
+    assert!(ls.contains("[gemini") || ls.contains("gemini"), "{ls}");
+    for args in [vec!["ls"], vec!["status"], vec!["ls", "--json"]] {
+        let (o, e, _c) = run(root.path(), &args);
+        assert!(
+            !o.contains("SENTINEL") && !e.contains("SENTINEL"),
+            "token leak in {args:?}"
+        );
+    }
+}
+
+// A three-tool machine: one profile holds claude + codex + gemini and a single
+// `use` switches all three.
+#[test]
+fn three_tool_profile_switches_together() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex(root.path(), "acct-A");
+    seed_gemini(root.path(), "sub-A", "a@gmail.com");
+    run(root.path(), &["add", "all-a"]);
+    seed_claude(root.path(), "uuid-B", "b@x.com");
+    seed_codex(root.path(), "acct-B");
+    seed_gemini(root.path(), "sub-B", "b@gmail.com");
+    run(root.path(), &["add", "all-b"]);
+
+    let (o, e, c) = run(root.path(), &["use", "all-a"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert_eq!(claude_live_uuid(root.path()), "uuid-A");
+    let codex: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".codex/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(codex["tokens"]["account_id"], "acct-A");
+    let g: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.path().join(".gemini/google_accounts.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(g["active"], "a@gmail.com");
+    assert_eq!(o.matches("switched").count(), 3, "all three switched: {o}");
+}

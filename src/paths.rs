@@ -9,6 +9,7 @@ pub struct Paths {
     home: PathBuf,       // for ~/.claude.json (sibling of ~/.claude)
     claude_dir: PathBuf, // ~/.claude or $CLAUDE_CONFIG_DIR
     codex_dir: PathBuf,  // ~/.codex or $CODEX_HOME
+    gemini_dir: PathBuf, // ~/.gemini
     data: PathBuf,       // ~/.local/share/swapdex
 }
 
@@ -21,6 +22,7 @@ impl Paths {
             home: root.to_path_buf(),
             claude_dir: root.join(".claude"),
             codex_dir: root.join(".codex"),
+            gemini_dir: root.join(".gemini"),
             data: root.join(".local/share/swapdex"),
         }
     }
@@ -42,10 +44,12 @@ impl Paths {
         let data = dirs::data_dir()
             .context("cannot determine data dir")?
             .join("swapdex");
+        let gemini_dir = home.join(".gemini");
         Ok(Paths {
             home,
             claude_dir,
             codex_dir,
+            gemini_dir,
             data,
         })
     }
@@ -58,6 +62,12 @@ impl Paths {
     }
     pub fn codex_auth(&self) -> PathBuf {
         self.codex_dir.join("auth.json")
+    }
+    pub fn gemini_oauth(&self) -> PathBuf {
+        self.gemini_dir.join("oauth_creds.json")
+    }
+    pub fn gemini_accounts(&self) -> PathBuf {
+        self.gemini_dir.join("google_accounts.json")
     }
     pub fn store_dir(&self) -> PathBuf {
         self.data.clone()

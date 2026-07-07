@@ -82,6 +82,7 @@ impl Store {
         let tool_static: &'static str = match tool {
             "claude-code" => "claude-code",
             "codex" => "codex",
+            "gemini" => "gemini",
             _ => return Ok(None),
         };
         let mut blobs = Vec::new();
@@ -198,6 +199,7 @@ impl Store {
         let tool_static: &'static str = match tool {
             "claude-code" => "claude-code",
             "codex" => "codex",
+            "gemini" => "gemini",
             _ => return Ok(None),
         };
         let base = self.dir.join("backups").join(tool);

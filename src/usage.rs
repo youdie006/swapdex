@@ -36,6 +36,10 @@ pub struct ToolUsage {
     pub tool: &'static str,
     pub w5h: Bucket,
     pub w7d: Bucket,
+    /// Tokens per account profile (from the switch timeline): name -> (5h, 7d).
+    /// Empty when no switch history exists - attribution starts at the first
+    /// switch, and swapdex never guesses.
+    pub accounts: std::collections::BTreeMap<String, (u64, u64)>,
 }
 
 fn now_secs() -> u64 {
@@ -73,20 +77,53 @@ fn recent_jsonl(dir: &Path, now: u64, max_age: u64, out: &mut Vec<PathBuf>) {
 
 pub fn tool_usage(paths: &Paths) -> Vec<ToolUsage> {
     let now = now_secs();
-    let (c5, c7) = claude_usage(&paths.claude_projects(), now);
-    let (x5, x7) = codex_usage(&paths.codex_sessions(), now);
+    // The switch timeline turns machine-wide token counts into per-ACCOUNT
+    // ones: each event is attributed to the profile active at its timestamp
+    // (the same join `sessions` uses).
+    let events = crate::session_link::read_timeline(paths);
+    let (c5, c7, ca) = claude_usage(&paths.claude_projects(), now, &events);
+    let (x5, x7, xa) = codex_usage(&paths.codex_sessions(), now, &events);
     vec![
         ToolUsage {
             tool: "claude-code",
             w5h: c5,
             w7d: c7,
+            accounts: ca,
         },
         ToolUsage {
             tool: "codex",
             w5h: x5,
             w7d: x7,
+            accounts: xa,
         },
     ]
+}
+
+/// Attribute `toks` at `ts` to the account active then (per-tool), adding into
+/// the 5h/7d columns of `map`. No events for the tool before `ts` -> no entry
+/// (never a guess).
+fn credit(
+    map: &mut std::collections::BTreeMap<String, (u64, u64)>,
+    events: &[crate::session_link::Event],
+    tool: &str,
+    ts: u64,
+    now: u64,
+    toks: u64,
+) {
+    if toks == 0 {
+        return;
+    }
+    let Some(account) = crate::session_link::attribute(events, tool, ts as i64) else {
+        return;
+    };
+    let e = map.entry(account).or_insert((0, 0));
+    let age = now.saturating_sub(ts);
+    if age <= D7 {
+        e.1 += toks;
+    }
+    if age <= H5 {
+        e.0 += toks;
+    }
 }
 
 /// The line's timestamp in unix seconds, or None.
@@ -100,10 +137,19 @@ fn line_ts(d: &Value) -> Option<u64> {
 /// Claude: one API call = one `message.id`; a call's usage may be repeated on
 /// several lines (one per content block) and whole messages reappear in resumed
 /// sessions, so count each id once globally. Window by the message timestamp.
-fn claude_usage(dir: &Path, now: u64) -> (Bucket, Bucket) {
+fn claude_usage(
+    dir: &Path,
+    now: u64,
+    events: &[crate::session_link::Event],
+) -> (
+    Bucket,
+    Bucket,
+    std::collections::BTreeMap<String, (u64, u64)>,
+) {
     let mut files = Vec::new();
     recent_jsonl(dir, now, D7, &mut files);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut accounts = std::collections::BTreeMap::new();
     let (mut b5, mut b7) = (Bucket::default(), Bucket::default());
     for f in &files {
         let Ok(file) = std::fs::File::open(f) else {
@@ -142,21 +188,31 @@ fn claude_usage(dir: &Path, now: u64) -> (Bucket, Bucket) {
                 t5 += toks;
                 in5 = true;
             }
+            credit(&mut accounts, events, "claude-code", ts, now, toks);
         }
         b7.tokens += t7;
         b7.sessions += in7 as u64;
         b5.tokens += t5;
         b5.sessions += in5 as u64;
     }
-    (b5, b7)
+    (b5, b7, accounts)
 }
 
 /// Codex: `payload.info.total_token_usage` is the monotonic running sum for the
 /// session; the tokens attributable to one event are the DELTA from the
 /// previous event, windowed by that line's timestamp.
-fn codex_usage(dir: &Path, now: u64) -> (Bucket, Bucket) {
+fn codex_usage(
+    dir: &Path,
+    now: u64,
+    events: &[crate::session_link::Event],
+) -> (
+    Bucket,
+    Bucket,
+    std::collections::BTreeMap<String, (u64, u64)>,
+) {
     let mut files = Vec::new();
     recent_jsonl(dir, now, D7, &mut files);
+    let mut accounts = std::collections::BTreeMap::new();
     let (mut b5, mut b7) = (Bucket::default(), Bucket::default());
     for f in &files {
         let Ok(file) = std::fs::File::open(f) else {
@@ -201,13 +257,14 @@ fn codex_usage(dir: &Path, now: u64) -> (Bucket, Bucket) {
                 t5 += delta;
                 in5 = true;
             }
+            credit(&mut accounts, events, "codex", ts, now, delta);
         }
         b7.tokens += t7;
         b7.sessions += in7 as u64;
         b5.tokens += t5;
         b5.sessions += in5 as u64;
     }
-    (b5, b7)
+    (b5, b7, accounts)
 }
 
 /// Human-friendly token count (e.g. 1.2M, 45.0k, 900). Thresholds are set just
@@ -253,7 +310,7 @@ mod tests {
         std::fs::write(proj.join("s.jsonl"), format!("{m1}\n{m1}\n{old}\n")).unwrap();
         // A resumed session copies msg_1 into a second file: still counted once.
         std::fs::write(proj.join("resumed.jsonl"), format!("{m1}\n")).unwrap();
-        let (b5, b7) = claude_usage(dir.path(), now);
+        let (b5, b7, _a) = claude_usage(dir.path(), now, &[]);
         assert_eq!(
             b5.tokens, 150,
             "duplicate lines and resumed copies count once"
@@ -279,10 +336,50 @@ mod tests {
             format!("{l1}\n{l2}\n{l2}\n"),
         )
         .unwrap();
-        let (b5, b7) = codex_usage(dir.path(), now);
+        let (b5, b7, _a) = codex_usage(dir.path(), now, &[]);
         assert_eq!(b5.tokens, 1800, "cumulative total, duplicates ignored");
         assert_eq!(b7.tokens, 1800);
         assert_eq!(b5.sessions, 1);
+    }
+
+    #[test]
+    fn tokens_attribute_to_the_account_active_at_event_time() {
+        let now = crate::session_link::rfc3339_to_secs("2026-07-06T12:00:00Z").unwrap() as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).unwrap();
+        // work until 10:00, personal after.
+        let t10 = crate::session_link::rfc3339_to_secs("2026-07-06T10:00:00Z").unwrap();
+        let mk = |ts: i64, account: &str| crate::session_link::Event {
+            ts,
+            tool: "claude-code".into(),
+            account: account.into(),
+        };
+        let events = vec![mk(0, "work"), mk(t10, "personal")];
+        let m = |ts: &str, tok: u64| {
+            serde_json::json!({"timestamp": ts,
+                "message": {"id": format!("m{ts}{tok}"), "usage": {"input_tokens": tok, "output_tokens": 0}}})
+        };
+        std::fs::write(
+            proj.join("s.jsonl"),
+            format!(
+                "{}\n{}\n",
+                m("2026-07-06T06:00:00Z", 100), // -> work (6h ago: outside 5h)
+                m("2026-07-06T11:00:00Z", 40),  // -> personal
+            ),
+        )
+        .unwrap();
+        let (_b5, b7, accounts) = claude_usage(dir.path(), now, &events);
+        assert_eq!(b7.tokens, 140);
+        assert_eq!(
+            accounts.get("work"),
+            Some(&(0, 100)),
+            "6h ago is outside 5h"
+        );
+        assert_eq!(accounts.get("personal"), Some(&(40, 40)));
+        // No events -> no attribution at all (never a guess).
+        let (_b5, _b7, none) = claude_usage(dir.path(), now, &[]);
+        assert!(none.is_empty());
     }
 
     #[test]
@@ -301,7 +398,7 @@ mod tests {
             format!("{l1}\n{l2}\n"),
         )
         .unwrap();
-        let (b5, b7) = codex_usage(dir.path(), now);
+        let (b5, b7, _a) = codex_usage(dir.path(), now, &[]);
         assert_eq!(b5.tokens, 500, "only the in-window delta");
         assert_eq!(b7.tokens, 1500);
     }

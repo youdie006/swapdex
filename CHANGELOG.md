@@ -4,6 +4,25 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.5.0] - 2026-07-07
+
+Two headline features: a third tool, and per-account usage.
+
+### Added
+- **Gemini CLI support**: `~/.gemini/oauth_creds.json` +
+  `~/.gemini/google_accounts.json` are switched together with the same
+  both-or-neither rollback the Claude adapter uses. One profile can now hold
+  Claude Code + Codex + Gemini and a single `use` switches all three;
+  `--tool gemini` scopes any command; `ls`/`status`/`ui`/`doctor`/`restore`
+  cover it like the others; sessionwiki's account badges pick Gemini sessions
+  up automatically (the timeline join is tool-generic). `--tool all` is the
+  explicit everything-selector (alias `both` kept for scripts).
+- **`usage` is per-account once a switch history exists**: every token event
+  is attributed to the profile active at its timestamp - the same honest join
+  `sessions` uses - so "how much have I used on EACH account" finally has an
+  answer. What predates your first switch shows as untagged; no history, no
+  guessing. JSON grows an `accounts` object per tool.
+
 ## [0.4.2] - 2026-07-07
 
 Ecosystem-walkthrough fixes: the integrated flows, from a fresh user's chair.
