@@ -1,6 +1,6 @@
 [package]
 name = "swapdex"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Switch between multiple Claude Code, Codex, Gemini, and Antigravity login accounts, locally and safely."
 license = "MIT"
@@ -25,3 +25,4 @@ base64 = "0.22"
 clap_mangen = "0.3.0"
 unicode-width = "0.2.2"
 sha2 = "0.11.0"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

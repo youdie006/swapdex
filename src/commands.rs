@@ -1133,10 +1133,16 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
 /// picking a number IS the explicit `swapdex use <name>`.
 pub fn ui(paths: &Paths) -> Result<i32> {
     use std::io::IsTerminal;
-    let tty = std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+    let real_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let tty = real_tty || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
     if !tty {
         eprintln!("swapdex: `ui` is interactive and needs a terminal (try `swapdex use <name>`)");
         return Ok(2);
+    }
+    // A real terminal gets the full-screen picker; the pipe-driven path (tests,
+    // SWAPDEX_ASSUME_TTY) keeps the plain numbered prompt below.
+    if real_tty {
+        return ui_tui(paths);
     }
     let store = Store::open(paths)?;
     let profiles = store.list();
@@ -1196,55 +1202,8 @@ pub fn ui(paths: &Paths) -> Result<i32> {
                 // fallback written exactly for it.
                 let first_time = crate::session_link::read_timeline(paths).is_empty();
                 let rc = use_account(paths, &name, None, false)?;
-                // Continuity hint - the reason you switched: the sessions you
-                // were in on THIS account, and the one command to reopen one.
                 if rc == 0 {
-                    let attributed = crate::session_link::recent_sessions_for(paths, &name, 3);
-                    let (recent, label) = match attributed {
-                        Some(r) if !r.is_empty() => (
-                            Some(r),
-                            format!("recent sessions on '{name}' (sessionwiki):"),
-                        ),
-                        // Nothing attributable yet: attribution starts at the
-                        // first recorded switch - fall back honestly.
-                        Some(_) if first_time => (
-                            crate::session_link::recent_sessions_any(3),
-                            "recent sessions (any account - attribution starts with your \
-                             first switch):"
-                                .to_string(),
-                        ),
-                        _ => (None, String::new()),
-                    };
-                    if let Some(recent) = recent.filter(|r| !r.is_empty()) {
-                        println!("\n{label}");
-                        for (i, s) in recent.iter().enumerate() {
-                            let id6: String = s.id.chars().take(6).collect();
-                            let age = age_line((s.started.max(0) as u128) * 1_000_000_000);
-                            let line = format!(
-                                "  {}) {id6}  {:>7}  {}  {}",
-                                i + 1,
-                                age,
-                                fit(&format!("[{}]", s.tool), 13),
-                                fit(&s.title, 44)
-                            );
-                            println!("{}", line.trim_end());
-                        }
-                        // One-shot handoff on an explicit pick - the same
-                        // precedent as `login` spawning the official CLI.
-                        // Enter skips; swapdex never launches anything unasked.
-                        if let Some(ans) = prompt(
-                            &format!("resume one? [1-{}] (Enter skips): ", recent.len()),
-                            "",
-                        ) {
-                            if let Ok(k) = ans.parse::<usize>() {
-                                if (1..=recent.len()).contains(&k) {
-                                    let id = recent[k - 1].id.clone();
-                                    println!("opening session {id} via sessionwiki...");
-                                    return Err(exec_sessionwiki_resume(&id));
-                                }
-                            }
-                        }
-                    }
+                    ui_session_hints(paths, &name, first_time)?;
                 }
                 return Ok(rc);
             }
@@ -1253,6 +1212,152 @@ pub fn ui(paths: &Paths) -> Result<i32> {
                     "  pick a number between 1 and {} (Enter cancels)",
                     profiles.len()
                 );
+            }
+        }
+    }
+}
+
+/// Post-switch continuity: recent sessions of the picked account + the
+/// numbered resume handoff. Shared by the numbered picker and the TUI.
+fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
+    // `first_time` is captured by the CALLER before the switch writes its own
+    // timeline event (audit fix - re-reading here would kill the fallback on
+    // the very first switch, the case it exists for).
+    let attributed = crate::session_link::recent_sessions_for(paths, name, 3);
+    let (recent, label) = match attributed {
+        Some(r) if !r.is_empty() => (
+            Some(r),
+            format!("recent sessions on '{name}' (sessionwiki):"),
+        ),
+        Some(_) if first_time => (
+            crate::session_link::recent_sessions_any(3),
+            "recent sessions (any account - attribution starts with your first switch):"
+                .to_string(),
+        ),
+        _ => (None, String::new()),
+    };
+    if let Some(recent) = recent.filter(|r| !r.is_empty()) {
+        println!("\n{label}");
+        for (i, s) in recent.iter().enumerate() {
+            let id6: String = s.id.chars().take(6).collect();
+            let age = age_line((s.started.max(0) as u128) * 1_000_000_000);
+            let line = format!(
+                "  {}) {id6}  {:>7}  {}  {}",
+                i + 1,
+                age,
+                fit(&format!("[{}]", s.tool), 13),
+                fit(&s.title, 44)
+            );
+            println!("{}", line.trim_end());
+        }
+        if let Some(ans) = prompt(
+            &format!("resume one? [1-{}] (Enter skips): ", recent.len()),
+            "",
+        ) {
+            if let Ok(k) = ans.parse::<usize>() {
+                if (1..=recent.len()).contains(&k) {
+                    let id = recent[k - 1].id.clone();
+                    println!("opening session {id} via sessionwiki...");
+                    return Err(exec_sessionwiki_resume(&id));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The full-screen ui loop: render -> action -> run the SAME command path the
+/// CLI uses -> re-enter (llmux-style stay-in-the-ui), except a switch, which
+/// exits to print the switch result and the session continuity flow.
+fn ui_tui(paths: &Paths) -> Result<i32> {
+    loop {
+        let store = Store::open(paths)?;
+        let profiles = store.list();
+        if profiles.is_empty() {
+            println!("No accounts saved yet.");
+            println!("  guided setup:  swapdex setup");
+            return Ok(0);
+        }
+        let active = active_by_tool(&store, paths);
+        let rows: Vec<crate::tui::Row> = profiles
+            .iter()
+            .map(|p| {
+                let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+                let at: Vec<&str> = active
+                    .iter()
+                    .filter(|(_, n)| n == &p.name)
+                    .map(|(t, _)| *t)
+                    .collect();
+                crate::tui::Row {
+                    name: p.name.clone(),
+                    ident: identity_column(email, tier),
+                    tools: p
+                        .tools
+                        .iter()
+                        .map(|t| {
+                            if at.contains(&t.as_str()) {
+                                format!("{t}*")
+                            } else {
+                                t.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    active: !at.is_empty(),
+                    warn: marker,
+                }
+            })
+            .collect();
+        let summary = crate::session_link::status_line(paths);
+        drop(store);
+        match crate::tui::pick(&rows, summary.as_deref())? {
+            crate::tui::Action::Quit => return Ok(0),
+            crate::tui::Action::Switch(name) => {
+                let first_time = crate::session_link::read_timeline(paths).is_empty();
+                let rc = use_account(paths, &name, None, false)?;
+                if rc == 0 {
+                    ui_session_hints(paths, &name, first_time)?;
+                }
+                return Ok(rc);
+            }
+            crate::tui::Action::AddAccount => {
+                if let Some(tool) = crate::tui::pick_tool()? {
+                    let sel = match tool {
+                        "claude-code" => Some(ToolSel::Claude),
+                        "codex" => Some(ToolSel::Codex),
+                        "gemini" => Some(ToolSel::Gemini),
+                        _ => Some(ToolSel::Antigravity),
+                    };
+                    let who = adapters::by_name(tool)
+                        .and_then(|a| a.identity(paths).ok().flatten())
+                        .and_then(|id| id.email)
+                        .unwrap_or_else(|| "account".into());
+                    let store = Store::open(paths)?;
+                    let Some(name) = ask_name(
+                        &store,
+                        &format!("name for the new account [{}]: ", suggest_name(&who)),
+                        &suggest_name(&who),
+                    ) else {
+                        continue;
+                    };
+                    drop(store);
+                    let rc = login(paths, &name, sel)?;
+                    if rc != 0 {
+                        return Ok(rc);
+                    }
+                    println!("(press Enter to go back to the picker)");
+                    let _ = prompt("", "");
+                }
+            }
+            crate::tui::Action::Restore => {
+                restore(paths, None, false)?;
+                println!("(press Enter to go back to the picker)");
+                let _ = prompt("", "");
+            }
+            crate::tui::Action::Delete(name) => {
+                let store = Store::open(paths)?;
+                store.remove(&name)?;
+                drop(store);
             }
         }
     }
@@ -1531,8 +1636,30 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         Some(ToolSel::Codex) => "codex",
         Some(ToolSel::Gemini) => "gemini",
         Some(ToolSel::Antigravity) => "antigravity",
-        _ if command_exists("codex") => "codex",
-        _ => "claude-code",
+        _ => {
+            // Never guess which tool the user means (real-use feedback: the
+            // old codex-if-installed default kept asking about the wrong
+            // tool). On a terminal, ask; otherwise require --tool.
+            use std::io::IsTerminal;
+            let tty =
+                std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+            if !tty {
+                eprintln!("swapdex: say which tool: swapdex login {name} --tool <claude|codex|gemini|antigravity>");
+                return Ok(2);
+            }
+            println!("Which tool do you want to log '{name}' into?");
+            println!("  1) Claude Code   2) Codex   3) Gemini CLI   4) Antigravity");
+            match prompt("pick [1-4] (Enter cancels): ", "").as_deref() {
+                Some("1") => "claude-code",
+                Some("2") => "codex",
+                Some("3") => "gemini",
+                Some("4") => "antigravity",
+                _ => {
+                    println!("cancelled.");
+                    return Ok(0);
+                }
+            }
+        }
     };
 
     if tool == "antigravity" {
@@ -1580,15 +1707,98 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             .and_then(|c| c.identity(paths).ok().flatten())
             .is_some();
         if already {
-            // Already logged in. Adding a DIFFERENT account needs /logout + /login
-            // inside a session - spawning `claude` won't re-prompt, so we guide.
-            println!("You're already logged into Claude Code.");
-            println!("  save the current account:  swapdex add {name} --tool claude");
-            println!("  or switch to another account first: run `claude`, use /logout then");
-            println!(
-                "  /login with the other account, exit, then `swapdex add {name} --tool claude`."
-            );
-            return Ok(0);
+            // Already logged in - the user wants to ADD a different account.
+            // Do the whole thing: save the current login, sign out locally,
+            // run claude for the fresh sign-in, capture the new account. The
+            // original login is stashed in the store and restored on any
+            // failure, so this can never lose an account.
+            use std::io::IsTerminal;
+            let tty =
+                std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+            let adapter = claude.expect("claude adapter exists");
+            let cur = adapter.identity(paths)?.expect("already checked");
+            if !tty {
+                // Scripts get the old guidance - this flow is interactive.
+                println!(
+                    "You're already logged into Claude Code ({}).",
+                    identity_line(&cur)
+                );
+                println!("  save the current account:  swapdex add {name} --tool claude");
+                println!("  add a DIFFERENT account:   swapdex login {name} --tool claude  (on a terminal)");
+                return Ok(0);
+            }
+            println!("Currently logged in as {}.", identity_line(&cur));
+            if !yes_no(
+                &format!(
+                    "Sign in to a DIFFERENT account as '{name}'? swapdex will save the                      current login, sign you out locally, and open Claude Code for the                      new sign-in. [Y/n]: "
+                ),
+                true,
+            ) {
+                println!("cancelled - nothing changed.");
+                return Ok(0);
+            }
+            let store = Store::open(paths)?;
+            let _lock = match store.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    eprintln!("swapdex: another swapdex is mid-switch; try again");
+                    return Ok(4);
+                }
+            };
+            // 1) The current login, saved twice over: a store backup (restore
+            //    can always bring it back) and - if unmatched - a profile.
+            let stash = adapter.capture(paths)?;
+            store.backup(&stash)?;
+            if matched_profile_name(&store, "claude-code", &cur.account_id).is_none() {
+                let who = cur.email.clone().unwrap_or_else(|| cur.display.clone());
+                let suggestion = suggest_name(&who);
+                if let Some(keep) = ask_name(
+                    &store,
+                    &format!("name to keep the CURRENT account under [{suggestion}]: "),
+                    &suggestion,
+                ) {
+                    store.save(&keep, &stash)?;
+                    println!("saved current login as '{keep}'.");
+                }
+            }
+            // 2) Local sign-out: remove the credential file and the
+            //    oauthAccount block (everything else in .claude.json stays).
+            std::fs::remove_file(paths.claude_credentials()).ok();
+            if let Ok(bytes) = std::fs::read(paths.claude_config_json()) {
+                if let Ok(mut cfg) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(obj) = cfg.as_object_mut() {
+                        obj.remove("oauthAccount");
+                        if let Ok(out) = serde_json::to_vec(&cfg) {
+                            let _ = crate::atomic::write_secret(&paths.claude_config_json(), &out);
+                        }
+                    }
+                }
+            }
+            // 3) Fresh sign-in inside the official app.
+            println!("Opening Claude Code - sign in with the OTHER account, then exit (/exit).");
+            let spawn = Command::new("claude").status();
+            // 4) Capture, or restore the stash on any failure.
+            let new_id = adapter.identity(paths).ok().flatten();
+            match (spawn, new_id) {
+                (Ok(_), Some(new)) if !new.account_id.is_empty() => {
+                    if new.account_id == cur.account_id {
+                        println!("note: you signed back into the same account.");
+                    }
+                    let snap = adapter.capture(paths)?;
+                    store.save(name, &snap)?;
+                    println!("saved profile '{name}' ({}).", identity_line(&new));
+                    println!("switch back any time:  swapdex use <name>  (or `swapdex ui`)");
+                    return Ok(0);
+                }
+                _ => {
+                    adapter.apply(paths, &stash)?;
+                    eprintln!(
+                        "swapdex: no new Claude login was completed - your previous                          login ({}) was restored.",
+                        identity_line(&cur)
+                    );
+                    return Ok(8);
+                }
+            }
         }
         // Not logged in: drive it. Claude Code has no login subcommand, so run
         // `claude` itself - its first-run flow does the browser login - then

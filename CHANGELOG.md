@@ -4,6 +4,32 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.7.0] - 2026-07-07
+
+Real-use feedback release: the three things that actually hurt.
+
+### Added
+- **Add a NEW account in one flow**: `swapdex login <name> --tool claude`
+  while already logged in now does the whole thing - saves your current
+  login (profile + store backup), signs you out locally, opens Claude Code
+  for the fresh sign-in, and captures the new account. If the sign-in does
+  not complete, your previous login is restored automatically; it can never
+  be lost. (Previously this case printed instructions and stopped - the
+  single most-hit wall in real use.)
+- **Full-screen `ui`** on a real terminal: arrow keys, Enter to switch, `a`
+  add a new account, `r` restore, `d` delete (with confirm), `q` quit -
+  the llmux-style experience, by direct request. Every action runs the
+  exact same command path as the CLI; piped stdin falls back to the plain
+  numbered prompt. (ratatui with the crossterm backend only; the "no HTTP
+  client in the dependency graph" guarantee is unchanged.)
+
+### Changed
+- `login` without `--tool` ASKS which tool instead of silently preferring
+  Codex when it is installed - the old guess kept steering Claude users to
+  the wrong tool.
+- Tool ordering everywhere (setup, ls, status, doctor) leads with Claude
+  Code, then Codex, Gemini, Antigravity.
+
 ## [0.6.0] - 2026-07-07
 
 ### Added

@@ -8,8 +8,8 @@
 
 </div>
 
-One command to flip your Claude Code, Codex, or Gemini CLI from your work
-account to your personal one, and back. No re-login, no browser, no copying
+One command to flip your Claude Code, Codex, Gemini CLI, or Antigravity from
+your work account to your personal one, and back. No re-login, no browser, no copying
 tokens around. 100% local. Never touches the network.
 
 <div align="center">
@@ -20,7 +20,8 @@ tokens around. 100% local. Never touches the network.
 
 ## Why
 
-If you run Claude Code, Codex, or Gemini CLI under more than one account -- a work seat and a
+If you run Claude Code, Codex, Gemini CLI, or Antigravity under more than one
+account -- a work seat and a
 personal subscription, a client's org and your own -- switching means logging
 out and back in every time. swapdex snapshots each logged-in account once, then
 swaps between them in place: the running CLI picks up the new account on your
@@ -150,6 +151,7 @@ Each CLI keeps its login in a small on-disk file:
   `~/.claude.json`
 - Codex: `~/.codex/auth.json`
 - Gemini CLI: `~/.gemini/oauth_creds.json` plus `~/.gemini/google_accounts.json`
+- Antigravity: `~/.gemini/antigravity-cli/antigravity-oauth-token`
 
 `add` copies the current login into a private store at
 `~/.local/share/swapdex`. `use` writes a saved snapshot back into place

@@ -8,5 +8,6 @@ pub mod proc;
 pub mod secret;
 pub mod session_link;
 pub mod store;
+pub mod tui;
 pub mod usage;
 pub mod util;

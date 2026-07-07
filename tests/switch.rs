@@ -1437,3 +1437,107 @@ fn antigravity_add_use_roundtrip() {
         );
     }
 }
+
+// THE flow real use demanded: already logged into account A, want to ADD
+// account B. `login <name> --tool claude` must save A, sign out locally, run
+// claude for the fresh sign-in, and capture B - one command.
+fn fake_claude(root: &Path, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = root.join("fakebin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let fake = bin_dir.join("claude");
+    std::fs::write(&fake, script).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir
+}
+
+fn run_login_tty(root: &Path, bin_dir: &Path, args: &[&str], input: &str) -> (String, String, i32) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(bin())
+        .args(args)
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("PATH", &path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn login_claude_adds_a_second_account_in_one_flow() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "old", "--tool", "claude"]);
+    // Fake claude: simulates the user signing into account B inside the app.
+    let script = r#"#!/bin/sh
+mkdir -p "$SWAPDEX_ROOT/.claude"
+cat > "$SWAPDEX_ROOT/.claude/.credentials.json" <<'CRED'
+{"claudeAiOauth":{"accessToken":"AT-B","refreshToken":"RT-B","expiresAt":9999999999999,"subscriptionType":"pro"}}
+CRED
+cat > "$SWAPDEX_ROOT/.claude.json" <<'CFG'
+{"oauthAccount":{"accountUuid":"uuid-B","emailAddress":"b@x.com","displayName":"B"},"projects":{"/keep/me":{"trust":true}}}
+CFG
+"#;
+    let bin_dir = fake_claude(root.path(), script);
+    // "y" confirms the sign-out-and-sign-in flow.
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "newacc", "--tool", "claude"],
+        "y\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    assert_eq!(claude_live_uuid(root.path()), "uuid-B", "B is live: {o}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(names.contains("newacc"), "B saved as newacc: {names}");
+    assert!(names.contains("old"), "A's profile still there: {names}");
+    // And the old account is one command away.
+    let (_o, e, c) = run(root.path(), &["use", "old"]);
+    assert_eq!(c, 0, "{e}");
+    assert_eq!(
+        claude_live_uuid(root.path()),
+        "uuid-A",
+        "A restored via use"
+    );
+}
+
+#[test]
+fn login_claude_restores_original_when_no_new_signin() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "old", "--tool", "claude"]);
+    // Fake claude that exits WITHOUT logging in (user quit / login failed).
+    let bin_dir = fake_claude(root.path(), "#!/bin/sh\nexit 0\n");
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "newacc", "--tool", "claude"],
+        "y\n",
+    );
+    assert_eq!(c, 8, "incomplete login flow: {o}{e}");
+    assert_eq!(
+        claude_live_uuid(root.path()),
+        "uuid-A",
+        "original login restored - NEVER lost: {o}{e}"
+    );
+}

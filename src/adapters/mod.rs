@@ -47,11 +47,13 @@ pub trait AuthTool: Send + Sync {
 }
 
 pub fn all() -> Vec<Box<dyn AuthTool>> {
+    // Claude Code first: it is the most common tool, and this order drives
+    // every user-facing iteration (setup, ls, status, doctor).
     vec![
-        Box::new(antigravity::Antigravity),
         Box::new(claude::Claude),
         Box::new(codex::Codex),
         Box::new(gemini::Gemini),
+        Box::new(antigravity::Antigravity),
     ]
 }
 
