@@ -48,8 +48,11 @@ impl AuthTool for Claude {
         // missing config as an absent oauthAccount rather than failing capture.
         let cfg_path = paths.claude_config_json();
         let cfg: Value = if cfg_path.exists() {
-            serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?)
-                .context("parse .claude.json")?
+            serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?).context(
+                "your LIVE ~/.claude.json is corrupt (not the profile snapshot) - \
+                     repair or remove that file, then retry; removing loses local \
+                     settings like project trust",
+            )?
         } else {
             Value::Null
         };
@@ -93,8 +96,11 @@ impl AuthTool for Claude {
         // guarantee) BEFORE writing anything, so both writes are prepared first.
         let cfg_path = paths.claude_config_json();
         let mut cfg: Value = if cfg_path.exists() {
-            serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?)
-                .context("parse .claude.json")?
+            serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?).context(
+                "your LIVE ~/.claude.json is corrupt (not the profile snapshot) - \
+                     repair or remove that file, then retry; removing loses local \
+                     settings like project trust",
+            )?
         } else {
             Value::Object(Default::default())
         };

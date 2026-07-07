@@ -176,7 +176,10 @@ fn reject_bad_name(name: &str) -> Option<i32> {
     if crate::store::valid_profile_name(name) {
         None
     } else {
-        eprintln!("swapdex: invalid profile name '{name}' (no '/', '\\', '..', leading '.', or control chars)");
+        eprintln!(
+            "swapdex: invalid profile name '{name}' (1-64 bytes, not all spaces; \
+             no '/', '\\', leading '.', or control chars)"
+        );
         Some(2)
     }
 }
@@ -247,6 +250,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
     };
     let mut saved = Vec::new();
     let mut skipped = Vec::new();
+    let mut capture_failed: Vec<&str> = Vec::new();
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         if !adapter.present(paths) {
@@ -310,7 +314,14 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             skipped.push(tool);
             continue;
         }
-        let snap = adapter.capture(paths)?;
+        let snap = match adapter.capture(paths) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("swapdex: {tool}: could not read the live login ({e:#}) - skipped");
+                capture_failed.push(tool);
+                continue;
+            }
+        };
         store.save(name, &snap)?;
         saved.push(tool);
     }
@@ -334,12 +345,19 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
         )
     };
     println!("saved profile '{name}' ({}){note}", saved.join(", "));
+    if !capture_failed.is_empty() {
+        eprintln!(
+            "swapdex: {} tool(s) could not be read and were NOT saved: {}",
+            capture_failed.len(),
+            capture_failed.join(", ")
+        );
+    }
     if name.contains(char::is_whitespace) {
         println!(
             "note: the name has spaces - quote it in later commands (`swapdex use \"{name}\"`)"
         );
     }
-    Ok(0)
+    Ok(if capture_failed.is_empty() { 0 } else { 1 })
 }
 
 pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
@@ -394,8 +412,15 @@ fn use_account_inner(
             return Ok(4);
         }
     };
+    // A typo must be ONE line, not four "left unchanged" notes implying the
+    // profile exists but lacks those tools.
+    if !store.list().iter().any(|p| p.name == name) {
+        eprintln!("swapdex: no profile named '{name}'");
+        return Ok(5);
+    }
     let mut matched = 0; // profile had a snapshot for this tool
     let mut changed = 0; // an actual switch was written
+    let mut failed: Vec<&str> = Vec::new(); // tools whose switch errored
 
     // Snapshot running processes once (best-effort) so we can warn if a switch
     // pulls the login out from under a live session. Skipped on a dry-run.
@@ -510,12 +535,19 @@ fn use_account_inner(
                 ),
             }
         }
-        adapter.apply(paths, &target).map_err(|e| {
-            e.context(format!(
-                "profile '{name}' has a bad {tool} snapshot - log in to that account \
-                 and re-save it with `swapdex add {name} --tool {tool} --update`"
-            ))
-        })?;
+        if let Err(e) = adapter.apply(paths, &target) {
+            // Do NOT abort the whole multi-tool switch: the other tools can
+            // still switch; a summary at the end says what failed.
+            eprintln!(
+                "swapdex: {tool}: switch failed - {:#}\n  (if the error is about the \
+                 SNAPSHOT: log in to that account and re-save with `swapdex add {name} \
+                 --tool {} --update`)",
+                e,
+                pretty_tool_flag(tool)
+            );
+            failed.push(tool);
+            continue;
+        }
         store.append_timeline_at(tool, name, "use", switch_ts)?;
         if let Some(id) = adapter.identity(paths).ok().flatten() {
             println!("switched {tool} -> {}", identity_line(&id));
@@ -536,6 +568,15 @@ fn use_account_inner(
     // Only when a login was actually written - not for a no-op or a dry-run.
     if changed > 0 {
         println!("(takes effect on your next message)");
+    }
+    if !failed.is_empty() {
+        eprintln!(
+            "swapdex: {} tool(s) failed to switch ({}); the tools above did switch - \
+             `swapdex restore` undoes this switch entirely",
+            failed.len(),
+            failed.join(", ")
+        );
+        return Ok(1);
     }
     if open {
         if let Some(adapter) = selected_adapters(sel).into_iter().next() {
@@ -962,7 +1003,14 @@ fn profile_summary(
     let mut email = None;
     let mut tier = None;
     let mut marker = None;
-    for t in tools {
+    // Adapter order (Claude first), NOT the store's alphabetical order:
+    // antigravity sorts first alphabetically and its auth_method ("consumer")
+    // would mask claude's real plan tier ("max") on multi-tool profiles.
+    for a in adapters::all() {
+        let t = a.name();
+        if !tools.iter().any(|x| x == t) {
+            continue;
+        }
         if let Some((e, ti, m)) = profile_detail(store, name, t) {
             email = email.or(e);
             tier = tier.or(ti);
@@ -1824,6 +1872,47 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         }
     }
 
+    // Live credential files hold refresh tokens - flag loose modes on ALL of
+    // them, not just .claude.json (the store already self-tightens; the live
+    // files are each tool's own, so we can only warn).
+    for f in [
+        paths.claude_credentials(),
+        paths.codex_auth(),
+        paths.gemini_oauth(),
+        paths.antigravity_token(),
+    ] {
+        if let Ok(meta) = std::fs::metadata(&f) {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o077 != 0 {
+                report(
+                    "perms",
+                    false,
+                    format!(
+                        "{} is group/world-readable (holds tokens); run `chmod 600` on it",
+                        crate::util::redact_path(&f.display().to_string())
+                    ),
+                );
+            }
+        }
+    }
+    // A corrupt live .claude.json breaks every claude switch with an error
+    // users misread as a snapshot problem - diagnose it here by name.
+    if paths.claude_config_json().exists() {
+        if let Ok(bytes) = std::fs::read(paths.claude_config_json()) {
+            if serde_json::from_slice::<Value>(&bytes).is_err() {
+                report(
+                    "claude-config",
+                    false,
+                    format!(
+                        "{} is not valid JSON - claude switches will fail until it is \
+                         repaired or removed (removing loses local settings like \
+                         project trust)",
+                        crate::util::redact_path(&paths.claude_config_json().display().to_string())
+                    ),
+                );
+            }
+        }
+    }
     // .claude.json permissions (holds account PII).
     if let Ok(meta) = std::fs::metadata(paths.claude_config_json()) {
         if meta.permissions().mode() & 0o077 != 0 {
@@ -1870,7 +1959,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
 
     // Backups: newest intact per tool (load_backup already skips torn ones).
     let mut kept = Vec::new();
-    for tool in ["claude-code", "codex"] {
+    for tool in ["claude-code", "codex", "gemini", "antigravity"] {
         if let Ok(Some((stamp, _))) = store.load_backup(tool) {
             kept.push(format!("{tool} (newest {})", age_line(stamp)));
         }
@@ -1896,7 +1985,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         "tools",
         true,
         if found.is_empty() {
-            "neither `claude` nor `codex` found on PATH".into()
+            "none of `claude`, `codex`, `gemini`, `agy` found on PATH".into()
         } else {
             format!("on PATH: {}", found.join(", "))
         },
@@ -1995,7 +2084,7 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
 /// the app, so for it swapdex guides the two-step manual path.
 pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
-    if let Some(c) = reject_bad_name(name) {
+    if let Some(c) = reject_bad_name(name).or_else(|| reject_reserved_name(name)) {
         return Ok(c);
     }
     let tool = match sel {
@@ -2163,6 +2252,27 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             if new.account_id == cur.account_id {
                 println!("note: you signed back into the same account.");
             }
+            // Same repoint rule as `add --update`: if '{name}' already exists
+            // and holds a DIFFERENT account, changing what the name means must
+            // be explicit (we are interactive here by construction).
+            if let Some(stored) = profile_account_id(&store, name, tool).filter(|s| !s.is_empty()) {
+                if stored != new.account_id
+                    && !yes_no(
+                        &format!(
+                            "profile '{name}' already holds a different {tool} account. \
+                             Repoint it to this new login? [y/N]: "
+                        ),
+                        false,
+                    )
+                {
+                    adapter.apply(paths, &stash)?;
+                    println!(
+                        "not saved - your previous login was restored. Re-run with a \
+                         different name to keep both accounts."
+                    );
+                    return Ok(0);
+                }
+            }
             let snap = adapter.capture(paths)?;
             store.save(name, &snap)?;
             println!("saved profile '{name}' ({}).", identity_line(&new));
@@ -2325,7 +2435,7 @@ fn ask_name(store: &Store, question: &str, default: &str) -> Option<String> {
             return None;
         }
         if !crate::store::valid_profile_name(&ans) {
-            println!("  '{ans}' can't be a name (no '/', '..', leading '.', or control chars). Try again.");
+            println!("  '{ans}' can't be a name (1-64 bytes, not all spaces; no '/', '\\\\', leading '.', or control chars). Try again.");
             continue;
         }
         if store.list().iter().any(|p| p.name == ans)
@@ -2377,6 +2487,17 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         let who = id.email.clone().unwrap_or_else(|| id.display.clone());
         let default = suggest_name(&who);
         println!("{}: you're logged in as {who}.", pretty_tool(tool));
+        // Attaching this tool to an existing profile of the same suggested
+        // name is the NORMAL multi-tool case (`swapdex add <name>` semantics)
+        // - never scare with "replace it?" for it, and never skip it.
+        if let Some(p) = store.list().into_iter().find(|p| p.name == default) {
+            if !p.tools.iter().any(|t| t == tool) {
+                let snap = adapter.capture(paths)?;
+                store.save(&default, &snap)?;
+                println!("  attached {} to '{default}'.\n", pretty_tool(tool));
+                continue;
+            }
+        }
         match ask_name(
             &store,
             &format!("  save it as [{default}] (Enter to accept, 'skip' to skip): "),

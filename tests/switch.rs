@@ -21,6 +21,11 @@ fn run(root: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+fn chmod600(p: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 fn seed_codex(root: &Path, account_id: &str) {
     let d = root.join(".codex");
     std::fs::create_dir_all(&d).unwrap();
@@ -34,6 +39,7 @@ fn seed_codex(root: &Path, account_id: &str) {
         .unwrap(),
     )
     .unwrap();
+    chmod600(&root.join(".codex/auth.json"));
 }
 
 #[test]
@@ -362,6 +368,8 @@ fn seed_claude(root: &Path, uuid: &str, email: &str) {
         .unwrap(),
     )
     .unwrap();
+    chmod600(&root.join(".claude/.credentials.json"));
+    chmod600(&root.join(".claude.json"));
 }
 
 // --tool must reject a typo instead of silently falling through to both.
@@ -1309,6 +1317,8 @@ fn seed_gemini(root: &Path, sub: &str, email: &str) {
         serde_json::to_vec(&serde_json::json!({"active": email, "old": []})).unwrap(),
     )
     .unwrap();
+    chmod600(&root.join(".gemini/oauth_creds.json"));
+    chmod600(&root.join(".gemini/google_accounts.json"));
 }
 
 // Gemini: add/use roundtrip switches BOTH files together, ls shows the email,
@@ -1395,6 +1405,7 @@ fn seed_antigravity(root: &Path, refresh: &str) {
         .unwrap(),
     )
     .unwrap();
+    chmod600(&root.join(".gemini/antigravity-cli/antigravity-oauth-token"));
 }
 
 // Antigravity: single-file swap roundtrip; identity has no email (none is
@@ -2078,5 +2089,215 @@ fn login_survives_sigint_and_restores() {
         claude_live_uuid(root.path()),
         "uuid-A",
         "previous login restored, NOT left signed out"
+    );
+}
+
+// Walkthrough-audit HIGHs.
+
+// Enter-through setup must attach every logged-in tool to the suggested
+// profile, not scare the user with "replace it?" and silently skip 3 of 4.
+#[test]
+fn setup_enter_through_attaches_all_tools() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    // Same email on both tools -> the SAME suggested name, which is where
+    // the old "replace it?" prompt silently skipped the second tool.
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex(root.path(), "acct-A");
+    let mut child = Command::new(bin())
+        .arg("setup")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Enter for each tool's default name, then 'n' to add-another.
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"\n\n\nn\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(!o.contains("replace it?"), "no replace scare: {o}");
+    let (l, _e, _c) = run(root.path(), &["ls"]);
+    assert!(
+        l.contains("claude-code") && l.contains("codex"),
+        "both tools attached to one profile: {l}"
+    );
+}
+
+// A corrupt LIVE ~/.claude.json must be diagnosed as such - not blamed on
+// the profile snapshot with a remedy that also fails - and doctor must flag it.
+#[test]
+fn corrupt_live_claude_config_diagnosed_not_blamed_on_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "alice", "--tool", "claude"]);
+    seed_claude(root.path(), "uuid-B", "b@x.com");
+    run(root.path(), &["add", "bob", "--tool", "claude"]);
+    std::fs::write(root.path().join(".claude.json"), b"not json{{").unwrap();
+    // Correct perms, so doctor's permission check cannot mask the real test:
+    // diagnosing the CORRUPTION itself.
+    std::fs::set_permissions(
+        root.path().join(".claude.json"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let (_o, e, c) = run(root.path(), &["use", "alice", "--tool", "claude"]);
+    assert_ne!(c, 0);
+    assert!(
+        e.contains(".claude.json") && e.to_lowercase().contains("live"),
+        "blames the LIVE file, not the snapshot: {e}"
+    );
+    let (o, _e, c) = run(root.path(), &["doctor"]);
+    assert_eq!(c, 9, "doctor flags it: {o}");
+    assert!(o.contains(".claude.json"), "doctor names the file: {o}");
+}
+
+// A per-tool failure must not abort the whole multi-tool switch: the other
+// tools still switch, and a summary says what failed.
+#[test]
+fn use_continues_past_a_failing_tool() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alice"]);
+    seed_claude(root.path(), "uuid-B", "b@x.com");
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "bob"]);
+    // Corrupt alice's CODEX snapshot in the store.
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/accounts/alice/codex/auth"),
+        b"broken{{",
+    )
+    .unwrap();
+    let (o, e, c) = run(root.path(), &["use", "alice"]);
+    assert_eq!(c, 1, "partial switch exits 1: {o}{e}");
+    assert_eq!(claude_live_uuid(root.path()), "uuid-A", "claude DID switch");
+    assert!(
+        e.contains("codex") && e.contains("failed"),
+        "summary names the failed tool: {e}"
+    );
+    assert!(e.contains("restore"), "points at the undo: {e}");
+}
+
+// Same for add: a corrupt live login for one tool must not silently create a
+// partial profile with exit 1 and no explanation.
+#[test]
+fn add_reports_a_failing_tool_and_keeps_going() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex(root.path(), "acct-A");
+    std::fs::write(root.path().join(".codex/auth.json"), b"broken{{").unwrap();
+    let (o, e, c) = run(root.path(), &["add", "prof"]);
+    assert_eq!(c, 1, "{o}{e}");
+    assert!(
+        o.contains("saved profile 'prof'"),
+        "claude still saved: {o}"
+    );
+    assert!(
+        e.contains("codex") && (e.contains("skipped") || e.contains("could not")),
+        "explains the skipped tool: {e}"
+    );
+}
+
+// Walkthrough-audit MEDIUMs.
+#[test]
+fn login_reserved_name_dash_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let (_o, e, c) = run(root.path(), &["login", "-", "--tool", "codex"]);
+    assert_ne!(c, 0, "'-' is the toggle, never a profile name: {e}");
+}
+
+#[test]
+fn use_typo_is_one_line() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work"]);
+    let (o, e, c) = run(root.path(), &["use", "zzz"]);
+    assert_eq!(c, 5);
+    assert!(
+        !o.contains("left unchanged") && !e.contains("left unchanged"),
+        "no per-tool noise for a typo: {o}{e}"
+    );
+}
+
+#[test]
+fn multi_tool_tier_prefers_claude_over_antigravity() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    seed_antigravity(root.path(), "RT-A");
+    run(root.path(), &["add", "all2"]);
+    let (o, _e, _c) = run(root.path(), &["ls"]);
+    assert!(
+        o.contains("[max]"),
+        "claude's real plan tier, not antigravity's auth_method: {o}"
+    );
+}
+
+#[test]
+fn rename_rewrites_timeline_attribution() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alice", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "bob", "--tool", "codex"]);
+    run(root.path(), &["use", "alice"]);
+    run(root.path(), &["rename", "alice", "corp"]);
+    let tl =
+        std::fs::read_to_string(root.path().join(".local/share/swapdex/timeline.jsonl")).unwrap();
+    assert!(
+        !tl.contains("\"alice\"") && tl.contains("\"corp\""),
+        "timeline follows the rename: {tl}"
+    );
+}
+
+// Walkthrough-audit LOWs.
+#[test]
+fn ls_hides_ghost_dirs_and_unknown_tools() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "bee", "--tool", "codex"]);
+    std::fs::create_dir_all(root.path().join(".local/share/swapdex/accounts/ghosty")).unwrap();
+    std::fs::create_dir_all(
+        root.path()
+            .join(".local/share/swapdex/accounts/bee/fakedir"),
+    )
+    .unwrap();
+    let (o, _e, _c) = run(root.path(), &["ls"]);
+    assert!(!o.contains("ghosty"), "empty dir is not a profile: {o}");
+    assert!(!o.contains("fakedir"), "unknown subdir is not a tool: {o}");
+}
+
+#[test]
+fn whitespace_only_name_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (_o, e, c) = run(root.path(), &["add", "   ", "--tool", "codex"]);
+    assert_eq!(c, 2, "{e}");
+}
+
+#[test]
+fn doctor_flags_loose_live_cred_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    std::fs::set_permissions(
+        root.path().join(".codex/auth.json"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let (o, _e, c) = run(root.path(), &["doctor"]);
+    assert_eq!(c, 9, "{o}");
+    assert!(
+        o.contains("auth.json") && o.contains("chmod 600"),
+        "names the loose live file with the remedy: {o}"
     );
 }

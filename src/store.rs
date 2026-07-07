@@ -133,12 +133,20 @@ impl Store {
                 let mut tools = Vec::new();
                 if let Ok(td) = fs::read_dir(e.path()) {
                     for t in td.flatten() {
-                        if t.path().is_dir() {
-                            tools.push(t.file_name().to_string_lossy().into_owned());
+                        let tname = t.file_name().to_string_lossy().into_owned();
+                        // Only KNOWN tools count - a stray subdir (crash
+                        // debris, manual poking) must not render as a tool.
+                        if t.path().is_dir() && KNOWN_TOOLS.contains(&tname.as_str()) {
+                            tools.push(tname);
                         }
                     }
                 }
                 tools.sort();
+                // An empty dir is not a profile: `use` would refuse it, so
+                // `ls` showing it is a lie.
+                if tools.is_empty() {
+                    continue;
+                }
                 out.push(ProfileInfo { name, tools });
             }
         }
@@ -170,6 +178,31 @@ impl Store {
             anyhow::bail!("a profile named '{new}' already exists");
         }
         fs::rename(&from, &to).with_context(|| format!("rename profile {old} -> {new}"))?;
+        // The timeline attributes sessions/usage by profile NAME - leaving the
+        // old name there makes `usage`/`sessions` report a profile that no
+        // longer exists, forever. Rewrite events in place (atomic).
+        let tl = self.dir.join("timeline.jsonl");
+        if let Ok(text) = fs::read_to_string(&tl) {
+            let mut changed = false;
+            let rewritten: Vec<String> = text
+                .lines()
+                .map(
+                    |line| match serde_json::from_str::<serde_json::Value>(line) {
+                        Ok(mut v) if v["account"] == old => {
+                            v["account"] = serde_json::Value::String(new.to_string());
+                            changed = true;
+                            serde_json::to_string(&v).unwrap_or_else(|_| line.to_string())
+                        }
+                        _ => line.to_string(),
+                    },
+                )
+                .collect();
+            if changed {
+                let mut out = rewritten.join("\n");
+                out.push('\n');
+                crate::atomic::write_secret(&tl, out.as_bytes())?;
+            }
+        }
         Ok(true)
     }
 
@@ -321,11 +354,13 @@ impl Store {
 /// A profile name must be a single safe path component - reject anything that
 /// could escape the store (`/`, `\`, `..`, a leading `.`, control chars, empty,
 /// or absurdly long). Guards `add`/`use`/`rm`/`rename` against path traversal.
+pub const KNOWN_TOOLS: [&str; 4] = ["claude-code", "codex", "gemini", "antigravity"];
+
 pub fn valid_profile_name(name: &str) -> bool {
     // NOTE: "-" is reserved at CREATION time (add/rename reject it) because
     // `use -` toggles - but it stays valid here so a legacy profile named "-"
     // can still be rm'd/renamed after an upgrade.
-    !name.is_empty()
+    !name.trim().is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
         && !name.contains(['/', '\\'])
