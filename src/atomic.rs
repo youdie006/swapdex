@@ -46,6 +46,39 @@ fn refuse_insecure_parent(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuse if any directory component of `dest` at or below `root` is a
+/// symlink, and require `dest` to actually live under `root`. The store
+/// subtree is entirely swapdex-managed and never legitimately contains a
+/// symlink, so a symlinked `accounts/<name>` or a symlinked store dir - which
+/// the leaf-only check misses - can no longer redirect a token write outside
+/// the 0700 store. (Ancestors ABOVE `root` are the user's own - e.g. a
+/// dotfile-managed ~/.local - and are not policed here.)
+pub fn refuse_symlink_below(root: &Path, dest: &Path) -> Result<()> {
+    // The root itself must be a real directory, not a symlink to elsewhere.
+    if let Ok(meta) = std::fs::symlink_metadata(root) {
+        if meta.file_type().is_symlink() {
+            bail!("refusing: store path {} is a symlink", root.display());
+        }
+    }
+    let rel = dest.strip_prefix(root).map_err(|_| {
+        anyhow::anyhow!(
+            "refusing: {} is not under the store {}",
+            dest.display(),
+            root.display()
+        )
+    })?;
+    let mut cur = root.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+            if meta.file_type().is_symlink() {
+                bail!("refusing: {} is a symlink inside the store", cur.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read a whole file, refusing a symlink or a foreign-owned file.
 pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
     refuse_unsafe_path(path)?;

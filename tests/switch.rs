@@ -2516,3 +2516,49 @@ fn restore_scopes_to_last_invocation_not_same_second() {
     let auth = std::fs::read_to_string(root.path().join(".codex/auth.json")).unwrap();
     assert!(auth.contains("acct-B"), "codex untouched: {auth}");
 }
+
+// Bare `swapdex` over a pipe (no tty) prints the banner, never the TUI - and
+// never creates the store on a fresh machine.
+#[test]
+fn bare_swapdex_pipe_is_banner_not_tui() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    let (o, _e, c) = run(root.path(), &[]);
+    assert_eq!(c, 0);
+    assert!(o.contains("swapdex"), "banner printed: {o}");
+    assert!(o.contains("active:"), "shows where you stand: {o}");
+}
+
+#[test]
+fn bare_swapdex_fresh_machine_is_banner_and_does_not_create_store() {
+    let root = tempfile::tempdir().unwrap();
+    let (o, _e, c) = run(root.path(), &[]);
+    assert_eq!(c, 0);
+    assert!(o.contains("swapdex setup"), "fresh-machine hint: {o}");
+    assert!(
+        !root.path().join(".local/share/swapdex").exists(),
+        "a bare banner must not create the store"
+    );
+}
+
+// Security F1: a symlinked accounts/<name> must not let a token write escape
+// the 0700 store (the leaf-only symlink check missed intermediate dirs).
+#[test]
+fn add_refuses_symlinked_profile_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let escape = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    // Pre-create the store, then plant accounts/beta -> attacker dir.
+    run(root.path(), &["add", "seed", "--tool", "codex"]);
+    let accounts = root.path().join(".local/share/swapdex/accounts");
+    std::os::unix::fs::symlink(escape.path(), accounts.join("beta")).unwrap();
+    let (_o, e, c) = run(root.path(), &["add", "beta", "--tool", "codex"]);
+    assert_ne!(c, 0, "must refuse: {e}");
+    // Nothing was written into the attacker's dir.
+    assert!(
+        !escape.path().join("codex/auth").exists(),
+        "no token escaped the store into {}",
+        escape.path().display()
+    );
+}

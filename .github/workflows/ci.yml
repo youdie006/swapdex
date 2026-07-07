@@ -29,7 +29,7 @@ jobs:
         run: cargo test --all
       - name: No network crate in the graph (switcher, not rotator)
         run: |
-          if cargo tree -e normal | grep -qiE '\b(reqwest|hyper|ureq|isahc|curl)\b'; then
+          if cargo tree -e normal | grep -qiE '\b(reqwest|hyper|ureq|isahc|curl|tokio|rustls|native-tls|openssl|socket2|hickory-resolver|trust-dns|quinn|h2)\b'; then
             echo "A network crate is in the dependency graph; swapdex must have none."
             exit 1
           fi

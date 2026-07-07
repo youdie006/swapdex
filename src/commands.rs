@@ -270,6 +270,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
     let mut saved = Vec::new();
     let mut skipped = Vec::new();
     let mut capture_failed: Vec<&str> = Vec::new();
+    let mut declined: Vec<&str> = Vec::new(); // repoint prompt answered No
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         if !adapter.present(paths) {
@@ -316,6 +317,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
                         false,
                     ) {
                         println!("skipped {tool}.");
+                        declined.push(tool);
                         continue;
                     }
                 }
@@ -345,6 +347,15 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
         saved.push(tool);
     }
     if saved.is_empty() {
+        if !declined.is_empty() {
+            // The user was logged in but declined to repoint - nothing wrong,
+            // nothing saved. NOT "not logged in" (exit 3 would be a lie).
+            println!(
+                "nothing saved for {} (you declined the repoint).",
+                declined.join(", ")
+            );
+            return Ok(0);
+        }
         if !skipped.is_empty() {
             eprintln!(
                 "swapdex: profile '{name}' already has {}; pass --update to replace",

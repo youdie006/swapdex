@@ -95,7 +95,9 @@ impl Store {
         .ok();
         fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).ok();
         for (part, secret) in &snap.blobs {
-            crate::atomic::write_secret(&d.join(part), secret.expose())?;
+            let dest = d.join(part);
+            crate::atomic::refuse_symlink_below(&self.dir, &dest)?;
+            crate::atomic::write_secret(&dest, secret.expose())?;
         }
         Ok(())
     }
@@ -118,6 +120,7 @@ impl Store {
             // Skip a transient ".<name>.swapdex.tmp" from a concurrent write so
             // it is never mistaken for a snapshot part.
             if e.path().is_file() && !part.starts_with('.') {
+                crate::atomic::refuse_symlink_below(&self.dir, &e.path())?;
                 let bytes = crate::atomic::read_regular(&e.path())?;
                 blobs.push((part, Secret::new(bytes)));
             }
@@ -213,6 +216,7 @@ impl Store {
             if changed {
                 let mut out = rewritten.join("\n");
                 out.push('\n');
+                crate::atomic::refuse_symlink_below(&self.dir, &tl)?;
                 crate::atomic::write_secret(&tl, out.as_bytes())?;
             }
         }
@@ -232,7 +236,9 @@ impl Store {
         fs::create_dir_all(&d).ok();
         fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).ok();
         for (part, secret) in &snap.blobs {
-            crate::atomic::write_secret(&d.join(part), secret.expose())?;
+            let dest = d.join(part);
+            crate::atomic::refuse_symlink_below(&self.dir, &dest)?;
+            crate::atomic::write_secret(&dest, secret.expose())?;
         }
         // Prune to newest 2.
         let mut stamps: Vec<PathBuf> = fs::read_dir(&base)
@@ -292,6 +298,7 @@ impl Store {
             for e in fs::read_dir(&d)?.flatten() {
                 let part = e.file_name().to_string_lossy().into_owned();
                 if e.path().is_file() && !part.starts_with('.') {
+                    crate::atomic::refuse_symlink_below(&self.dir, &e.path())?;
                     let bytes = crate::atomic::read_regular(&e.path())?;
                     blobs.push((part, Secret::new(bytes)));
                 }
@@ -358,7 +365,10 @@ impl Store {
             serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action})
         };
         let mut buf = if path.exists() {
-            crate::atomic::read_regular(&path)?
+            {
+                crate::atomic::refuse_symlink_below(&self.dir, &path)?;
+                crate::atomic::read_regular(&path)?
+            }
         } else {
             Vec::new()
         };
@@ -380,6 +390,7 @@ impl Store {
                 .collect();
             buf = (tail.join("\n") + "\n").into_bytes();
         }
+        crate::atomic::refuse_symlink_below(&self.dir, &path)?;
         crate::atomic::write_secret(&path, &buf)
     }
 }

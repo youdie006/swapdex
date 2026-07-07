@@ -118,10 +118,32 @@ fn main() {
         }
     };
     let Some(cmd) = &cli.cmd else {
-        // No subcommand: the wordmark, a short hint, and - because the person
-        // typing a bare `swapdex` usually wants to know where they stand - the
-        // active accounts. Best-effort: a broken store never breaks the banner,
-        // and a bare banner never CREATES the store on a fresh machine.
+        // No subcommand. On an interactive terminal with saved accounts, open
+        // the picker - people expect a bare `swapdex` to DO something (k9s /
+        // lazygit / ccusage all launch their UI this way), and a banner that
+        // flashes and returns reads as "it opened and closed". Otherwise (a
+        // pipe, a dumb terminal, or a fresh machine with nothing saved) print
+        // the wordmark + a short hint + where you stand, and never touch the
+        // store on a fresh machine.
+        use std::io::IsTerminal;
+        let interactive = std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::env::var("TERM")
+                .map(|t| !t.is_empty() && t != "dumb")
+                .unwrap_or(false);
+        let has_profiles = paths.store_dir().exists()
+            && swapdex::store::Store::open(&paths)
+                .map(|st| !st.list().is_empty())
+                .unwrap_or(false);
+        if interactive && has_profiles {
+            match commands::ui(&paths) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("swapdex: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         swapdex::banner::print_banner();
         if paths.store_dir().exists() {
             if let Some(line) = commands::short_line(&paths) {
