@@ -128,7 +128,17 @@ impl AuthTool for Claude {
                          underlying problem (e.g. disk space) is fixed"
                     }
                 },
-                None => "apply aborted; no previous credentials existed",
+                None => {
+                    // Fresh install: nothing to roll back TO - remove the file
+                    // we just wrote, or the "aborted" apply leaves new
+                    // credentials next to an un-updated identity (half-swap).
+                    match std::fs::remove_file(&cred_path) {
+                        Ok(()) => "apply aborted; the just-written credentials were removed",
+                        Err(_) => {
+                            "apply aborted and cleanup FAILED - a credentials file was                              written without its identity; run `swapdex restore --tool                              claude` once the underlying problem is fixed"
+                        }
+                    }
+                }
             };
             return Err(e.context(msg));
         }

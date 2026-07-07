@@ -1503,6 +1503,11 @@ fn launch_in_folder(tool: &str) -> anyhow::Error {
     let dir = prompt("folder to open in [current dir]: ", "")
         .filter(|d| !d.is_empty())
         .map(|d| {
+            if d == "~" {
+                if let Some(home) = dirs::home_dir() {
+                    return home;
+                }
+            }
             if let Some(rest) = d.strip_prefix("~/") {
                 if let Some(home) = dirs::home_dir() {
                     return home.join(rest);
@@ -1538,6 +1543,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
     struct Ctx<'a> {
         paths: &'a Paths,
         last_sessions: Vec<MenuSession>,
+        /// Timeline emptiness CAPTURED BEFORE the last switch wrote its own
+        /// events - the only correct "first time" signal (audit).
+        pre_switch_first: bool,
     }
     fn run_self(args: &[&str]) -> (bool, String) {
         let exe = match std::env::current_exe() {
@@ -1603,6 +1611,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .collect()
         }
         fn switch(&mut self, name: &str) -> (bool, String) {
+            self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
             run_self(&["use", name])
         }
         fn restore(&mut self) -> String {
@@ -1616,11 +1625,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn sessions(&mut self, name: &str) -> (String, Vec<crate::tui::SessionEntry>) {
-            // The switch already wrote its own timeline event by the time this
-            // runs, so "first time" here means: the timeline holds nothing
-            // BUT that one switch (at most one event per tool).
-            let first_time =
-                crate::session_link::read_timeline(self.paths).len() <= adapters::all().len();
+            let first_time = self.pre_switch_first;
             let (sessions, label) = recent_menu_sessions(self.paths, name, first_time, 5);
             let entries = sessions
                 .iter()
@@ -1652,6 +1657,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
     let mut ctx = Ctx {
         paths,
         last_sessions: Vec::new(),
+        pre_switch_first: crate::session_link::read_timeline(paths).is_empty(),
     };
     loop {
         // Empty store: fall back to the guided path rather than an empty box.
@@ -2117,13 +2123,20 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     if matched_profile_name(&store, tool, &cur.account_id).is_none() {
         let who = cur.email.clone().unwrap_or_else(|| cur.display.clone());
         let suggestion = suggest_name(&who);
-        if let Some(keep) = ask_name(
+        while let Some(keep) = ask_name(
             &store,
             &format!("name to keep the CURRENT account under [{suggestion}]: "),
             &suggestion,
         ) {
+            if keep == name {
+                // '{name}' is reserved for the NEW account - accepting it here
+                // would let the new sign-in silently overwrite the current one.
+                println!("'{name}' is the name for the NEW account - pick another.");
+                continue;
+            }
             store.save(&keep, &stash)?;
             println!("saved current login as '{keep}'.");
+            break;
         }
     }
     // 2) Local sign-out, so the tool's own flow prompts a FRESH sign-in.
@@ -2179,12 +2192,22 @@ fn sel_for_tool(tool: &str) -> Option<ToolSel> {
 /// Run the tool's own sign-in command, terminal inherited. codex has a real
 /// `login` subcommand; the other three sign in on first run of the app.
 fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
+    // A shell Ctrl+C during the interactive sign-in hits the whole foreground
+    // process group. With the default disposition it would kill swapdex before
+    // the restore-stash branch runs - leaving the user locally signed out of
+    // everything. A no-op HANDLER (not SIG_IGN: handlers reset to default
+    // across exec, SIG_IGN would be inherited by the child) makes swapdex
+    // ride it out; the child keeps normal Ctrl+C behavior.
+    unsafe extern "C" fn ride_out(_: libc::c_int) {}
+    #[allow(function_casts_as_integer)]
+    let prev = unsafe { libc::signal(libc::SIGINT, ride_out as libc::sighandler_t) };
     let mut cmd = Command::new(bin);
     if tool == "codex" {
         cmd.arg("login");
     }
-    cmd.status()
-        .map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))
+    let status = cmd.status();
+    unsafe { libc::signal(libc::SIGINT, prev) };
+    status.map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))
 }
 
 /// Remove the live credential files so the tool's next run prompts a fresh

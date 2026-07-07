@@ -95,8 +95,13 @@ fn claude_head(p: &Path) -> (String, Option<PathBuf>) {
         }
         if title.is_none() && v["type"] == "user" && !v["isMeta"].as_bool().unwrap_or(false) {
             if let Some(t) = first_text(&v["message"]["content"]) {
-                if !t.starts_with('<') {
-                    // skip tool_result / system-ish payloads
+                // Skip only KNOWN harness-injected payloads - a real prompt
+                // may legitimately start with '<' ("<table> won't render").
+                let meta = t.starts_with("<command-")
+                    || t.starts_with("<local-command-")
+                    || t.starts_with("<system-")
+                    || t.starts_with("<task-notification");
+                if !meta {
                     title = Some(tidy_title(&t));
                 }
             }

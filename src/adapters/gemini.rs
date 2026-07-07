@@ -87,7 +87,16 @@ impl AuthTool for Gemini {
                          underlying problem (e.g. disk space) is fixed"
                     }
                 },
-                None => "apply aborted; no previous oauth_creds existed",
+                None => {
+                    // Fresh install: remove the just-written file rather than
+                    // leave a half-swap (new oauth_creds, no accounts file).
+                    match std::fs::remove_file(&oauth_path) {
+                        Ok(()) => "apply aborted; the just-written oauth_creds were removed",
+                        Err(_) => {
+                            "apply aborted and cleanup FAILED - oauth_creds was written                              without google_accounts; run `swapdex restore --tool gemini`                              once the underlying problem is fixed"
+                        }
+                    }
+                }
             };
             return Err(e.context(msg));
         }

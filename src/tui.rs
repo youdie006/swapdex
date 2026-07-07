@@ -247,7 +247,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                         status = ctx.delete(&rows[i].name);
                         rows = ctx.rows();
-                        state.select(Some(0));
+                        // The list may now be EMPTY - a dangling Some(0)
+                        // would make the next Enter/o index out of bounds.
+                        state.select((!rows.is_empty()).then_some(0));
                     }
                     confirm_delete = None;
                     continue;
@@ -262,7 +264,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         let i = state.selected().unwrap_or(0);
                         state.select(Some(i.saturating_sub(1)));
                     }
-                    KeyCode::Enter => {
+                    KeyCode::Enter if !rows.is_empty() => {
                         if let Some(i) = state.selected() {
                             let name = rows[i].name.clone();
                             let (ok, msg) = ctx.switch(&name);
@@ -275,7 +277,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             }
                         }
                     }
-                    KeyCode::Char('o') => {
+                    KeyCode::Char('o') if !rows.is_empty() => {
                         if let Some(i) = state.selected() {
                             let name = rows[i].name.clone();
                             let (label, entries) = ctx.sessions(&name);
@@ -344,6 +346,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 KeyCode::Enter => {
                     let dir = if input.is_empty() {
                         None
+                    } else if input == "~" {
+                        dirs::home_dir()
                     } else if let Some(rest) = input.strip_prefix("~/") {
                         dirs::home_dir().map(|h| h.join(rest))
                     } else {

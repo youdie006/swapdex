@@ -1014,6 +1014,7 @@ dependencies = [
  "clap_mangen",
  "dirs",
  "fs2",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

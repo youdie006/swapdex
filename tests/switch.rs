@@ -2051,3 +2051,30 @@ fn login_gemini_restores_original_when_no_new_signin() {
     // The original seed's tokens, byte-identical (ids live inside JWT b64).
     assert!(creds.contains("RT-SENTINEL"), "A NEVER lost: {creds}");
 }
+
+// Ctrl+C during the interactive sign-in goes to the whole foreground process
+// group. swapdex must SURVIVE it and run the restore-stash branch - dying
+// would leave the user locally signed out of everything.
+#[test]
+fn login_survives_sigint_and_restores() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "old", "--tool", "claude"]);
+    // Fake claude: SIGINTs its parent (swapdex) mid-login, then exits
+    // without completing any sign-in.
+    let script = "#!/bin/sh\ncase \"$1\" in --version) echo 1.0.0; exit 0;; esac\nkill -INT $PPID\nsleep 0.3\nexit 130\n";
+    let bin_dir = fake_claude(root.path(), script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "claude"],
+        "y\n",
+    );
+    assert_eq!(c, 8, "survived SIGINT, reported incomplete: {o}{e}");
+    assert!(e.contains("was restored"), "restore branch ran: {e}");
+    assert_eq!(
+        claude_live_uuid(root.path()),
+        "uuid-A",
+        "previous login restored, NOT left signed out"
+    );
+}

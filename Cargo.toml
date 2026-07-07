@@ -26,3 +26,4 @@ clap_mangen = "0.3.0"
 unicode-width = "0.2.2"
 sha2 = "0.11.0"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+libc = "0.2.186"
