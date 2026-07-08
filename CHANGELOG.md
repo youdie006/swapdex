@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.17.0] - 2026-07-08
+
+### Added
+- **Claude Code account switching on macOS** (issue #1). Claude on macOS keeps
+  its login in the login Keychain rather than a file, so swapdex previously
+  refused to switch it there. The Claude adapter now reads and writes the
+  Keychain (via `security`): `capture` reads the token from the file or the
+  Keychain, `apply` writes it to both plus the `.claude.json` identity with
+  all-or-nothing rollback, and the add-a-new-account flow deletes the Keychain
+  item so Claude prompts a fresh sign-in. Linux and WSL are unchanged
+  (file-based); the Keychain code is a no-op off macOS.
+
 ## [0.16.3] - 2026-07-08
 
 ### Fixed
