@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.16.2] - 2026-07-08
+
+### Fixed
+- **Renaming in the UI now mutates the store directly** instead of shelling
+  out to a `swapdex rename` subprocess. The subprocess resolved the binary
+  via `current_exe()`, which can misbehave under some installs/wrappers and
+  make the rename a silent no-op while the UI still refreshed and looked
+  fine. It now renames in-process with the same validation, lock, and
+  collision check as the CLI.
+
 ## [0.16.1] - 2026-07-08
 
 ### Fixed
