@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.16.0] - 2026-07-08
+
+### Changed
+- **Opening a new conversation is now a folder BROWSER, not a text field.**
+  You no longer type or memorize a path: each level lists its
+  subdirectories, Enter/Right descends, Left/Backspace (or the `..` row)
+  goes up, a `~ (home)` row jumps home, and `> open here` launches the
+  conversation in the current directory. Fully mouse-driven too - scroll,
+  click a folder to enter it, click "open here" to launch. Dotfiles are
+  hidden and the current path is shown in the title.
+
 ## [0.15.0] - 2026-07-08
 
 A full UI overhaul, by user request: the picker is now a designed interface,
