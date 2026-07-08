@@ -53,10 +53,14 @@ fn keychain_service() -> Option<String> {
 /// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
 fn keychain_read() -> Option<Vec<u8>> {
     let service = keychain_service()?;
-    let out = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", &service, "-w"])
-        .output()
-        .ok()?;
+    let acct = keychain_account(&service);
+    let mut cmd = std::process::Command::new("security");
+    cmd.args(["find-generic-password", "-s", &service]);
+    if let Some(a) = &acct {
+        cmd.args(["-a", a]);
+    }
+    cmd.arg("-w");
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -112,9 +116,21 @@ fn keychain_write(value: &[u8]) -> Result<()> {
 /// Remove Claude's Keychain item so `claude` prompts a FRESH sign-in during the
 /// add-a-new-account flow. No-op off macOS or when there is no item.
 pub(crate) fn keychain_delete() {
-    if let Some(service) = keychain_service() {
+    let Some(service) = keychain_service() else {
+        return;
+    };
+    let acct = keychain_account(&service);
+    let mut cmd = std::process::Command::new("security");
+    cmd.args(["delete-generic-password", "-s", &service]);
+    if let Some(a) = &acct {
+        cmd.args(["-a", a]);
+    }
+    let _ = cmd.output();
+    // Also clear the bare-prefix item if it is a distinct stray (an older
+    // swapdex may have written one) so it can't shadow discovery next time.
+    if service != KEYCHAIN_PREFIX {
         let _ = std::process::Command::new("security")
-            .args(["delete-generic-password", "-s", &service])
+            .args(["delete-generic-password", "-s", KEYCHAIN_PREFIX])
             .output();
     }
 }
