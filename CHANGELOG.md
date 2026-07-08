@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.16.1] - 2026-07-08
+
+### Fixed
+- **Adding a new account that signs you back into the SAME one.** swapdex
+  removes the local login and opens the tool, but it cannot make the tool's
+  OAuth show an account picker - with a live browser session, the tool signs
+  you straight back into the same account. The old flow printed a note but
+  still saved that account under the new name, leaving a duplicate profile
+  and no actual new account. Now it saves nothing under the new name,
+  restores the login as it was, and explains per-tool how to reach the other
+  account (sign out at claude.ai / chatgpt.com, or pick the other Google
+  account) - printed both up front and if it happens.
+
 ## [0.16.0] - 2026-07-08
 
 ### Changed
