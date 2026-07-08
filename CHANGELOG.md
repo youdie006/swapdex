@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.16.3] - 2026-07-08
+
+### Fixed
+- **A left-open `swapdex login` no longer locks the whole store.** The
+  add-a-new-account flow held the store lock across the interactive tool
+  sign-in (which can take minutes or be left open), so while it was open
+  every other operation - rename, use, restore - failed with "another
+  swapdex is mid-switch". This was the macOS "rename doesn't work" report:
+  a half-finished login had permanently locked the store. The lock now
+  covers only the store writes and is released during the sign-in. The busy
+  message also names the likely cause.
+
 ## [0.16.2] - 2026-07-08
 
 ### Fixed
