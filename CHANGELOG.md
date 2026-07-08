@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.17.1] - 2026-07-08
+
+### Fixed
+- **macOS Claude Keychain: use the REAL service name.** 0.17.0 assumed the
+  Keychain service was exactly `Claude Code-credentials`, but Claude's item
+  has a per-install hash suffix (e.g. `Claude Code-credentials-5953ba74`), so
+  swapdex operated on the wrong item and Claude stayed signed in. The service
+  name is now discovered at runtime from the login keychain's attributes
+  (no password prompt) and read/write/delete target it. On first access
+  macOS will ask to allow swapdex to read the item - choose "Always Allow".
+
 ## [0.17.0] - 2026-07-08
 
 ### Added
