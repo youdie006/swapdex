@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.18.0] - 2026-07-08
+
+### Changed
+- **macOS Claude Keychain, done right** (from decompiling Claude Code's own
+  bundle and reading the mature switchers). The Keychain service name is now
+  COMPUTED exactly as Claude Code computes it - `Claude Code-credentials`
+  plus a `-sha256(CLAUDE_CONFIG_DIR)[..8]` suffix when that env var is set -
+  so swapdex targets the right item even when `CLAUDE_CONFIG_DIR` is set (the
+  case that hardcoding tools get wrong), with runtime discovery as a
+  fallback. All Keychain calls go through `/usr/bin/security` (the same
+  binary Claude used to create the item, so its ACL already trusts it - no
+  "Always Allow" prompt), target the item by account (`$USER`), and pass the
+  token as hex over stdin so it never appears in `ps`. Linux/WSL unchanged.
+
 ## [0.17.2] - 2026-07-08
 
 ### Fixed
