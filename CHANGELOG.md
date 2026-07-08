@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.19.0] - 2026-07-08
+
+### Fixed
+- **Adding a new Claude account now works on macOS.** The flow tried to clear
+  Claude's Keychain item with an external `security` call, which is not
+  ACL-authorized to do so reliably - so Claude stayed signed in and dropped
+  you back into the same session. swapdex now uses Claude Code's own
+  non-interactive auth commands: `claude auth logout` to sign out (Claude
+  holds the Keychain ACL, so it actually clears the token) and `claude auth
+  login` to sign in (just the OAuth step, no workspace-trust detour). Direct
+  file/Keychain cleanup stays as a fallback for older Claude builds. Same on
+  Linux/WSL.
+
 ## [0.18.1] - 2026-07-08
 
 ### Fixed
