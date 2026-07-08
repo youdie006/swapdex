@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.18.1] - 2026-07-08
+
+### Fixed
+- **macOS Claude add-account: target the real Keychain item, and verify the
+  sign-out.** swapdex now discovers Claude's Keychain item first (preferring
+  the hash-suffixed entry - the real credential - over a bare stray) rather
+  than trusting a computed name, since swapdex may not see the same
+  `CLAUDE_CONFIG_DIR` the user launches `claude` with. And after the local
+  sign-out the add-account flow verifies the account is actually cleared; if
+  swapdex couldn't clear the Keychain it aborts with guidance and restores,
+  instead of opening Claude straight back into the same session.
+
 ## [0.18.0] - 2026-07-08
 
 ### Changed
