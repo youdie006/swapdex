@@ -6,17 +6,55 @@ use serde_json::Value;
 
 pub struct Claude;
 
-/// The macOS login Keychain service Claude Code stores its OAuth token under.
-const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+/// The prefix of the Keychain service Claude Code stores its token under. The
+/// real service has a per-install hash suffix (e.g. "Claude Code-credentials-
+/// 5953ba74"), so the exact name is DISCOVERED at runtime, not hardcoded.
+const KEYCHAIN_PREFIX: &str = "Claude Code-credentials";
 
-/// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
-/// None on non-macOS or when there is no such item.
-fn keychain_read() -> Option<Vec<u8>> {
+/// Pull an attribute value out of a `security` output line, e.g. the `svce`
+/// (service) or `acct` printed as `    "svce"<blob>="<value>"`.
+fn parse_kc_attr(line: &str, attr: &str) -> Option<String> {
+    let needle = format!("\"{attr}\"");
+    let rest = line.split(&needle).nth(1)?;
+    let after = rest.split("=\"").nth(1)?;
+    let end = after.find('"')?;
+    Some(after[..end].to_string())
+}
+
+/// Discover Claude Code's actual Keychain service by dumping the login
+/// keychain's ATTRIBUTES (no `-d`, so no password prompt) and finding the entry
+/// whose service starts with the prefix. Prefers a hash-suffixed entry (Claude's
+/// real credential) over the bare prefix (which may be a stray an older swapdex
+/// wrote). None off macOS or when Claude has no such item.
+fn keychain_service() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
     let out = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .arg("dump-keychain")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut best: Option<String> = None;
+    for line in text.lines() {
+        if let Some(svc) = parse_kc_attr(line, "svce") {
+            if svc.starts_with(KEYCHAIN_PREFIX) {
+                let suffixed = svc != KEYCHAIN_PREFIX;
+                let best_bare = best.as_deref() == Some(KEYCHAIN_PREFIX);
+                if best.is_none() || (suffixed && best_bare) {
+                    best = Some(svc);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
+fn keychain_read() -> Option<Vec<u8>> {
+    let service = keychain_service()?;
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", &service, "-w"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -29,39 +67,27 @@ fn keychain_read() -> Option<Vec<u8>> {
     (!v.is_empty()).then_some(v)
 }
 
-/// The `acct` attribute of the existing Keychain item, so a write updates the
+/// The `acct` attribute of the given Keychain service, so a write updates the
 /// SAME item Claude Code reads rather than creating a sibling.
-fn keychain_account() -> Option<String> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
+fn keychain_account(service: &str) -> Option<String> {
     let out = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+        .args(["find-generic-password", "-s", service])
         .output()
         .ok()?;
-    parse_keychain_acct(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Pull the `acct` attribute out of `security find-generic-password` output,
-/// which prints it as a line like `    "acct"<blob>="bsgong"`.
-fn parse_keychain_acct(text: &str) -> Option<String> {
-    for line in text.lines() {
-        if let Some(rest) = line.split("\"acct\"").nth(1) {
-            if let Some(after) = rest.split("=\"").nth(1) {
-                if let Some(end) = after.find('"') {
-                    return Some(after[..end].to_string());
-                }
-            }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(a) = parse_kc_attr(line, "acct") {
+            return Some(a);
         }
     }
     None
 }
 
-/// Write the Claude token JSON into the macOS Keychain (updating the existing
-/// item). `-U` updates in place; the account is preserved when known.
+/// Write the Claude token JSON into the macOS Keychain, updating Claude's own
+/// item in place (discovered service + preserved account).
 fn keychain_write(value: &[u8]) -> Result<()> {
+    let service = keychain_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string());
     let val = std::str::from_utf8(value).context("keychain value is not UTF-8")?;
-    let acct = keychain_account()
+    let acct = keychain_account(&service)
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "swapdex".into());
     let status = std::process::Command::new("security")
@@ -71,7 +97,7 @@ fn keychain_write(value: &[u8]) -> Result<()> {
             "-a",
             &acct,
             "-s",
-            KEYCHAIN_SERVICE,
+            &service,
             "-w",
             val,
         ])
@@ -83,15 +109,14 @@ fn keychain_write(value: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Remove the macOS Keychain item so `claude` prompts a FRESH sign-in during
-/// the add-a-new-account flow. No-op on non-macOS.
+/// Remove Claude's Keychain item so `claude` prompts a FRESH sign-in during the
+/// add-a-new-account flow. No-op off macOS or when there is no item.
 pub(crate) fn keychain_delete() {
-    if !cfg!(target_os = "macos") {
-        return;
+    if let Some(service) = keychain_service() {
+        let _ = std::process::Command::new("security")
+            .args(["delete-generic-password", "-s", &service])
+            .output();
     }
-    let _ = std::process::Command::new("security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE])
-        .output();
 }
 
 /// The Claude token JSON from wherever it lives: the file when present,
@@ -300,21 +325,20 @@ mod tests {
     }
 
     #[test]
-    fn keychain_acct_parser_reads_the_security_output() {
-        // A realistic `security find-generic-password` dump.
-        let sample = r#"keychain: "/Users/bsgong/Library/Keychains/login.keychain-db"
-version: 512
-class: "genp"
-attributes:
-    0x00000007 <blob>="Claude Code-credentials"
-    "acct"<blob>="bsgong"
-    "svce"<blob>="Claude Code-credentials"
-"#;
+    fn keychain_attr_parser_reads_svce_and_acct() {
         assert_eq!(
-            super::parse_keychain_acct(sample).as_deref(),
+            super::parse_kc_attr("    \"acct\"<blob>=\"bsgong\"", "acct").as_deref(),
             Some("bsgong")
         );
-        assert_eq!(super::parse_keychain_acct("no acct here"), None);
+        assert_eq!(
+            super::parse_kc_attr(
+                "    \"svce\"<blob>=\"Claude Code-credentials-5953ba74\"",
+                "svce"
+            )
+            .as_deref(),
+            Some("Claude Code-credentials-5953ba74")
+        );
+        assert_eq!(super::parse_kc_attr("no attr here", "acct"), None);
     }
 
     // C1: if the .claude.json write fails after credentials are written, the
