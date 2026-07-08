@@ -2381,13 +2381,35 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             ", then exit it.".to_string()
         }
     );
+    // Proactive warning: the tool may re-use a cached browser session and log
+    // you straight back into the SAME account without asking. Tell them how to
+    // avoid it BEFORE it happens.
+    println!("  tip: {}", same_account_hint(tool));
     let spawn = spawn_tool_login(bin, tool);
     // 4) Capture, or restore the stash on any failure.
     let new_id = adapter.identity(paths).ok().flatten();
     match (spawn, new_id) {
         (Ok(status), Some(new)) if !new.account_id.is_empty() => {
             if new.account_id == cur.account_id {
-                println!("note: you signed back into the same account.");
+                // The tool re-used its browser session and signed BACK INTO
+                // the same account - swapdex removed the local login, but it
+                // cannot force the tool's OAuth to offer an account picker.
+                // Do NOT save a duplicate profile under a new name; explain
+                // how to actually reach the other account, and restore the
+                // stash so the login is exactly as it was.
+                adapter.apply(paths, &stash)?;
+                eprintln!(
+                    "swapdex: you were signed back into the SAME account ({}), so \
+                     nothing was saved as '{name}'.",
+                    identity_line(&new)
+                );
+                eprintln!("  {}", same_account_hint(tool));
+                eprintln!(
+                    "  (to just save THIS account under a name, use `swapdex add {name} \
+                     --tool {}`.)",
+                    pretty_tool_flag(tool)
+                );
+                return Ok(0);
             }
             // Same repoint rule as `add --update`: if '{name}' already has a
             // snapshot for this tool, changing what the name means must be
@@ -2577,6 +2599,26 @@ fn suggest_name(who: &str) -> String {
 }
 
 /// A friendly tool label for prompts.
+/// How to actually reach a DIFFERENT account when the tool keeps signing you
+/// back into the same one from a cached browser session. swapdex removes the
+/// local credential but cannot control the tool's own OAuth prompt.
+fn same_account_hint(tool: &str) -> String {
+    match tool {
+        "claude-code" => "To add a different account: sign out at claude.ai in your browser \
+             first (or use /logout then /login inside Claude Code and pick the other \
+             account), then run this again."
+            .to_string(),
+        "codex" => "Codex re-used your ChatGPT browser session. Sign out at chatgpt.com \
+             (or open the login in a different browser / private window), then run this \
+             again."
+            .to_string(),
+        _ => "The tool re-used your signed-in Google account. Choose the OTHER account at \
+             Google's account picker (or sign the first one out in your browser), then \
+             run this again."
+            .to_string(),
+    }
+}
+
 fn pretty_tool(tool: &str) -> &str {
     match tool {
         "claude-code" => "Claude Code",

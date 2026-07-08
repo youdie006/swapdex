@@ -2562,3 +2562,44 @@ fn add_refuses_symlinked_profile_dir() {
         escape.path().display()
     );
 }
+
+// Real-use bug: adding a NEW account but the tool signs you back into the
+// SAME one (cached browser session). swapdex must NOT save a duplicate under
+// the new name, must restore the login, and must explain how to switch.
+#[test]
+fn login_same_account_back_does_not_save_duplicate() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    // Fake codex whose "login" writes the SAME account back.
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; logout) rm -f "$SWAPDEX_ROOT/.codex/auth.json"; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.codex"
+printf '%s' '{"auth_mode":"chatgpt","tokens":{"id_token":"h.eyJlbWFpbCI6ImFAeC5jb20ifQ.s","access_token":"AT2","refresh_token":"RT2","account_id":"acct-A"},"last_refresh":"2026-07-08T00:00:00Z"}' > "$SWAPDEX_ROOT/.codex/auth.json"
+"#;
+    let bin_dir = fake_tool(root.path(), "codex", script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "codex"],
+        "y\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(
+        e.contains("SAME account"),
+        "explains the same-account outcome: {e}"
+    );
+    assert!(
+        e.to_lowercase().contains("browser"),
+        "tells how to actually switch: {e}"
+    );
+    // 'second' must NOT exist - no duplicate profile of acct-A.
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(
+        !names.contains("second"),
+        "no duplicate profile saved: {names}"
+    );
+    // The live login is intact (still acct-A).
+    let auth = std::fs::read_to_string(root.path().join(".codex/auth.json")).unwrap();
+    assert!(auth.contains("acct-A"), "login restored/intact: {auth}");
+}
