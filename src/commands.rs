@@ -90,27 +90,13 @@ fn is_explicit(sel: Option<ToolSel>) -> bool {
 /// `~/.claude/.credentials.json`, so swapdex sees "not logged in" even when a
 /// login exists. When the config file proves a login is present, explain that
 /// instead of gaslighting the user. (`cfg!` keeps this type-checked on Linux.)
-fn macos_keychain_note(paths: &Paths, tool: &str) -> Option<&'static str> {
-    if !cfg!(target_os = "macos") || tool != "claude-code" {
-        return None;
-    }
-    if paths.claude_credentials().exists() {
-        return None;
-    }
-    let logged_in_by_config = std::fs::read(paths.claude_config_json())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .map(|v| v["oauthAccount"].is_object())
-        .unwrap_or(false);
-    if logged_in_by_config {
-        Some(
-            "Claude Code on macOS keeps its login in the Keychain, which swapdex \
-             cannot snapshot yet - Codex switching works; Claude-on-macOS is on \
-             the roadmap",
-        )
-    } else {
-        None
-    }
+fn macos_keychain_note(_paths: &Paths, _tool: &str) -> Option<&'static str> {
+    // Claude Code on macOS is now supported: the adapter reads and writes the
+    // login Keychain via `security`. So there is no longer anything to skip or
+    // warn about - this returns None everywhere and the old skip branches are
+    // inert. (Kept as a single seam in case a future tool needs a similar
+    // platform note.)
+    None
 }
 
 /// The account_id inside a snapshot's blobs (works for stored profiles and
@@ -2592,6 +2578,9 @@ fn sign_out_locally(paths: &Paths, tool: &str) {
     match tool {
         "claude-code" => {
             std::fs::remove_file(paths.claude_credentials()).ok();
+            // macOS: the token is in the Keychain - removing the file alone
+            // leaves Claude logged in, so delete the Keychain item too.
+            crate::adapters::claude::keychain_delete();
             if let Ok(bytes) = std::fs::read(paths.claude_config_json()) {
                 if let Ok(mut cfg) = serde_json::from_slice::<Value>(&bytes) {
                     if let Some(obj) = cfg.as_object_mut() {

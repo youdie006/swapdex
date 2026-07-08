@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 mod antigravity;
-mod claude;
+pub(crate) mod claude;
 mod gemini;
 pub(crate) use antigravity::token_fingerprint as antigravity_fingerprint;
 pub(crate) use gemini::jwt_claim as gemini_jwt_claim;

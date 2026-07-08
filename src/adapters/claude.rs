@@ -6,17 +6,108 @@ use serde_json::Value;
 
 pub struct Claude;
 
-/// Is this a macOS Keychain-mode install? True when there is no credentials
-/// FILE but `.claude.json` proves a login exists (its oauthAccount block).
-/// `cfg!` (not `#[cfg]`) keeps this type-checked on every platform.
-fn keychain_mode(paths: &Paths) -> bool {
-    cfg!(target_os = "macos")
-        && !paths.claude_credentials().exists()
-        && std::fs::read(paths.claude_config_json())
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .map(|v| v["oauthAccount"].is_object())
-            .unwrap_or(false)
+/// The macOS login Keychain service Claude Code stores its OAuth token under.
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
+/// None on non-macOS or when there is no such item.
+fn keychain_read() -> Option<Vec<u8>> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut v = out.stdout;
+    while v.last() == Some(&b'\n') {
+        v.pop();
+    }
+    (!v.is_empty()).then_some(v)
+}
+
+/// The `acct` attribute of the existing Keychain item, so a write updates the
+/// SAME item Claude Code reads rather than creating a sibling.
+fn keychain_account() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+        .output()
+        .ok()?;
+    parse_keychain_acct(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pull the `acct` attribute out of `security find-generic-password` output,
+/// which prints it as a line like `    "acct"<blob>="bsgong"`.
+fn parse_keychain_acct(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some(rest) = line.split("\"acct\"").nth(1) {
+            if let Some(after) = rest.split("=\"").nth(1) {
+                if let Some(end) = after.find('"') {
+                    return Some(after[..end].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Write the Claude token JSON into the macOS Keychain (updating the existing
+/// item). `-U` updates in place; the account is preserved when known.
+fn keychain_write(value: &[u8]) -> Result<()> {
+    let val = std::str::from_utf8(value).context("keychain value is not UTF-8")?;
+    let acct = keychain_account()
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "swapdex".into());
+    let status = std::process::Command::new("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-a",
+            &acct,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+            val,
+        ])
+        .status()
+        .context("run `security add-generic-password`")?;
+    if !status.success() {
+        bail!("`security add-generic-password` failed (Keychain write)");
+    }
+    Ok(())
+}
+
+/// Remove the macOS Keychain item so `claude` prompts a FRESH sign-in during
+/// the add-a-new-account flow. No-op on non-macOS.
+pub(crate) fn keychain_delete() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let _ = std::process::Command::new("security")
+        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE])
+        .output();
+}
+
+/// The Claude token JSON from wherever it lives: the file when present,
+/// otherwise the macOS Keychain.
+fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
+    let f = paths.claude_credentials();
+    if f.exists() {
+        crate::atomic::read_regular(&f).ok()
+    } else {
+        keychain_read()
+    }
+}
+
+/// True if a Claude login exists at all (file or Keychain).
+fn cred_present(paths: &Paths) -> bool {
+    paths.claude_credentials().exists() || keychain_read().is_some()
 }
 
 impl AuthTool for Claude {
@@ -25,24 +116,15 @@ impl AuthTool for Claude {
     }
 
     fn present(&self, paths: &Paths) -> bool {
-        paths.claude_credentials().exists()
+        cred_present(paths)
     }
 
     fn capture(&self, paths: &Paths) -> Result<Snapshot> {
-        let cred = paths.claude_credentials();
-        if !cred.exists() {
-            if keychain_mode(paths) {
-                bail!(
-                    "Claude Code on macOS keeps its login in the Keychain, which swapdex \
-                     cannot snapshot yet (Codex switching works; Claude-on-macOS is on \
-                     the roadmap)"
-                );
-            }
-            bail!("not logged in to Claude Code (no {})", cred.display());
-        }
-        let cred_bytes = crate::atomic::read_regular(&cred)?;
+        let Some(cred_bytes) = cred_read(paths) else {
+            bail!("not logged in to Claude Code");
+        };
         serde_json::from_slice::<Value>(&cred_bytes)
-            .context(".credentials.json is not valid JSON")?;
+            .context("the Claude credential is not valid JSON")?;
         // Extract ONLY the oauthAccount block from .claude.json, never the file.
         // Right after a fresh CLI login .claude.json may not exist yet; treat a
         // missing config as an absent oauthAccount rather than failing capture.
@@ -68,17 +150,6 @@ impl AuthTool for Claude {
     }
 
     fn apply(&self, paths: &Paths, snap: &Snapshot) -> Result<()> {
-        // On a Keychain-mode macOS install, writing .credentials.json would be
-        // ignored by Claude Code while the oauthAccount swap would still change
-        // what swapdex REPORTS - a half-switch that lies about the live login.
-        // Refuse up front instead.
-        if keychain_mode(paths) {
-            bail!(
-                "Claude Code on macOS keeps its login in the Keychain, which swapdex \
-                 cannot write yet - refusing to switch claude-code (Codex switching \
-                 works; Claude-on-macOS is on the roadmap)"
-            );
-        }
         let cred = snap
             .part("credentials")
             .context("snapshot missing credentials")?;
@@ -111,42 +182,50 @@ impl AuthTool for Claude {
             None => bail!(".claude.json is not a JSON object"),
         }
         let new_cfg = serde_json::to_vec(&cfg)?;
-        // Both-or-neither: write credentials, then config. If the config write
-        // fails, roll the credentials back so the login is never left half-
-        // swapped (new credentials + old identity, or vice versa).
+        // Three writes, both-or-neither: the credential FILE, the macOS
+        // Keychain (Claude Code reads its token from there), and the config
+        // file's oauthAccount. Snapshot the previous state of each so any
+        // failure rolls ALL of them back - the login is never half-swapped.
         let cred_path = paths.claude_credentials();
-        let prev_creds = if cred_path.exists() {
+        let macos = cfg!(target_os = "macos");
+        let prev_file = if cred_path.exists() {
             crate::atomic::read_regular(&cred_path).ok()
         } else {
             None
         };
+        let prev_kc = if macos { keychain_read() } else { None };
+
+        let restore_file = |prev: &Option<Vec<u8>>| match prev {
+            Some(p) => crate::atomic::write_secret(&cred_path, p).is_ok(),
+            None => std::fs::remove_file(&cred_path).is_ok() || !cred_path.exists(),
+        };
+
+        // 1) credential file (keeps Claude working on Linux, and on macOS
+        //    installs that also read the file).
         crate::atomic::write_secret(&cred_path, cred.expose())?;
+        // 2) macOS Keychain - the source of truth for Claude on macOS.
+        if macos {
+            if let Err(e) = keychain_write(cred.expose()) {
+                restore_file(&prev_file);
+                return Err(e.context("apply aborted; credential file rolled back"));
+            }
+        }
+        // 3) config oauthAccount.
         if let Err(e) = crate::atomic::write_secret(&cfg_path, &new_cfg) {
-            // Report what the rollback actually did - if it also failed (e.g.
-            // disk full broke both writes), saying "rolled back" would be a lie
-            // about a half-swapped login.
-            let msg = match prev_creds {
-                Some(prev) => match crate::atomic::write_secret(&cred_path, &prev) {
-                    Ok(()) => "apply aborted; credentials rolled back",
-                    Err(_) => {
-                        "apply aborted and the rollback FAILED - the login may be \
-                         half-swapped; run `swapdex restore --tool claude` once the \
-                         underlying problem (e.g. disk space) is fixed"
-                    }
-                },
-                None => {
-                    // Fresh install: nothing to roll back TO - remove the file
-                    // we just wrote, or the "aborted" apply leaves new
-                    // credentials next to an un-updated identity (half-swap).
-                    match std::fs::remove_file(&cred_path) {
-                        Ok(()) => "apply aborted; the just-written credentials were removed",
-                        Err(_) => {
-                            "apply aborted and cleanup FAILED - a credentials file was written \
-                             without its identity; run `swapdex restore --tool claude` \
-                             once the underlying problem is fixed"
-                        }
-                    }
+            let f_ok = restore_file(&prev_file);
+            let k_ok = if macos {
+                match &prev_kc {
+                    Some(p) => keychain_write(p).is_ok(),
+                    None => true, // nothing prior; leave the new token
                 }
+            } else {
+                true
+            };
+            let msg = if f_ok && k_ok {
+                "apply aborted; the credential change was rolled back"
+            } else {
+                "apply aborted and the rollback FAILED - the login may be half-swapped; \
+                 run `swapdex restore --tool claude` once the underlying problem is fixed"
             };
             return Err(e.context(msg));
         }
@@ -154,12 +233,13 @@ impl AuthTool for Claude {
     }
 
     fn identity(&self, paths: &Paths) -> Result<Option<Account>> {
-        let cred = paths.claude_credentials();
-        if !cred.exists() {
+        // The token comes from the file or the macOS Keychain; the identity
+        // (email/uuid) is always in .claude.json.
+        let Some(cred_bytes) = cred_read(paths) else {
             return Ok(None);
-        }
-        let creds: Value = serde_json::from_slice(&crate::atomic::read_regular(&cred)?)
-            .context("parse .credentials.json")?;
+        };
+        let creds: Value = serde_json::from_slice(&cred_bytes)
+            .context("the Claude credential is not valid JSON")?;
         let expires_at = creds["claudeAiOauth"]["expiresAt"].as_i64();
         let tier = creds["claudeAiOauth"]["subscriptionType"]
             .as_str()
@@ -217,6 +297,24 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn keychain_acct_parser_reads_the_security_output() {
+        // A realistic `security find-generic-password` dump.
+        let sample = r#"keychain: "/Users/bsgong/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    0x00000007 <blob>="Claude Code-credentials"
+    "acct"<blob>="bsgong"
+    "svce"<blob>="Claude Code-credentials"
+"#;
+        assert_eq!(
+            super::parse_keychain_acct(sample).as_deref(),
+            Some("bsgong")
+        );
+        assert_eq!(super::parse_keychain_acct("no acct here"), None);
     }
 
     // C1: if the .claude.json write fails after credentials are written, the
