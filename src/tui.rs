@@ -146,15 +146,68 @@ enum InputKind {
     SaveCurrent,    // save the current live logins as a new profile
 }
 
+/// One row in the folder browser.
+enum FolderRow {
+    OpenHere,      // launch the conversation in the current dir
+    Up,            // go to the parent dir
+    Home,          // jump to $HOME
+    Into(PathBuf), // descend into this subdirectory
+}
+
+/// The browser rows for `cwd`: "open here", parent (if any), home, then the
+/// visible subdirectories (alphabetical, dotfiles hidden, unreadable skipped).
+fn folder_rows(cwd: &std::path::Path) -> Vec<FolderRow> {
+    let mut rows = vec![FolderRow::OpenHere];
+    if cwd.parent().is_some() {
+        rows.push(FolderRow::Up);
+    }
+    if dirs::home_dir().is_some_and(|h| h != cwd) {
+        rows.push(FolderRow::Home);
+    }
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(cwd)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+        })
+        .collect();
+    subs.sort();
+    rows.extend(subs.into_iter().map(FolderRow::Into));
+    rows
+}
+
+/// A path with $HOME collapsed to `~`, for a compact browser title.
+fn tildify(p: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = p.strip_prefix(&home) {
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            };
+        }
+    }
+    p.display().to_string()
+}
+
 enum Screen {
     Main,
     Open {
         label: String,
         entries: Vec<SessionEntry>,
     },
+    /// A folder BROWSER (no typing): navigate into subdirs, `..` to go up,
+    /// and pick "open here" - conversations are per-directory.
     Folder {
         tool: &'static str,
-        input: String,
+        cwd: PathBuf,
+        rows: Vec<FolderRow>,
         /// The Open screen to return to on Esc (one step back, not two).
         back: (String, Vec<SessionEntry>),
     },
@@ -387,42 +440,60 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         help,
                     );
                 }
-                Screen::Folder { tool, input, .. } => {
+                Screen::Folder { tool, cwd, rows: frows, .. } => {
                     let name = NEW_CONV
                         .iter()
                         .find(|(_, t)| t == tool)
                         .map(|(l, _)| *l)
                         .unwrap_or("open");
-                    f.render_widget(
-                        Paragraph::new(vec![
-                            Line::from(""),
-                            Line::from(Span::styled(
-                                format!("  {name}"),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            )),
-                            Line::from(""),
-                            Line::from(vec![
-                                Span::styled("  folder ", Style::default().fg(MUTED)),
-                                Span::styled(
-                                    "[current dir]".to_string(),
-                                    Style::default().fg(Color::DarkGray),
-                                ),
-                                Span::raw(": "),
-                                Span::styled(
-                                    format!("{input}\u{2588}"),
-                                    Style::default().fg(VIOLET),
-                                ),
-                            ]),
-                        ])
-                        .block(list_block(" which folder? ")),
-                        main,
-                    );
+                    let items: Vec<ListItem> = frows
+                        .iter()
+                        .map(|r| match r {
+                            FolderRow::OpenHere => ListItem::new(Line::from(Span::styled(
+                                "\u{25b8} open here",
+                                Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                            ))),
+                            FolderRow::Up => ListItem::new(Line::from(Span::styled(
+                                "\u{2191} ..",
+                                Style::default().fg(DEXGRAY),
+                            ))),
+                            FolderRow::Home => ListItem::new(Line::from(Span::styled(
+                                "\u{2302} ~  (home)",
+                                Style::default().fg(DEXGRAY),
+                            ))),
+                            FolderRow::Into(p) => {
+                                let leaf = p
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("?");
+                                ListItem::new(Line::from(vec![
+                                    Span::styled("  ", Style::default()),
+                                    Span::styled(
+                                        format!("{leaf}/"),
+                                        Style::default().fg(Color::Reset),
+                                    ),
+                                ]))
+                            }
+                        })
+                        .collect();
+                    let list = List::new(items)
+                        .block(list_block_titled(&format!(
+                            " {name}  \u{2014}  {} ",
+                            tildify(cwd)
+                        )))
+                        .highlight_style(
+                            Style::default()
+                                .bg(Color::Rgb(50, 47, 68))
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .highlight_symbol("\u{2503} ");
+                    f.render_stateful_widget(list, main, &mut open_state);
                     f.render_widget(Paragraph::new(""), foot);
                     f.render_widget(
                         Paragraph::new(key_hints(&[
-                            ("\u{21b5}", "open"),
+                            ("\u{21b5}", "enter / open here"),
+                            ("\u{2191}\u{2193}", "move"),
                             ("esc", "back"),
-                            ("~", "home ok, empty = current"),
                         ])),
                         help,
                     );
@@ -541,6 +612,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     Screen::Main => rows.len(),
                     Screen::Open { entries, .. } => entries.len() + NEW_CONV.len(),
                     Screen::ToolPick => 4,
+                    Screen::Folder { rows: frows, .. } => frows.len(),
                     _ => 0,
                 };
                 let is_main = matches!(screen, Screen::Main);
@@ -690,11 +762,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         break 'ui Outcome::OpenSession(i);
                     }
                     let tool = NEW_CONV[i - entries.len()].1;
+                    let cwd = std::env::current_dir()
+                        .ok()
+                        .or_else(dirs::home_dir)
+                        .unwrap_or_else(|| PathBuf::from("/"));
+                    let frows = folder_rows(&cwd);
+                    open_state.select(Some(0));
                     if let Screen::Open { label, entries } = std::mem::replace(
                         &mut screen,
                         Screen::Folder {
                             tool,
-                            input: String::new(),
+                            cwd,
+                            rows: frows,
                             back: (String::new(), Vec::new()),
                         },
                     ) {
@@ -705,35 +784,64 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 }
                 _ => {}
             },
-            Screen::Folder { tool, input, back } => match key.code {
+            Screen::Folder {
+                tool,
+                cwd,
+                rows: frows,
+                back,
+            } => match key.code {
                 KeyCode::Esc => {
                     // One step back to the Open menu, not two.
                     let (label, entries) = std::mem::take(back);
                     screen = Screen::Open { label, entries };
                 }
-                KeyCode::Backspace => {
-                    input.pop();
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let i = open_state.selected().unwrap_or(0);
+                    open_state.select(Some((i + 1).min(frows.len().saturating_sub(1))));
                 }
-                KeyCode::Enter => {
-                    let dir = if input.is_empty() {
-                        None
-                    } else if input == "~" {
-                        dirs::home_dir()
-                    } else if let Some(rest) = input.strip_prefix("~/") {
-                        dirs::home_dir().map(|h| h.join(rest))
-                    } else {
-                        Some(PathBuf::from(input.clone()))
-                    };
-                    if let Some(d) = &dir {
-                        if !d.is_dir() {
-                            status = format!("not a directory: {}", d.display());
-                            input.clear();
-                            continue;
-                        }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let i = open_state.selected().unwrap_or(0);
+                    open_state.select(Some(i.saturating_sub(1)));
+                }
+                // Left / Backspace = go up a level (a natural browser gesture).
+                KeyCode::Left | KeyCode::Backspace => {
+                    if let Some(parent) = cwd.parent() {
+                        *cwd = parent.to_path_buf();
+                        *frows = folder_rows(cwd);
+                        open_state.select(Some(0));
                     }
-                    break 'ui Outcome::NewConv { tool, dir };
                 }
-                KeyCode::Char(c) => input.push(c),
+                KeyCode::Enter | KeyCode::Right => {
+                    let i = open_state.selected().unwrap_or(0);
+                    match frows.get(i) {
+                        Some(FolderRow::OpenHere) => {
+                            break 'ui Outcome::NewConv {
+                                tool,
+                                dir: Some(cwd.clone()),
+                            };
+                        }
+                        Some(FolderRow::Up) => {
+                            if let Some(parent) = cwd.parent() {
+                                *cwd = parent.to_path_buf();
+                                *frows = folder_rows(cwd);
+                                open_state.select(Some(0));
+                            }
+                        }
+                        Some(FolderRow::Home) => {
+                            if let Some(h) = dirs::home_dir() {
+                                *cwd = h;
+                                *frows = folder_rows(cwd);
+                                open_state.select(Some(0));
+                            }
+                        }
+                        Some(FolderRow::Into(p)) => {
+                            *cwd = p.clone();
+                            *frows = folder_rows(cwd);
+                            open_state.select(Some(0));
+                        }
+                        None => {}
+                    }
+                }
                 _ => {}
             },
             Screen::ToolPick => match key.code {
@@ -800,4 +908,40 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     );
     ratatui::restore();
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_rows_lead_with_open_here_and_hide_dotfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("visible")).unwrap();
+        std::fs::create_dir(dir.path().join(".hidden")).unwrap();
+        std::fs::write(dir.path().join("afile"), b"x").unwrap();
+        let rows = folder_rows(dir.path());
+        assert!(matches!(rows[0], FolderRow::OpenHere), "open-here is first");
+        assert!(
+            rows.iter().any(|r| matches!(r, FolderRow::Up)),
+            "parent exists -> Up row present"
+        );
+        let into: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                FolderRow::Into(p) => p.file_name().and_then(|n| n.to_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(into, vec!["visible"], "only non-dot subdirs, no files");
+    }
+
+    #[test]
+    fn tildify_collapses_home() {
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(tildify(&home), "~");
+            assert_eq!(tildify(&home.join("proj")), "~/proj");
+        }
+        assert_eq!(tildify(std::path::Path::new("/etc")), "/etc");
+    }
 }
