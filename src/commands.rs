@@ -2400,6 +2400,25 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     }
     // 2) Local sign-out, so the tool's own flow prompts a FRESH sign-in.
     sign_out_locally(paths, tool);
+    // Verify the sign-out actually took. On macOS Claude keeps its login in
+    // the Keychain; if swapdex could not clear it (permissions, an aliased
+    // CLAUDE_CONFIG_DIR, another cache), opening the tool would just drop you
+    // back into the SAME session (the confusing trust prompt) and no new
+    // account can be added. Abort clearly and restore, instead.
+    if let Some(still) = adapter.identity(paths).ok().flatten() {
+        if still.account_id == cur.account_id {
+            adapter.apply(paths, &stash)?;
+            drop(lock1);
+            eprintln!(
+                "swapdex: couldn't sign {} out of the current account ({}), so a new \
+                 account can't be added this way - your login is unchanged.",
+                pretty_tool(tool),
+                identity_line(&cur)
+            );
+            eprintln!("  {}", same_account_hint(tool));
+            return Ok(0);
+        }
+    }
     // RELEASE the store lock before the interactive sign-in: it can take
     // minutes (or be left open), and holding it would block every other
     // swapdex - rename, use, everything - with "another swapdex is

@@ -53,6 +53,15 @@ fn keychain_service() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
+    // DISCOVERY FIRST. swapdex may not see the same CLAUDE_CONFIG_DIR the user
+    // launches `claude` with (e.g. it's set only in a shell alias), so the
+    // computed name could be the bare prefix while Claude's real item is
+    // suffixed. Discovery scans the keychain and prefers the suffixed item -
+    // Claude's real credential - over a bare-prefix stray. Only if discovery
+    // finds nothing do we fall back to the computed name.
+    if let Some(svc) = discover_keychain_service() {
+        return Some(svc);
+    }
     let computed = match std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR") {
         Ok(t) if t.is_empty() => KEYCHAIN_PREFIX.to_string(),
         Ok(t) => format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(t.as_bytes())[..8]),
@@ -63,10 +72,7 @@ fn keychain_service() -> Option<String> {
             _ => KEYCHAIN_PREFIX.to_string(),
         },
     };
-    if keychain_item_exists(&computed) {
-        return Some(computed);
-    }
-    discover_keychain_service()
+    keychain_item_exists(&computed).then_some(computed)
 }
 
 /// True if a Keychain item with this service (+ account) exists, via an
