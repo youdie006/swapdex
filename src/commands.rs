@@ -1814,7 +1814,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             && adapters::all().iter().all(|a| !a.present(paths))
         {
             println!("No accounts saved yet, and you're not logged into any tool.");
-            println!("  sign in to Claude Code / Codex / Gemini / Antigravity, then run `swapdex`.");
+            println!(
+                "  sign in to Claude Code / Codex / Gemini / Antigravity, then run `swapdex`."
+            );
             return Ok(0);
         }
         match crate::tui::run(&mut ctx)? {
