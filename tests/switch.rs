@@ -1459,7 +1459,15 @@ fn fake_claude(root: &Path, script: &str) -> std::path::PathBuf {
     let bin_dir = root.join("fakebin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let fake = bin_dir.join("claude");
-    std::fs::write(&fake, script).unwrap();
+    // swapdex now drives claude as `claude auth logout` (sign-out) and
+    // `claude auth login` (sign-in). Inject a guard so every fake no-ops on
+    // the logout and only its body runs for login / bare.
+    let wrapped = script.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\ncase \"$1 $2\" in \"auth logout\") exit 0 ;; esac\n",
+        1,
+    );
+    std::fs::write(&fake, wrapped).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     bin_dir
 }
@@ -2650,4 +2658,45 @@ printf '%s' '{{"auth_mode":"chatgpt","tokens":{{"id_token":"h.eyJlbWFpbCI6ImJAeC
         names.contains("moved") && !names.contains("victim"),
         "victim was renamed mid-sign-in: {names}"
     );
+}
+
+// The add-account flow signs out via `claude auth logout` (Claude clears its
+// own macOS Keychain item - the ACL-authorized way) before the fresh login.
+#[test]
+fn login_claude_signs_out_via_claude_auth_logout() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "old", "--tool", "claude"]);
+    // Fake claude records an `auth logout` call, then a login writes B.
+    let script = r#"#!/bin/sh
+case "$1 $2" in "auth logout") echo logout >> "$SWAPDEX_ROOT/authcalls.txt"; exit 0 ;; esac
+case "$1" in --version) echo 1.0.0; exit 0;; esac
+mkdir -p "$SWAPDEX_ROOT/.claude"
+printf '%s' '{"claudeAiOauth":{"accessToken":"AT-B","refreshToken":"RT-B","expiresAt":9999999999999,"subscriptionType":"pro"}}' > "$SWAPDEX_ROOT/.claude/.credentials.json"
+printf '%s' '{"oauthAccount":{"accountUuid":"uuid-B","emailAddress":"b@x.com","displayName":"B"},"projects":{}}' > "$SWAPDEX_ROOT/.claude.json"
+"#;
+    // fake_claude injects its own logout guard; use a raw file so ours runs.
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = root.path().join("rawbin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(bin_dir.join("claude"), script).unwrap();
+    std::fs::set_permissions(
+        bin_dir.join("claude"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "claude"],
+        "y\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let calls = std::fs::read_to_string(root.path().join("authcalls.txt")).unwrap_or_default();
+    assert!(
+        calls.contains("logout"),
+        "sign-out went through `claude auth logout`: {calls:?}"
+    );
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(names.contains("second"), "B saved: {names}");
 }

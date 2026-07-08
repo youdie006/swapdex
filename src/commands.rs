@@ -2579,8 +2579,17 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
     #[allow(function_casts_as_integer)]
     let prev_quit = unsafe { libc::signal(libc::SIGQUIT, ride_out as libc::sighandler_t) };
     let mut cmd = Command::new(bin);
-    if tool == "codex" {
-        cmd.arg("login");
+    match tool {
+        // Codex has a `login` subcommand; Claude Code a proper `auth login`
+        // that does JUST the OAuth sign-in (no workspace-trust / session
+        // detour); Gemini / Antigravity sign in on first run of the app.
+        "codex" => {
+            cmd.arg("login");
+        }
+        "claude-code" => {
+            cmd.args(["auth", "login"]);
+        }
+        _ => {}
     }
     let status = cmd.status();
     unsafe {
@@ -2596,9 +2605,17 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
 fn sign_out_locally(paths: &Paths, tool: &str) {
     match tool {
         "claude-code" => {
+            // Claude's OWN logout clears its macOS Keychain item - it holds
+            // the Keychain ACL that an external `security` call may lack, so
+            // this is what actually signs Claude out on a Mac (found via
+            // `claude auth logout`). Quiet, best-effort.
+            let _ = Command::new("claude")
+                .args(["auth", "logout"])
+                .stdin(std::process::Stdio::null())
+                .output();
+            // Belt-and-suspenders for older Claude builds / Linux: clear the
+            // file and the Keychain item directly too.
             std::fs::remove_file(paths.claude_credentials()).ok();
-            // macOS: the token is in the Keychain - removing the file alone
-            // leaves Claude logged in, so delete the Keychain item too.
             crate::adapters::claude::keychain_delete();
             if let Ok(bytes) = std::fs::read(paths.claude_config_json()) {
                 if let Ok(mut cfg) = serde_json::from_slice::<Value>(&bytes) {
