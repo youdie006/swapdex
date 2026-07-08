@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.17.2] - 2026-07-08
+
+### Fixed
+- **macOS Claude Keychain: target the item by account, not service alone.**
+  Reading/deleting Claude's Keychain credential matched by service name
+  only, so a stray bare `Claude Code-credentials` item (an older swapdex may
+  have written one) could be hit instead of Claude's real item, leaving
+  Claude logged in. Read and delete now pass `-a <account>` (the item's own
+  account, else `$USER`) to target exactly Claude's credential, and delete
+  also clears a distinct stray. Confirmed against Anthropic's auth docs and
+  the community switchers: the macOS credential is the Keychain item plus
+  the `oauthAccount` block in `~/.claude.json`, and `CLAUDE_CONFIG_DIR` does
+  not isolate it on macOS - a Keychain swap (what swapdex does) is correct.
+
 ## [0.17.1] - 2026-07-08
 
 ### Fixed
