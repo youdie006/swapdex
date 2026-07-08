@@ -6,10 +6,25 @@ use serde_json::Value;
 
 pub struct Claude;
 
-/// The prefix of the Keychain service Claude Code stores its token under. The
-/// real service has a per-install hash suffix (e.g. "Claude Code-credentials-
-/// 5953ba74"), so the exact name is DISCOVERED at runtime, not hardcoded.
+/// Absolute path to `security`: Claude Code creates its Keychain item by
+/// shelling out to `/usr/bin/security`, so the item's ACL trusts THAT binary.
+/// Using the same absolute path means swapdex is the same trusted app - no
+/// "allow / Always Allow" prompt - and a PATH-injected `security` can't steal
+/// tokens.
+const SECURITY: &str = "/usr/bin/security";
+
+/// The prefix of the Keychain service Claude Code stores its OAuth token under.
 const KEYCHAIN_PREFIX: &str = "Claude Code-credentials";
+
+/// The Keychain `acct` attribute Claude Code uses: `$USER`, else the OS
+/// username, else a fixed fallback - matching Claude Code's own account fn.
+fn keychain_account_name() -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("LOGNAME").ok().filter(|u| !u.is_empty()))
+        .unwrap_or_else(|| "claude-code-user".into())
+}
 
 /// Pull an attribute value out of a `security` output line, e.g. the `svce`
 /// (service) or `acct` printed as `    "svce"<blob>="<value>"`.
@@ -21,16 +36,60 @@ fn parse_kc_attr(line: &str, attr: &str) -> Option<String> {
     Some(after[..end].to_string())
 }
 
-/// Discover Claude Code's actual Keychain service by dumping the login
-/// keychain's ATTRIBUTES (no `-d`, so no password prompt) and finding the entry
-/// whose service starts with the prefix. Prefers a hash-suffixed entry (Claude's
-/// real credential) over the bare prefix (which may be a stray an older swapdex
-/// wrote). None off macOS or when Claude has no such item.
+/// sha256 as lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The exact Keychain service Claude Code uses, computed the SAME way Claude
+/// Code does: "Claude Code-credentials" plus, when CLAUDE_SECURESTORAGE_CONFIG_DIR
+/// / CLAUDE_CONFIG_DIR is set, "-" + first 8 hex of sha256(that dir). Correct
+/// even when the config dir is set (the case hardcoding tools get wrong).
+/// Existence is verified; a dump-keychain scan is the fallback.
 fn keychain_service() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    let out = std::process::Command::new("security")
+    let computed = match std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR") {
+        Ok(t) if t.is_empty() => KEYCHAIN_PREFIX.to_string(),
+        Ok(t) => format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(t.as_bytes())[..8]),
+        Err(_) => match std::env::var("CLAUDE_CONFIG_DIR") {
+            Ok(d) if !d.is_empty() => {
+                format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(d.as_bytes())[..8])
+            }
+            _ => KEYCHAIN_PREFIX.to_string(),
+        },
+    };
+    if keychain_item_exists(&computed) {
+        return Some(computed);
+    }
+    discover_keychain_service()
+}
+
+/// True if a Keychain item with this service (+ account) exists, via an
+/// attribute-only lookup (no `-w`, so no ACL prompt).
+fn keychain_item_exists(service: &str) -> bool {
+    std::process::Command::new(SECURITY)
+        .args([
+            "find-generic-password",
+            "-s",
+            service,
+            "-a",
+            &keychain_account_name(),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Fallback discovery: dump the login keychain's ATTRIBUTES (no `-d`, no
+/// prompt) and find a service starting with the prefix, preferring a suffixed
+/// entry over the bare prefix.
+fn discover_keychain_service() -> Option<String> {
+    let out = std::process::Command::new(SECURITY)
         .arg("dump-keychain")
         .output()
         .ok()?;
@@ -53,14 +112,17 @@ fn keychain_service() -> Option<String> {
 /// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
 fn keychain_read() -> Option<Vec<u8>> {
     let service = keychain_service()?;
-    let acct = keychain_account(&service);
-    let mut cmd = std::process::Command::new("security");
-    cmd.args(["find-generic-password", "-s", &service]);
-    if let Some(a) = &acct {
-        cmd.args(["-a", a]);
-    }
-    cmd.arg("-w");
-    let out = cmd.output().ok()?;
+    let out = std::process::Command::new(SECURITY)
+        .args([
+            "find-generic-password",
+            "-s",
+            &service,
+            "-a",
+            &keychain_account_name(),
+            "-w",
+        ])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -71,44 +133,33 @@ fn keychain_read() -> Option<Vec<u8>> {
     (!v.is_empty()).then_some(v)
 }
 
-/// The `acct` attribute of the given Keychain service, so a write updates the
-/// SAME item Claude Code reads rather than creating a sibling.
-fn keychain_account(service: &str) -> Option<String> {
-    let out = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", service])
-        .output()
-        .ok()?;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if let Some(a) = parse_kc_attr(line, "acct") {
-            return Some(a);
-        }
-    }
-    None
-}
-
-/// Write the Claude token JSON into the macOS Keychain, updating Claude's own
-/// item in place (discovered service + preserved account).
+/// Write the Claude token into the Keychain, updating Claude's own item. The
+/// token is passed as HEX over `security -i` stdin (via `-X`), never in argv,
+/// so it can't be read from `ps`.
 fn keychain_write(value: &[u8]) -> Result<()> {
+    use std::io::Write;
     let service = keychain_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string());
-    let val = std::str::from_utf8(value).context("keychain value is not UTF-8")?;
-    let acct = keychain_account(&service)
-        .or_else(|| std::env::var("USER").ok())
-        .unwrap_or_else(|| "swapdex".into());
-    let status = std::process::Command::new("security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-a",
-            &acct,
-            "-s",
-            &service,
-            "-w",
-            val,
-        ])
-        .status()
-        .context("run `security add-generic-password`")?;
-    if !status.success() {
-        bail!("`security add-generic-password` failed (Keychain write)");
+    let acct = keychain_account_name();
+    let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
+    let cmd = format!("add-generic-password -U -a \"{acct}\" -s \"{service}\" -X {hex}\n");
+    let mut child = std::process::Command::new(SECURITY)
+        .arg("-i")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("run `/usr/bin/security -i`")?;
+    child
+        .stdin
+        .as_mut()
+        .context("security stdin")?
+        .write_all(cmd.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "Keychain write failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -119,18 +170,19 @@ pub(crate) fn keychain_delete() {
     let Some(service) = keychain_service() else {
         return;
     };
-    let acct = keychain_account(&service);
-    let mut cmd = std::process::Command::new("security");
-    cmd.args(["delete-generic-password", "-s", &service]);
-    if let Some(a) = &acct {
-        cmd.args(["-a", a]);
-    }
-    let _ = cmd.output();
-    // Also clear the bare-prefix item if it is a distinct stray (an older
-    // swapdex may have written one) so it can't shadow discovery next time.
+    let acct = keychain_account_name();
+    let _ = std::process::Command::new(SECURITY)
+        .args(["delete-generic-password", "-s", &service, "-a", &acct])
+        .output();
     if service != KEYCHAIN_PREFIX {
-        let _ = std::process::Command::new("security")
-            .args(["delete-generic-password", "-s", KEYCHAIN_PREFIX])
+        let _ = std::process::Command::new(SECURITY)
+            .args([
+                "delete-generic-password",
+                "-s",
+                KEYCHAIN_PREFIX,
+                "-a",
+                &acct,
+            ])
             .output();
     }
 }
@@ -338,6 +390,12 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        // sha256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        assert_eq!(&super::sha256_hex(b"abc")[..8], "ba7816bf");
     }
 
     #[test]
