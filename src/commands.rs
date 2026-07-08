@@ -1739,7 +1739,27 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn rename(&mut self, old: &str, new: &str) -> (bool, String) {
-            run_self(&["rename", old, new])
+            // In-process (like delete) - no subprocess, no current_exe
+            // dependency. store.rename also rewrites the timeline internally.
+            if !crate::store::valid_profile_name(new) || new == "-" {
+                return (false, format!("'{new}' can't be a profile name"));
+            }
+            let store = match Store::open(self.paths) {
+                Ok(s) => s,
+                Err(e) => return (false, format!("cannot open store: {e}")),
+            };
+            let _lock = match store.lock() {
+                Ok(g) => g,
+                Err(_) => return (false, "another swapdex is busy; try again".into()),
+            };
+            if store.profile_dir_exists(new) {
+                return (false, format!("a profile named '{new}' already exists"));
+            }
+            match store.rename(old, new) {
+                Ok(true) => (true, format!("renamed '{old}' -> '{new}'")),
+                Ok(false) => (false, format!("no profile named '{old}'")),
+                Err(e) => (false, format!("rename failed: {e:#}")),
+            }
         }
         fn save_current(&mut self, name: &str) -> (bool, String) {
             // `add <name>` captures the CURRENT live logins (all tools) - no
