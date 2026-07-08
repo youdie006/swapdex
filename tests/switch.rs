@@ -2603,3 +2603,51 @@ printf '%s' '{"auth_mode":"chatgpt","tokens":{"id_token":"h.eyJlbWFpbCI6ImFAeC5j
     let auth = std::fs::read_to_string(root.path().join(".codex/auth.json")).unwrap();
     assert!(auth.contains("acct-A"), "login restored/intact: {auth}");
 }
+
+// The login flow must NOT hold the store lock across the interactive sign-in
+// - otherwise a left-open login blocks rename/use/everything with "another
+// swapdex is mid-switch" (the real macOS report). The fake tool, WHILE it is
+// the spawned sign-in, runs a `rename` against the same store; it must
+// succeed, proving the lock was released.
+#[test]
+fn login_does_not_hold_lock_during_signin() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    // A second profile we will rename FROM INSIDE the spawned sign-in.
+    seed_codex(root.path(), "acct-V");
+    run(root.path(), &["add", "victim", "--tool", "codex"]);
+    // Put the current account back so the login flow stashes acct-A.
+    seed_codex(root.path(), "acct-A");
+    // Fake codex: on `login`, rename victim -> moved (using the real swapdex
+    // binary) BEFORE writing the new account. If login still held the lock,
+    // this rename would fail with exit 4.
+    let script = format!(
+        r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; logout) rm -f "$SWAPDEX_ROOT/.codex/auth.json"; exit 0;; esac
+"{}" rename victim moved > "$SWAPDEX_ROOT/rename-rc.txt" 2>&1
+echo "rc=$?" >> "$SWAPDEX_ROOT/rename-rc.txt"
+mkdir -p "$SWAPDEX_ROOT/.codex"
+printf '%s' '{{"auth_mode":"chatgpt","tokens":{{"id_token":"h.eyJlbWFpbCI6ImJAeC5jb20ifQ.s","access_token":"ATB","refresh_token":"RTB","account_id":"acct-B"}},"last_refresh":"2026-07-08T00:00:00Z"}}' > "$SWAPDEX_ROOT/.codex/auth.json"
+"#,
+        bin()
+    );
+    let bin_dir = fake_tool(root.path(), "codex", &script);
+    let (o, e, c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "codex"],
+        "\ny\n",
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let rc = std::fs::read_to_string(root.path().join("rename-rc.txt")).unwrap_or_default();
+    assert!(
+        rc.contains("rc=0"),
+        "rename during the sign-in succeeded (lock was free): {rc}"
+    );
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(
+        names.contains("moved") && !names.contains("victim"),
+        "victim was renamed mid-sign-in: {names}"
+    );
+}

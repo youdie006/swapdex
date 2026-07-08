@@ -256,7 +256,10 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
     let _lock = match store.lock() {
         Ok(g) => g,
         Err(crate::store::LockError::Busy) => {
-            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
             return Ok(4);
         }
         Err(crate::store::LockError::Unwritable(e)) => {
@@ -438,7 +441,10 @@ fn use_account_inner(
     let _lock = match store.lock() {
         Ok(g) => g,
         Err(crate::store::LockError::Busy) => {
-            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
             return Ok(4);
         }
         Err(crate::store::LockError::Unwritable(e)) => {
@@ -637,7 +643,10 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
     let _lock = match store.lock() {
         Ok(g) => g,
         Err(crate::store::LockError::Busy) => {
-            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
             return Ok(4);
         }
         Err(crate::store::LockError::Unwritable(e)) => {
@@ -1750,7 +1759,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             };
             let _lock = match store.lock() {
                 Ok(g) => g,
-                Err(_) => return (false, "another swapdex is busy; try again".into()),
+                Err(_) => {
+                    return (
+                        false,
+                        "another swapdex is busy (finish or close any open `swapdex login`)".into(),
+                    )
+                }
             };
             if store.profile_dir_exists(new) {
                 return (false, format!("a profile named '{new}' already exists"));
@@ -2159,7 +2173,10 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
     let _lock = match store.lock() {
         Ok(g) => g,
         Err(crate::store::LockError::Busy) => {
-            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
             return Ok(4);
         }
         Err(crate::store::LockError::Unwritable(e)) => {
@@ -2192,7 +2209,10 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     let _lock = match store.lock() {
         Ok(g) => g,
         Err(crate::store::LockError::Busy) => {
-            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
             return Ok(4);
         }
         Err(crate::store::LockError::Unwritable(e)) => {
@@ -2344,10 +2364,13 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         return Ok(0);
     }
     let store = Store::open(paths)?;
-    let _lock = match store.lock() {
+    let lock1 = match store.lock() {
         Ok(g) => g,
         Err(crate::store::LockError::Busy) => {
-            eprintln!("swapdex: another swapdex is mid-switch; try again");
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
             return Ok(4);
         }
         Err(crate::store::LockError::Unwritable(e)) => {
@@ -2391,6 +2414,11 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     }
     // 2) Local sign-out, so the tool's own flow prompts a FRESH sign-in.
     sign_out_locally(paths, tool);
+    // RELEASE the store lock before the interactive sign-in: it can take
+    // minutes (or be left open), and holding it would block every other
+    // swapdex - rename, use, everything - with "another swapdex is
+    // mid-switch". The stash is already safe in the store's backups.
+    drop(lock1);
     // 3) Fresh sign-in inside the official app.
     println!(
         "Opening {} - sign in with the OTHER account{}",
@@ -2406,6 +2434,11 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     // avoid it BEFORE it happens.
     println!("  tip: {}", same_account_hint(tool));
     let spawn = spawn_tool_login(bin, tool);
+    // Re-take the lock for the final store writes. Best-effort: the sign-in is
+    // done, a single profile save is an atomic per-file write, and we must not
+    // discard the user's completed login just because another swapdex is
+    // momentarily active.
+    let _lock = store.lock().ok();
     // 4) Capture, or restore the stash on any failure.
     let new_id = adapter.identity(paths).ok().flatten();
     match (spawn, new_id) {
