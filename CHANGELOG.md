@@ -4,6 +4,25 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.20.0] - 2026-07-10
+
+### Fixed
+- **No more constant "expired".** Claude access tokens live ~1h and Claude
+  Code refreshes them silently, but swapdex flagged every saved Claude
+  profile `(expired)` the moment the access token lapsed. The marker (and
+  the switch-time warning) now fire only for a snapshot older than 30 days,
+  whose refresh token may actually be dead - matching Codex/Gemini/Antigravity.
+- **Opening a conversation offers only the tools the account has.** A
+  Claude-only profile no longer shows Codex/Gemini/Antigravity; a single-tool
+  switch goes straight to that tool's folder browser. The session list also
+  falls back to any-account when none are attributed (so the menu isn't
+  empty), and the sessionwiki lookup timeout is 2s -> 5s.
+
+### Added
+- **Usage in the UI** (press `u`): tokens used per account, read locally.
+  Labelled honestly - swapdex is no-network, so this is tokens USED on this
+  machine, not the vendor's remaining quota.
+
 ## [0.19.0] - 2026-07-08
 
 ### Fixed
