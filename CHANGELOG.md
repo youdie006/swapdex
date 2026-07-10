@@ -4,6 +4,24 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.22.0] - 2026-07-10
+
+### Fixed
+- **CRITICAL: add-account no longer signs you out of your other accounts.**
+  0.19.0 made the add-a-new-account flow run `claude auth logout` to clear the
+  macOS Keychain. That command REVOKES the OAuth token server-side, which killed
+  the snapshot swapdex had just saved for the current account - and, because the
+  refresh token is shared, could invalidate every saved profile for that
+  account. The result was "all my logged-in accounts got signed out". Sign-out
+  is now LOCAL only (clear the Keychain item + credential file, exactly what
+  claude-swap and Symbioose do) - it never revokes, so a saved login is always
+  restorable. A regression test asserts swapdex never invokes `claude auth
+  logout` and that the previously-saved profile's token survives an add-account.
+
+  If accounts were already signed out: re-login each once (`claude`, then
+  `/login`), then `swapdex add <name> --update` to re-save the fresh token.
+  Normal `swapdex use` between saved accounts never had this problem.
+
 ## [0.21.0] - 2026-07-10
 
 ### Added

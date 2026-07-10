@@ -4,13 +4,15 @@
 
 [![CI](https://github.com/youdie006/swapdex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/youdie006/swapdex/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
-[![local only](https://img.shields.io/badge/network-none-7a3be0.svg)](#what-it-will-not-do)
+[![switcher: no network](https://img.shields.io/badge/switcher-no%20network-7a3be0.svg)](#what-it-will-not-do)
 
 </div>
 
 One command to flip your Claude Code, Codex, Gemini CLI, or Antigravity from
 your work account to your personal one, and back. No re-login, no browser, no copying
-tokens around. 100% local. Never touches the network.
+tokens around -- and the switch itself never touches the network. (One opt-in
+command, `swapdex quota`, reads your remaining balance from Anthropic; nothing
+else does.)
 
 <div align="center">
 <img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls, use personal, status, restore, doctor" width="760" />
@@ -93,6 +95,9 @@ swapdex sessions
 # Recent local token usage per tool (5h/7d) -- tells you when to switch
 swapdex usage
 
+# Remaining quota per Claude account -- the one opt-in network read
+swapdex quota
+
 # Made a bad switch? Put back the login that was live before it
 swapdex restore
 
@@ -146,6 +151,29 @@ each event's timestamp (the same honest join `sessions` uses); anything before
 your first switch stays untagged. Still deliberately a hint, not a
 quota-dodging auto-rotator.
 
+Where `usage` is your local activity, `quota` is the vendor's actual remaining
+balance -- the one command that reaches the network, and only when you run it:
+
+```
+$ swapdex quota
+quota - remaining on your Claude accounts
+live from Anthropic's usage endpoint; opt-in network, spends 0 message quota.
+
+work (active)   you@work.com
+  5h        ▓▓▓▓▓▓▓░░░   68% left   resets in 2h14m
+  7d        ▓▓▓▓▓▓░░░░   57% left   resets in 3d 4h
+
+personal   you@personal.com
+  snapshot token expired - `swapdex use personal` to refresh, then `swapdex quota`
+```
+
+It reads each account's remaining quota from Anthropic's official OAuth usage
+endpoint using that account's **own** token -- read-only, and it spends zero
+message quota. The active account is always live; a saved account whose token
+has expired reports so rather than showing a stale number (swapdex never
+refreshes tokens -- that is the line between a switcher and a rotator). It is
+also in `swapdex ui` under the `%` key.
+
 ## How it works
 
 Each CLI keeps its login in a small on-disk file:
@@ -186,9 +214,14 @@ single-user by design).
 These are structural properties, not promises -- the code is built so they
 cannot happen:
 
-- **No network, ever.** The switching binary has no HTTP client in its
-  dependency graph (CI asserts this on every commit). swapdex cannot phone home
-  or exfiltrate a token.
+- **No HTTP client, no background network.** The binary has no HTTP client in
+  its dependency graph (CI asserts this on every commit), so it cannot phone
+  home or exfiltrate a token. Switching, `ls`, `status`, `usage` -- all 100%
+  local. The one exception is the opt-in `swapdex quota` command, which shells
+  out to `curl` to read your *own* remaining balance from Anthropic's official
+  usage endpoint (that account's own token, read-only, spends zero message
+  quota). It runs only when you type it, sends no data anywhere, and touches no
+  other endpoint.
 - **No auto-rotation.** There is no `--auto`, `--next`, or
   `--when-rate-limited` flag. `use` only ever switches to a name you type.
 - **No token export.** There is no command that prints a saved credential.
@@ -246,8 +279,9 @@ that project's README, July 2026):
   philosophical opposite of swapdex.
 
 Pick swapdex if you want the smallest thing that switches Claude Code and
-Codex together, can always undo (`restore`), diagnoses itself (`doctor`),
-and structurally cannot rotate, proxy, or touch the network.
+Codex together, can always undo (`restore`), diagnoses itself (`doctor`), shows
+your remaining balance (`quota`), and structurally cannot rotate, proxy, or
+spoof the official client.
 
 ## Roadmap
 

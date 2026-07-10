@@ -2670,16 +2670,16 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
 fn sign_out_locally(paths: &Paths, tool: &str) {
     match tool {
         "claude-code" => {
-            // Claude's OWN logout clears its macOS Keychain item - it holds
-            // the Keychain ACL that an external `security` call may lack, so
-            // this is what actually signs Claude out on a Mac (found via
-            // `claude auth logout`). Quiet, best-effort.
-            let _ = Command::new("claude")
-                .args(["auth", "logout"])
-                .stdin(std::process::Stdio::null())
-                .output();
-            // Belt-and-suspenders for older Claude builds / Linux: clear the
-            // file and the Keychain item directly too.
+            // Sign out LOCALLY only - deliberately NOT `claude auth logout`.
+            // That command REVOKES the OAuth token server-side, which kills the
+            // snapshot we captured one step earlier AND every saved profile
+            // that shares this account - the "all my logins got signed out"
+            // disaster. A safe switcher must never destroy a login it exists to
+            // preserve. Clearing the local Keychain item + credential file is
+            // enough for Claude to prompt a fresh sign-in for the NEW account,
+            // and the stashed token stays valid so `restore` / switching back
+            // still works. This matches what claude-swap and Symbioose do
+            // (local `security delete`, never a server-revoking logout).
             std::fs::remove_file(paths.claude_credentials()).ok();
             crate::adapters::claude::keychain_delete();
             if let Ok(bytes) = std::fs::read(paths.claude_config_json()) {

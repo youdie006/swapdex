@@ -2660,14 +2660,18 @@ printf '%s' '{{"auth_mode":"chatgpt","tokens":{{"id_token":"h.eyJlbWFpbCI6ImJAeC
     );
 }
 
-// The add-account flow signs out via `claude auth logout` (Claude clears its
-// own macOS Keychain item - the ACL-authorized way) before the fresh login.
+// A safe switcher must NEVER run `claude auth logout` during add-account: that
+// revokes the OAuth token server-side, which would kill the snapshot swapdex
+// just captured AND every saved profile sharing the account (the "all my
+// logins got signed out" disaster). Sign-out is LOCAL only; the fresh login
+// prompt for the new account still appears, and the old snapshot stays valid.
 #[test]
-fn login_claude_signs_out_via_claude_auth_logout() {
+fn login_claude_signs_out_locally_without_revoking() {
     let root = tempfile::tempdir().unwrap();
     seed_claude(root.path(), "uuid-A", "a@x.com");
     run(root.path(), &["add", "old", "--tool", "claude"]);
-    // Fake claude records an `auth logout` call, then a login writes B.
+    // Fake claude records ANY `auth logout` call (there must be none); a
+    // login writes B.
     let script = r#"#!/bin/sh
 case "$1 $2" in "auth logout") echo logout >> "$SWAPDEX_ROOT/authcalls.txt"; exit 0 ;; esac
 case "$1" in --version) echo 1.0.0; exit 0;; esac
@@ -2692,11 +2696,23 @@ printf '%s' '{"oauthAccount":{"accountUuid":"uuid-B","emailAddress":"b@x.com","d
         "y\n",
     );
     assert_eq!(c, 0, "{o}{e}");
+    // swapdex must NEVER have invoked the server-revoking logout.
     let calls = std::fs::read_to_string(root.path().join("authcalls.txt")).unwrap_or_default();
     assert!(
-        calls.contains("logout"),
-        "sign-out went through `claude auth logout`: {calls:?}"
+        !calls.contains("logout"),
+        "swapdex must not run `claude auth logout` - it revokes server-side: {calls:?}"
     );
+    // The new account is saved AND the old profile's snapshot is preserved.
     let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
     assert!(names.contains("second"), "B saved: {names}");
+    assert!(names.contains("old"), "old profile preserved: {names}");
+    let old_cred = std::fs::read_to_string(
+        root.path()
+            .join(".local/share/swapdex/accounts/old/claude-code/credentials"),
+    )
+    .unwrap_or_default();
+    assert!(
+        old_cred.contains("\"accessToken\":\"AT\""),
+        "old account's saved token is untouched (not revoked): {old_cred}"
+    );
 }
