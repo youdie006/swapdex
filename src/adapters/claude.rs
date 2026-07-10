@@ -115,6 +115,60 @@ fn discover_keychain_service() -> Option<String> {
     best
 }
 
+/// Every Keychain service name starting with the Claude prefix (attribute dump
+/// only - no secret, no prompt). For `doctor`: reveals strays and the real
+/// item so a service-name mismatch (switch writes A, Claude reads B) is caught.
+#[cfg(target_os = "macos")]
+fn all_claude_services() -> Vec<String> {
+    let Ok(out) = std::process::Command::new(SECURITY)
+        .arg("dump-keychain")
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut v: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(svc) = parse_kc_attr(line, "svce") {
+            if svc.starts_with(KEYCHAIN_PREFIX) && !v.contains(&svc) {
+                v.push(svc);
+            }
+        }
+    }
+    v
+}
+
+/// macOS Keychain reality for `doctor`: which Claude items exist vs the one
+/// swapdex reads/writes. `None` off macOS (Claude is file-based there).
+pub(crate) struct KeychainDiag {
+    pub found: Vec<String>,
+    pub target: Option<String>,
+    pub config_dir: Option<String>,
+}
+
+pub(crate) fn keychain_diagnostic() -> Option<KeychainDiag> {
+    #[cfg(target_os = "macos")]
+    {
+        let config_dir = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                std::env::var("CLAUDE_CONFIG_DIR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            });
+        Some(KeychainDiag {
+            found: all_claude_services(),
+            target: keychain_service(),
+            config_dir,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
 fn keychain_read() -> Option<Vec<u8>> {
     let service = keychain_service()?;

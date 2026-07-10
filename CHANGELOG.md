@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.23.0] - 2026-07-10
+
+### Added
+- **`swapdex doctor` now diagnoses why a macOS switch "does not stick".** The
+  #1 durable cause of "I switched but the old Claude account is still active" is
+  a Keychain service-name mismatch: swapdex writes one item while Claude Code
+  reads another (the suffixed `Claude Code-credentials-<hash>` that appears when
+  CLAUDE_CONFIG_DIR is set). Doctor now shows Claude's real Keychain item(s),
+  the one swapdex targets, and - on a mismatch - the exact fix (launch swapdex
+  with the same CLAUDE_CONFIG_DIR you launch `claude` with). Read-only, macOS
+  only; reuses the existing keychain discovery, so nothing new touches a
+  credential. This turns a silent failure into a self-serve, actionable finding.
+
 ## [0.22.0] - 2026-07-10
 
 ### Fixed

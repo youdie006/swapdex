@@ -1981,6 +1981,45 @@ fn exec_sessionwiki_resume(id: &str) -> anyhow::Error {
 /// healthy, 9 when any problem was found (scripts can gate on it). Checks the
 /// store, every saved snapshot, both live logins, backups, and the CLIs on
 /// PATH - and never touches the network.
+/// Turn the macOS Keychain reality into a doctor verdict. `None` = nothing to
+/// report (no Claude item found: not logged in, or a locked/headless keychain).
+/// A service-name MISMATCH is the classic "I switched but the old account is
+/// still there" - swapdex writes one Keychain item, Claude reads another.
+fn keychain_verdict(found: &[String], target: Option<&str>) -> Option<(bool, String)> {
+    if found.is_empty() {
+        return None;
+    }
+    let list = found
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match target {
+        Some(t) if found.iter().any(|s| s == t) => {
+            let msg = if found.len() > 1 {
+                format!("swapdex targets the item Claude uses ('{t}'); {} present, extras are harmless strays", found.len())
+            } else {
+                format!("swapdex targets the item Claude uses ('{t}')")
+            };
+            Some((true, msg))
+        }
+        Some(t) => Some((
+            false,
+            format!(
+                "swapdex writes '{t}' but Claude's Keychain item is {list} - a switch will not \
+                 stick. Launch swapdex with the same CLAUDE_CONFIG_DIR you launch `claude` with."
+            ),
+        )),
+        None => Some((
+            false,
+            format!(
+                "Claude's Keychain item is {list} but swapdex could not resolve which to use - a \
+                 switch will not stick. Set CLAUDE_CONFIG_DIR to match your `claude` launch."
+            ),
+        )),
+    }
+}
+
 pub fn doctor(paths: &Paths) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
     // Stat BEFORE Store::open, which self-heals the mode to 0700 - otherwise
@@ -2057,6 +2096,26 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                  or log in again in the tool"
                     .into(),
             ),
+        }
+    }
+
+    // macOS: swapdex swaps Claude's login INSIDE the Keychain, so a mismatch
+    // between the item Claude reads and the one swapdex writes is the classic
+    // "I switched but the old account is still active". Read-only; no-op off
+    // macOS (Claude is file-based there).
+    if let Some(diag) = crate::adapters::claude::keychain_diagnostic() {
+        if let Some((ok, msg)) = keychain_verdict(&diag.found, diag.target.as_deref()) {
+            report("keychain", ok, msg);
+        }
+        if let Some(dir) = &diag.config_dir {
+            report(
+                "config-dir",
+                true,
+                format!(
+                    "CLAUDE_CONFIG_DIR={} (swapdex must see the same value)",
+                    dir
+                ),
+            );
         }
     }
 
@@ -3370,5 +3429,49 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keychain_verdict;
+
+    #[test]
+    fn keychain_verdict_ok_when_target_matches_a_present_item() {
+        let (ok, msg) = keychain_verdict(
+            &["Claude Code-credentials-5953ba74".to_string()],
+            Some("Claude Code-credentials-5953ba74"),
+        )
+        .unwrap();
+        assert!(ok, "targeting the present item is healthy");
+        assert!(msg.contains("targets the item Claude uses"));
+    }
+
+    #[test]
+    fn keychain_verdict_flags_service_name_mismatch() {
+        // The real item is suffixed but swapdex would write the bare name:
+        // the exact "I switched but the old account is still there" cause.
+        let (ok, msg) = keychain_verdict(
+            &["Claude Code-credentials-5953ba74".to_string()],
+            Some("Claude Code-credentials"),
+        )
+        .unwrap();
+        assert!(!ok);
+        assert!(msg.contains("will not stick"));
+        assert!(msg.contains("CLAUDE_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn keychain_verdict_flags_unresolved_target() {
+        let (ok, _msg) = keychain_verdict(&["Claude Code-credentials".to_string()], None).unwrap();
+        assert!(!ok, "an item exists but swapdex resolved no target");
+    }
+
+    #[test]
+    fn keychain_verdict_silent_when_no_item() {
+        assert!(
+            keychain_verdict(&[], Some("Claude Code-credentials")).is_none(),
+            "nothing to report if Claude has no Keychain item"
+        );
     }
 }
