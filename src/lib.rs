@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod native_sessions;
 pub mod paths;
 pub mod proc;
+pub mod quota;
 pub mod secret;
 pub mod session_link;
 pub mod store;

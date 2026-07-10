@@ -204,6 +204,14 @@ fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
     }
 }
 
+/// The LIVE Claude credential JSON (file or Keychain) - the active account's
+/// token, kept fresh by Claude Code. Used only by `swapdex quota` to read the
+/// active account's remaining quota; never leaves the machine except as that
+/// account's own bearer token to Anthropic's usage endpoint.
+pub(crate) fn live_credentials(paths: &Paths) -> Option<Vec<u8>> {
+    cred_read(paths)
+}
+
 /// True if a Claude login exists at all (file or Keychain).
 fn cred_present(paths: &Paths) -> bool {
     paths.claude_credentials().exists() || keychain_read().is_some()

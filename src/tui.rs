@@ -117,6 +117,9 @@ pub trait TuiCtx {
     fn doctor(&mut self) -> Vec<String>;
     /// Run `usage` and return its lines (consumed tokens per account).
     fn usage(&mut self) -> Vec<String>;
+    /// Run `quota` and return its lines (remaining quota per Claude account -
+    /// the one opt-in network read).
+    fn quota(&mut self) -> Vec<String>;
     /// Display names of the tools you're logged into RIGHT NOW (for the
     /// empty-state onboarding: "save these as a profile").
     fn live_tools(&mut self) -> Vec<String>;
@@ -242,6 +245,13 @@ enum Screen {
     },
     /// Read-only `usage` output (consumed tokens per account, local).
     Usage {
+        lines: Vec<String>,
+        scroll: u16,
+        pending: bool,
+    },
+    /// Read-only `quota` output (remaining quota per Claude account). `pending`
+    /// draws a "fetching..." frame first because this one hits the network.
+    Quota {
         lines: Vec<String>,
         scroll: u16,
         pending: bool,
@@ -422,6 +432,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             ("a", "add"),
                             ("n", "rename"),
                             ("u", "usage"),
+                            ("%", "quota"),
                             ("r", "restore"),
                             ("d", "delete"),
                             ("?", "health"),
@@ -638,6 +649,41 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         help,
                     );
                 }
+                Screen::Quota { lines, scroll, .. } => {
+                    let text: Vec<Line> = lines
+                        .iter()
+                        .map(|l| {
+                            let style = if l.contains("% left") {
+                                Style::default().fg(VIOLET)
+                            } else if l.contains("expired")
+                                || l.contains("rejected")
+                                || l.contains("unexpected")
+                                || l.contains("could not reach")
+                            {
+                                Style::default().fg(Color::Rgb(200, 150, 90))
+                            } else if l.starts_with(' ') || l.contains("network") || l.contains("(") {
+                                Style::default().fg(MUTED)
+                            } else {
+                                Style::default().fg(DEXGRAY)
+                            };
+                            Line::from(Span::styled(format!("  {l}"), style))
+                        })
+                        .collect();
+                    f.render_widget(
+                        Paragraph::new(text)
+                            .scroll((*scroll, 0))
+                            .block(list_block(" quota - remaining (live from Anthropic) ")),
+                        main,
+                    );
+                    f.render_widget(Paragraph::new(""), foot);
+                    f.render_widget(
+                        Paragraph::new(key_hints(&[
+                            ("\u{2191}\u{2193}", "scroll"),
+                            ("esc", "back"),
+                        ])),
+                        help,
+                    );
+                }
             }
         })?;
 
@@ -655,6 +701,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         if let Screen::Usage { pending: true, .. } = &screen {
             let lines = ctx.usage();
             screen = Screen::Usage {
+                lines,
+                scroll: 0,
+                pending: false,
+            };
+            continue;
+        }
+        if let Screen::Quota { pending: true, .. } = &screen {
+            let lines = ctx.quota();
+            screen = Screen::Quota {
                 lines,
                 scroll: 0,
                 pending: false,
@@ -836,6 +891,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             pending: true,
                         };
                     }
+                    KeyCode::Char('%') if !rows.is_empty() => {
+                        screen = Screen::Quota {
+                            lines: vec!["fetching remaining quota from Anthropic...".into()],
+                            scroll: 0,
+                            pending: true,
+                        };
+                    }
                     _ => {}
                 }
             }
@@ -1010,6 +1072,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 _ => {}
             },
             Screen::Usage { lines, scroll, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => screen = Screen::Main,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = (lines.len() as u16).saturating_sub(1);
+                    *scroll = (*scroll + 1).min(max);
+                }
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                _ => {}
+            },
+            Screen::Quota { lines, scroll, .. } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => screen = Screen::Main,
                 KeyCode::Down | KeyCode::Char('j') => {
                     let max = (lines.len() as u16).saturating_sub(1);

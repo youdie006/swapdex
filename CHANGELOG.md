@@ -4,6 +4,26 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.21.0] - 2026-07-10
+
+### Added
+- **`swapdex quota` - remaining balance per Claude account.** The one opt-in
+  network command: it reads each account's remaining 5h/7d quota (and per-model
+  weekly windows) from Anthropic's official OAuth usage endpoint, using that
+  account's *own* access token. Read-only, and it spends zero message quota. The
+  active account is always live; a saved account whose token has expired reports
+  so rather than showing a stale number - swapdex still never refreshes tokens,
+  which is the line between a switcher and a rotator. Also in `swapdex ui` under
+  the `%` key, and `swapdex quota --json` (which includes the raw response for
+  any unexpected shape).
+
+### Changed
+- The "no network, ever" claim is now stated precisely: the switcher has no HTTP
+  client in its dependency graph (still CI-asserted) and never touches the
+  network; the new opt-in `quota` command shells out to `curl` to read your own
+  balance and is the sole, hand-invoked exception. README and the network badge
+  updated to say so honestly.
+
 ## [0.20.0] - 2026-07-10
 
 ### Fixed

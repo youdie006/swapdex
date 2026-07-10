@@ -1817,6 +1817,23 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("usage failed: {e}")],
             }
         }
+        fn quota(&mut self) -> Vec<String> {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => return vec![format!("cannot find own binary: {e}")],
+            };
+            match Command::new(exe)
+                .arg("quota")
+                .stdin(std::process::Stdio::null())
+                .output()
+            {
+                Ok(out) => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    text.lines().map(|l| l.to_string()).collect()
+                }
+                Err(e) => vec![format!("quota failed: {e}")],
+            }
+        }
         fn live_tools(&mut self) -> Vec<String> {
             adapters::all()
                 .iter()
@@ -3009,6 +3026,282 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
     }
     println!("(summed locally from session transcripts; accounts via the switch timeline)");
     Ok(0)
+}
+
+/// `swapdex quota` - the one opt-in network command. Reads each Claude account's
+/// REMAINING quota from Anthropic's usage endpoint (that account's own token,
+/// read-only, zero message spend). The active account uses its live token; a
+/// saved-but-inactive account uses its snapshot token, which may have expired
+/// (swapdex does not refresh tokens - that is the switcher/rotator line). All
+/// network rules live in src/quota.rs; this function only orchestrates + renders.
+pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
+    use crate::quota::{self as q, Fetch};
+
+    struct Row {
+        label: String,
+        email: Option<String>,
+        token: Option<String>,
+        active: bool,
+    }
+
+    let live_id = adapters::claude::Claude.identity(paths).ok().flatten();
+    let live_uuid = live_id
+        .as_ref()
+        .map(|a| a.account_id.clone())
+        .filter(|s| !s.is_empty());
+    let live_token = adapters::claude::live_credentials(paths)
+        .as_deref()
+        .and_then(q::token_from_credentials);
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut matched_live = false;
+    if let Ok(store) = Store::open(paths) {
+        for p in store.list() {
+            if !p.tools.iter().any(|t| t == "claude-code") {
+                continue;
+            }
+            let snap = store.load(&p.name, "claude-code").ok().flatten();
+            let (mut email, mut uuid, mut token) = (None, None, None);
+            if let Some(s) = &snap {
+                if let Some(o) = s
+                    .part("oauth_account")
+                    .and_then(|o| serde_json::from_slice::<Value>(o.expose()).ok())
+                {
+                    email = o["emailAddress"].as_str().map(str::to_string);
+                    uuid = o["accountUuid"].as_str().map(str::to_string);
+                }
+                token = s
+                    .part("credentials")
+                    .and_then(|c| q::token_from_credentials(c.expose()));
+            }
+            let active = live_uuid.is_some() && uuid == live_uuid;
+            matched_live |= active;
+            rows.push(Row {
+                label: if active {
+                    format!("{} (active)", p.name)
+                } else {
+                    p.name.clone()
+                },
+                email: if active {
+                    live_id.as_ref().and_then(|a| a.email.clone()).or(email)
+                } else {
+                    email
+                },
+                token: if active { live_token.clone() } else { token },
+                active,
+            });
+        }
+    }
+    // A live login that is not saved as any profile still deserves a line.
+    if !matched_live && live_token.is_some() {
+        rows.insert(
+            0,
+            Row {
+                label: "(active login, not saved)".into(),
+                email: live_id.as_ref().and_then(|a| a.email.clone()),
+                token: live_token.clone(),
+                active: true,
+            },
+        );
+    }
+    rows.sort_by_key(|r| !r.active);
+
+    if rows.is_empty() {
+        if json {
+            println!("{}", serde_json::json!({"accounts": [], "offline": null}));
+        } else {
+            println!(
+                "No Claude accounts found. Log in with `claude`, or `swapdex add` to save one."
+            );
+        }
+        return Ok(0);
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // Fetch each account. If the first attempt that actually leaves the machine
+    // fails at the transport layer, we are almost certainly offline - stop
+    // rather than fire every account's token at an unreachable endpoint.
+    let mut results: Vec<(usize, Fetch)> = Vec::new();
+    let mut offline: Option<String> = None;
+    for (i, r) in rows.iter().enumerate() {
+        match &r.token {
+            None => results.push((i, Fetch::Offline("no saved token".into()))),
+            Some(t) => {
+                let f = q::fetch(t);
+                let reached = results.iter().any(|(_, x)| !matches!(x, Fetch::Offline(_)));
+                if !reached {
+                    if let Fetch::Offline(msg) = &f {
+                        offline = Some(msg.clone());
+                        break;
+                    }
+                }
+                results.push((i, f));
+            }
+        }
+    }
+
+    if json {
+        let accounts: Vec<Value> = results
+            .iter()
+            .map(|(i, f)| {
+                quota_json(
+                    &rows[*i].label,
+                    rows[*i].email.as_deref(),
+                    rows[*i].active,
+                    f,
+                )
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({"accounts": accounts, "offline": offline})
+        );
+        return Ok(0);
+    }
+
+    if let Some(msg) = offline {
+        println!("swapdex quota: could not reach api.anthropic.com - {msg}");
+        println!(
+            "(quota is the only swapdex command that uses the network; everything else is local)"
+        );
+        return Ok(0);
+    }
+
+    println!("quota - remaining on your Claude accounts");
+    println!("live from Anthropic's usage endpoint; opt-in network, spends 0 message quota.\n");
+    for (i, f) in &results {
+        let r = &rows[*i];
+        match &r.email {
+            Some(e) => println!("{}   {}", r.label, e),
+            None => println!("{}", r.label),
+        }
+        match f {
+            Fetch::Ok(qd) => {
+                let mut any = false;
+                if let Some(w) = qd.five_hour {
+                    println!("  {}", win_line("5h", &w, now));
+                    any = true;
+                }
+                if let Some(w) = qd.seven_day {
+                    println!("  {}", win_line("7d", &w, now));
+                    any = true;
+                }
+                for (label, w) in &qd.scoped {
+                    println!("  {}", win_line(label, w, now));
+                    any = true;
+                }
+                if !any {
+                    println!(
+                        "  (endpoint reported no windows - `swapdex quota --json` to inspect)"
+                    );
+                }
+            }
+            Fetch::Unauthorized => {
+                if r.active {
+                    println!("  active token rejected - run `claude` once to refresh, then retry");
+                } else {
+                    println!(
+                        "  snapshot token expired - `swapdex use {}` to refresh, then `swapdex quota`",
+                        r.label
+                    );
+                }
+            }
+            Fetch::Unexpected(code, _) => {
+                println!(
+                    "  unexpected response (HTTP {code}) - run `swapdex quota --json` to see it"
+                );
+            }
+            Fetch::Offline(msg) => println!("  {msg}"),
+        }
+        println!();
+    }
+    println!("this is the only swapdex command that touches the network.");
+    Ok(0)
+}
+
+/// Render one window as a remaining-percent bar with its reset countdown.
+fn win_line(label: &str, w: &crate::quota::Window, now: i64) -> String {
+    let rem = w.remaining_pct();
+    let filled = ((rem / 100.0) * 10.0).round().clamp(0.0, 10.0) as usize;
+    let bar: String = "\u{2593}".repeat(filled) + &"\u{2591}".repeat(10 - filled);
+    let reset = match w.resets_at {
+        Some(ts) => format!("   resets in {}", human_until(now, ts)),
+        None => String::new(),
+    };
+    format!("{label:<9} {bar}  {rem:>3.0}% left{reset}")
+}
+
+/// A coarse "2h14m" / "3d 4h" countdown to `ts` from `now` (unix seconds).
+fn human_until(now: i64, ts: i64) -> String {
+    let d = ts - now;
+    if d <= 0 {
+        return "now".into();
+    }
+    let (days, hrs, mins) = (d / 86400, (d % 86400) / 3600, (d % 3600) / 60);
+    if days > 0 {
+        format!("{days}d {hrs}h")
+    } else if hrs > 0 {
+        format!("{hrs}h {mins}m")
+    } else {
+        format!("{mins}m")
+    }
+}
+
+/// One account's quota as JSON (for `swapdex quota --json`). An unexpected shape
+/// carries the raw body so the exact endpoint schema is never lost.
+fn quota_json(label: &str, email: Option<&str>, active: bool, f: &crate::quota::Fetch) -> Value {
+    use crate::quota::{Fetch, Window};
+    fn win(w: &Window) -> Value {
+        serde_json::json!({
+            "used_pct": (w.used_pct * 10.0).round() / 10.0,
+            "remaining_pct": (w.remaining_pct() * 10.0).round() / 10.0,
+            "resets_at": w.resets_at,
+        })
+    }
+    let mut o = serde_json::json!({"name": label, "email": email, "active": active});
+    let m = o.as_object_mut().expect("json object");
+    match f {
+        Fetch::Ok(q) => {
+            m.insert("status".into(), Value::String("ok".into()));
+            m.insert(
+                "five_hour".into(),
+                q.five_hour.as_ref().map(win).unwrap_or(Value::Null),
+            );
+            m.insert(
+                "seven_day".into(),
+                q.seven_day.as_ref().map(win).unwrap_or(Value::Null),
+            );
+            let scoped: Vec<Value> = q
+                .scoped
+                .iter()
+                .map(|(n, w)| {
+                    let mut wj = win(w);
+                    wj.as_object_mut()
+                        .unwrap()
+                        .insert("label".into(), Value::String(n.clone()));
+                    wj
+                })
+                .collect();
+            m.insert("scoped".into(), Value::Array(scoped));
+        }
+        Fetch::Unauthorized => {
+            m.insert("status".into(), Value::String("expired".into()));
+        }
+        Fetch::Unexpected(code, body) => {
+            m.insert("status".into(), Value::String("unexpected".into()));
+            m.insert("http".into(), Value::from(*code));
+            m.insert("raw".into(), Value::String(body.clone()));
+        }
+        Fetch::Offline(msg) => {
+            m.insert("status".into(), Value::String("offline".into()));
+            m.insert("detail".into(), Value::String(msg.clone()));
+        }
+    }
+    o
 }
 
 pub fn sessions(paths: &Paths, json: bool) -> Result<i32> {

@@ -100,6 +100,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Remaining Claude quota per account (opt-in live read from Anthropic)
+    Quota {
+        /// Emit JSON (includes the raw response for any unexpected shape)
+        #[arg(long)]
+        json: bool,
+    },
     /// Run as a read-only MCP server over stdio
     Mcp,
     /// Print a shell completion script (bash, zsh, fish, ...)
@@ -208,6 +214,7 @@ fn main() {
         Cmd::Ui => commands::ui(&paths),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
+        Cmd::Quota { json } => commands::quota(&paths, *json),
         Cmd::Mcp => {
             swapdex::mcp::serve();
             return;
