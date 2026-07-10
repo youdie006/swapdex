@@ -189,7 +189,7 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
         let _ = tx.send(out);
     });
     let out = rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(std::time::Duration::from_secs(5))
         .ok()?
         .ok()?;
     if !out.status.success() {

@@ -104,7 +104,9 @@ pub trait TuiCtx {
     fn restore(&mut self) -> String;
     fn delete(&mut self, name: &str) -> String;
     /// (label, session entries) for the just-switched profile.
-    fn sessions(&mut self, name: &str) -> (String, Vec<SessionEntry>);
+    /// (label, session entries, the profile's tools) for the just-switched
+    /// profile. The tools drive which "open a NEW ..." entries to show.
+    fn sessions(&mut self, name: &str) -> (String, Vec<SessionEntry>, Vec<&'static str>);
     /// Rename a profile (subprocess). Returns (ok, message).
     fn rename(&mut self, old: &str, new: &str) -> (bool, String);
     /// Save the accounts you're currently logged into as a new profile
@@ -113,6 +115,8 @@ pub trait TuiCtx {
     fn save_current(&mut self, name: &str) -> (bool, String);
     /// Run `doctor` and return its output lines for a read-only panel.
     fn doctor(&mut self) -> Vec<String>;
+    /// Run `usage` and return its lines (consumed tokens per account).
+    fn usage(&mut self) -> Vec<String>;
     /// Display names of the tools you're logged into RIGHT NOW (for the
     /// empty-state onboarding: "save these as a profile").
     fn live_tools(&mut self) -> Vec<String>;
@@ -139,6 +143,16 @@ const NEW_CONV: [(&str, &str); 4] = [
     ("open a NEW Gemini conversation", "gemini"),
     ("open a NEW Antigravity conversation", "antigravity"),
 ];
+
+/// The "open a NEW <tool> conversation" entries for the tools a profile
+/// actually has - so a Claude-only account doesn't offer Codex/Gemini/etc.
+fn new_conv_for(tools: &[&str]) -> Vec<(&'static str, &'static str)> {
+    NEW_CONV
+        .iter()
+        .filter(|(_, t)| tools.contains(t))
+        .map(|&(l, t)| (l, t))
+        .collect()
+}
 
 /// What a text-input screen is collecting.
 enum InputKind {
@@ -201,6 +215,7 @@ enum Screen {
     Open {
         label: String,
         entries: Vec<SessionEntry>,
+        new_conv: Vec<(&'static str, &'static str)>,
     },
     /// A folder BROWSER (no typing): navigate into subdirs, `..` to go up,
     /// and pick "open here" - conversations are per-directory.
@@ -209,7 +224,7 @@ enum Screen {
         cwd: PathBuf,
         rows: Vec<FolderRow>,
         /// The Open screen to return to on Esc (one step back, not two).
-        back: (String, Vec<SessionEntry>),
+        back: (String, Vec<SessionEntry>, Vec<(&'static str, &'static str)>),
     },
     ToolPick,
     /// A single-line text prompt (rename / save-current / new-account name).
@@ -221,6 +236,12 @@ enum Screen {
     /// has not run yet; we draw a "checking..." frame first so the UI never
     /// looks frozen.
     Doctor {
+        lines: Vec<String>,
+        scroll: u16,
+        pending: bool,
+    },
+    /// Read-only `usage` output (consumed tokens per account, local).
+    Usage {
         lines: Vec<String>,
         scroll: u16,
         pending: bool,
@@ -400,6 +421,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             ("o", "open"),
                             ("a", "add"),
                             ("n", "rename"),
+                            ("u", "usage"),
                             ("r", "restore"),
                             ("d", "delete"),
                             ("?", "health"),
@@ -408,14 +430,14 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     };
                     f.render_widget(Paragraph::new(key_hints(hints)), help);
                 }
-                Screen::Open { label, entries } => {
+                Screen::Open { label, entries, new_conv } => {
                     let mut items: Vec<ListItem> = entries
                         .iter()
                         .map(|e| ListItem::new(Line::from(e.line.clone())))
                         .collect();
-                    for (label, _) in NEW_CONV {
+                    for (nlabel, _) in new_conv {
                         items.push(ListItem::new(Line::from(Span::styled(
-                            label,
+                            *nlabel,
                             Style::default().fg(VIOLET),
                         ))));
                     }
@@ -587,6 +609,35 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         help,
                     );
                 }
+                Screen::Usage { lines, scroll, .. } => {
+                    let text: Vec<Line> = lines
+                        .iter()
+                        .map(|l| {
+                            let style = if l.trim_start().starts_with('@') {
+                                Style::default().fg(VIOLET)
+                            } else if l.contains("note:") || l.contains("(") {
+                                Style::default().fg(MUTED)
+                            } else {
+                                Style::default().fg(DEXGRAY)
+                            };
+                            Line::from(Span::styled(format!("  {l}"), style))
+                        })
+                        .collect();
+                    f.render_widget(
+                        Paragraph::new(text)
+                            .scroll((*scroll, 0))
+                            .block(list_block(" usage - tokens used (local, this machine) ")),
+                        main,
+                    );
+                    f.render_widget(Paragraph::new(""), foot);
+                    f.render_widget(
+                        Paragraph::new(key_hints(&[
+                            ("\u{2191}\u{2193}", "scroll"),
+                            ("esc", "back"),
+                        ])),
+                        help,
+                    );
+                }
             }
         })?;
 
@@ -595,6 +646,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         if let Screen::Doctor { pending: true, .. } = &screen {
             let lines = ctx.doctor();
             screen = Screen::Doctor {
+                lines,
+                scroll: 0,
+                pending: false,
+            };
+            continue;
+        }
+        if let Screen::Usage { pending: true, .. } = &screen {
+            let lines = ctx.usage();
+            screen = Screen::Usage {
                 lines,
                 scroll: 0,
                 pending: false,
@@ -610,7 +670,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind as MK};
                 let list_len = match &screen {
                     Screen::Main => rows.len(),
-                    Screen::Open { entries, .. } => entries.len() + NEW_CONV.len(),
+                    Screen::Open {
+                        entries, new_conv, ..
+                    } => entries.len() + new_conv.len(),
                     Screen::ToolPick => 4,
                     Screen::Folder { rows: frows, .. } => frows.len(),
                     _ => 0,
@@ -691,18 +753,46 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             status = msg;
                             rows = ctx.rows();
                             if ok {
-                                let (label, entries) = ctx.sessions(&name);
+                                let (label, entries, tools) = ctx.sessions(&name);
+                                let new_conv = new_conv_for(&tools);
                                 open_state.select(Some(0));
-                                screen = Screen::Open { label, entries };
+                                // A single-tool profile: skip the menu entirely
+                                // when there are no sessions to pick - go
+                                // straight to that tool's folder browser.
+                                if entries.is_empty() && new_conv.len() == 1 {
+                                    let tool = new_conv[0].1;
+                                    let cwd = std::env::current_dir()
+                                        .ok()
+                                        .or_else(dirs::home_dir)
+                                        .unwrap_or_else(|| PathBuf::from("/"));
+                                    let frows = folder_rows(&cwd);
+                                    screen = Screen::Folder {
+                                        tool,
+                                        cwd,
+                                        rows: frows,
+                                        back: (label, entries, new_conv),
+                                    };
+                                } else {
+                                    screen = Screen::Open {
+                                        label,
+                                        entries,
+                                        new_conv,
+                                    };
+                                }
                             }
                         }
                     }
                     KeyCode::Char('o') if !rows.is_empty() => {
                         if let Some(i) = state.selected() {
                             let name = rows[i].name.clone();
-                            let (label, entries) = ctx.sessions(&name);
+                            let (label, entries, tools) = ctx.sessions(&name);
+                            let new_conv = new_conv_for(&tools);
                             open_state.select(Some(0));
-                            screen = Screen::Open { label, entries };
+                            screen = Screen::Open {
+                                label,
+                                entries,
+                                new_conv,
+                            };
                         }
                     }
                     KeyCode::Char('a') => {
@@ -739,16 +829,25 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             pending: true,
                         };
                     }
+                    KeyCode::Char('u') if !rows.is_empty() => {
+                        screen = Screen::Usage {
+                            lines: vec!["computing usage...".into()],
+                            scroll: 0,
+                            pending: true,
+                        };
+                    }
                     _ => {}
                 }
             }
-            Screen::Open { entries, .. } => match key.code {
+            Screen::Open {
+                entries, new_conv, ..
+            } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     rows = ctx.rows();
                     screen = Screen::Main;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let max = entries.len() + NEW_CONV.len() - 1;
+                    let max = entries.len() + new_conv.len() - 1;
                     let i = open_state.selected().unwrap_or(0);
                     open_state.select(Some((i + 1).min(max)));
                 }
@@ -761,24 +860,30 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     if i < entries.len() {
                         break 'ui Outcome::OpenSession(i);
                     }
-                    let tool = NEW_CONV[i - entries.len()].1;
+                    let Some(&(_, tool)) = new_conv.get(i - entries.len()) else {
+                        continue;
+                    };
                     let cwd = std::env::current_dir()
                         .ok()
                         .or_else(dirs::home_dir)
                         .unwrap_or_else(|| PathBuf::from("/"));
                     let frows = folder_rows(&cwd);
                     open_state.select(Some(0));
-                    if let Screen::Open { label, entries } = std::mem::replace(
+                    if let Screen::Open {
+                        label,
+                        entries,
+                        new_conv: nc,
+                    } = std::mem::replace(
                         &mut screen,
                         Screen::Folder {
                             tool,
                             cwd,
                             rows: frows,
-                            back: (String::new(), Vec::new()),
+                            back: (String::new(), Vec::new(), Vec::new()),
                         },
                     ) {
                         if let Screen::Folder { back, .. } = &mut screen {
-                            *back = (label, entries);
+                            *back = (label, entries, nc);
                         }
                     }
                 }
@@ -792,8 +897,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             } => match key.code {
                 KeyCode::Esc => {
                     // One step back to the Open menu, not two.
-                    let (label, entries) = std::mem::take(back);
-                    screen = Screen::Open { label, entries };
+                    let (label, entries, new_conv) = std::mem::take(back);
+                    screen = Screen::Open {
+                        label,
+                        entries,
+                        new_conv,
+                    };
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let i = open_state.selected().unwrap_or(0);
@@ -900,6 +1009,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
                 _ => {}
             },
+            Screen::Usage { lines, scroll, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => screen = Screen::Main,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = (lines.len() as u16).saturating_sub(1);
+                    *scroll = (*scroll + 1).min(max);
+                }
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                _ => {}
+            },
         }
     };
     let _ = ratatui::crossterm::execute!(
@@ -913,6 +1031,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_conv_only_offers_the_profiles_tools() {
+        // A Claude-only profile offers just Claude, not all four.
+        let one = super::new_conv_for(&["claude-code"]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].1, "claude-code");
+        // A two-tool profile offers exactly those two, in canonical order.
+        let two = super::new_conv_for(&["gemini", "codex"]);
+        let tools: Vec<&str> = two.iter().map(|(_, t)| *t).collect();
+        assert_eq!(tools, vec!["codex", "gemini"]);
+    }
 
     #[test]
     fn folder_rows_lead_with_open_here_and_hide_dotfiles() {

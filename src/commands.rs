@@ -958,8 +958,8 @@ fn age_line(stamp_nanos: u128) -> String {
 const STALE_DAYS: i64 = 30;
 
 /// Identity extracted from a STORED snapshot (no live read, no secrets):
-/// (email, tier, marker). marker is "expired" (Claude access token past expiry)
-/// or "stale" (Codex login not refreshed in >STALE_DAYS - its refresh token may
+/// (email, tier, marker). marker is "stale" (a login snapshot older than
+/// STALE_DAYS whose refresh token may
 /// have rotated, so re-run `add --update`), else None.
 fn profile_detail(
     store: &Store,
@@ -984,10 +984,16 @@ fn profile_detail(
             ) else {
                 return Some(unreadable);
             };
-            let marker = match creds["claudeAiOauth"]["expiresAt"].as_i64() {
-                Some(ms) if ms < now_ms() => Some("expired"),
-                _ => None,
-            };
+            // Claude access tokens live ~1h and Claude Code refreshes them
+            // silently with the refresh token, so "expired" the moment the
+            // access token lapses is pure noise (this was the constant
+            // "expired" spam). Only flag a snapshot whose access token is
+            // ANCIENT (>30 days) - by then the refresh token itself may be
+            // revoked. Same rule as Codex / Gemini / Antigravity.
+            let marker = creds["claudeAiOauth"]["expiresAt"]
+                .as_i64()
+                .filter(|ms| now_ms() - ms > STALE_DAYS * 86400 * 1000)
+                .map(|_| "stale");
             Some((
                 oauth["emailAddress"].as_str().map(String::from),
                 creds["claudeAiOauth"]["subscriptionType"]
@@ -1496,15 +1502,20 @@ pub(crate) fn recent_menu_sessions(
                 format!("recent sessions on '{name}' (sessionwiki):"),
             );
         }
-        if first_time {
-            if let Some(any) = crate::session_link::recent_sessions_any(n) {
-                if !any.is_empty() {
-                    return (
-                        any.into_iter().map(MenuSession::Wiki).collect(),
-                        "recent sessions (any account - attribution starts with your first switch):"
-                            .to_string(),
-                    );
-                }
+        // No sessions attributed to this account: still show recent ones so
+        // the menu is useful (you can resume any). Attribution is best-effort;
+        // an empty menu is worse than a broad one.
+        if let Some(any) = crate::session_link::recent_sessions_any(n) {
+            if !any.is_empty() {
+                let label = if first_time {
+                    "recent sessions (any account - attribution starts with your first switch):"
+                } else {
+                    "recent sessions (any account):"
+                };
+                return (
+                    any.into_iter().map(MenuSession::Wiki).collect(),
+                    label.to_string(),
+                );
             }
         }
         return (Vec::new(), String::new());
@@ -1532,15 +1543,14 @@ pub(crate) fn recent_menu_sessions(
             format!("recent sessions on '{name}':"),
         );
     }
-    if first_time {
-        let any: Vec<MenuSession> = all.into_iter().take(n).map(MenuSession::Native).collect();
-        if !any.is_empty() {
-            return (
-                any,
-                "recent sessions (any account - attribution starts with your first switch):"
-                    .to_string(),
-            );
-        }
+    let any: Vec<MenuSession> = all.into_iter().take(n).map(MenuSession::Native).collect();
+    if !any.is_empty() {
+        let label = if first_time {
+            "recent sessions (any account - attribution starts with your first switch):"
+        } else {
+            "recent sessions (any account):"
+        };
+        return (any, label.to_string());
     }
     (Vec::new(), String::new())
 }
@@ -1784,6 +1794,29 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("doctor failed: {e}")],
             }
         }
+        fn usage(&mut self) -> Vec<String> {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => return vec![format!("cannot find own binary: {e}")],
+            };
+            match Command::new(exe)
+                .arg("usage")
+                .stdin(std::process::Stdio::null())
+                .output()
+            {
+                Ok(out) => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+                    lines.push(String::new());
+                    lines.push(
+                        "swapdex is local: this is tokens USED here, not remaining quota."
+                            .to_string(),
+                    );
+                    lines
+                }
+                Err(e) => vec![format!("usage failed: {e}")],
+            }
+        }
         fn live_tools(&mut self) -> Vec<String> {
             adapters::all()
                 .iter()
@@ -1791,9 +1824,24 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .map(|a| pretty_tool(a.name()).to_string())
                 .collect()
         }
-        fn sessions(&mut self, name: &str) -> (String, Vec<crate::tui::SessionEntry>) {
+        fn sessions(
+            &mut self,
+            name: &str,
+        ) -> (String, Vec<crate::tui::SessionEntry>, Vec<&'static str>) {
             let first_time = self.pre_switch_first;
             let (sessions, label) = recent_menu_sessions(self.paths, name, first_time, 5);
+            // The profile's saved tools drive which "open a NEW <tool>" entries
+            // the menu offers (a Claude-only account shouldn't offer Codex).
+            let tools: Vec<&'static str> = Store::open(self.paths)
+                .ok()
+                .and_then(|st| st.list().into_iter().find(|p| p.name == name))
+                .map(|p| {
+                    ["claude-code", "codex", "gemini", "antigravity"]
+                        .into_iter()
+                        .filter(|t| p.tools.iter().any(|x| x == t))
+                        .collect()
+                })
+                .unwrap_or_default();
             let entries = sessions
                 .iter()
                 .map(|s| {
@@ -1817,7 +1865,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             } else {
                 label.trim_end_matches(':').to_string()
             };
-            (label, entries)
+            (label, entries, tools)
         }
     }
 
@@ -3020,9 +3068,12 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
     }
     if let Some(cred) = target.part("credentials") {
         if let Ok(v) = serde_json::from_slice::<Value>(cred.expose()) {
+            // Only warn for an ANCIENT snapshot (>30d) whose refresh token may
+            // be dead - a normally-expired access token (~1h) is refreshed
+            // silently, so warning every switch was noise.
             if let Some(ms) = v["claudeAiOauth"]["expiresAt"].as_i64() {
-                if ms < now_ms() {
-                    eprintln!("swapdex: note - this saved login's access token expired; the tool may re-prompt for login");
+                if now_ms() - ms > STALE_DAYS * 86400 * 1000 {
+                    eprintln!("swapdex: note - this saved login is old; Claude may re-prompt for login if its refresh token has expired");
                 }
             }
         }
