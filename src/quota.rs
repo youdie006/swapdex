@@ -175,10 +175,18 @@ pub fn classify(code: u32, body: String) -> Fetch {
     }
 }
 
+/// Whether a token can be embedded in the curl config at all: quotes,
+/// backslashes, and newlines could break out of the quoted config value, so
+/// they fail closed. Callers use this to distinguish "this snapshot's token is
+/// unusable" (a per-account problem) from "the network is down" (global).
+pub fn token_usable(token: &str) -> bool {
+    !token.is_empty() && !token.contains(['"', '\n', '\r', '\\'])
+}
+
 /// The live, opt-in network call. curl reads its config (including the bearer
 /// token) from stdin so the token never appears in argv.
 pub fn fetch(token: &str) -> Fetch {
-    if token.is_empty() || token.contains(['"', '\n', '\r', '\\']) {
+    if !token_usable(token) {
         return Fetch::Offline("no usable access token for this account".into());
     }
     let cfg = format!(
@@ -199,10 +207,27 @@ pub fn fetch(token: &str) -> Fetch {
     }
 }
 
+/// The curl binary: the system one when it exists (macOS/most Linux ship
+/// /usr/bin/curl), so a PATH-shadowing wrapper never receives the token -
+/// the same discipline as the pinned /usr/bin/security. PATH is the fallback
+/// for distros that install curl elsewhere. SWAPDEX_CURL is a test-fixture
+/// hook (like SWAPDEX_SESSIONWIKI_JSON): the E2E tests point it at a fake
+/// curl to exercise this path without the network.
+fn curl_bin() -> String {
+    if let Some(t) = std::env::var_os("SWAPDEX_CURL") {
+        return t.to_string_lossy().into_owned();
+    }
+    if std::path::Path::new("/usr/bin/curl").exists() {
+        "/usr/bin/curl".into()
+    } else {
+        "curl".into()
+    }
+}
+
 /// Run `curl --config -`, feeding the config on stdin. Returns (body, status).
 fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
     use std::io::Write;
-    let mut child = std::process::Command::new("curl")
+    let mut child = std::process::Command::new(curl_bin())
         .arg("--config")
         .arg("-")
         .stdin(std::process::Stdio::piped())
@@ -217,8 +242,10 @@ fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
         .write_all(cfg.as_bytes())
         .map_err(|e| e.to_string())?;
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    // curl exits non-zero on transport failure; with no body that is offline.
-    if out.stdout.is_empty() {
+    // curl exits non-zero on transport failure (it exits 0 on HTTP error
+    // statuses - no --fail here). A partial body from an aborted transfer
+    // must not be parsed as a response.
+    if !out.status.success() || out.stdout.is_empty() {
         let err = String::from_utf8_lossy(&out.stderr);
         let msg = err.trim();
         return Err(if msg.is_empty() {

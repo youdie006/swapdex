@@ -4,6 +4,56 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.23.1] - 2026-07-12
+
+Hardening release from an adversarial review of 0.21.0-0.23.0 (one reviewer
+agent + a manual pass; 11 findings, the ones that matter fixed here).
+
+### Fixed
+- **macOS: SWAPDEX_ROOT now really isolates.** SWAPDEX_ROOT redirected every
+  FILE path into a sandbox but Keychain writes still hit the machine-global
+  login Keychain - a sandboxed test switch on a Mac could overwrite the REAL
+  Claude token. All Keychain operations are now disabled under SWAPDEX_ROOT
+  (file-only, like Linux).
+- **Keychain resolution: exact match first.** When swapdex sees the same
+  CLAUDE_CONFIG_DIR that `claude` launches with, the computed suffixed service
+  name is used directly; the dump-keychain scan (which can pick a stale sibling
+  when several suffixed items linger) is now only the fallback.
+- **`doctor` keychain check has real teeth now.** 0.23.0's mismatch check could
+  effectively never fire (the switch path resolves its target from the same
+  scan). It now flags the two detectable causes: several suffixed items with no
+  CLAUDE_CONFIG_DIR to break the tie (the scan can only guess), and the
+  env-computed name disagreeing with the resolved target - each with the exact
+  cleanup command.
+- **Add-account sign-out verification is stricter.** It now also requires the
+  credential to actually be GONE (not just the identity changed), so a residual
+  second Keychain item can never lead to a profile pairing the OLD token with
+  the NEW account's identity. Aborts and restores instead.
+- **`quota`: a corrupt saved token no longer masquerades as "network down".**
+  It is reported per-account ("saved token unusable") and the other accounts
+  are still fetched; previously it could abort the whole run with a false
+  "could not reach api.anthropic.com".
+- **`quota --json` names are clean.** `name` no longer carries the " (active)"
+  display suffix (the `active` field already says so) - safe to feed back into
+  `swapdex use`.
+- **curl is pinned** to /usr/bin/curl when present (PATH fallback otherwise) -
+  the same PATH-shadowing discipline as /usr/bin/security - and a non-zero curl
+  exit is now always a transport error (a partial body can not be parsed as a
+  response).
+- TUI: mouse wheel scrolls the doctor/usage/quota panels; `%` (quota) works
+  before any profile is saved; a failed quota shows its error in the panel
+  instead of rendering blank; a Down-key on an empty open-menu no longer
+  underflows.
+- README: the "macOS Claude is issue #1" install note was stale (Keychain
+  switching shipped in 0.17-0.19); countdown format examples now match the
+  actual output ("2h 14m").
+
+### Added
+- E2E tests for `quota` against a fake curl (SWAPDEX_CURL fixture hook, like
+  SWAPDEX_SESSIONWIKI_JSON): clean JSON names, expired snapshots, and the
+  no-false-offline behavior are now regression-locked. Unit tests for the
+  countdown/bar renderers and the new keychain verdicts.
+
 ## [0.23.0] - 2026-07-10
 
 ### Added

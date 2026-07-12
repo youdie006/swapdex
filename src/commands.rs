@@ -1828,7 +1828,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .output()
             {
                 Ok(out) => {
-                    let text = String::from_utf8_lossy(&out.stdout);
+                    // stderr too (like doctor): a failed quota must show its
+                    // error in the panel, not render blank.
+                    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                    text.push_str(&String::from_utf8_lossy(&out.stderr));
                     text.lines().map(|l| l.to_string()).collect()
                 }
                 Err(e) => vec![format!("quota failed: {e}")],
@@ -1977,15 +1980,22 @@ fn exec_sessionwiki_resume(id: &str) -> anyhow::Error {
     anyhow::anyhow!("could not launch `sessionwiki resume {id}`: {err}")
 }
 
-/// `doctor` - local-only health check with a remedy per finding. Exit 0 when
-/// healthy, 9 when any problem was found (scripts can gate on it). Checks the
-/// store, every saved snapshot, both live logins, backups, and the CLIs on
-/// PATH - and never touches the network.
 /// Turn the macOS Keychain reality into a doctor verdict. `None` = nothing to
 /// report (no Claude item found: not logged in, or a locked/headless keychain).
-/// A service-name MISMATCH is the classic "I switched but the old account is
-/// still there" - swapdex writes one Keychain item, Claude reads another.
-fn keychain_verdict(found: &[String], target: Option<&str>) -> Option<(bool, String)> {
+/// `computed` is the service name derived from the env swapdex sees.
+///
+/// The failure this catches is "I switched but the old account is still
+/// there": swapdex writes one Keychain item while Claude reads another. The
+/// switch path resolves its target by scanning the same keychain, so a hard
+/// target-not-present mismatch is rare; the DETECTABLE causes are (a) several
+/// suffixed items lingering from old config dirs - a scan can only guess
+/// between them - and (b) the env-computed name disagreeing with the target.
+fn keychain_verdict(
+    found: &[String],
+    target: Option<&str>,
+    computed: Option<&str>,
+) -> Option<(bool, String)> {
+    const BARE: &str = "Claude Code-credentials";
     if found.is_empty() {
         return None;
     }
@@ -1994,32 +2004,67 @@ fn keychain_verdict(found: &[String], target: Option<&str>) -> Option<(bool, Str
         .map(|s| format!("'{s}'"))
         .collect::<Vec<_>>()
         .join(", ");
-    match target {
-        Some(t) if found.iter().any(|s| s == t) => {
-            let msg = if found.len() > 1 {
-                format!("swapdex targets the item Claude uses ('{t}'); {} present, extras are harmless strays", found.len())
-            } else {
-                format!("swapdex targets the item Claude uses ('{t}')")
-            };
-            Some((true, msg))
-        }
-        Some(t) => Some((
-            false,
-            format!(
-                "swapdex writes '{t}' but Claude's Keychain item is {list} - a switch will not \
-                 stick. Launch swapdex with the same CLAUDE_CONFIG_DIR you launch `claude` with."
-            ),
-        )),
-        None => Some((
+    let Some(t) = target else {
+        return Some((
             false,
             format!(
                 "Claude's Keychain item is {list} but swapdex could not resolve which to use - a \
                  switch will not stick. Set CLAUDE_CONFIG_DIR to match your `claude` launch."
             ),
-        )),
+        ));
+    };
+    if !found.iter().any(|s| s == t) {
+        return Some((
+            false,
+            format!(
+                "swapdex writes '{t}' but Claude's Keychain item is {list} - a switch will not \
+                 stick. Launch swapdex with the same CLAUDE_CONFIG_DIR you launch `claude` with."
+            ),
+        ));
     }
+    // Target present. An env disagreement beats everything: the env-computed
+    // suffixed name is Claude's actual item whenever `claude` sees that env.
+    if let Some(c) = computed {
+        if c != BARE && c != t && found.iter().any(|s| s == c) {
+            return Some((
+                false,
+                format!(
+                    "swapdex resolved '{t}' but your CLAUDE_CONFIG_DIR computes '{c}' (also \
+                     present) - switches may write the wrong item. Remove the stale one: \
+                     security delete-generic-password -s '{t}'"
+                ),
+            ));
+        }
+    }
+    // Several suffixed items and no env to break the tie: the scan can only
+    // guess, and guessing wrong is exactly the switch-not-sticking failure.
+    let suffixed = found.iter().filter(|s| s.as_str() != BARE).count();
+    if suffixed > 1 && computed.is_none() {
+        return Some((
+            false,
+            format!(
+                "{suffixed} suffixed Claude items exist ({list}) and CLAUDE_CONFIG_DIR is not \
+                 set, so swapdex picked '{t}' by scan order - if switches don't stick, delete \
+                 the stale items or export CLAUDE_CONFIG_DIR to match your `claude` launch."
+            ),
+        ));
+    }
+    let msg = if found.len() > 1 {
+        format!(
+            "swapdex targets the item Claude uses ('{t}'); {} other Claude item(s) are stale \
+             strays - switches still hit the right one",
+            found.len() - 1
+        )
+    } else {
+        format!("swapdex targets the item Claude uses ('{t}')")
+    };
+    Some((true, msg))
 }
 
+/// `doctor` - local-only health check with a remedy per finding. Exit 0 when
+/// healthy, 9 when any problem was found (scripts can gate on it). Checks the
+/// store, every saved snapshot, both live logins, backups, and the CLIs on
+/// PATH - and never touches the network.
 pub fn doctor(paths: &Paths) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
     // Stat BEFORE Store::open, which self-heals the mode to 0700 - otherwise
@@ -2104,7 +2149,11 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     // "I switched but the old account is still active". Read-only; no-op off
     // macOS (Claude is file-based there).
     if let Some(diag) = crate::adapters::claude::keychain_diagnostic() {
-        if let Some((ok, msg)) = keychain_verdict(&diag.found, diag.target.as_deref()) {
+        if let Some((ok, msg)) = keychain_verdict(
+            &diag.found,
+            diag.target.as_deref(),
+            diag.computed.as_deref(),
+        ) {
             report("keychain", ok, msg);
         }
         if let Some(dir) = &diag.config_dir {
@@ -2113,7 +2162,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 true,
                 format!(
                     "CLAUDE_CONFIG_DIR={} (swapdex must see the same value)",
-                    dir
+                    crate::util::redact_path(dir)
                 ),
             );
         }
@@ -2524,24 +2573,31 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     }
     // 2) Local sign-out, so the tool's own flow prompts a FRESH sign-in.
     sign_out_locally(paths, tool);
-    // Verify the sign-out actually took. On macOS Claude keeps its login in
-    // the Keychain; if swapdex could not clear it (permissions, an aliased
-    // CLAUDE_CONFIG_DIR, another cache), opening the tool would just drop you
-    // back into the SAME session (the confusing trust prompt) and no new
-    // account can be added. Abort clearly and restore, instead.
-    if let Some(still) = adapter.identity(paths).ok().flatten() {
-        if still.account_id == cur.account_id {
-            adapter.apply(paths, &stash)?;
-            drop(lock1);
-            eprintln!(
-                "swapdex: couldn't sign {} out of the current account ({}), so a new \
-                 account can't be added this way - your login is unchanged.",
-                pretty_tool(tool),
-                identity_line(&cur)
-            );
-            eprintln!("  {}", same_account_hint(tool));
-            return Ok(0);
-        }
+    // Verify the sign-out actually took. Two independent checks:
+    // - identity: same account still resolvable (e.g. an aliased
+    //   CLAUDE_CONFIG_DIR kept .claude.json's oauthAccount alive);
+    // - present: a CREDENTIAL still lingers even with the identity gone
+    //   (e.g. a second suffixed macOS Keychain item that keychain_delete's
+    //   discovery did not target). Proceeding then is worse than the trust
+    //   prompt: the eventual capture could pair the OLD token with the NEW
+    //   account's identity - a profile that switches to the wrong login.
+    // Either way: abort clearly and restore.
+    let still_same = adapter
+        .identity(paths)
+        .ok()
+        .flatten()
+        .is_some_and(|still| still.account_id == cur.account_id);
+    if still_same || adapter.present(paths) {
+        adapter.apply(paths, &stash)?;
+        drop(lock1);
+        eprintln!(
+            "swapdex: couldn't sign {} out of the current account ({}), so a new \
+             account can't be added this way - your login is unchanged.",
+            pretty_tool(tool),
+            identity_line(&cur)
+        );
+        eprintln!("  {}", same_account_hint(tool));
+        return Ok(0);
     }
     // RELEASE the store lock before the interactive sign-in: it can take
     // minutes (or be left open), and holding it would block every other
@@ -3097,7 +3153,10 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     use crate::quota::{self as q, Fetch};
 
     struct Row {
+        /// Display label (may carry an "(active)" marker).
         label: String,
+        /// The plain profile name - what `--json` reports and `use` hints take.
+        name: String,
         email: Option<String>,
         token: Option<String>,
         active: bool,
@@ -3141,6 +3200,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 } else {
                     p.name.clone()
                 },
+                name: p.name.clone(),
                 email: if active {
                     live_id.as_ref().and_then(|a| a.email.clone()).or(email)
                 } else {
@@ -3157,6 +3217,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             0,
             Row {
                 label: "(active login, not saved)".into(),
+                name: "(active login, not saved)".into(),
                 email: live_id.as_ref().and_then(|a| a.email.clone()),
                 token: live_token.clone(),
                 active: true,
@@ -3189,6 +3250,17 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     for (i, r) in rows.iter().enumerate() {
         match &r.token {
             None => results.push((i, Fetch::Offline("no saved token".into()))),
+            // An unusable token is a PER-ACCOUNT problem (corrupt snapshot),
+            // not a transport failure - it must never masquerade as "the
+            // network is down" and abort the whole run.
+            Some(t) if !q::token_usable(t) => results.push((
+                i,
+                Fetch::Offline(
+                    "saved token unusable (corrupt snapshot?) - `swapdex add <name> --update` \
+                     re-saves it"
+                        .into(),
+                ),
+            )),
             Some(t) => {
                 let f = q::fetch(t);
                 let reached = results.iter().any(|(_, x)| !matches!(x, Fetch::Offline(_)));
@@ -3208,7 +3280,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             .iter()
             .map(|(i, f)| {
                 quota_json(
-                    &rows[*i].label,
+                    &rows[*i].name,
                     rows[*i].email.as_deref(),
                     rows[*i].active,
                     f,
@@ -3265,7 +3337,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 } else {
                     println!(
                         "  snapshot token expired - `swapdex use {}` to refresh, then `swapdex quota`",
-                        r.label
+                        r.name
                     );
                 }
             }
@@ -3294,7 +3366,7 @@ fn win_line(label: &str, w: &crate::quota::Window, now: i64) -> String {
     format!("{label:<9} {bar}  {rem:>3.0}% left{reset}")
 }
 
-/// A coarse "2h14m" / "3d 4h" countdown to `ts` from `now` (unix seconds).
+/// A coarse "2h 14m" / "3d 4h" countdown to `ts` from `now` (unix seconds).
 fn human_until(now: i64, ts: i64) -> String {
     let d = ts - now;
     if d <= 0 {
@@ -3434,13 +3506,44 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::keychain_verdict;
+    use super::{human_until, keychain_verdict, win_line};
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn human_until_formats_countdowns() {
+        assert_eq!(human_until(1000, 900), "now", "past resets read as now");
+        assert_eq!(human_until(0, 30), "0m", "sub-minute rounds down");
+        assert_eq!(human_until(0, 2 * 3600 + 14 * 60), "2h 14m");
+        assert_eq!(human_until(0, 3 * 86400 + 4 * 3600), "3d 4h");
+    }
+
+    #[test]
+    fn win_line_shows_remaining_bar_and_reset() {
+        let w = crate::quota::Window {
+            used_pct: 61.0,
+            resets_at: Some(2 * 3600 + 14 * 60),
+        };
+        let line = win_line("5h", &w, 0);
+        assert!(line.contains("39% left"), "{line}");
+        assert!(line.contains("resets in 2h 14m"), "{line}");
+        let full = crate::quota::Window {
+            used_pct: 0.0,
+            resets_at: None,
+        };
+        let line = win_line("7d", &full, 0);
+        assert!(line.contains("100% left"), "{line}");
+        assert!(!line.contains("resets"), "no reset when absent: {line}");
+    }
 
     #[test]
     fn keychain_verdict_ok_when_target_matches_a_present_item() {
         let (ok, msg) = keychain_verdict(
-            &["Claude Code-credentials-5953ba74".to_string()],
+            &s(&["Claude Code-credentials-5953ba74"]),
             Some("Claude Code-credentials-5953ba74"),
+            None,
         )
         .unwrap();
         assert!(ok, "targeting the present item is healthy");
@@ -3452,8 +3555,9 @@ mod tests {
         // The real item is suffixed but swapdex would write the bare name:
         // the exact "I switched but the old account is still there" cause.
         let (ok, msg) = keychain_verdict(
-            &["Claude Code-credentials-5953ba74".to_string()],
+            &s(&["Claude Code-credentials-5953ba74"]),
             Some("Claude Code-credentials"),
+            None,
         )
         .unwrap();
         assert!(!ok);
@@ -3463,15 +3567,81 @@ mod tests {
 
     #[test]
     fn keychain_verdict_flags_unresolved_target() {
-        let (ok, _msg) = keychain_verdict(&["Claude Code-credentials".to_string()], None).unwrap();
+        let (ok, _msg) = keychain_verdict(&s(&["Claude Code-credentials"]), None, None).unwrap();
         assert!(!ok, "an item exists but swapdex resolved no target");
     }
 
     #[test]
     fn keychain_verdict_silent_when_no_item() {
         assert!(
-            keychain_verdict(&[], Some("Claude Code-credentials")).is_none(),
+            keychain_verdict(&[], Some("Claude Code-credentials"), None).is_none(),
             "nothing to report if Claude has no Keychain item"
         );
+    }
+
+    #[test]
+    fn keychain_verdict_flags_env_disagreeing_with_target() {
+        // Both the resolved target and the env-computed item exist but differ:
+        // Claude follows the env, so writes to the target go to a stale item.
+        let (ok, msg) = keychain_verdict(
+            &s(&[
+                "Claude Code-credentials-aaaaaaaa",
+                "Claude Code-credentials-5953ba74",
+            ]),
+            Some("Claude Code-credentials-aaaaaaaa"),
+            Some("Claude Code-credentials-5953ba74"),
+        )
+        .unwrap();
+        assert!(!ok, "env-computed item disagrees with the resolved target");
+        assert!(msg.contains("wrong item"));
+        assert!(msg.contains("delete-generic-password"));
+    }
+
+    #[test]
+    fn keychain_verdict_flags_multiple_suffixed_items_without_env() {
+        // Two suffixed items and no env: the scan can only guess between them.
+        let (ok, msg) = keychain_verdict(
+            &s(&[
+                "Claude Code-credentials-aaaaaaaa",
+                "Claude Code-credentials-bbbbbbbb",
+            ]),
+            Some("Claude Code-credentials-aaaaaaaa"),
+            None,
+        )
+        .unwrap();
+        assert!(!ok, "ambiguous suffixed items must be flagged");
+        assert!(msg.contains("scan order"));
+    }
+
+    #[test]
+    fn keychain_verdict_bare_stray_next_to_target_is_ok() {
+        // A bare-name stray next to the real suffixed target is harmless.
+        let (ok, msg) = keychain_verdict(
+            &s(&[
+                "Claude Code-credentials",
+                "Claude Code-credentials-5953ba74",
+            ]),
+            Some("Claude Code-credentials-5953ba74"),
+            Some("Claude Code-credentials-5953ba74"),
+        )
+        .unwrap();
+        assert!(ok, "a bare stray does not shadow a suffixed target");
+        assert!(msg.contains("stray"), "{msg}");
+    }
+
+    #[test]
+    fn keychain_verdict_env_matching_target_is_ok_even_with_extras() {
+        // Env agrees with the target: extra suffixed items are stale but the
+        // resolution is exact, so this is healthy.
+        let (ok, _msg) = keychain_verdict(
+            &s(&[
+                "Claude Code-credentials-aaaaaaaa",
+                "Claude Code-credentials-5953ba74",
+            ]),
+            Some("Claude Code-credentials-5953ba74"),
+            Some("Claude Code-credentials-5953ba74"),
+        )
+        .unwrap();
+        assert!(ok, "exact env match wins even with stale siblings");
     }
 }

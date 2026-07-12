@@ -9,11 +9,16 @@ fn bin() -> &'static str {
 }
 
 fn run(root: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(bin())
-        .args(args)
-        .env("SWAPDEX_ROOT", root)
-        .output()
-        .unwrap();
+    run_env(root, args, &[])
+}
+
+fn run_env(root: &Path, args: &[&str], envs: &[(&str, &str)]) -> (String, String, i32) {
+    let mut cmd = Command::new(bin());
+    cmd.args(args).env("SWAPDEX_ROOT", root);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -2715,4 +2720,115 @@ printf '%s' '{"oauthAccount":{"accountUuid":"uuid-B","emailAddress":"b@x.com","d
         old_cred.contains("\"accessToken\":\"AT\""),
         "old account's saved token is untouched (not revoked): {old_cred}"
     );
+}
+
+/// A fake curl for `swapdex quota` (via the SWAPDEX_CURL fixture hook): reads
+/// the config from stdin like the real one, answers by bearer token.
+fn write_fake_curl(dir: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("fake-curl");
+    std::fs::write(
+        &p,
+        r#"#!/bin/sh
+cfg=$(cat)
+tok=$(printf '%s' "$cfg" | sed -n 's/.*Authorization: Bearer \([^"]*\)".*/\1/p')
+case "$tok" in
+  AT) printf '{"five_hour":{"utilization":0.25,"resets_at":1893456000},"seven_day":{"utilization":0.5}}\n200' ;;
+  *)  printf '{"type":"error","error":{"type":"authentication_error"}}\n401' ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// Seed a saved claude profile directly in the store (bypasses `add`, so the
+/// snapshot can hold a DIFFERENT account than the live login).
+fn seed_claude_profile(root: &Path, name: &str, uuid: &str, email: &str, token: &str) {
+    let d = root
+        .join(".local/share/swapdex/accounts")
+        .join(name)
+        .join("claude-code");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("credentials"),
+        format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"R"}}}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("oauth_account"),
+        format!(r#"{{"accountUuid":"{uuid}","emailAddress":"{email}"}}"#),
+    )
+    .unwrap();
+    chmod600(&d.join("credentials"));
+    chmod600(&d.join("oauth_account"));
+}
+
+// End-to-end `quota --json` against a fake curl: the active account resolves
+// live data, an expired snapshot reports "expired", and the JSON `name` is
+// the PLAIN profile name (no " (active)" suffix - scripts feed it to `use`).
+#[test]
+fn quota_json_reports_accounts_with_clean_names() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "main", "--tool", "claude"]);
+    seed_claude_profile(root.path(), "backup", "uuid-B", "b@x.com", "AT-B");
+    let curl = write_fake_curl(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    assert!(v["offline"].is_null(), "not offline: {v}");
+    let accounts = v["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2, "{v}");
+    // Active first (stable sort), with a clean name and live windows.
+    assert_eq!(accounts[0]["name"], "main", "no ' (active)' suffix: {v}");
+    assert_eq!(accounts[0]["active"], true);
+    assert_eq!(accounts[0]["status"], "ok");
+    assert_eq!(accounts[0]["five_hour"]["remaining_pct"], 75.0);
+    // The stale snapshot got a 401 -> expired, never a fake number.
+    assert_eq!(accounts[1]["name"], "backup");
+    assert_eq!(accounts[1]["status"], "expired");
+}
+
+// A corrupt/unusable saved token is a PER-ACCOUNT finding; it must not
+// masquerade as "the network is down" and abort the other accounts.
+#[test]
+fn quota_unusable_token_does_not_abort_the_run() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "main", "--tool", "claude"]);
+    seed_claude_profile(root.path(), "backup", "uuid-B", "b@x.com", "AT-B");
+    // Corrupt the LIVE token (the active row fetches it first): a quote char
+    // can't be embedded in the curl config, so it is locally unusable.
+    std::fs::write(
+        root.path().join(".claude/.credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"bad\"tok","refreshToken":"R"}}"#,
+    )
+    .unwrap();
+    let curl = write_fake_curl(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    assert!(
+        v["offline"].is_null(),
+        "a local token fault must not report the network down: {v}"
+    );
+    let accounts = v["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2, "both accounts reported: {v}");
+    assert_eq!(accounts[0]["status"], "offline");
+    assert!(
+        accounts[0]["detail"].as_str().unwrap().contains("unusable"),
+        "{v}"
+    );
+    // The healthy snapshot was still fetched (401 -> expired).
+    assert_eq!(accounts[1]["status"], "expired");
 }

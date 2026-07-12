@@ -62,10 +62,10 @@ npm install -g @youdie006/swapdex
 curl -fsSL https://raw.githubusercontent.com/youdie006/swapdex/main/install.sh | sh
 ```
 
-Linux / WSL first; on macOS, Codex works today and Claude-via-Keychain is
-[issue #1](https://github.com/youdie006/swapdex/issues/1). Requires the Claude Code
-and/or Codex CLI already installed and logged in. Full command, exit-code, and
-environment reference: [docs/COMMANDS.md](docs/COMMANDS.md).
+Linux, WSL, and macOS (Claude's macOS login lives in the Keychain; swapdex
+swaps it there, via `/usr/bin/security`). Requires the Claude Code and/or Codex
+CLI already installed and logged in. Full command, exit-code, and environment
+reference: [docs/COMMANDS.md](docs/COMMANDS.md).
 
 ## Use
 
@@ -160,7 +160,7 @@ quota - remaining on your Claude accounts
 live from Anthropic's usage endpoint; opt-in network, spends 0 message quota.
 
 work (active)   you@work.com
-  5h        ▓▓▓▓▓▓▓░░░   68% left   resets in 2h14m
+  5h        ▓▓▓▓▓▓▓░░░   68% left   resets in 2h 14m
   7d        ▓▓▓▓▓▓░░░░   57% left   resets in 3d 4h
 
 personal   you@personal.com

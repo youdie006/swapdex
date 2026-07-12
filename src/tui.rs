@@ -723,6 +723,20 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             Event::Key(k) if k.kind == KeyEventKind::Press => k,
             Event::Mouse(m) => {
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind as MK};
+                // Text panels (doctor/usage/quota) scroll their content with
+                // the wheel - the list logic below is for menu screens only.
+                if let Screen::Doctor { lines, scroll, .. }
+                | Screen::Usage { lines, scroll, .. }
+                | Screen::Quota { lines, scroll, .. } = &mut screen
+                {
+                    let max = (lines.len() as u16).saturating_sub(1);
+                    match m.kind {
+                        MK::ScrollDown => *scroll = (*scroll + 1).min(max),
+                        MK::ScrollUp => *scroll = scroll.saturating_sub(1),
+                        _ => {}
+                    }
+                    continue;
+                }
                 let list_len = match &screen {
                     Screen::Main => rows.len(),
                     Screen::Open {
@@ -891,7 +905,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             pending: true,
                         };
                     }
-                    KeyCode::Char('%') if !rows.is_empty() => {
+                    // Ungated like doctor's '?': quota also covers a live
+                    // login that is not saved as any profile yet.
+                    KeyCode::Char('%') => {
                         screen = Screen::Quota {
                             lines: vec!["fetching remaining quota from Anthropic...".into()],
                             scroll: 0,
@@ -909,7 +925,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     screen = Screen::Main;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let max = entries.len() + new_conv.len() - 1;
+                    // saturating: both lists can be empty (a profile whose
+                    // store entry vanished mid-session) - `- 1` would panic.
+                    let max = (entries.len() + new_conv.len()).saturating_sub(1);
                     let i = open_state.selected().unwrap_or(0);
                     open_state.select(Some((i + 1).min(max)));
                 }

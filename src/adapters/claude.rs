@@ -16,6 +16,17 @@ const SECURITY: &str = "/usr/bin/security";
 /// The prefix of the Keychain service Claude Code stores its OAuth token under.
 const KEYCHAIN_PREFIX: &str = "Claude Code-credentials";
 
+/// Whether Keychain operations may run at all. Two conditions:
+/// - macOS (elsewhere Claude is file-based), and
+/// - NOT under SWAPDEX_ROOT. SWAPDEX_ROOT redirects every FILE path into a
+///   sandbox, but the login Keychain is machine-global - without this gate a
+///   `SWAPDEX_ROOT=/tmp/x swapdex use fake` test on a Mac would write the fake
+///   token into the REAL Keychain item and clobber the user's actual login.
+///   Under SWAPDEX_ROOT, Claude handling is file-only, like Linux.
+fn keychain_enabled() -> bool {
+    cfg!(target_os = "macos") && std::env::var_os("SWAPDEX_ROOT").is_none()
+}
+
 /// The Keychain `acct` attribute Claude Code uses: `$USER`, else the OS
 /// username, else a fixed fallback - matching Claude Code's own account fn.
 fn keychain_account_name() -> String {
@@ -44,34 +55,55 @@ fn sha256_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The exact Keychain service Claude Code uses, computed the SAME way Claude
-/// Code does: "Claude Code-credentials" plus, when CLAUDE_SECURESTORAGE_CONFIG_DIR
-/// / CLAUDE_CONFIG_DIR is set, "-" + first 8 hex of sha256(that dir). Correct
-/// even when the config dir is set (the case hardcoding tools get wrong).
-/// Existence is verified; a dump-keychain scan is the fallback.
+/// The service name computed from the env, exactly the way Claude Code derives
+/// it: "Claude Code-credentials" plus, when CLAUDE_SECURESTORAGE_CONFIG_DIR /
+/// CLAUDE_CONFIG_DIR is set, "-" + first 8 hex of sha256(that dir). `None`
+/// when neither env var is visible to swapdex. (Claude normalizes the dir to
+/// NFC before hashing; this skips that, so a non-ASCII config dir could
+/// compute a different hash - discovery in `keychain_service` covers it.)
+fn env_computed_service() -> Option<String> {
+    match std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR") {
+        Ok(t) if t.is_empty() => Some(KEYCHAIN_PREFIX.to_string()),
+        Ok(t) => Some(format!(
+            "{KEYCHAIN_PREFIX}-{}",
+            &sha256_hex(t.as_bytes())[..8]
+        )),
+        Err(_) => match std::env::var("CLAUDE_CONFIG_DIR") {
+            Ok(d) if !d.is_empty() => Some(format!(
+                "{KEYCHAIN_PREFIX}-{}",
+                &sha256_hex(d.as_bytes())[..8]
+            )),
+            _ => None,
+        },
+    }
+}
+
+/// The exact Keychain service swapdex reads/writes: env-computed exact match
+/// first, then discovery, then the computed name. Existence-verified.
 fn keychain_service() -> Option<String> {
-    if !cfg!(target_os = "macos") {
+    if !keychain_enabled() {
         return None;
     }
-    // DISCOVERY FIRST. swapdex may not see the same CLAUDE_CONFIG_DIR the user
-    // launches `claude` with (e.g. it's set only in a shell alias), so the
-    // computed name could be the bare prefix while Claude's real item is
-    // suffixed. Discovery scans the keychain and prefers the suffixed item -
-    // Claude's real credential - over a bare-prefix stray. Only if discovery
-    // finds nothing do we fall back to the computed name.
+    // 1) EXACT MATCH FIRST: when swapdex sees the same CLAUDE_CONFIG_DIR that
+    //    `claude` launches with, the computed SUFFIXED name IS Claude's item.
+    //    Discovery alone can pick a stale sibling when several suffixed items
+    //    linger from old config dirs (it keeps the first one the dump yields),
+    //    so an existing exact match must outrank it. Suffixed only - a bare
+    //    computed name gets no priority, or a bare stray would shadow Claude's
+    //    real suffixed item (the pre-0.18.1 bug).
+    if let Some(computed) = env_computed_service() {
+        if computed != KEYCHAIN_PREFIX && keychain_item_exists(&computed) {
+            return Some(computed);
+        }
+    }
+    // 2) Discovery: swapdex may not see the env at all (set only in a shell
+    //    alias), so scan the keychain and prefer a suffixed item - Claude's
+    //    real credential - over a bare-prefix stray.
     if let Some(svc) = discover_keychain_service() {
         return Some(svc);
     }
-    let computed = match std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR") {
-        Ok(t) if t.is_empty() => KEYCHAIN_PREFIX.to_string(),
-        Ok(t) => format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(t.as_bytes())[..8]),
-        Err(_) => match std::env::var("CLAUDE_CONFIG_DIR") {
-            Ok(d) if !d.is_empty() => {
-                format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(d.as_bytes())[..8])
-            }
-            _ => KEYCHAIN_PREFIX.to_string(),
-        },
-    };
+    // 3) The computed name (bare included) if the item exists.
+    let computed = env_computed_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string());
     keychain_item_exists(&computed).then_some(computed)
 }
 
@@ -143,10 +175,15 @@ fn all_claude_services() -> Vec<String> {
 pub(crate) struct KeychainDiag {
     pub found: Vec<String>,
     pub target: Option<String>,
+    /// The name computed from the env swapdex sees (None when no env is set).
+    pub computed: Option<String>,
     pub config_dir: Option<String>,
 }
 
 pub(crate) fn keychain_diagnostic() -> Option<KeychainDiag> {
+    if !keychain_enabled() {
+        return None;
+    }
     #[cfg(target_os = "macos")]
     {
         let config_dir = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
@@ -160,6 +197,7 @@ pub(crate) fn keychain_diagnostic() -> Option<KeychainDiag> {
         Some(KeychainDiag {
             found: all_claude_services(),
             target: keychain_service(),
+            computed: env_computed_service(),
             config_dir,
         })
     }
@@ -198,6 +236,12 @@ fn keychain_read() -> Option<Vec<u8>> {
 /// so it can't be read from `ps`.
 fn keychain_write(value: &[u8]) -> Result<()> {
     use std::io::Write;
+    // Defense in depth: apply() already skips the Keychain when disabled, but
+    // a future caller must never be able to write a sandboxed test token into
+    // the real Keychain.
+    if !keychain_enabled() {
+        return Ok(());
+    }
     let service = keychain_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string());
     let acct = keychain_account_name();
     let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
@@ -348,7 +392,10 @@ impl AuthTool for Claude {
         // file's oauthAccount. Snapshot the previous state of each so any
         // failure rolls ALL of them back - the login is never half-swapped.
         let cred_path = paths.claude_credentials();
-        let macos = cfg!(target_os = "macos");
+        // keychain_enabled, not bare cfg!(macos): under SWAPDEX_ROOT the
+        // Keychain must stay untouched (file-only, like Linux), or a sandboxed
+        // test switch would overwrite the REAL login token.
+        let macos = keychain_enabled();
         let prev_file = if cred_path.exists() {
             crate::atomic::read_regular(&cred_path).ok()
         } else {
