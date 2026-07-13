@@ -1982,20 +1982,17 @@ fn exec_sessionwiki_resume(id: &str) -> anyhow::Error {
 
 /// Turn the macOS Keychain reality into a doctor verdict. `None` = nothing to
 /// report (no Claude item found: not logged in, or a locked/headless keychain).
-/// `computed` is the service name derived from the env swapdex sees.
+/// `computed` is the item swapdex's own env derives (bare when no env) - the
+/// one a `claude` launched from this same shell would read.
 ///
-/// The failure this catches is "I switched but the old account is still
-/// there": swapdex writes one Keychain item while Claude reads another. The
-/// switch path resolves its target by scanning the same keychain, so a hard
-/// target-not-present mismatch is rare; the DETECTABLE causes are (a) several
-/// suffixed items lingering from old config dirs - a scan can only guess
-/// between them - and (b) the env-computed name disagreeing with the target.
+/// The contract: swapdex manages the profile of the environment it runs in.
+/// Other Claude items are OTHER profiles (CLAUDE_CONFIG_DIR aliases) or
+/// leftovers - swapdex never touches them, and this verdict says so.
 fn keychain_verdict(
     found: &[String],
     target: Option<&str>,
-    computed: Option<&str>,
+    computed: &str,
 ) -> Option<(bool, String)> {
-    const BARE: &str = "Claude Code-credentials";
     if found.is_empty() {
         return None;
     }
@@ -2005,58 +2002,49 @@ fn keychain_verdict(
         .collect::<Vec<_>>()
         .join(", ");
     let Some(t) = target else {
+        // The derived item does not exist and several items are present:
+        // refusing to guess is the safe behavior, and this is the remedy.
         return Some((
             false,
             format!(
-                "Claude's Keychain item is {list} but swapdex could not resolve which to use - a \
-                 switch will not stick. Set CLAUDE_CONFIG_DIR to match your `claude` launch."
+                "this environment's profile item ('{computed}') does not exist; the items \
+                 present ({list}) belong to other CLAUDE_CONFIG_DIR profiles, and swapdex \
+                 refuses to guess between them. Run swapdex with the profile's \
+                 CLAUDE_CONFIG_DIR, or log in once with plain `claude` to create '{computed}'."
             ),
         ));
     };
     if !found.iter().any(|s| s == t) {
+        // Defensive: the two keychain reads disagreed (item vanished between).
         return Some((
             false,
             format!(
-                "swapdex writes '{t}' but Claude's Keychain item is {list} - a switch will not \
-                 stick. Launch swapdex with the same CLAUDE_CONFIG_DIR you launch `claude` with."
+                "swapdex resolves '{t}' but the Keychain currently shows {list} - re-run \
+                 `swapdex doctor`; if this persists, launch swapdex with the same \
+                 CLAUDE_CONFIG_DIR you launch `claude` with."
             ),
         ));
     }
-    // Target present. An env disagreement beats everything: the env-computed
-    // suffixed name is Claude's actual item whenever `claude` sees that env.
-    if let Some(c) = computed {
-        if c != BARE && c != t && found.iter().any(|s| s == c) {
-            return Some((
-                false,
-                format!(
-                    "swapdex resolved '{t}' but your CLAUDE_CONFIG_DIR computes '{c}' (also \
-                     present) - switches may write the wrong item. Remove the stale one: \
-                     security delete-generic-password -s '{t}'"
-                ),
-            ));
-        }
-    }
-    // Several suffixed items and no env to break the tie: the scan can only
-    // guess, and guessing wrong is exactly the switch-not-sticking failure.
-    let suffixed = found.iter().filter(|s| s.as_str() != BARE).count();
-    if suffixed > 1 && computed.is_none() {
+    if t != computed {
+        // Single-item fallback: swapdex's env derives a missing item, so it
+        // manages the only login that exists. Working alias-only setup.
         return Some((
-            false,
+            true,
             format!(
-                "{suffixed} suffixed Claude items exist ({list}) and CLAUDE_CONFIG_DIR is not \
-                 set, so swapdex picked '{t}' by scan order - if switches don't stick, delete \
-                 the stale items or export CLAUDE_CONFIG_DIR to match your `claude` launch."
+                "this environment derives '{computed}' (not present); managing the only \
+                 Claude login, '{t}' - if your `claude` runs with a CLAUDE_CONFIG_DIR, \
+                 launch swapdex with the same one"
             ),
         ));
     }
     let msg = if found.len() > 1 {
         format!(
-            "swapdex targets the item Claude uses ('{t}'); {} other Claude item(s) are stale \
-             strays - switches still hit the right one",
+            "managing this environment's profile ('{t}'); {} other Claude item(s) belong to \
+             other CLAUDE_CONFIG_DIR profiles (or are leftovers) - swapdex never touches them",
             found.len() - 1
         )
     } else {
-        format!("swapdex targets the item Claude uses ('{t}')")
+        format!("managing this environment's profile ('{t}')")
     };
     Some((true, msg))
 }
@@ -2149,11 +2137,9 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     // "I switched but the old account is still active". Read-only; no-op off
     // macOS (Claude is file-based there).
     if let Some(diag) = crate::adapters::claude::keychain_diagnostic() {
-        if let Some((ok, msg)) = keychain_verdict(
-            &diag.found,
-            diag.target.as_deref(),
-            diag.computed.as_deref(),
-        ) {
+        if let Some((ok, msg)) =
+            keychain_verdict(&diag.found, diag.target.as_deref(), &diag.computed)
+        {
             report("keychain", ok, msg);
         }
         if let Some(dir) = &diag.config_dir {
@@ -3538,110 +3524,80 @@ mod tests {
         assert!(!line.contains("resets"), "no reset when absent: {line}");
     }
 
-    #[test]
-    fn keychain_verdict_ok_when_target_matches_a_present_item() {
-        let (ok, msg) = keychain_verdict(
-            &s(&["Claude Code-credentials-5953ba74"]),
-            Some("Claude Code-credentials-5953ba74"),
-            None,
-        )
-        .unwrap();
-        assert!(ok, "targeting the present item is healthy");
-        assert!(msg.contains("targets the item Claude uses"));
-    }
+    const BARE: &str = "Claude Code-credentials";
 
-    #[test]
-    fn keychain_verdict_flags_service_name_mismatch() {
-        // The real item is suffixed but swapdex would write the bare name:
-        // the exact "I switched but the old account is still there" cause.
-        let (ok, msg) = keychain_verdict(
-            &s(&["Claude Code-credentials-5953ba74"]),
-            Some("Claude Code-credentials"),
-            None,
-        )
-        .unwrap();
-        assert!(!ok);
-        assert!(msg.contains("will not stick"));
-        assert!(msg.contains("CLAUDE_CONFIG_DIR"));
-    }
-
-    #[test]
-    fn keychain_verdict_flags_unresolved_target() {
-        let (ok, _msg) = keychain_verdict(&s(&["Claude Code-credentials"]), None, None).unwrap();
-        assert!(!ok, "an item exists but swapdex resolved no target");
+    // The real-world multi-profile layout (one user, three CLAUDE_CONFIG_DIR
+    // profiles): bare + two suffixed items, all LIVE logins.
+    fn three_profiles() -> Vec<String> {
+        s(&[
+            BARE,
+            "Claude Code-credentials-5953ba74",
+            "Claude Code-credentials-feeb5ea6",
+        ])
     }
 
     #[test]
     fn keychain_verdict_silent_when_no_item() {
         assert!(
-            keychain_verdict(&[], Some("Claude Code-credentials"), None).is_none(),
+            keychain_verdict(&[], Some(BARE), BARE).is_none(),
             "nothing to report if Claude has no Keychain item"
         );
     }
 
     #[test]
-    fn keychain_verdict_flags_env_disagreeing_with_target() {
-        // Both the resolved target and the env-computed item exist but differ:
-        // Claude follows the env, so writes to the target go to a stale item.
-        let (ok, msg) = keychain_verdict(
-            &s(&[
-                "Claude Code-credentials-aaaaaaaa",
-                "Claude Code-credentials-5953ba74",
-            ]),
-            Some("Claude Code-credentials-aaaaaaaa"),
-            Some("Claude Code-credentials-5953ba74"),
-        )
-        .unwrap();
-        assert!(!ok, "env-computed item disagrees with the resolved target");
-        assert!(msg.contains("wrong item"));
-        assert!(msg.contains("delete-generic-password"));
+    fn keychain_verdict_manages_own_env_profile_among_aliased_siblings() {
+        // No env -> swapdex manages the bare item; the suffixed items are
+        // OTHER profiles (claude-work aliases) and must be called that - not
+        // "stale strays" to delete.
+        let (ok, msg) = keychain_verdict(&three_profiles(), Some(BARE), BARE).unwrap();
+        assert!(ok, "coexisting aliased profiles are healthy: {msg}");
+        assert!(msg.contains("other CLAUDE_CONFIG_DIR profiles"), "{msg}");
+        assert!(msg.contains("never touches"), "{msg}");
     }
 
     #[test]
-    fn keychain_verdict_flags_multiple_suffixed_items_without_env() {
-        // Two suffixed items and no env: the scan can only guess between them.
-        let (ok, msg) = keychain_verdict(
-            &s(&[
-                "Claude Code-credentials-aaaaaaaa",
-                "Claude Code-credentials-bbbbbbbb",
-            ]),
-            Some("Claude Code-credentials-aaaaaaaa"),
-            None,
-        )
-        .unwrap();
-        assert!(!ok, "ambiguous suffixed items must be flagged");
-        assert!(msg.contains("scan order"));
+    fn keychain_verdict_single_profile_is_plain_ok() {
+        let (ok, msg) = keychain_verdict(&s(&[BARE]), Some(BARE), BARE).unwrap();
+        assert!(ok);
+        assert!(msg.contains("managing this environment's profile"), "{msg}");
     }
 
     #[test]
-    fn keychain_verdict_bare_stray_next_to_target_is_ok() {
-        // A bare-name stray next to the real suffixed target is harmless.
-        let (ok, msg) = keychain_verdict(
-            &s(&[
-                "Claude Code-credentials",
-                "Claude Code-credentials-5953ba74",
-            ]),
-            Some("Claude Code-credentials-5953ba74"),
-            Some("Claude Code-credentials-5953ba74"),
-        )
-        .unwrap();
-        assert!(ok, "a bare stray does not shadow a suffixed target");
-        assert!(msg.contains("stray"), "{msg}");
+    fn keychain_verdict_flags_refused_ambiguity() {
+        // The derived item does not exist and several profiles are present:
+        // resolution refuses to guess (target None) and doctor explains.
+        let found = s(&[
+            "Claude Code-credentials-5953ba74",
+            "Claude Code-credentials-feeb5ea6",
+        ]);
+        let (ok, msg) = keychain_verdict(&found, None, BARE).unwrap();
+        assert!(!ok, "refused ambiguity is a finding");
+        assert!(msg.contains("refuses to guess"), "{msg}");
+        assert!(msg.contains("CLAUDE_CONFIG_DIR"), "{msg}");
+        assert!(msg.contains(BARE), "names the missing derived item: {msg}");
     }
 
     #[test]
-    fn keychain_verdict_env_matching_target_is_ok_even_with_extras() {
-        // Env agrees with the target: extra suffixed items are stale but the
-        // resolution is exact, so this is healthy.
-        let (ok, _msg) = keychain_verdict(
-            &s(&[
-                "Claude Code-credentials-aaaaaaaa",
-                "Claude Code-credentials-5953ba74",
-            ]),
+    fn keychain_verdict_single_item_fallback_is_ok_with_note() {
+        // Alias-only setup: env derives bare (missing), the only login is a
+        // suffixed item - swapdex manages it, with a pointer to the env.
+        let (ok, msg) = keychain_verdict(
+            &s(&["Claude Code-credentials-5953ba74"]),
             Some("Claude Code-credentials-5953ba74"),
-            Some("Claude Code-credentials-5953ba74"),
+            BARE,
         )
         .unwrap();
-        assert!(ok, "exact env match wins even with stale siblings");
+        assert!(ok, "managing the only existing login works: {msg}");
+        assert!(msg.contains("only"), "{msg}");
+        assert!(msg.contains("CLAUDE_CONFIG_DIR"), "{msg}");
+    }
+
+    #[test]
+    fn keychain_verdict_flags_target_not_in_found() {
+        // Defensive: the two keychain reads disagreed.
+        let (ok, msg) =
+            keychain_verdict(&s(&["Claude Code-credentials-5953ba74"]), Some(BARE), BARE).unwrap();
+        assert!(!ok);
+        assert!(msg.contains("re-run"), "{msg}");
     }
 }

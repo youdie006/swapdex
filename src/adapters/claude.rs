@@ -84,27 +84,48 @@ fn keychain_service() -> Option<String> {
     if !keychain_enabled() {
         return None;
     }
-    // 1) EXACT MATCH FIRST: when swapdex sees the same CLAUDE_CONFIG_DIR that
-    //    `claude` launches with, the computed SUFFIXED name IS Claude's item.
-    //    Discovery alone can pick a stale sibling when several suffixed items
-    //    linger from old config dirs (it keeps the first one the dump yields),
-    //    so an existing exact match must outrank it. Suffixed only - a bare
-    //    computed name gets no priority, or a bare stray would shadow Claude's
-    //    real suffixed item (the pre-0.18.1 bug).
-    if let Some(computed) = env_computed_service() {
-        if computed != KEYCHAIN_PREFIX && keychain_item_exists(&computed) {
-            return Some(computed);
-        }
+    let computed = effective_computed_service();
+    pick_service(
+        computed.clone(),
+        keychain_item_exists(&computed),
+        all_claude_services(),
+    )
+}
+
+/// The service name swapdex's OWN environment derives - bare when no config
+/// env is set. This is exactly what a `claude` launched from the same shell
+/// would use.
+fn effective_computed_service() -> String {
+    env_computed_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string())
+}
+
+/// The resolution CONTRACT, mirroring Claude Code's own (Claude never scans -
+/// it derives the item name purely from its env): swapdex manages the profile
+/// of the environment it runs in. No env -> the DEFAULT (bare) profile; env
+/// set -> that profile's suffixed item.
+///
+/// People run several profiles side by side via CLAUDE_CONFIG_DIR aliases
+/// (`alias claude-work='CLAUDE_CONFIG_DIR=... claude'`), each with its own
+/// Keychain item. The old suffix-preferring scan grabbed an ALIASED profile's
+/// item while the user's plain `claude` read the bare one - switches "didn't
+/// stick", and add-account deleted the wrong profile's login.
+///
+/// When the derived item does not exist, fall back to the scan ONLY if it is
+/// unambiguous (exactly one Claude item = the alias-only setup where swapdex
+/// can't see the env). With several items, guessing means reading or writing
+/// some OTHER profile's login - refuse instead; `doctor` explains the state.
+fn pick_service(
+    computed: String,
+    computed_exists: bool,
+    discovered: Vec<String>,
+) -> Option<String> {
+    if computed_exists {
+        return Some(computed);
     }
-    // 2) Discovery: swapdex may not see the env at all (set only in a shell
-    //    alias), so scan the keychain and prefer a suffixed item - Claude's
-    //    real credential - over a bare-prefix stray.
-    if let Some(svc) = discover_keychain_service() {
-        return Some(svc);
+    if discovered.len() == 1 {
+        return discovered.into_iter().next();
     }
-    // 3) The computed name (bare included) if the item exists.
-    let computed = env_computed_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string());
-    keychain_item_exists(&computed).then_some(computed)
+    None
 }
 
 /// True if a Keychain item with this service (+ account) exists, via an
@@ -123,34 +144,9 @@ fn keychain_item_exists(service: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Fallback discovery: dump the login keychain's ATTRIBUTES (no `-d`, no
-/// prompt) and find a service starting with the prefix, preferring a suffixed
-/// entry over the bare prefix.
-fn discover_keychain_service() -> Option<String> {
-    let out = std::process::Command::new(SECURITY)
-        .arg("dump-keychain")
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut best: Option<String> = None;
-    for line in text.lines() {
-        if let Some(svc) = parse_kc_attr(line, "svce") {
-            if svc.starts_with(KEYCHAIN_PREFIX) {
-                let suffixed = svc != KEYCHAIN_PREFIX;
-                let best_bare = best.as_deref() == Some(KEYCHAIN_PREFIX);
-                if best.is_none() || (suffixed && best_bare) {
-                    best = Some(svc);
-                }
-            }
-        }
-    }
-    best
-}
-
 /// Every Keychain service name starting with the Claude prefix (attribute dump
-/// only - no secret, no prompt). For `doctor`: reveals strays and the real
-/// item so a service-name mismatch (switch writes A, Claude reads B) is caught.
-#[cfg(target_os = "macos")]
+/// only - no secret, no prompt). Feeds both the resolution fallback and the
+/// `doctor` diagnostic.
 fn all_claude_services() -> Vec<String> {
     let Ok(out) = std::process::Command::new(SECURITY)
         .arg("dump-keychain")
@@ -175,8 +171,9 @@ fn all_claude_services() -> Vec<String> {
 pub(crate) struct KeychainDiag {
     pub found: Vec<String>,
     pub target: Option<String>,
-    /// The name computed from the env swapdex sees (None when no env is set).
-    pub computed: Option<String>,
+    /// The name swapdex's own env derives (bare when no env is set) - the
+    /// item a `claude` launched from this same shell would use.
+    pub computed: String,
     pub config_dir: Option<String>,
 }
 
@@ -184,27 +181,20 @@ pub(crate) fn keychain_diagnostic() -> Option<KeychainDiag> {
     if !keychain_enabled() {
         return None;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let config_dir = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("CLAUDE_CONFIG_DIR")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            });
-        Some(KeychainDiag {
-            found: all_claude_services(),
-            target: keychain_service(),
-            computed: env_computed_service(),
-            config_dir,
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+    let config_dir = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("CLAUDE_CONFIG_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+    Some(KeychainDiag {
+        found: all_claude_services(),
+        target: keychain_service(),
+        computed: effective_computed_service(),
+        config_dir,
+    })
 }
 
 /// Read the Claude token JSON from the macOS Keychain (`{"claudeAiOauth":...}`).
@@ -242,7 +232,11 @@ fn keychain_write(value: &[u8]) -> Result<()> {
     if !keychain_enabled() {
         return Ok(());
     }
-    let service = keychain_service().unwrap_or_else(|| KEYCHAIN_PREFIX.to_string());
+    // When no item exists yet (right after a sign-out, or a first switch on a
+    // fresh Mac), create the slot the env DERIVES - a `claude` launched from
+    // this same environment reads exactly that one. Never fall back to a
+    // discovered item: that could be a different profile's slot.
+    let service = keychain_service().unwrap_or_else(effective_computed_service);
     let acct = keychain_account_name();
     let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
     let cmd = format!("add-generic-password -U -a \"{acct}\" -s \"{service}\" -X {hex}\n");
@@ -268,8 +262,11 @@ fn keychain_write(value: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Remove Claude's Keychain item so `claude` prompts a FRESH sign-in during the
-/// add-a-new-account flow. No-op off macOS or when there is no item.
+/// Remove Claude's Keychain item so `claude` prompts a FRESH sign-in during
+/// the add-a-new-account flow. Deletes ONLY the item this environment resolves
+/// to - other CLAUDE_CONFIG_DIR profiles' items are other logins, and the old
+/// "also clear the bare name" extra could kill a LIVE default profile. No-op
+/// off macOS or when nothing resolves.
 pub(crate) fn keychain_delete() {
     let Some(service) = keychain_service() else {
         return;
@@ -278,17 +275,6 @@ pub(crate) fn keychain_delete() {
     let _ = std::process::Command::new(SECURITY)
         .args(["delete-generic-password", "-s", &service, "-a", &acct])
         .output();
-    if service != KEYCHAIN_PREFIX {
-        let _ = std::process::Command::new(SECURITY)
-            .args([
-                "delete-generic-password",
-                "-s",
-                KEYCHAIN_PREFIX,
-                "-a",
-                &acct,
-            ])
-            .output();
-    }
 }
 
 /// The Claude token JSON from wherever it lives: the file when present,
@@ -481,6 +467,55 @@ mod tests {
     use super::*;
     use crate::paths::Paths;
     use serde_json::json;
+
+    // The resolution contract: manage the profile of the environment swapdex
+    // runs in; fall back to the scan only when it is unambiguous.
+    #[test]
+    fn pick_service_prefers_the_env_derived_item() {
+        // The derived item exists: use it, even when aliased siblings exist.
+        // (The old suffix-preferring scan would have grabbed a sibling here -
+        // the "switch didn't stick / wrong profile wiped" root cause.)
+        let siblings = vec![
+            "Claude Code-credentials-5953ba74".to_string(),
+            "Claude Code-credentials-feeb5ea6".to_string(),
+        ];
+        assert_eq!(
+            pick_service("Claude Code-credentials".into(), true, siblings),
+            Some("Claude Code-credentials".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_service_falls_back_only_when_unambiguous() {
+        // Derived item missing + exactly one login: manage that one
+        // (alias-only setup where swapdex can't see the env).
+        assert_eq!(
+            pick_service(
+                "Claude Code-credentials".into(),
+                false,
+                vec!["Claude Code-credentials-5953ba74".to_string()],
+            ),
+            Some("Claude Code-credentials-5953ba74".to_string())
+        );
+        // Derived item missing + several logins: refuse to guess - reading or
+        // writing would hit some OTHER profile's login.
+        assert_eq!(
+            pick_service(
+                "Claude Code-credentials".into(),
+                false,
+                vec![
+                    "Claude Code-credentials-5953ba74".to_string(),
+                    "Claude Code-credentials-feeb5ea6".to_string(),
+                ],
+            ),
+            None
+        );
+        // Nothing anywhere: nothing to manage.
+        assert_eq!(
+            pick_service("Claude Code-credentials".into(), false, vec![]),
+            None
+        );
+    }
 
     fn seed_claude(p: &Paths, acct: &str, email: &str) {
         std::fs::create_dir_all(p.claude_credentials().parent().unwrap()).unwrap();

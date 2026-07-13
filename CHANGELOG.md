@@ -4,6 +4,32 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.0] - 2026-07-13
+
+### Changed
+- **macOS Keychain resolution now mirrors Claude Code exactly - parallel
+  CLAUDE_CONFIG_DIR profiles are finally safe.** Ground truth from a real
+  multi-profile Mac (three live profiles: plain `claude` plus two
+  `CLAUDE_CONFIG_DIR` aliases, three Keychain items) showed the root cause of
+  "my switch did not stick" and "my other logins got wiped": the old
+  suffix-preferring Keychain scan grabbed an ALIASED profile's item while the
+  user's plain `claude` read the bare one - so switches wrote the wrong item,
+  and add-account's cleanup deleted the wrong profile's login (plus the bare
+  one). The new contract: **swapdex manages the profile of the environment it
+  runs in**, derived the same deterministic way `claude` derives it (no env ->
+  the bare/default item; CLAUDE_CONFIG_DIR set -> that profile's suffixed
+  item). The scan remains only as a fallback when the derived item does not
+  exist AND exactly one Claude login exists (alias-only setups); with several
+  items it refuses to guess instead of corrupting another profile.
+- Add-account's Keychain cleanup now deletes ONLY the resolved item - the old
+  "also clear the bare name" extra could kill a live default profile.
+- A fresh Keychain write (first switch on a Mac, or right after a sign-out)
+  now creates the slot the environment derives, never a discovered one.
+- `doctor` describes coexisting profiles truthfully: other Claude items are
+  reported as "other CLAUDE_CONFIG_DIR profiles (or leftovers) - swapdex never
+  touches them", not as stale strays to delete; a refused ambiguous resolution
+  comes with the exact way out.
+
 ## [0.23.1] - 2026-07-12
 
 Hardening release from an adversarial review of 0.21.0-0.23.0 (one reviewer

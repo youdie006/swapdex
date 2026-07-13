@@ -190,6 +190,12 @@ atomically, backing up the current login first. For Claude, only the
 `oauthAccount` block of `~/.claude.json` is swapped -- your projects, MCP
 servers, and settings in that file are never touched.
 
+On macOS the Claude token lives in the login Keychain, one item per
+`CLAUDE_CONFIG_DIR` profile. swapdex manages **the profile of the environment
+it runs in**, exactly like `claude` itself resolves it: plain `swapdex`
+manages the default profile; profiles you run side by side via
+`CLAUDE_CONFIG_DIR` aliases are never touched.
+
 ## Safety
 
 - Every credential file swapdex writes is `0600`; the store directory is `0700`.
