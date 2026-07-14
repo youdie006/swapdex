@@ -329,8 +329,8 @@ spoof the official client.
 - ~~Permanent per-account slots.~~ **Shipped** (0.26): each account gets its own
   `CLAUDE_CONFIG_DIR`, so a switch copies no token and can never log an account
   out -- even with a session running. `run`, `use` (repoint) + the `claude`
-  shim, `onboard`, `adopt`, `migrate`. (Sharing MCP config across slots is the
-  one piece still open -- it lives in the per-account `.claude.json`.)
+  shim, `onboard`, `adopt`, `migrate`, and `sync-mcp` (shares your MCP servers
+  across slots, since they live in the per-account `.claude.json`).
 
 Being considered, explicitly opt-in and advisory-only:
 
