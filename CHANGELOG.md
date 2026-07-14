@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.2] - 2026-07-14
+
+### Fixed
+- **`swapdex setup` no longer lets you name a profile `-`.** The name `-` is
+  reserved for `swapdex use -` (toggle to the previous profile), and `add` /
+  `rename` already reject it - but setup's interactive save bypassed that
+  guard, so answering `-` at the name prompt created a `-` profile that then
+  broke `use -` ("can't tell which profile '-' means"). The shared name
+  prompt (`ask_name`, used by setup, `login`, and interactive `add`) now
+  rejects `-` and re-asks, matching the non-interactive commands.
+
 ## [0.24.1] - 2026-07-14
 
 Two real-use bugs from an adversarial scenario sweep (12 sandboxed

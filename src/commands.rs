@@ -2907,6 +2907,17 @@ fn ask_name(store: &Store, question: &str, default: &str) -> Option<String> {
             println!("  '{ans}' can't be a name (1-64 bytes, not all spaces; no '/', '\\\\', leading '.', or control chars). Try again.");
             continue;
         }
+        // ask_name only ever names a NEW profile, so reject the reserved "-"
+        // here too - `valid_profile_name` intentionally allows it (legacy "-"
+        // profiles must stay rm/rename-able), but CREATION must not, or setup
+        // would mint a "-" that breaks `use -`. `add`/`rename` reject it via a
+        // separate post-check; setup had none.
+        if ans == "-" {
+            println!(
+                "  '-' is reserved (`swapdex use -` toggles to the previous profile). Try again."
+            );
+            continue;
+        }
         if store.list().iter().any(|p| p.name == ans)
             && !yes_no(
                 &format!("  '{ans}' already exists - replace it? [y/N]: "),

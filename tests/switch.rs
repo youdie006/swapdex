@@ -186,6 +186,24 @@ fn setup_reprompts_on_an_invalid_name() {
     assert!(ls.contains("good"), "should save the valid retry: {ls}");
 }
 
+// setup must not let you name a profile "-" - it is reserved for `use -`
+// (toggle) and `add`/`rename` already reject it. Regression: setup's inline
+// save bypassed that guard, creating a "-" profile that broke `use -`.
+#[test]
+fn setup_rejects_the_reserved_dash_name() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let (o, c) = run_setup(root.path(), "-\ngood\nn\n");
+    assert_eq!(c, 0);
+    assert!(o.contains("reserved"), "must reject '-' as reserved: {o}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(
+        !names.lines().any(|l| l == "-"),
+        "no profile literally named '-': {names}"
+    );
+    assert!(names.contains("good"), "the valid retry is saved: {names}");
+}
+
 // login --tool claude: with Claude already logged in it guides the
 // `swapdex add` step rather than spawning an interactive session. A fake
 // `claude` on PATH makes this deterministic on machines (like CI) that do not
