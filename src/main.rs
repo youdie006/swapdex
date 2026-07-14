@@ -69,6 +69,8 @@ enum Cmd {
     Migrate,
     /// Guided setup: register/migrate your accounts into permanent slots
     Onboard,
+    /// Share MCP servers (from ~/.claude.json) into every account slot
+    SyncMcp,
     /// List saved profiles (active marked from the live login)
     Ls {
         #[arg(long)]
@@ -249,6 +251,7 @@ fn main() {
         Cmd::Adopt { name, dir } => commands::adopt_slot(&paths, name, dir),
         Cmd::Migrate => commands::migrate(&paths),
         Cmd::Onboard => commands::onboard(&paths),
+        Cmd::SyncMcp => commands::sync_mcp(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),

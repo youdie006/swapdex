@@ -37,8 +37,27 @@ pub fn shim_script(pointer: &Path, real_claude: &Path) -> String {
     )
 }
 
-/// The first `claude` on PATH that is NOT swapdex's own shim dir - the real one
-/// the shim should exec (avoids the shim calling itself).
+/// A marker line the generated shim carries, so we can recognize (and never
+/// re-exec) our own shim regardless of how its dir is spelled on PATH.
+const SHIM_MARKER: &str = "swapdex claude shim";
+
+/// True if `path` is one of swapdex's own `claude` shims (by content), not the
+/// real binary. Robust against path-spelling: a `~`, symlink, or relative PATH
+/// entry that resolves to the shim dir would slip past a plain path comparison.
+fn is_our_shim(path: &Path) -> bool {
+    // The shim is a tiny text script; read only its head.
+    let mut buf = [0u8; 256];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let n = f.read(&mut buf).unwrap_or(0);
+    String::from_utf8_lossy(&buf[..n]).contains(SHIM_MARKER)
+}
+
+/// The first `claude` on PATH that is NOT swapdex's own shim - the real one the
+/// shim should exec. Skips the shim dir AND any `claude` that is itself one of
+/// our shims (so re-running `swapdex shim` can never bake a self-reference).
 fn find_real_claude(shim_dir: &Path) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -46,7 +65,7 @@ fn find_real_claude(shim_dir: &Path) -> Option<PathBuf> {
             continue;
         }
         let cand = dir.join("claude");
-        if cand.is_file() {
+        if cand.is_file() && !is_our_shim(&cand) {
             return Some(cand);
         }
     }
@@ -98,5 +117,18 @@ mod tests {
         let s = shim_script(Path::new("/a b/active-claude"), Path::new("/c d/claude"));
         assert!(s.contains("'/a b/active-claude'"), "pointer is quoted");
         assert!(s.contains("'/c d/claude'"), "real claude is quoted");
+    }
+
+    #[test]
+    fn recognizes_our_own_shim_by_marker() {
+        // The generated shim carries the marker, so find_real_claude never bakes
+        // a self-reference even if the shim dir is spelled oddly on PATH.
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("claude");
+        std::fs::write(&shim, shim_script(Path::new("/p"), Path::new("/real"))).unwrap();
+        assert!(is_our_shim(&shim), "our shim is recognized by its marker");
+        let real = dir.path().join("real-claude");
+        std::fs::write(&real, "#!/bin/sh\nexec node /opt/claude \"$@\"\n").unwrap();
+        assert!(!is_our_shim(&real), "a real claude is not flagged");
     }
 }

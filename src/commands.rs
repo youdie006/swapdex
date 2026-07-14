@@ -2773,6 +2773,55 @@ pub fn migrate(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
+/// Share MCP servers across slots. Each Claude slot keeps its own `.claude.json`
+/// (which mixes the per-account `oauthAccount` with the shareable `mcpServers`),
+/// so MCP config cannot simply be symlinked like `settings.json`. This copies the
+/// `mcpServers` block from the bare `~/.claude.json` into every slot's own
+/// `.claude.json`, preserving each slot's account identity and other keys. Run it
+/// after logging into your slots (a slot has no `.claude.json` until first login).
+pub fn sync_mcp(paths: &Paths) -> Result<i32> {
+    let src_path = paths.claude_config_json();
+    let src: Value = if src_path.exists() {
+        serde_json::from_slice(&crate::atomic::read_regular(&src_path)?).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let mcp = src
+        .get("mcpServers")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let n = mcp.as_object().map(|o| o.len()).unwrap_or(0);
+    if n == 0 {
+        println!("No MCP servers in ~/.claude.json to share.");
+        return Ok(0);
+    }
+    let slots = crate::slots::Slots::open(paths)?;
+    let mut synced = 0;
+    let mut pending = 0;
+    for r in slots.list() {
+        let target = r.config_dir.join(".claude.json");
+        if !target.exists() {
+            pending += 1;
+            continue;
+        }
+        let mut cfg: Value =
+            serde_json::from_slice(&crate::atomic::read_regular(&target)?).unwrap_or(Value::Null);
+        let Some(obj) = cfg.as_object_mut() else {
+            continue;
+        };
+        obj.insert("mcpServers".into(), mcp.clone());
+        crate::atomic::write_secret(&target, &serde_json::to_vec(&cfg)?)?;
+        synced += 1;
+    }
+    println!("shared {n} MCP server(s) into {synced} slot(s).");
+    if pending > 0 {
+        println!(
+            "  {pending} slot(s) have no login yet - `swapdex run <name>` to sign in, then re-run."
+        );
+    }
+    Ok(0)
+}
+
 /// Register an existing `CLAUDE_CONFIG_DIR` directory as a slot, in place.
 pub fn adopt_slot(paths: &Paths, name: &str, dir: &std::path::Path) -> Result<i32> {
     let mut slots = crate::slots::Slots::open(paths)?;

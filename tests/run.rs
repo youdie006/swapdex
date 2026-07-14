@@ -388,3 +388,55 @@ fn onboard_marks_itself_done_so_it_does_not_nag() {
         .spawn_with_input("n\nn\n");
     assert!(marker.exists(), "onboarding marks itself done");
 }
+
+#[test]
+fn sync_mcp_shares_servers_into_slots_preserving_identity() {
+    let root = tempfile::tempdir().unwrap();
+    // Source: bare ~/.claude.json with mcpServers.
+    std::fs::write(
+        root.path().join(".claude.json"),
+        br#"{"oauthAccount":{"emailAddress":"bare@x.com"},"mcpServers":{"ctx7":{"command":"c"}}}"#,
+    )
+    .unwrap();
+    // A slot that has already "logged in" (its own .claude.json with a different account, no MCP).
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "work"], &path);
+    let slots = root.path().join(".local/share/swapdex/slots");
+    let slot = std::fs::read_dir(&slots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        slot.join(".claude.json"),
+        br#"{"oauthAccount":{"emailAddress":"work@x.com"},"mcpServers":{}}"#,
+    )
+    .unwrap();
+    // Sync: the slot gets the shared MCP but keeps its own account.
+    let out = Command::new(bin())
+        .args(["sync-mcp"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1 MCP server"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let cfg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(slot.join(".claude.json")).unwrap()).unwrap();
+    assert!(
+        cfg["mcpServers"]["ctx7"].is_object(),
+        "shared MCP landed in the slot"
+    );
+    assert_eq!(
+        cfg["oauthAccount"]["emailAddress"], "work@x.com",
+        "slot's own account preserved"
+    );
+}
