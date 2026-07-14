@@ -171,6 +171,18 @@ fn main() {
         // Also open the UI for a fresh-but-logged-in user: the onboarding
         // screen offers to save the accounts they're already signed into.
         let logged_in = swapdex::adapters::all().iter().any(|a| a.present(&paths));
+        // First run with something to set up (existing config dirs to register,
+        // or legacy copy-model profiles to migrate): guide onboarding instead of
+        // silently dropping into the picker. One-time - marked done afterward.
+        if interactive && commands::needs_onboarding(&paths) {
+            match commands::onboard(&paths) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("swapdex: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         if interactive && (has_profiles || logged_in) {
             match commands::ui(&paths) {
                 Ok(code) => std::process::exit(code),

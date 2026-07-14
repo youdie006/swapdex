@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.26.1] - 2026-07-14
+
+### Fixed
+- **Guided onboarding now runs automatically on first launch.** A bare `swapdex`
+  on an interactive terminal offers the guided setup when there is something to
+  set up (existing `~/.claude-*` dirs to register, or legacy profiles to
+  migrate), instead of requiring you to already know the `swapdex onboard`
+  command. It is shown once (a marker prevents re-nagging), then a bare `swapdex`
+  drops into the normal picker. Non-interactive shells (pipes, scripts) are never
+  hijacked - they still print the banner.
+
 ## [0.26.0] - 2026-07-14
 
 The **permanent-slot account model**: each account lives in its own

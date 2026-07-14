@@ -2625,6 +2625,39 @@ fn ask_yes(question: &str) -> bool {
     )
 }
 
+/// The marker written once onboarding has been shown, so a bare `swapdex` does
+/// not re-run the guided flow on every launch.
+fn onboarded_marker(paths: &Paths) -> std::path::PathBuf {
+    paths.store_dir().join("onboarded")
+}
+
+/// True when a bare `swapdex` should auto-run guided onboarding: it has not been
+/// shown before, AND there is something to set up (existing `~/.claude-*` dirs to
+/// register, or legacy copy-model Claude profiles to migrate). A brand-new user
+/// with nothing to migrate is left to the normal banner/hints.
+pub fn needs_onboarding(paths: &Paths) -> bool {
+    if onboarded_marker(paths).exists() {
+        return false;
+    }
+    let Ok(slots) = crate::slots::Slots::open(paths) else {
+        return false;
+    };
+    let has_unregistered = paths
+        .discover_claude_config_dirs()
+        .iter()
+        .any(|d| !slots.list().iter().any(|r| &r.config_dir == d));
+    if has_unregistered {
+        return true;
+    }
+    if let Ok(store) = Store::open(paths) {
+        return store
+            .list()
+            .iter()
+            .any(|p| p.tools.iter().any(|t| t == "claude-code") && slots.get(&p.name).is_none());
+    }
+    false
+}
+
 /// Guided first-run: detect what the user already has and walk them to a safe
 /// slot setup, one [Y/n] at a time. Explains the win, hides the machinery.
 pub fn onboard(paths: &Paths) -> Result<i32> {
@@ -2687,6 +2720,10 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
         install_shim(paths)?;
         println!();
     }
+
+    // Mark it shown so a bare `swapdex` does not re-run this every launch.
+    let _ = std::fs::create_dir_all(paths.store_dir());
+    let _ = std::fs::write(onboarded_marker(paths), b"1");
 
     // Wrap up.
     if crate::slots::Slots::open(paths)?.list().is_empty() {

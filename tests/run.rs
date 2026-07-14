@@ -370,3 +370,21 @@ impl SpawnWithInput for Command {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 }
+
+#[test]
+fn onboard_marks_itself_done_so_it_does_not_nag() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".claude-company")).unwrap();
+    // Before onboarding, the marker is absent (bare `swapdex` would offer it).
+    let marker = root.path().join(".local/share/swapdex/onboarded");
+    assert!(!marker.exists());
+    // Run onboard (decline everything); it should still mark itself shown.
+    Command::new(bin())
+        .args(["onboard"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn_with_input("n\nn\n");
+    assert!(marker.exists(), "onboarding marks itself done");
+}
