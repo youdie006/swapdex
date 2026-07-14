@@ -2535,6 +2535,28 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
 /// Onboarding in one step: run a tool's login flow, then save the result as a
 /// named profile. Codex has a driveable CLI login; Claude Code signs in inside
 /// the app, so for it swapdex guides the two-step manual path.
+/// Launch Claude in `<name>`'s permanent slot (create the slot on first use).
+/// swapdex never writes the credential here - the tool's own login does, into
+/// the slot's own `CLAUDE_CONFIG_DIR`. `exec` replaces this process, so this
+/// only returns on failure.
+pub fn run_account(paths: &Paths, name: &str, args: &[String]) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let mut slots = crate::slots::Slots::open(paths)?;
+    let rec = match slots.get(name) {
+        Some(r) => r,
+        None => slots.create(name)?,
+    };
+    if !command_exists("claude") {
+        eprintln!("swapdex: `claude` isn't on your PATH. Install it, then retry.");
+        return Ok(3);
+    }
+    let err = std::process::Command::new("claude")
+        .args(args)
+        .env("CLAUDE_CONFIG_DIR", &rec.config_dir)
+        .exec();
+    Err(anyhow::anyhow!("failed to launch claude: {err}"))
+}
+
 pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     if let Some(c) = reject_bad_name(name).or_else(|| reject_reserved_name(name)) {

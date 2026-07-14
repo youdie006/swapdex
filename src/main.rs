@@ -46,6 +46,14 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Launch Claude in an account's own permanent slot (concurrent-safe)
+    Run {
+        /// The account to launch
+        name: String,
+        /// Extra args passed straight to `claude` (after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// List saved profiles (active marked from the live login)
     Ls {
         #[arg(long)]
@@ -208,6 +216,7 @@ fn main() {
                 commands::use_account(&paths, name, *tool, *dry_run, *force)
             }
         }
+        Cmd::Run { name, args } => commands::run_account(&paths, name, args),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
