@@ -2611,6 +2611,92 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
+/// A [Y/n] prompt defaulting to yes. Non-interactive (no TTY) returns false so
+/// onboarding never blocks a script - it prints guidance instead.
+fn ask_yes(question: &str) -> bool {
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+    if !tty {
+        return false;
+    }
+    matches!(
+        prompt(&format!("{question} [Y/n]"), "y").as_deref(),
+        Some("y") | Some("Y") | Some("")
+    )
+}
+
+/// Guided first-run: detect what the user already has and walk them to a safe
+/// slot setup, one [Y/n] at a time. Explains the win, hides the machinery.
+pub fn onboard(paths: &Paths) -> Result<i32> {
+    println!("swapdex gives each account its own space, so switching never logs you out.\n");
+
+    // State 3: existing ~/.claude-* dirs the user runs by hand, not yet registered.
+    let slots_now = crate::slots::Slots::open(paths)?;
+    let unregistered: Vec<std::path::PathBuf> = paths
+        .discover_claude_config_dirs()
+        .into_iter()
+        .filter(|d| !slots_now.list().iter().any(|r| &r.config_dir == d))
+        .collect();
+    if !unregistered.is_empty() {
+        println!("Found Claude config dirs you already use:");
+        for d in &unregistered {
+            println!("  {}", d.display());
+        }
+        if ask_yes("Register them as swapdex accounts?") {
+            let mut s = crate::slots::Slots::open(paths)?;
+            for d in &unregistered {
+                let name = d
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.trim_start_matches(".claude-").to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "account".into());
+                match s.adopt(&name, d) {
+                    Ok(r) => println!("  registered '{}'", r.name),
+                    Err(e) => eprintln!("  skipped {}: {e}", d.display()),
+                }
+            }
+        }
+        println!();
+    }
+
+    // State 2: legacy copy-model Claude profiles without a slot.
+    if let Ok(store) = Store::open(paths) {
+        let s = crate::slots::Slots::open(paths)?;
+        let legacy = store
+            .list()
+            .into_iter()
+            .filter(|p| p.tools.iter().any(|t| t == "claude-code") && s.get(&p.name).is_none())
+            .count();
+        if legacy > 0 {
+            println!(
+                "You have {legacy} saved Claude profile(s) on the old copy-switch model \
+                 (the one that could log you out)."
+            );
+            if ask_yes("Give each its own slot now?") {
+                migrate(paths)?;
+                println!();
+            }
+        }
+    }
+
+    // Casual convenience: make a plain `claude` follow `swapdex use`.
+    if !crate::shim::shim_path(paths).exists()
+        && ask_yes("Make a plain `claude` follow `swapdex use`? (installs a small shim)")
+    {
+        install_shim(paths)?;
+        println!();
+    }
+
+    // Wrap up.
+    if crate::slots::Slots::open(paths)?.list().is_empty() {
+        println!("No accounts yet. Log into Claude, then run: swapdex run <name>");
+    } else {
+        println!("You're set. `swapdex slots` lists accounts; `swapdex use <name>` switches.");
+    }
+    Ok(0)
+}
+
 /// Create permanent slots for the legacy copy-model Claude profiles so they can
 /// be used via `run`/`use` with no credential copying. Does NOT import a token
 /// (a slot's login is created by a fresh sign-in - swapdex never writes a
@@ -2626,7 +2712,8 @@ pub fn migrate(paths: &Paths) -> Result<i32> {
         if slots.get(&p.name).is_some() {
             continue;
         }
-        if slots.create(&p.name).is_ok() {
+        if let Ok(rec) = slots.create(&p.name) {
+            crate::slots::link_shared_config(&rec.config_dir, paths.claude_dir());
             created.push(p.name.clone());
         }
     }
@@ -2666,7 +2753,11 @@ pub fn run_account(paths: &Paths, name: &str, args: &[String]) -> Result<i32> {
     let mut slots = crate::slots::Slots::open(paths)?;
     let rec = match slots.get(name) {
         Some(r) => r,
-        None => slots.create(name)?,
+        None => {
+            let r = slots.create(name)?;
+            crate::slots::link_shared_config(&r.config_dir, paths.claude_dir());
+            r
+        }
     };
     if !command_exists("claude") {
         eprintln!("swapdex: `claude` isn't on your PATH. Install it, then retry.");
@@ -2684,7 +2775,8 @@ pub fn list_slots(paths: &Paths) -> Result<i32> {
     let slots = crate::slots::Slots::open(paths)?;
     let list = slots.list();
     if list.is_empty() {
-        println!("No slots yet. Create one by launching an account: swapdex run <name>");
+        println!("No slots yet. Run `swapdex onboard` to set up your accounts,");
+        println!("  or launch one directly: swapdex run <name>");
         return Ok(0);
     }
     for r in list {

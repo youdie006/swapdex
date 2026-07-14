@@ -286,3 +286,87 @@ fn doctor_reports_slots_default_and_shim() {
     );
     assert!(o.contains("shim"), "shim line: {o}");
 }
+
+#[test]
+fn new_slot_symlinks_shared_config_from_bare_claude() {
+    let root = tempfile::tempdir().unwrap();
+    // Bare ~/.claude with shared config the new slot should inherit.
+    let bare = root.path().join(".claude");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(bare.join("settings.json"), b"{\"theme\":\"dark\"}").unwrap();
+    std::fs::write(bare.join("CLAUDE.md"), b"# global rules").unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "work"], &path);
+    // The slot got symlinks to the shared files (same contents), but NOT a token.
+    let slots = root.path().join(".local/share/swapdex/slots");
+    let slot = std::fs::read_dir(&slots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        std::fs::read_to_string(slot.join("settings.json")).unwrap(),
+        "{\"theme\":\"dark\"}",
+        "settings shared into the slot"
+    );
+    assert!(slot.join("CLAUDE.md").exists(), "global memory shared");
+    assert!(
+        std::fs::symlink_metadata(slot.join("settings.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "shared via symlink, not a copy"
+    );
+}
+
+#[test]
+fn onboard_registers_config_dirs_and_migrates_profiles() {
+    let root = tempfile::tempdir().unwrap();
+    // State 3: an existing ~/.claude-company dir. State 2: a legacy copy profile.
+    std::fs::create_dir_all(root.path().join(".claude-company")).unwrap();
+    seed_copy_profile(root.path(), "work");
+    let out = Command::new(bin())
+        .args(["onboard"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn_with_input("y\ny\nn\n");
+    // Both an adopted slot and a migrated slot now exist.
+    let listed = Command::new(bin())
+        .args(["slots"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let l = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        l.contains("company"),
+        "adopted the config dir: {l} / onboard out: {out}"
+    );
+    assert!(l.contains("work"), "migrated the legacy profile: {l}");
+}
+
+// Small helper: run with piped stdin, return stdout.
+trait SpawnWithInput {
+    fn spawn_with_input(&mut self, input: &str) -> String;
+}
+impl SpawnWithInput for Command {
+    fn spawn_with_input(&mut self, input: &str) -> String {
+        use std::io::Write;
+        let mut child = self.spawn().unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}

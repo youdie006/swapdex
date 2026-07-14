@@ -67,6 +67,8 @@ enum Cmd {
     },
     /// Give each legacy Claude profile its own permanent slot
     Migrate,
+    /// Guided setup: register/migrate your accounts into permanent slots
+    Onboard,
     /// List saved profiles (active marked from the live login)
     Ls {
         #[arg(long)]
@@ -234,6 +236,7 @@ fn main() {
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir } => commands::adopt_slot(&paths, name, dir),
         Cmd::Migrate => commands::migrate(&paths),
+        Cmd::Onboard => commands::onboard(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
