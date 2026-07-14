@@ -38,7 +38,21 @@ fn tighten_tree(dir: &std::path::Path) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
-        if p.is_dir() {
+        // NEVER follow a symlink: chmod/recurse would touch a target OUTSIDE
+        // the 0700 store. Use the entry's own file type (lstat), and skip any
+        // symlink outright - a real snapshot part is a plain file/dir.
+        let is_symlink = e
+            .file_type()
+            .map(|t| t.is_symlink())
+            .or_else(|_| fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()))
+            .unwrap_or(true);
+        if is_symlink {
+            continue;
+        }
+        if fs::symlink_metadata(&p)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).ok();
             tighten_tree(&p);
         } else {
@@ -431,10 +445,19 @@ fn overwrite_tree(dir: &std::path::Path) {
     if let Ok(rd) = fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            // Use lstat, never follow a symlink: `fs::write` through a symlink
+            // would zero a file OUTSIDE the store. Unlink (in remove_dir_all
+            // afterwards) drops the link itself; we never write through it.
+            let Ok(meta) = fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
                 overwrite_tree(&p);
-            } else if let Ok(len) = fs::metadata(&p).map(|m| m.len()) {
-                let _ = fs::write(&p, vec![0u8; len as usize]);
+            } else if meta.is_file() {
+                let _ = fs::write(&p, vec![0u8; meta.len() as usize]);
             }
         }
     }
@@ -450,6 +473,43 @@ mod tests {
             tool: "codex",
             blobs: vec![("auth".into(), Secret::new(b"{\"k\":\"SENTINEL\"}".to_vec()))],
         }
+    }
+
+    // A symlink planted inside the store must never be FOLLOWED when tightening
+    // perms or securely zeroing on `rm`: chmod/overwrite would escape to a file
+    // outside the 0700 store. remove() must delete the profile without touching
+    // the symlink target.
+    #[test]
+    fn destructive_traversal_does_not_follow_symlinks_out_of_the_store() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let s = Store::open(&p).unwrap();
+        s.save("work", &snap()).unwrap();
+        // An important external file, and a symlink to it inside the profile.
+        let outside = d.path().join("important.txt");
+        fs::write(&outside, b"DO-NOT-TOUCH").unwrap();
+        let mode_before = fs::symlink_metadata(&outside).unwrap().permissions().mode();
+        let link = p
+            .store_dir()
+            .join("accounts")
+            .join("work")
+            .join("codex")
+            .join("evil");
+        symlink(&outside, &link).unwrap();
+        // Re-open (runs tighten_tree over the symlink) and remove (overwrite_tree).
+        let s = Store::open(&p).unwrap();
+        assert!(s.remove("work").unwrap());
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            b"DO-NOT-TOUCH",
+            "the external target was neither zeroed nor chmod-ed"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&outside).unwrap().permissions().mode(),
+            mode_before,
+            "external file's mode is untouched (never chmod-ed through the symlink)"
+        );
     }
 
     fn walk_files(dir: &std::path::Path) -> Vec<PathBuf> {

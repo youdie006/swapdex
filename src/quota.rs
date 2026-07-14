@@ -99,16 +99,33 @@ fn pct_used(v: &Value) -> Option<f64> {
     None
 }
 
+/// Normalize an epoch that might be in milliseconds. Unix SECONDS stay under
+/// ~10 digits until the year 2286; anything past 1e11 (year ~5138 in seconds)
+/// is really milliseconds, so a drift to ms - or a per-window field that uses
+/// ms - shows a sane countdown instead of "resets in 21970092d".
+fn normalize_epoch(n: i64) -> i64 {
+    if n > 100_000_000_000 {
+        n / 1000
+    } else {
+        n
+    }
+}
+
 fn reset_secs(v: &Value) -> Option<i64> {
     for k in ["resets_at", "reset_at", "resets", "reset"] {
         match v.get(k) {
-            Some(Value::Number(n)) => return n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+            Some(Value::Number(n)) => {
+                return n
+                    .as_i64()
+                    .or_else(|| n.as_f64().map(|f| f as i64))
+                    .map(normalize_epoch)
+            }
             Some(Value::String(s)) => {
                 if let Some(t) = crate::session_link::rfc3339_to_secs(s) {
                     return Some(t);
                 }
                 if let Ok(n) = s.parse::<i64>() {
-                    return Some(n);
+                    return Some(normalize_epoch(n));
                 }
             }
             _ => {}
@@ -211,11 +228,13 @@ pub fn fetch(token: &str) -> Fetch {
 /// /usr/bin/curl), so a PATH-shadowing wrapper never receives the token -
 /// the same discipline as the pinned /usr/bin/security. PATH is the fallback
 /// for distros that install curl elsewhere. SWAPDEX_CURL is a test-fixture
-/// hook (like SWAPDEX_SESSIONWIKI_JSON): the E2E tests point it at a fake
-/// curl to exercise this path without the network.
+/// hook, honored ONLY under SWAPDEX_ROOT (test/dev mode) so a production
+/// environment can never redirect the token-bearing curl to another binary.
 fn curl_bin() -> String {
-    if let Some(t) = std::env::var_os("SWAPDEX_CURL") {
-        return t.to_string_lossy().into_owned();
+    if std::env::var_os("SWAPDEX_ROOT").is_some() {
+        if let Some(t) = std::env::var_os("SWAPDEX_CURL") {
+            return t.to_string_lossy().into_owned();
+        }
     }
     if std::path::Path::new("/usr/bin/curl").exists() {
         "/usr/bin/curl".into()
@@ -228,6 +247,11 @@ fn curl_bin() -> String {
 fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
     use std::io::Write;
     let mut child = std::process::Command::new(curl_bin())
+        // `-q` MUST be first: it disables ~/.curlrc, which could otherwise turn
+        // on `verbose`/`trace-ascii` and log the Authorization: Bearer header
+        // (the account token) to a file. curl reads the default config even
+        // with `--config -` unless -q/--disable comes first.
+        .arg("-q")
         .arg("--config")
         .arg("-")
         .stdin(std::process::Stdio::piped())
@@ -280,6 +304,20 @@ mod tests {
         );
         assert_eq!(token_from_credentials(b"{}"), None);
         assert_eq!(token_from_credentials(b"not json"), None);
+    }
+
+    #[test]
+    fn reset_in_milliseconds_is_normalized_to_seconds() {
+        // A ms epoch (13 digits) must not render "resets in 21970092d".
+        let body = r#"{"five_hour":{"utilization":0.5,"resets_at":1900000000000}}"#;
+        let w = parse(body).unwrap().five_hour.unwrap();
+        assert_eq!(w.resets_at, Some(1_900_000_000), "ms divided to seconds");
+        // A real seconds epoch is left untouched.
+        let body = r#"{"five_hour":{"utilization":0.5,"resets_at":1900000000}}"#;
+        assert_eq!(
+            parse(body).unwrap().five_hour.unwrap().resets_at,
+            Some(1_900_000_000)
+        );
     }
 
     #[test]

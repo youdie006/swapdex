@@ -4,6 +4,43 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.3] - 2026-07-14
+
+Hardening from a cross-model adversarial review (GPT-5.6 code pass + ChatGPT
+Pro invariant pass). Both independently flagged the stale-file/Keychain issue
+as the one a normal macOS user actually hits.
+
+### Fixed
+- **macOS: the authoritative Keychain is now read first.** swapdex leaves a
+  `~/.claude/.credentials.json` behind on switch, but Claude refreshes its
+  token in the *Keychain* (rotating the refresh token) without rewriting that
+  file. Reading the file first handed back a stale, possibly-revoked token -
+  and the switch-away writeback then persisted it into the profile, losing the
+  live login. When the Keychain is in play it is now the source of truth; the
+  file is only a fallback.
+- **`swapdex quota` no longer leaks the account token to a curl trace.** curl
+  reads `~/.curlrc` even with `--config -`; a user `curlrc` with `verbose` or
+  `trace-ascii` could log the `Authorization: Bearer` header. curl is now run
+  with `-q` first (disables curlrc), and the `SWAPDEX_CURL` test hook is
+  honored only under `SWAPDEX_ROOT`, never in production.
+- **macOS: switching/sign-out never touches another profile's Keychain item.**
+  Keychain writes and deletes now target only the item this environment
+  *derives* (never a discovered one), so a plain `swapdex` with a single
+  aliased `CLAUDE_CONFIG_DIR` login can no longer overwrite or delete that
+  alias profile.
+- **A switch never overwrites a recoverable login it could not back up.** If
+  the live login is valid (identity resolves) but a sibling file is corrupt
+  (a hand-edited `~/.claude.json`, a broken Gemini `google_accounts.json`),
+  `use`/`restore` now refuse for that tool and point at the repair instead of
+  overwriting it with no backup. A genuinely broken login (unparseable) still
+  gets replaced, as before.
+- **`rm` and permission-tightening never follow a symlink out of the store.**
+  A symlink planted inside the 0700 store could make secure-overwrite or chmod
+  escape to an external file; the traversal now uses `lstat` and skips symlinks.
+- **`swapdex quota` shows a sane reset countdown even if the endpoint returns
+  milliseconds.** A 13-digit `resets_at` is normalized to seconds instead of
+  rendering "resets in 21970092d".
+
 ## [0.24.2] - 2026-07-14
 
 ### Fixed

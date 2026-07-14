@@ -1,0 +1,9 @@
+tasks/*.json
+results/*.json
+sessions/*.json
+receipts/*.json
+artifacts/*
+config.local.json
+receipt-key.local
+last-browser-send
+!.gitignore

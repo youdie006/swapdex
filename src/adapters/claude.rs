@@ -236,11 +236,13 @@ fn keychain_write(value: &[u8]) -> Result<()> {
     if !keychain_enabled() {
         return Ok(());
     }
-    // When no item exists yet (right after a sign-out, or a first switch on a
-    // fresh Mac), create the slot the env DERIVES - a `claude` launched from
-    // this same environment reads exactly that one. Never fall back to a
-    // discovered item: that could be a different profile's slot.
-    let service = keychain_service().unwrap_or_else(effective_computed_service);
+    // Write ONLY to the item this environment DERIVES - a `claude` launched
+    // from the same env reads exactly that one. Never write to a DISCOVERED
+    // item: with no env and a single existing alias, keychain_service()'s scan
+    // fallback would return that alias, so a plain `swapdex use` would overwrite
+    // a DIFFERENT profile's login. The env-derived name is exact and, when the
+    // item does not exist yet, is the correct slot to create.
+    let service = effective_computed_service();
     let acct = keychain_account_name();
     let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
     let cmd = format!("add-generic-password -U -a \"{acct}\" -s \"{service}\" -X {hex}\n");
@@ -272,9 +274,13 @@ fn keychain_write(value: &[u8]) -> Result<()> {
 /// "also clear the bare name" extra could kill a LIVE default profile. No-op
 /// off macOS or when nothing resolves.
 pub(crate) fn keychain_delete() {
-    let Some(service) = keychain_service() else {
+    if !keychain_enabled() {
         return;
-    };
+    }
+    // Delete the env-DERIVED item only, never a discovered one: sign-out during
+    // add-account must not remove some OTHER CLAUDE_CONFIG_DIR profile's login
+    // just because it happens to be the single item the scan found.
+    let service = effective_computed_service();
     let acct = keychain_account_name();
     let _ = std::process::Command::new(SECURITY)
         .args(["delete-generic-password", "-s", &service, "-a", &acct])
@@ -284,6 +290,21 @@ pub(crate) fn keychain_delete() {
 /// The Claude token JSON from wherever it lives: the file when present,
 /// otherwise the macOS Keychain.
 fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
+    // On macOS the Keychain is AUTHORITATIVE: Claude reads its token there and
+    // silently refreshes it (rotating the refresh token) without rewriting the
+    // credential FILE that swapdex leaves behind. Reading the file first would
+    // hand back a stale, possibly-revoked token - and the switch-away writeback
+    // would then persist that stale token into the profile, losing the live
+    // login. So prefer the Keychain when it is in play; the file is only the
+    // fallback (a Keychain locked/absent, or an install that still uses it).
+    if keychain_enabled() {
+        return keychain_read().or_else(|| {
+            let f = paths.claude_credentials();
+            f.exists()
+                .then(|| crate::atomic::read_regular(&f).ok())
+                .flatten()
+        });
+    }
     let f = paths.claude_credentials();
     if f.exists() {
         crate::atomic::read_regular(&f).ok()

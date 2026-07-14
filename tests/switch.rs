@@ -2259,6 +2259,33 @@ fn add_with_corrupt_config_is_not_reported_as_not_logged_in() {
     );
 }
 
+// A present-but-uncapturable live login (a valid Gemini oauth_creds.json with a
+// corrupt google_accounts.json) must NOT be overwritten without a backup: the
+// switch refuses for that tool rather than destroying a recoverable login.
+#[test]
+fn use_refuses_to_overwrite_a_present_uncapturable_login() {
+    let root = tempfile::tempdir().unwrap();
+    seed_gemini(root.path(), "sub-a", "a@g.com");
+    run(root.path(), &["add", "ga", "--tool", "gemini"]);
+    seed_gemini(root.path(), "sub-b", "b@g.com");
+    // b is now live and UNSAVED. Corrupt only the auxiliary file so present()
+    // still sees the login but capture() fails.
+    std::fs::write(
+        root.path().join(".gemini/google_accounts.json"),
+        b"NOT JSON {",
+    )
+    .unwrap();
+    let before = std::fs::read(root.path().join(".gemini/oauth_creds.json")).unwrap();
+    let (_o, e, c) = run(root.path(), &["use", "ga", "--tool", "gemini"]);
+    assert_ne!(c, 0, "the switch must not report success: {e}");
+    assert!(
+        e.contains("refusing to overwrite"),
+        "explains the refusal: {e}"
+    );
+    let after = std::fs::read(root.path().join(".gemini/oauth_creds.json")).unwrap();
+    assert_eq!(before, after, "the live login B is untouched (not lost)");
+}
+
 // A per-tool failure must not abort the whole multi-tool switch: the other
 // tools still switch, and a summary says what failed.
 #[test]

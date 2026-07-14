@@ -572,7 +572,28 @@ fn use_account_inner(
                         }
                     }
                 }
+                Err(e) if live.is_some() => {
+                    // identity() SUCCEEDED but capture() failed: the login is
+                    // valid and recoverable, only a sibling file is corrupt (a
+                    // hand-edited ~/.claude.json, or a Gemini
+                    // google_accounts.json). Applying now would OVERWRITE a
+                    // recoverable login with NO backup - a lost login. Refuse
+                    // for this tool (the others still switch) and point at the
+                    // repair.
+                    eprintln!(
+                        "swapdex: {tool}: the current login is present but could not be backed \
+                         up ({e:#}) - refusing to overwrite it without a backup. Repair the file \
+                         named above (or re-login), then retry."
+                    );
+                    failed.push(tool);
+                    continue;
+                }
                 Err(e) => eprintln!(
+                    // identity() ALSO failed: the live login is genuinely
+                    // broken (its primary credential is unparseable), so there
+                    // is nothing recoverable to preserve - switching in a good
+                    // profile IS the fix. Proceed, warning about the skipped
+                    // backup.
                     "swapdex: note - the current {tool} login could not be read ({e:#}); \
                      switching without a backup of it"
                 ),
