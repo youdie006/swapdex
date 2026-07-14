@@ -4,6 +4,29 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.25.0] - 2026-07-14
+
+Prevents a real logout: switching a Claude account while a `claude` session is
+still running on that same login slot. Confirmed on a multi-`CLAUDE_CONFIG_DIR`
+macOS setup, cross-checked by a two-model design review.
+
+### Fixed
+- **`swapdex use` now refuses to switch Claude while a session is running on
+  that login slot.** Claude's OAuth refresh tokens rotate (each refresh revokes
+  the previous one). If a `claude` session keeps running after a switch, its
+  next refresh rewrites the slot's token and revokes the snapshot swapdex just
+  saved for the outgoing account - so switching back later logged that account
+  out. swapdex now detects a running `claude` and the login slot it uses (its
+  `CLAUDE_CONFIG_DIR`), and refuses the switch when a session is on the very
+  slot being swapped. A session on a *different* `CLAUDE_CONFIG_DIR` profile is
+  correctly ignored. If the running session's slot can't be read, it fails
+  closed (refuses) rather than risk the logout.
+
+### Added
+- **`swapdex use --force`** to switch anyway when you know the running session
+  is on a different account, or you have quit it. The refusal message names the
+  flag and the risk.
+
 ## [0.24.6] - 2026-07-14
 
 Onboarding and TUI robustness across less-common conditions (empty sessionwiki

@@ -392,8 +392,14 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
     Ok(if capture_failed.is_empty() { 0 } else { 1 })
 }
 
-pub fn use_account(paths: &Paths, name: &str, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
-    use_account_inner(paths, name, sel, dry_run, false, None)
+pub fn use_account(
+    paths: &Paths,
+    name: &str,
+    sel: Option<ToolSel>,
+    dry_run: bool,
+    force: bool,
+) -> Result<i32> {
+    use_account_inner(paths, name, sel, dry_run, false, None, force)
 }
 
 /// `open`: after a successful switch, exec the tool (the --open flag; needs an
@@ -403,6 +409,7 @@ pub fn use_account_open(
     name: &str,
     sel: Option<ToolSel>,
     dir: Option<&std::path::Path>,
+    force: bool,
 ) -> Result<i32> {
     if !is_explicit(sel) {
         eprintln!("swapdex: --open needs --tool <claude|codex|gemini|antigravity> so it knows what to launch");
@@ -414,7 +421,7 @@ pub fn use_account_open(
             return Ok(2);
         }
     }
-    use_account_inner(paths, name, sel, false, true, dir)
+    use_account_inner(paths, name, sel, false, true, dir, force)
 }
 
 fn use_account_inner(
@@ -424,6 +431,7 @@ fn use_account_inner(
     dry_run: bool,
     open: bool,
     open_dir: Option<&std::path::Path>,
+    force: bool,
 ) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     let store = Store::open(paths)?;
@@ -473,6 +481,32 @@ fn use_account_inner(
         Vec::new()
     } else {
         crate::proc::running_process_names()
+    };
+    // Pre-switch guard for Claude: swapping the login slot while a `claude`
+    // session is using THAT slot both clobbers the incoming login AND revokes
+    // the outgoing account's just-saved snapshot on the session's next token
+    // refresh (Claude's refresh tokens rotate - the saved copy dies). Compute
+    // the verdict once (a process scan); enforced per-tool below unless --force.
+    // Skipped on a dry-run and under SWAPDEX_ROOT (no real sessions in play).
+    let claude_guard = if dry_run {
+        crate::proc::GuardVerdict::Clear
+    } else if std::env::var_os("SWAPDEX_ROOT").is_some() {
+        // Sandbox: never scan real processes (they are not the ones an isolated
+        // root's credentials belong to). A test hook - honored ONLY here - can
+        // inject a verdict to exercise the enforcement path.
+        match std::env::var("SWAPDEX_TEST_CLAUDE_GUARD").ok().as_deref() {
+            Some("same-slot") => crate::proc::GuardVerdict::SameSlot,
+            Some("unknown") => crate::proc::GuardVerdict::Unknown,
+            _ => crate::proc::GuardVerdict::Clear,
+        }
+    } else {
+        crate::proc::claude_switch_guard(
+            std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+                .ok()
+                .as_deref(),
+            std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+            &crate::proc::running_claude_procs(),
+        )
     };
     // One shared timestamp for every tool this invocation switches, so a later
     // bare `restore` can identify exactly this switch's tool set.
@@ -539,6 +573,36 @@ fn use_account_inner(
                 None => println!("would switch {tool} -> {name}"),
             }
             continue;
+        }
+        // Pre-switch guard (Claude only): refuse to swap the slot while a claude
+        // session is using it, or when a running session's slot is unknown
+        // (fail closed). Doing so would clobber the incoming login and, on the
+        // session's next refresh, revoke the outgoing account's snapshot ->
+        // a later switch-back logs it out. `--force` overrides.
+        if tool == "claude-code" && !force {
+            match claude_guard {
+                crate::proc::GuardVerdict::SameSlot => {
+                    eprintln!(
+                        "swapdex: {tool}: a Claude session is running on THIS login slot. \
+                         Switching now would log that account out on its next token refresh \
+                         (the refresh token rotates and the saved copy is revoked). Quit that \
+                         `claude` and retry, or `swapdex use {name} --tool claude --force` to \
+                         switch anyway."
+                    );
+                    failed.push(tool);
+                    continue;
+                }
+                crate::proc::GuardVerdict::Unknown => {
+                    eprintln!(
+                        "swapdex: {tool}: a Claude session is running but swapdex could not read \
+                         which login slot it uses, so it can't rule out that switching would log \
+                         it out. Quit `claude` and retry, or `--force` to switch anyway."
+                    );
+                    failed.push(tool);
+                    continue;
+                }
+                crate::proc::GuardVerdict::Clear => {}
+            }
         }
         // Safe order (A6): back up the CURRENT live login first (atomic + fsync
         // inside write_secret); if the backup fails, `?` aborts BEFORE we touch
@@ -1478,7 +1542,7 @@ pub fn ui(paths: &Paths) -> Result<i32> {
                 // event - otherwise the first-ever switch would skip the
                 // fallback written exactly for it.
                 let first_time = crate::session_link::read_timeline(paths).is_empty();
-                let rc = use_account(paths, &name, None, false)?;
+                let rc = use_account(paths, &name, None, false, false)?;
                 if rc == 0 {
                     ui_session_hints(paths, &name, first_time)?;
                 }

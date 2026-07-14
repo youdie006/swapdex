@@ -41,6 +41,10 @@ enum Cmd {
         /// Folder to open the conversation in (with --open; default: current dir)
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
+        /// Switch even if a Claude session is running on this login slot (it may
+        /// log that account out on its next token refresh)
+        #[arg(long)]
+        force: bool,
     },
     /// List saved profiles (active marked from the live login)
     Ls {
@@ -196,11 +200,12 @@ fn main() {
             dry_run,
             open,
             dir,
+            force,
         } => {
             if *open {
-                commands::use_account_open(&paths, name, *tool, dir.as_deref())
+                commands::use_account_open(&paths, name, *tool, dir.as_deref(), *force)
             } else {
-                commands::use_account(&paths, name, *tool, *dry_run)
+                commands::use_account(&paths, name, *tool, *dry_run, *force)
             }
         }
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),

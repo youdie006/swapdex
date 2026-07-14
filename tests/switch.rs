@@ -3066,3 +3066,68 @@ fn setup_continues_past_an_unreadable_tool() {
         "codex saved despite the claude error: {names} / {o}"
     );
 }
+
+// --- pre-switch running-session guard (SWAPDEX_TEST_CLAUDE_GUARD hook) ---
+
+fn seed_two_claude_profiles(root: &Path) {
+    // After this, live = B (b@x.com); alpha=A, beta=B are saved.
+    seed_claude(root, "uuid-A", "a@x.com");
+    run(root, &["add", "alpha", "--tool", "claude"]);
+    seed_claude(root, "uuid-B", "b@x.com");
+    run(root, &["add", "beta", "--tool", "claude"]);
+}
+
+#[test]
+fn claude_switch_is_refused_when_a_session_holds_this_slot() {
+    let root = tempfile::tempdir().unwrap();
+    seed_two_claude_profiles(root.path());
+    // A claude session (per the test hook) is running on this login slot.
+    let (_o, e, c) = run_env(
+        root.path(),
+        &["use", "alpha", "--tool", "claude"],
+        &[("SWAPDEX_TEST_CLAUDE_GUARD", "same-slot")],
+    );
+    assert_eq!(c, 1, "refused switch exits 1: {e}");
+    assert!(
+        e.contains("running on THIS login slot"),
+        "explains the refusal: {e}"
+    );
+    // Nothing switched - the live login is still B, and no backup was written.
+    let (o, _e, _c) = run(root.path(), &["status"]);
+    assert!(o.contains("b@x.com"), "live login unchanged: {o}");
+}
+
+#[test]
+fn claude_switch_force_overrides_the_running_session_guard() {
+    let root = tempfile::tempdir().unwrap();
+    seed_two_claude_profiles(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["use", "alpha", "--tool", "claude", "--force"],
+        &[("SWAPDEX_TEST_CLAUDE_GUARD", "same-slot")],
+    );
+    assert_eq!(c, 0, "--force switches through the guard: {o}{e}");
+    let (s, _e, _c) = run(root.path(), &["status"]);
+    assert!(
+        s.contains("a@x.com"),
+        "switched to alpha despite the session: {s}"
+    );
+}
+
+#[test]
+fn claude_switch_fails_closed_when_a_running_session_slot_is_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    seed_two_claude_profiles(root.path());
+    let (_o, e, c) = run_env(
+        root.path(),
+        &["use", "alpha", "--tool", "claude"],
+        &[("SWAPDEX_TEST_CLAUDE_GUARD", "unknown")],
+    );
+    assert_eq!(c, 1, "unknown slot fails closed: {e}");
+    assert!(
+        e.contains("could not read which login slot"),
+        "fail-closed message: {e}"
+    );
+    let (o, _e, _c) = run(root.path(), &["status"]);
+    assert!(o.contains("b@x.com"), "live login unchanged: {o}");
+}
