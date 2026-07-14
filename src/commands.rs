@@ -1871,6 +1871,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("quota failed: {e}")],
             }
         }
+        fn sessionwiki_present(&mut self) -> bool {
+            command_exists("sessionwiki")
+        }
         fn live_tools(&mut self) -> Vec<String> {
             adapters::all()
                 .iter()

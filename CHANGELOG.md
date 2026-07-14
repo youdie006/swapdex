@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.5] - 2026-07-14
+
+### Added
+- **The native session menu now nudges you toward sessionwiki.** When
+  sessionwiki is not installed, `swapdex ui`'s "open a conversation" menu shows
+  a one-line footer: "install sessionwiki to search these, trace a file to its
+  session, and group by account" - so you know the switching works today and
+  what installing sessionwiki would add on top.
+
 ## [0.24.4] - 2026-07-14
 
 ### Fixed

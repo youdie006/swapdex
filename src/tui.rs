@@ -120,6 +120,9 @@ pub trait TuiCtx {
     /// Run `quota` and return its lines (remaining quota per Claude account -
     /// the one opt-in network read).
     fn quota(&mut self) -> Vec<String>;
+    /// Is `sessionwiki` installed? When not, the session menu is native and a
+    /// one-line hint points at what installing it would add.
+    fn sessionwiki_present(&mut self) -> bool;
     /// Display names of the tools you're logged into RIGHT NOW (for the
     /// empty-state onboarding: "save these as a profile").
     fn live_tools(&mut self) -> Vec<String>;
@@ -275,6 +278,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     let mut open_state = ListState::default();
     let mut status = String::new();
     let mut confirm_delete: Option<usize> = None;
+    // Checked once: drives the "install sessionwiki for more" hint in the
+    // native session menu.
+    let wiki_present = ctx.sessionwiki_present();
     let mut screen = Screen::Main;
     // Cached only while the list is empty (onboarding); cheap to recompute.
     let mut onboard_live: Vec<String> = if rows.is_empty() {
@@ -461,13 +467,19 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         )
                         .highlight_symbol("\u{2503} ");
                     f.render_stateful_widget(list, main, &mut open_state);
-                    f.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            format!("  {status}"),
+                    // Native session menu (no sessionwiki): a one-line nudge at
+                    // what installing it adds. With sessionwiki, show the switch
+                    // status instead.
+                    let foot_line = if wiki_present {
+                        Span::styled(format!("  {status}"), Style::default().fg(MUTED))
+                    } else {
+                        Span::styled(
+                            "  tip: install sessionwiki to search these, trace a file to its \
+                             session, and group by account",
                             Style::default().fg(MUTED),
-                        ))),
-                        foot,
-                    );
+                        )
+                    };
+                    f.render_widget(Paragraph::new(Line::from(foot_line)), foot);
                     f.render_widget(
                         Paragraph::new(key_hints(&[("\u{21b5}", "open"), ("esc", "back")])),
                         help,
