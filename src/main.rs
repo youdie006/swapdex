@@ -56,6 +56,17 @@ enum Cmd {
     },
     /// List the permanent account slots
     Slots,
+    /// Install the `claude` shim so a plain `claude` follows `swapdex use`
+    Shim,
+    /// Register an existing CLAUDE_CONFIG_DIR directory as a slot (in place)
+    Adopt {
+        /// Name for the account
+        name: String,
+        /// The existing config dir (e.g. ~/.claude-work)
+        dir: std::path::PathBuf,
+    },
+    /// Give each legacy Claude profile its own permanent slot
+    Migrate,
     /// List saved profiles (active marked from the live login)
     Ls {
         #[arg(long)]
@@ -220,6 +231,9 @@ fn main() {
         }
         Cmd::Run { name, args } => commands::run_account(&paths, name, args),
         Cmd::Slots => commands::list_slots(&paths),
+        Cmd::Shim => commands::install_shim(&paths),
+        Cmd::Adopt { name, dir } => commands::adopt_slot(&paths, name, dir),
+        Cmd::Migrate => commands::migrate(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),

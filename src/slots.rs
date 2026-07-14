@@ -98,6 +98,68 @@ impl Slots {
         std::fs::write(&self.file, bytes).context("write slots.json")?;
         Ok(())
     }
+
+    /// Register an EXISTING config dir as a slot without creating or moving it
+    /// (adoption of a `~/.claude-*` the user already uses). `config_dir` must be
+    /// an existing absolute path.
+    pub fn adopt(&mut self, name: &str, config_dir: &std::path::Path) -> Result<SlotRecord> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a slot name is required");
+        }
+        if self.records.iter().any(|r| r.name == name) {
+            bail!("a slot named '{name}' already exists");
+        }
+        if !config_dir.is_absolute() {
+            bail!("config dir must be an absolute path");
+        }
+        if !config_dir.is_dir() {
+            bail!("config dir does not exist: {}", config_dir.display());
+        }
+        let rec = SlotRecord {
+            name: name.to_string(),
+            id: new_id(name),
+            config_dir: config_dir.to_path_buf(),
+            adopted: true,
+        };
+        self.records.push(rec.clone());
+        self.persist()?;
+        Ok(rec)
+    }
+
+    /// The pointer file the `claude` shim reads to find the default account's
+    /// slot: `<store_dir>/active-claude`.
+    fn pointer_file(&self) -> PathBuf {
+        // `self.file` is `<store_dir>/slots.json`; its parent is the store dir.
+        let store = self
+            .file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        store.join("active-claude")
+    }
+
+    /// Point the default account at `name`'s slot. A plain `claude` (via the
+    /// shim) then launches in this slot. No credential is moved.
+    pub fn set_default(&self, name: &str) -> Result<()> {
+        let rec = self
+            .get(name)
+            .with_context(|| format!("no slot named '{name}'"))?;
+        let p = self.pointer_file();
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).context("create store dir")?;
+        }
+        std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
+            .context("write active-claude pointer")?;
+        Ok(())
+    }
+
+    /// The default account's slot dir, if a default has been set.
+    pub fn default_dir(&self) -> Option<PathBuf> {
+        let s = std::fs::read_to_string(self.pointer_file()).ok()?;
+        let s = s.trim();
+        (!s.is_empty()).then(|| PathBuf::from(s))
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +206,37 @@ mod tests {
         let b = s.create("beta").unwrap();
         assert_ne!(a.id, b.id);
         assert_ne!(a.id, "alpha", "id is opaque, not the display name");
+    }
+
+    #[test]
+    fn set_default_points_at_the_slot_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = Slots::open(&paths).unwrap();
+        let rec = s.create("work").unwrap();
+        assert_eq!(s.default_dir(), None, "no default until set");
+        s.set_default("work").unwrap();
+        assert_eq!(s.default_dir(), Some(rec.config_dir.clone()));
+        // Re-open sees the same pointer (persisted on disk).
+        assert_eq!(
+            Slots::open(&paths).unwrap().default_dir(),
+            Some(rec.config_dir)
+        );
+        assert!(s.set_default("missing").is_err(), "unknown name rejected");
+    }
+
+    #[test]
+    fn adopt_registers_an_existing_dir_without_moving_it() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let existing = root.path().join("dot-claude-company");
+        std::fs::create_dir_all(&existing).unwrap();
+        let mut s = Slots::open(&paths).unwrap();
+        let rec = s.adopt("company", &existing).unwrap();
+        assert_eq!(rec.config_dir, existing, "config dir is the existing path");
+        assert!(rec.adopted);
+        assert!(existing.is_dir(), "the existing dir is left in place");
+        // A non-existent dir is refused.
+        assert!(s.adopt("nope", &root.path().join("absent")).is_err());
     }
 }

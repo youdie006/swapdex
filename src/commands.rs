@@ -399,6 +399,13 @@ pub fn use_account(
     dry_run: bool,
     force: bool,
 ) -> Result<i32> {
+    // Permanent-slot account: `use` just repoints the default pointer (the
+    // claude shim follows it) - no credential copy, so no rotation logout. A
+    // legacy copy-model profile (not in the slot registry) falls through to the
+    // old guarded switch.
+    if crate::slots::Slots::open(paths)?.get(name).is_some() {
+        return use_slot_default(paths, name, dry_run);
+    }
     use_account_inner(paths, name, sel, dry_run, false, None, force)
 }
 
@@ -2296,6 +2303,42 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         }
     }
 
+    // Permanent slots (the no-copy model): the slots, the default account the
+    // claude shim follows, and whether the shim is installed.
+    if let Ok(slots) = crate::slots::Slots::open(paths) {
+        let list = slots.list();
+        if !list.is_empty() {
+            report("slots", true, format!("{} account slot(s)", list.len()));
+            match slots.default_dir() {
+                Some(dir) => {
+                    let name = list
+                        .iter()
+                        .find(|r| r.config_dir == dir)
+                        .map(|r| r.name.as_str())
+                        .unwrap_or("(unknown)");
+                    report("default", true, format!("plain `claude` -> '{name}'"));
+                }
+                None => report(
+                    "default",
+                    true,
+                    "no default account set - `swapdex use <name>`".into(),
+                ),
+            }
+            let installed = crate::shim::shim_path(paths).exists();
+            report(
+                "shim",
+                true,
+                if installed {
+                    "claude shim installed".into()
+                } else {
+                    "claude shim not installed - run `swapdex shim` so a plain \
+                     `claude` follows `swapdex use`"
+                        .to_string()
+                },
+            );
+        }
+    }
+
     // Live credential files hold refresh tokens - flag loose modes on ALL of
     // them, not just .claude.json (the store already self-tightens; the live
     // files are each tool's own, so we can only warn).
@@ -2535,6 +2578,85 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
 /// Onboarding in one step: run a tool's login flow, then save the result as a
 /// named profile. Codex has a driveable CLI login; Claude Code signs in inside
 /// the app, so for it swapdex guides the two-step manual path.
+/// Repoint the default account at slot `name` (the `claude` shim follows this).
+/// No credential is moved. Called by `use_account` when the name is a slot.
+fn use_slot_default(paths: &Paths, name: &str, dry_run: bool) -> Result<i32> {
+    if dry_run {
+        println!("would set the default account -> {name}");
+        return Ok(0);
+    }
+    let slots = crate::slots::Slots::open(paths)?;
+    slots.set_default(name)?;
+    println!("default account -> {name}");
+    // First-time nudge: without the shim, a plain `claude` won't follow this.
+    if !crate::shim::shim_path(paths).exists() {
+        println!(
+            "  tip: run `swapdex shim` once so a plain `claude` follows your switches\n\
+             \x20      (or launch directly with `swapdex run {name}`)"
+        );
+    }
+    Ok(0)
+}
+
+/// Install the `claude` shim so a plain `claude` launches in the default
+/// account's slot. Prints the one PATH line the user needs.
+pub fn install_shim(paths: &Paths) -> Result<i32> {
+    let (shim, shim_dir) = crate::shim::install(paths)?;
+    println!("installed the claude shim at {}", shim.display());
+    println!(
+        "  add this to your shell profile (once), so it wins over the real claude:\n\
+         \x20     export PATH=\"{}:$PATH\"",
+        shim_dir.display()
+    );
+    Ok(0)
+}
+
+/// Create permanent slots for the legacy copy-model Claude profiles so they can
+/// be used via `run`/`use` with no credential copying. Does NOT import a token
+/// (a slot's login is created by a fresh sign-in - swapdex never writes a
+/// credential); it prints the accounts to log into once.
+pub fn migrate(paths: &Paths) -> Result<i32> {
+    let store = Store::open(paths)?;
+    let mut slots = crate::slots::Slots::open(paths)?;
+    let mut created = Vec::new();
+    for p in store.list() {
+        if !p.tools.iter().any(|t| t == "claude-code") {
+            continue;
+        }
+        if slots.get(&p.name).is_some() {
+            continue;
+        }
+        if slots.create(&p.name).is_ok() {
+            created.push(p.name.clone());
+        }
+    }
+    if created.is_empty() {
+        println!("Nothing to migrate - every Claude profile already has a slot.");
+        return Ok(0);
+    }
+    println!(
+        "Created slots for: {}. Each account now has its own space - the surprise\n\
+         logouts when switching are gone.",
+        created.join(", ")
+    );
+    println!("  Log into each once (creates its own login):");
+    for n in &created {
+        println!("    swapdex run {n}");
+    }
+    if !crate::shim::shim_path(paths).exists() {
+        println!("  Then `swapdex shim` so a plain `claude` follows `swapdex use`.");
+    }
+    Ok(0)
+}
+
+/// Register an existing `CLAUDE_CONFIG_DIR` directory as a slot, in place.
+pub fn adopt_slot(paths: &Paths, name: &str, dir: &std::path::Path) -> Result<i32> {
+    let mut slots = crate::slots::Slots::open(paths)?;
+    let rec = slots.adopt(name, dir)?;
+    println!("registered '{}' -> {}", rec.name, rec.config_dir.display());
+    Ok(0)
+}
+
 /// Launch Claude in `<name>`'s permanent slot (create the slot on first use).
 /// swapdex never writes the credential here - the tool's own login does, into
 /// the slot's own `CLAUDE_CONFIG_DIR`. `exec` replaces this process, so this
