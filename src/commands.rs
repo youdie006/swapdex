@@ -352,6 +352,19 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             );
             return Ok(6);
         }
+        if !capture_failed.is_empty() {
+            // present() said the login IS there but capture failed - a corrupt
+            // or unreadable live login (a hand-edited ~/.claude.json with a
+            // JSON syntax error is the common one), NOT "not logged in". The
+            // per-tool error above carries the fix; this is a hard error (1),
+            // never exit 3 (which would send the user to re-log-in in vain).
+            eprintln!(
+                "swapdex: nothing saved - the live login for {} is present but could not be \
+                 read (see the error above)",
+                capture_failed.join(", ")
+            );
+            return Ok(1);
+        }
         eprintln!("swapdex: not logged in to any selected tool");
         return Ok(3);
     }
@@ -3464,10 +3477,15 @@ fn identity_line(id: &Account) -> String {
 }
 
 fn expiry_note(expires_at: Option<i64>) -> String {
-    // expiresAt is epoch millis. Just flag if already past; no live clock math
-    // needed for a coarse warning.
+    // expiresAt is epoch millis. An OAuth ACCESS token lapses about hourly and
+    // the tool refreshes it silently, so "expired" for a just-lapsed token is
+    // pure noise (this is the `status` twin of the 0.20.0 ls/marker fix that
+    // this line was missed by). Only note a snapshot older than STALE_DAYS,
+    // where the refresh token itself may be dead and a re-login is plausible.
     match expires_at {
-        Some(ms) if ms < now_ms() => " - access token expired, may re-prompt".to_string(),
+        Some(ms) if now_ms() - ms > STALE_DAYS * 86400 * 1000 => {
+            " - login is old; may re-prompt if its refresh token has expired".to_string()
+        }
         _ => String::new(),
     }
 }

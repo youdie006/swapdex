@@ -861,6 +861,40 @@ fn status_short_is_one_compact_line() {
     assert!(o.contains("codex:work"), "tool:profile pairs: {o}");
 }
 
+// A just-lapsed Claude ACCESS token (they expire ~hourly and refresh silently)
+// must NOT make `status` cry "access token expired" - that is the false-alarm
+// the user hit daily. Only a >30-day-old login gets a soft re-login note.
+#[test]
+fn status_does_not_flag_a_normally_lapsed_access_token() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+    // expiresAt one hour in the PAST - the everyday auto-refresh case.
+    let one_hour_ago_ms = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64)
+        - 3_600_000;
+    std::fs::write(
+        root.path().join(".claude/.credentials.json"),
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"AT","refreshToken":"RT","expiresAt":{one_hour_ago_ms},"subscriptionType":"max"}}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(".claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"u","emailAddress":"a@x.com","displayName":"D"}}"#,
+    )
+    .unwrap();
+    let (o, _e, c) = run(root.path(), &["status"]);
+    assert_eq!(c, 0);
+    assert!(o.contains("a@x.com"), "shows the account: {o}");
+    assert!(
+        !o.to_lowercase().contains("expired"),
+        "a normally-lapsed access token is not 'expired': {o}"
+    );
+}
+
 // On a terminal, `rm` asks y/N instead of demanding --yes (scripts still get
 // exit 7 when stdin is not a tty - covered by rm_requires_yes elsewhere).
 #[test]
@@ -2175,6 +2209,36 @@ fn corrupt_live_claude_config_diagnosed_not_blamed_on_snapshot() {
     let (o, _e, c) = run(root.path(), &["doctor"]);
     assert_eq!(c, 9, "doctor flags it: {o}");
     assert!(o.contains(".claude.json"), "doctor names the file: {o}");
+}
+
+// `add` with a valid live login but a corrupt ~/.claude.json (a hand-edited
+// JSON syntax error - very common) must NOT report "not logged in" (exit 3):
+// the user IS logged in, the config is broken. It is a hard error (exit 1)
+// with the corrupt-file remedy, so they fix the file instead of re-logging in.
+#[test]
+fn add_with_corrupt_config_is_not_reported_as_not_logged_in() {
+    let root = tempfile::tempdir().unwrap();
+    // Valid credential file, corrupt config.
+    std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+    std::fs::write(
+        root.path().join(".claude/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT","expiresAt":9999999999999,"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    std::fs::write(root.path().join(".claude.json"), b"BROKEN { not json").unwrap();
+    let (_o, e, c) = run(root.path(), &["add", "p", "--tool", "claude"]);
+    assert_eq!(
+        c, 1,
+        "corrupt config is a hard error, not not-logged-in: {e}"
+    );
+    assert!(
+        !e.contains("not logged in"),
+        "must not claim the user is logged out when they are: {e}"
+    );
+    assert!(
+        e.contains(".claude.json"),
+        "points at the corrupt file: {e}"
+    );
 }
 
 // A per-tool failure must not abort the whole multi-tool switch: the other

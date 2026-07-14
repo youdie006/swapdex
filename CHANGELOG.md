@@ -4,6 +4,26 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.1] - 2026-07-14
+
+Two real-use bugs from an adversarial scenario sweep (12 sandboxed
+workflows + live checks on a real multi-profile Mac).
+
+### Fixed
+- **`status` no longer cries "access token expired".** An OAuth access token
+  lapses about hourly and the tool refreshes it silently; `status` still
+  flagged every just-lapsed token with "access token expired, may re-prompt".
+  This was the `status` twin of the 0.20.0 ls/marker fix - the same line, in a
+  code path that fix missed. Now only a login older than 30 days (whose
+  refresh token may actually be dead) gets a soft note. This is the daily
+  false alarm behind "it keeps saying expired".
+- **`add` on a corrupt `~/.claude.json` no longer claims you are "not logged
+  in".** With a valid credential but a hand-edited config that has a JSON
+  syntax error, `add` printed "not logged in to any selected tool" and exited
+  3 - sending you to re-log-in when the real fix is to repair the file. It now
+  exits 1 and points at the corrupt file (the detailed per-tool error was
+  already correct; only the summary + exit code were wrong).
+
 ## [0.24.0] - 2026-07-13
 
 ### Changed
