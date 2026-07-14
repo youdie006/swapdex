@@ -28,8 +28,9 @@ Without it, `cargo run -- use x` operates on YOUR real `~/.claude` and
 
 ## The most useful contribution: a new tool adapter
 
-swapdex supports Claude Code and Codex today. Adding another CLI (Gemini,
-OpenCode, ...) means implementing the `AuthTool` trait in `src/adapters/`:
+swapdex supports Claude Code, Codex, Gemini CLI, and Antigravity today.
+Adding another CLI (OpenCode, Cursor, ...) means implementing the `AuthTool`
+trait in `src/adapters/`:
 
 - `capture` reads the current live login into an opaque `Snapshot`.
 - `apply` writes a snapshot back atomically (use `crate::atomic::write_secret`;
@@ -40,10 +41,9 @@ OpenCode, ...) means implementing the `AuthTool` trait in `src/adapters/`:
 
 Include a capture/apply round-trip test against an isolated `Paths::rooted`.
 
-The most wanted adapter right now is **macOS Keychain support for Claude Code**
--- design and constraints are written up in
-[issue #1](https://github.com/youdie006/swapdex/issues/1) (needs a macOS dev
-machine).
+macOS Keychain support for Claude Code shipped in 0.17-0.24 (see the Keychain
+resolution contract in `src/adapters/claude.rs`); new-adapter and hardening
+contributions are the most useful right now.
 
 ## Non-negotiables
 

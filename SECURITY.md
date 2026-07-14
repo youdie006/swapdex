@@ -6,8 +6,12 @@ trust model and how to report an issue.
 
 ## Trust model
 
-- **Local only.** swapdex makes no network calls. The switching binary has no
-  HTTP client in its dependency graph, and CI asserts this on every commit.
+- **Local by default.** Switching, listing, status, usage - everything except
+  one command makes no network call. The binary has no HTTP client in its
+  dependency graph (CI asserts this on every commit). The sole exception is the
+  opt-in `swapdex quota` command, which shells out to `/usr/bin/curl` to read
+  your own remaining balance from Anthropic's official usage endpoint - your
+  account's own token, read-only, only when you type it.
 - **Your accounts only.** It manages the logins already present on your machine.
   It never creates, shares, or transmits credentials.
 - **The store holds plaintext refresh tokens.** `~/.local/share/swapdex` is as

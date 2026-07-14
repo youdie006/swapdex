@@ -1,7 +1,9 @@
 # swapdex commands
 
-A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
-(no arguments) for the wordmark and a short hint.
+A quick reference. Run `swapdex --help` for the generated help. Bare
+`swapdex` (no arguments) opens the full-screen picker when run on a terminal
+with saved profiles or a live login; otherwise it prints the wordmark and a
+short hint.
 
 ## Commands
 
@@ -9,8 +11,8 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | --- | --- |
 | `swapdex setup` | Guided first-time setup: saves the account(s) you're logged into, offers to add more (drives `codex login` for you), and shows how to switch. Interactive (needs a terminal). |
 | `swapdex login <name> [--tool ...]` | Log in to a NEW account and save it, in one flow. Already logged in? swapdex saves your current login, signs you out locally, opens the official tool for the fresh sign-in, and captures the new account - your previous login is stashed and restored automatically if the sign-in does not complete. Without `--tool` it asks which tool (never guesses). |
-| `swapdex add <name> [--tool claude\|codex] [--update]` | Save the current live login as a named profile. Snapshots both tools by default; `--tool` limits it. `--update` replaces an existing snapshot. |
-| `swapdex ui` | Persistent full-screen UI (real terminal): the screen clears and the UI stays up. Arrow keys + Enter switches (result in the status line, list refreshes in place); after a switch - or with `o` - the conversation menu opens: recent sessions (resumed in their own folder; sessionwiki when installed, the tools' own stores otherwise) plus new-conversation entries with a folder prompt. `a` add account, `r` restore, `d` delete, `q` quit. Opening a conversation is the one action that leaves. Needs a terminal (pipes are refused - script with `swapdex use`); a dumb terminal (`TERM=dumb`) gets a plain numbered prompt instead of the full-screen UI. |
+| `swapdex add <name> [--tool ...] [--update]` | Save the current live login as a named profile. Snapshots both tools by default; `--tool` limits it. `--update` replaces an existing snapshot. |
+| `swapdex ui` | Persistent full-screen UI (real terminal): the screen clears and the UI stays up. Arrow keys + Enter switches (result in the status line, list refreshes in place); after a switch - or with `o` - the conversation menu opens: recent sessions (resumed in their own folder; sessionwiki when installed, the tools' own stores otherwise) plus new-conversation entries with a folder prompt. `a` add account, `n` rename, `u` local usage, `%` remaining quota (the one networked panel), `?` health check, `r` restore, `d` delete, `s` save the current login (onboarding), `j`/`k` or the mouse wheel to move (text panels scroll with the wheel too), `q` quit. Opening a conversation is the one action that leaves. Needs a terminal (pipes are refused - script with `swapdex use`); a dumb terminal (`TERM=dumb`) gets a plain numbered prompt instead of the full-screen UI. |
 | `swapdex use <name> [--tool ...] [--dry-run] [--open [--dir <path>]]` | Switch the active login to a saved profile. Backs up the current login first, refreshes the outgoing account's saved profile with its latest (possibly rotated) tokens, then applies atomically. `--dry-run` prints the change without writing. `--open` launches the tool right after the switch (needs `--tool`; `--dir` picks the project folder). `use -` toggles to the previous/other profile (like `cd -`); a unique prefix works too, and an ambiguous prefix refuses with the candidates. |
 | `swapdex ls [--json] [--names]` | List saved profiles with the account email, tier, and a `(expired)` / `(stale)` / `(unreadable)` marker. The active profile is marked from the **live** login, not a stored guess. `--names` prints bare names one per line (for scripts and completion). |
 | `swapdex status [--json] [--short]` | Show the active account per tool, matched back to a saved profile, plus expiry and a session summary (needs sessionwiki). `--json` for scripting; `--short` prints one compact `claude:work codex:personal` line for shell prompts and statuslines. |
@@ -19,7 +21,8 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `swapdex rename <old> <new>` | Rename a saved profile. |
 | `swapdex sessions [--json]` | Sessions grouped by the account active when they ran (best-effort; needs sessionwiki on PATH - the ui's session menu itself does NOT). |
 | `swapdex usage [--json]` | Recent local token usage per tool over the last 5h and 7d, summed from `~/.claude` and `~/.codex` session logs - **per account** once a switch history exists (each event is attributed to the profile active at its timestamp; what predates your first switch shows as untagged). A rough activity gauge, not the billed quota. Reads local files only - never the network. |
-| `swapdex doctor` | Local health check: store permissions, every saved snapshot, both live logins, backups, and the CLIs on PATH - each finding ends with its fix. Exit 0 healthy, 9 when problems were found. Never touches the network. |
+| `swapdex quota [--json]` | Remaining balance per **Claude** account, live from Anthropic's OAuth usage endpoint (5h/7d windows, per-model weekly caps, reset countdowns). **The one opt-in network command**: it shells out to `/usr/bin/curl` with each account's own token - read-only, spends zero message quota, runs only when you type it. The active account uses its live token; a saved account whose snapshot token has expired reports so instead of showing a stale number. `--json` includes the raw response for any unexpected shape. Always exits 0. |
+| `swapdex doctor` | Local health check: store permissions, every saved snapshot, every live login, backups, the CLIs on PATH, and (macOS) whether the Claude Keychain item swapdex resolves matches this environment - the classic "my switch didn't stick" cause - each finding ends with its fix. Exit 0 healthy, 9 when problems were found. Never touches the network. |
 | `swapdex mcp` | Run as a read-only MCP server over stdio (`whoami`, `list_accounts`). No switch tool exists. |
 | `swapdex completions <shell>` | Print a tab-completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`. This completes swapdex's own commands; it does not wrap or intercept `claude`/`codex`. Installed automatically by Homebrew. |
 | `swapdex manpage` | Print the man page (roff) to stdout: `swapdex manpage > /usr/local/share/man/man1/swapdex.1`. Installed automatically by Homebrew. |
@@ -34,7 +37,7 @@ A quick reference. Run `swapdex --help` for the generated help, or `swapdex`
 | `3` | Not logged in to the selected tool (`add`/`login`); or `login` over a pipe while already logged in (guidance only - nothing was saved). |
 | `4` | The store is locked - another `swapdex` is mid-switch. |
 | `5` | No profile by that name (`use` / `rm` / `rename`), or no backup (`restore`). |
-| `6` | The profile already has a snapshot for that tool; pass `--update` (`add`). |
+| `6` | The profile already has a snapshot for that tool; pass `--update` (`add`); or the target name already exists (`rename`). |
 | `7` | `rm` was called without `--yes`; or `add --update` refused to repoint a profile to a DIFFERENT account (repointing must be explicit). |
 | `8` | `login` was started but the tool's login flow did not complete. |
 | `9` | `doctor` found at least one problem. |
@@ -53,7 +56,7 @@ output are `claude-code`, `codex`, `gemini`, and `antigravity`.
 | `CLAUDE_CONFIG_DIR` | Relocates Claude Code's config dir (honored, same as the CLI). |
 | `CODEX_HOME` | Relocates Codex's home dir (honored, same as the CLI). |
 | `SWAPDEX_ROOT` | Dev/test override: resolves every path (Claude, Codex, and the store) under one directory. Used by the test suite so tests never touch a real login. |
-| `HOME` | The base for `~/.claude.json`, `~/.claude/`, `~/.codex/`, and the store when the above are unset. |
+| `HOME` | The base for `~/.claude.json`, `~/.claude/`, `~/.codex/`, `~/.gemini/`, and the store when the above are unset. |
 
 ## Tab-completing profile names
 

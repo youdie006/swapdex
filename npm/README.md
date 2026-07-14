@@ -63,8 +63,8 @@ curl -fsSL https://raw.githubusercontent.com/youdie006/swapdex/main/install.sh |
 ```
 
 Linux, WSL, and macOS (Claude's macOS login lives in the Keychain; swapdex
-swaps it there, via `/usr/bin/security`). Requires the Claude Code and/or Codex
-CLI already installed and logged in. Full command, exit-code, and environment
+swaps it there, via `/usr/bin/security`). Requires at least one supported CLI
+(Claude Code, Codex, Gemini, Antigravity) already installed and logged in. Full command, exit-code, and environment
 reference: [docs/COMMANDS.md](docs/COMMANDS.md).
 
 ## Use
@@ -284,18 +284,17 @@ that project's README, July 2026):
   cross-tool with a shell wrapper and automatic rotation on rate limits; the
   philosophical opposite of swapdex.
 
-Pick swapdex if you want the smallest thing that switches Claude Code and
-Codex together, can always undo (`restore`), diagnoses itself (`doctor`), shows
+Pick swapdex if you want the smallest thing that switches your AI CLIs
+together, can always undo (`restore`), diagnoses itself (`doctor`), shows
 your remaining balance (`quota`), and structurally cannot rotate, proxy, or
 spoof the official client.
 
 ## Roadmap
 
-- **Claude Code on macOS (Keychain).** On macOS, Claude Code keeps its login in
-  the Keychain rather than a file; swapdex detects this and refuses honestly
-  instead of half-switching, but switching it is not supported yet. Design and
-  constraints: [issue #1](https://github.com/youdie006/swapdex/issues/1) --
-  contributions from macOS users welcome (Codex already works on macOS).
+- ~~Claude Code on macOS (Keychain).~~ **Shipped** (0.17-0.24): swapdex swaps
+  Claude's login inside the macOS Keychain via `/usr/bin/security`, resolves
+  the item exactly the way `claude` itself does (one item per
+  `CLAUDE_CONFIG_DIR` profile), and `doctor` diagnoses any mismatch.
 
 Being considered, explicitly opt-in and advisory-only:
 
