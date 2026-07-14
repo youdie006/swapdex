@@ -2557,6 +2557,20 @@ pub fn run_account(paths: &Paths, name: &str, args: &[String]) -> Result<i32> {
     Err(anyhow::anyhow!("failed to launch claude: {err}"))
 }
 
+/// List the permanent slots (name + the config dir each launches into).
+pub fn list_slots(paths: &Paths) -> Result<i32> {
+    let slots = crate::slots::Slots::open(paths)?;
+    let list = slots.list();
+    if list.is_empty() {
+        println!("No slots yet. Create one by launching an account: swapdex run <name>");
+        return Ok(0);
+    }
+    for r in list {
+        println!("  {}  {}", r.name, r.config_dir.display());
+    }
+    Ok(0)
+}
+
 pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     if let Some(c) = reject_bad_name(name).or_else(|| reject_reserved_name(name)) {

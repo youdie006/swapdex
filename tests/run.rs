@@ -68,3 +68,43 @@ fn run_forwards_extra_args_after_dash_dash() {
         "extra args are forwarded to claude: {o}"
     );
 }
+
+#[test]
+fn slots_lists_created_slots() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    // `run` creates the slot; then `slots` should list it.
+    Command::new(bin())
+        .args(["run", "work"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let out = Command::new(bin())
+        .args(["slots"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(o.contains("work"), "the slot is listed: {o}");
+}
+
+#[test]
+fn slots_empty_state_is_friendly() {
+    let root = tempfile::tempdir().unwrap();
+    let out = Command::new(bin())
+        .args(["slots"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        o.to_lowercase().contains("no slots"),
+        "empty-state hint: {o}"
+    );
+}

@@ -54,6 +54,8 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List the permanent account slots
+    Slots,
     /// List saved profiles (active marked from the live login)
     Ls {
         #[arg(long)]
@@ -217,6 +219,7 @@ fn main() {
             }
         }
         Cmd::Run { name, args } => commands::run_account(&paths, name, args),
+        Cmd::Slots => commands::list_slots(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
