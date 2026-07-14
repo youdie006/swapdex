@@ -162,6 +162,32 @@ impl Slots {
     }
 }
 
+/// The shared, account-agnostic config files symlinked from the bare `~/.claude`
+/// into a freshly-created slot, so switching accounts does not change the user's
+/// tooling. The token, history, and `.claude.json` (account identity) stay
+/// per-slot and are NOT linked. (MCP config lives inside `.claude.json`, which is
+/// per-account; sharing it needs the resolution noted in the design's open
+/// questions, so it is intentionally left per-slot for now.)
+pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md"];
+
+/// Symlink the shared config files from `source` into `slot` (best-effort; skips
+/// files absent in source or already present in the slot). Returns the names
+/// linked.
+pub fn link_shared_config(slot: &std::path::Path, source: &std::path::Path) -> Vec<String> {
+    let mut linked = Vec::new();
+    for name in SHARED_CONFIG_FILES {
+        let src = source.join(name);
+        let dst = slot.join(name);
+        if src.exists() && !dst.exists() {
+            #[cfg(unix)]
+            if std::os::unix::fs::symlink(&src, &dst).is_ok() {
+                linked.push((*name).to_string());
+            }
+        }
+    }
+    linked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

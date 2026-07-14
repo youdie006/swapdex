@@ -78,6 +78,27 @@ impl Paths {
     pub fn store_dir(&self) -> PathBuf {
         self.data.clone()
     }
+    /// The bare Claude config dir (`~/.claude`) - the source of shared,
+    /// account-agnostic config (settings, global memory) linked into new slots.
+    pub fn claude_dir(&self) -> &Path {
+        &self.claude_dir
+    }
+    /// Sibling `~/.claude-*` config dirs a user already runs via aliases -
+    /// adoptable as slots during onboarding. Excludes the bare `~/.claude`.
+    /// Best-effort; empty on failure.
+    pub fn discover_claude_config_dirs(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&self.home) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.starts_with(".claude-") && e.path().is_dir() {
+                    out.push(e.path());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
     /// Claude Code's session transcripts (for local, no-network usage reads).
     pub fn claude_projects(&self) -> PathBuf {
         self.claude_dir.join("projects")
