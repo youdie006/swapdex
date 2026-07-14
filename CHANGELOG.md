@@ -4,6 +4,39 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.26.0] - 2026-07-14
+
+The **permanent-slot account model**: each account lives in its own
+`CLAUDE_CONFIG_DIR`, so switching never copies a token - and therefore can never
+log an account out when a running session refreshes it. This is the complete fix
+for the rotation-logout class that the 0.25.0 guard only *prevented*. swapdex
+never writes a credential in this model; each account's own login creates and
+refreshes its token in place.
+
+### Added
+- **`swapdex run <name>`** - launch Claude in an account's own permanent slot.
+  Concurrent-safe: each terminal picks its own account, and they never collide.
+- **`swapdex use <name>`** now repoints a lightweight default-account pointer for
+  slot accounts (no credential copy). **`swapdex shim`** installs a `claude`
+  shortcut that follows it, so a plain `claude` uses your default account.
+- **`swapdex onboard`** - guided setup that registers existing `~/.claude-*`
+  config dirs, migrates legacy profiles, and offers the shim, one prompt at a
+  time. It never mentions "slots" - just gets you to a safe state.
+- **`swapdex adopt <name> <dir>`** - register an existing `CLAUDE_CONFIG_DIR`
+  directory as an account, in place (not moved).
+- **`swapdex migrate`** - give each legacy copy-model Claude profile its own slot.
+- **`swapdex slots`** lists the account slots; `doctor` now reports the slots, the
+  default account, and whether the shim is installed.
+- New slots inherit shared config (`settings.json`, global `CLAUDE.md`) from
+  `~/.claude` via symlink, so switching accounts keeps your tooling. Tokens and
+  history stay per-slot.
+
+### Notes
+- The legacy copy-switch (`use` on a profile that is not a slot) still works,
+  guarded by the 0.25.0 running-session check, until you migrate.
+- MCP server config lives in the per-account `.claude.json` and is not yet shared
+  across slots.
+
 ## [0.25.0] - 2026-07-14
 
 Prevents a real logout: switching a Claude account while a `claude` session is
