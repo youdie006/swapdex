@@ -114,6 +114,18 @@ fn claude_head(p: &Path) -> (String, Option<PathBuf>) {
 }
 
 /// Codex rollout file -> (title from the first user message, cwd).
+/// Codex harness boilerplate that must not become a session title (mirrors
+/// sessionwiki's codex adapter). The real first prompt follows it.
+fn codex_boilerplate(t: &str) -> bool {
+    let s = t.trim_start();
+    s.starts_with("<user_instructions>")
+        || s.starts_with("<environment_context>")
+        || s.starts_with("<ENVIRONMENT_CONTEXT>")
+        || s.starts_with("<turn_context>")
+        || s.starts_with("# AGENTS.md instructions")
+        || s.starts_with("<INSTRUCTIONS>")
+}
+
 fn codex_head(p: &Path) -> (String, Option<PathBuf>) {
     let mut title = None;
     let mut cwd = None;
@@ -130,9 +142,26 @@ fn codex_head(p: &Path) -> (String, Option<PathBuf>) {
                 }
             }
         }
-        if title.is_none() && payload["role"] == "user" {
-            if let Some(t) = first_text(&payload["content"]) {
-                title = Some(tidy_title(&t));
+        if title.is_none() {
+            // Current rollouts carry the first user prompt in one of three
+            // shapes - read whichever comes first (older code only read the
+            // response_item shape, so current sessions showed "(no prompt)"):
+            //   event_msg/user_message : payload.message is a plain string
+            //   response_item/message  : payload.role=="user", payload.content
+            //   pre-payload (2025)     : bare {type:"message",role:"user",content}
+            let candidate = if payload["type"] == "user_message" {
+                payload["message"].as_str().map(str::to_string)
+            } else if payload["role"] == "user" {
+                first_text(&payload["content"])
+            } else if v["type"] == "message" && v["role"] == "user" {
+                first_text(&v["content"])
+            } else {
+                None
+            };
+            if let Some(t) = candidate {
+                if !codex_boilerplate(&t) {
+                    title = Some(tidy_title(&t));
+                }
             }
         }
         if title.is_some() && cwd.is_some() {
@@ -287,5 +316,35 @@ mod tests {
         assert!(codex.title.contains("retry budget"));
         assert_eq!(codex.cwd, None, "nonexistent cwd is NOT trusted");
         assert_eq!(codex.id, "0a000000-0000-4000-8000-00000000000b");
+    }
+
+    // Current Codex rollouts carry the first prompt as event_msg/user_message
+    // (a plain string), after an AGENTS.md boilerplate line. The older parser
+    // read only the response_item shape, so these titled as "(no prompt)".
+    #[test]
+    fn codex_title_from_current_event_msg_format_skips_boilerplate() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(dir.path());
+        let cx = dir.path().join(".codex/sessions/2026/07/14");
+        std::fs::create_dir_all(&cx).unwrap();
+        std::fs::write(
+            cx.join("rollout-2026-07-14T09-00-00-0a000000-0000-4000-8000-0000000000cc.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":"x"}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"user_message",
+                    "message":"# AGENTS.md instructions for /home/dev\n\n<INSTRUCTIONS>do x</INSTRUCTIONS>"}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"user_message",
+                    "message":"fix the flaky retry in the codex client"}}),
+            ),
+        )
+        .unwrap();
+        let got = recent(&paths, 10);
+        let codex = got.iter().find(|s| s.tool == "codex").unwrap();
+        assert!(
+            codex.title.contains("flaky retry"),
+            "reads the real prompt, not '(no prompt)' or the AGENTS.md line: {}",
+            codex.title
+        );
     }
 }

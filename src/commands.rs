@@ -3483,7 +3483,8 @@ pub fn sessions(paths: &Paths, json: bool) -> Result<i32> {
     match crate::session_link::sessions_by_account(paths) {
         None => {
             println!(
-                "session data unavailable (install sessionwiki to see sessions grouped by account)"
+                "session data unavailable - install sessionwiki to group sessions by account \
+                 (`swapdex ui` already lists your recent sessions without it)"
             );
         }
         Some(counts) if counts.is_empty() => {

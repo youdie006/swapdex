@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.4] - 2026-07-14
+
+### Fixed
+- **Without sessionwiki, Codex sessions no longer show "(no prompt)".** The
+  native session menu (`swapdex ui` when sessionwiki is not installed) read
+  only Codex's old transcript shape; current rollouts carry the first prompt as
+  `event_msg`/`user_message`, so every Codex session titled as "(no prompt)".
+  It now reads all three shapes (event_msg, response_item, and the 2025-era
+  bare message) and skips AGENTS.md / environment boilerplate - the same drift
+  fixed in sessionwiki 0.19.3, now in swapdex's own native reader. Claude
+  titles were unaffected.
+- `swapdex sessions` without sessionwiki now points at `swapdex ui`, which
+  lists recent sessions natively, instead of only saying "install sessionwiki".
+
 ## [0.24.3] - 2026-07-14
 
 Hardening from a cross-model adversarial review (GPT-5.6 code pass + ChatGPT
