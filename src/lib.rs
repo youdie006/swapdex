@@ -9,6 +9,7 @@ pub mod proc;
 pub mod quota;
 pub mod secret;
 pub mod session_link;
+pub mod shim;
 pub mod slots;
 pub mod store;
 pub mod tui;
