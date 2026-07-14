@@ -1273,6 +1273,52 @@ fn ui_resume_enter_skips() {
     assert!(!o.contains("RESUMED"), "no exec on skip: {o}");
 }
 
+// sessionwiki installed but with an EMPTY index (never `sessionwiki sync`ed)
+// must not hide the real on-disk sessions: the menu falls back to the native
+// reader instead of showing a blank list.
+#[test]
+fn ui_empty_sessionwiki_falls_back_to_native_sessions() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    // sessionwiki present (fixture) but its index is EMPTY.
+    let fixture = root.path().join("sessions.json");
+    std::fs::write(&fixture, b"[]").unwrap();
+    // A real native codex transcript on disk.
+    let cx = root.path().join(".codex/sessions/2026/07/14");
+    std::fs::create_dir_all(&cx).unwrap();
+    std::fs::write(
+        cx.join("rollout-2026-07-14T09-00-00-0a000000-0000-4000-8000-0000000000dd.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":"x"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"user_message",
+                "message":"wire up the websocket reconnect"}}),
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("SWAPDEX_SESSIONWIKI_JSON", &fixture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"1\n\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{o}");
+    assert!(
+        o.contains("wire up the websocket reconnect"),
+        "the on-disk session shows even with an empty sessionwiki index: {o}"
+    );
+}
+
 // REVIEW: a multibyte session id must not panic the ui hint (byte-6 slice).
 #[test]
 fn ui_hint_survives_multibyte_session_id() {
@@ -1629,10 +1675,14 @@ fn ui_post_switch_c_opens_claude() {
     use std::io::Write;
     use std::process::Stdio;
     let root = tempfile::tempdir().unwrap();
+    // The profile must HAVE claude for 'c' to open it (a codex-only profile
+    // correctly refuses 'c' - see plain_menu_offers_only_the_profiles_tools).
+    seed_claude(root.path(), "uuid-A", "a@x.com");
     seed_codex(root.path(), "acct-A");
-    run(root.path(), &["add", "alpha", "--tool", "codex"]);
+    run(root.path(), &["add", "alpha"]);
+    seed_claude(root.path(), "uuid-B", "b@x.com");
     seed_codex(root.path(), "acct-B");
-    run(root.path(), &["add", "beta", "--tool", "codex"]);
+    run(root.path(), &["add", "beta"]);
     let bin_dir = fake_claude(root.path(), "#!/bin/sh\necho CLAUDE-OPENED\n");
     let path = format!(
         "{}:{}",
@@ -2945,4 +2995,74 @@ fn quota_unusable_token_does_not_abort_the_run() {
     );
     // The healthy snapshot was still fetched (401 -> expired).
     assert_eq!(accounts[1]["status"], "expired");
+}
+
+// The plain (dumb-terminal) post-switch menu must offer "new X" only for the
+// tools the switched profile holds. A codex-only profile must not offer - nor
+// launch - claude (which was NOT switched, so it'd open an unrelated account).
+#[test]
+fn plain_menu_offers_only_the_profiles_tools() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "onlycodex", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "other", "--tool", "codex"]);
+    // fake claude/codex that announce if launched.
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    for (t, msg) in [("claude", "LAUNCHED-CLAUDE"), ("codex", "LAUNCHED-CODEX")] {
+        let f = bin_dir.join(t);
+        std::fs::write(&f, format!("#!/bin/sh\necho {msg}\n")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("PATH", &path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // pick onlycodex (profile 1), then press 'c' (claude - NOT this profile's tool).
+    child.stdin.as_mut().unwrap().write_all(b"1\nc\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(o.contains("x new codex"), "offers codex: {o}");
+    assert!(
+        !o.contains("c new claude"),
+        "does NOT offer claude for a codex-only profile: {o}"
+    );
+    assert!(
+        !o.contains("LAUNCHED-CLAUDE"),
+        "pressing 'c' must not launch claude: {o}"
+    );
+}
+
+// setup must not abort the whole wizard when ONE tool's login is unreadable:
+// a corrupt Claude config must not stop Codex from being saved.
+#[test]
+fn setup_continues_past_an_unreadable_tool() {
+    let root = tempfile::tempdir().unwrap();
+    // Codex valid; Claude present() true but identity() errors - its PRIMARY
+    // credential file is corrupt, so the login reads as present-but-unreadable.
+    seed_codex(root.path(), "acct-A");
+    std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+    std::fs::write(root.path().join(".claude/.credentials.json"), b"NOT JSON {").unwrap();
+    let (o, c) = run_setup(root.path(), "codexname\nskip\n");
+    assert_eq!(c, 0, "{o}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert!(
+        names.contains("codexname"),
+        "codex saved despite the claude error: {names} / {o}"
+    );
 }

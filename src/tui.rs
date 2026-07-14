@@ -67,6 +67,26 @@ fn logo_lines() -> Vec<Line<'static>> {
 
 /// A key-hint footer where the keys are violet and the labels muted, so the
 /// eye lands on the keys (lazygit/gitui idiom).
+/// Keep a list selection in bounds after the row count changes (a switch,
+/// delete, or a concurrent `swapdex rm`), so the highlight never points past
+/// the end and no later `rows[i]` can panic.
+fn clamp_selection(state: &mut ListState, len: usize) {
+    match (state.selected(), len) {
+        (_, 0) => state.select(None),
+        (Some(i), n) if i >= n => state.select(Some(n - 1)),
+        (None, n) if n > 0 => state.select(Some(0)),
+        _ => {}
+    }
+}
+
+/// Map a clicked terminal row to a list index, accounting for the list's scroll
+/// `offset`: the first VISIBLE row is `offset`, not `0`. Ignoring the offset
+/// meant a click on a scrolled list opened an earlier, hidden entry (potentially
+/// another account's session). Caller guarantees `click_row >= top`.
+fn click_row_index(offset: usize, click_row: u16, top: u16, per: u16) -> usize {
+    offset + (click_row.saturating_sub(top) / per.max(1)) as usize
+}
+
 fn key_hints(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (i, (key, label)) in pairs.iter().enumerate() {
@@ -778,8 +798,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         };
                         let per = if is_main { 3 } else { 1 }; // Main rows are 3 lines
                         let top = main_area.y + header + 1;
-                        if m.row >= top {
-                            let idx = ((m.row - top) / per) as usize;
+                        // Bottom of the list box's INNER area (above its border).
+                        // A click below it (the foot/help rows) must not map to a
+                        // hidden entry and synthesize an Enter.
+                        let bottom = main_area.y + main_area.height.saturating_sub(1);
+                        if m.row >= top && m.row < bottom {
+                            // offset(): a scrolled list's first visible row is
+                            // sel.offset(), not 0 - without it a click opened a
+                            // hidden earlier entry (maybe another account).
+                            let idx = click_row_index(sel.offset(), m.row, top, per);
                             if idx < list_len {
                                 sel.select(Some(idx));
                                 // Click activates a MENU item; on Main it only
@@ -808,11 +835,22 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             Screen::Main => {
                 if let Some(i) = confirm_delete {
                     if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                        status = ctx.delete(&rows[i].name);
-                        rows = ctx.rows();
+                        if let Some(row) = rows.get(i) {
+                            status = ctx.delete(&row.name);
+                            rows = ctx.rows();
+                        }
                         // The list may now be EMPTY - a dangling Some(0)
                         // would make the next Enter/o index out of bounds.
-                        state.select((!rows.is_empty()).then_some(0));
+                        clamp_selection(&mut state, rows.len());
+                        // Deleting the last profile drops to the welcome screen,
+                        // which reads onboard_live - recompute it (the live login
+                        // is untouched by a delete) so it does not falsely claim
+                        // you are logged out. Mirrors the save/rename path.
+                        onboard_live = if rows.is_empty() {
+                            ctx.live_tools()
+                        } else {
+                            Vec::new()
+                        };
                     }
                     confirm_delete = None;
                     continue;
@@ -828,11 +866,17 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         state.select(Some(i.saturating_sub(1)));
                     }
                     KeyCode::Enter if !rows.is_empty() => {
-                        if let Some(i) = state.selected() {
-                            let name = rows[i].name.clone();
+                        // rows.get, not rows[i]: the stored selection can point
+                        // past the list if a concurrent `swapdex rm` shrank it.
+                        if let Some(name) = state
+                            .selected()
+                            .and_then(|i| rows.get(i))
+                            .map(|r| r.name.clone())
+                        {
                             let (ok, msg) = ctx.switch(&name);
                             status = msg;
                             rows = ctx.rows();
+                            clamp_selection(&mut state, rows.len());
                             if ok {
                                 let (label, entries, tools) = ctx.sessions(&name);
                                 let new_conv = new_conv_for(&tools);
@@ -864,16 +908,31 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         }
                     }
                     KeyCode::Char('o') if !rows.is_empty() => {
-                        if let Some(i) = state.selected() {
-                            let name = rows[i].name.clone();
-                            let (label, entries, tools) = ctx.sessions(&name);
-                            let new_conv = new_conv_for(&tools);
-                            open_state.select(Some(0));
-                            screen = Screen::Open {
-                                label,
-                                entries,
-                                new_conv,
-                            };
+                        if let Some(name) = state
+                            .selected()
+                            .and_then(|i| rows.get(i))
+                            .map(|r| r.name.clone())
+                        {
+                            // Switch FIRST, like Enter: opening a NEW conversation
+                            // (or resuming) launches under whatever account is
+                            // live, so without switching, `o` on a non-active
+                            // profile would open the wrong account. `o` differs
+                            // from Enter only in always showing the full menu
+                            // (Enter shortcuts a single-tool profile to the folder).
+                            let (ok, msg) = ctx.switch(&name);
+                            status = msg;
+                            rows = ctx.rows();
+                            clamp_selection(&mut state, rows.len());
+                            if ok {
+                                let (label, entries, tools) = ctx.sessions(&name);
+                                let new_conv = new_conv_for(&tools);
+                                open_state.select(Some(0));
+                                screen = Screen::Open {
+                                    label,
+                                    entries,
+                                    new_conv,
+                                };
+                            }
                         }
                     }
                     KeyCode::Char('a') => {
@@ -889,9 +948,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         };
                     }
                     KeyCode::Char('n') if !rows.is_empty() => {
-                        if let Some(i) = state.selected() {
+                        if let Some(name) = state
+                            .selected()
+                            .and_then(|i| rows.get(i))
+                            .map(|r| r.name.clone())
+                        {
                             screen = Screen::Input {
-                                kind: InputKind::Rename(rows[i].name.clone()),
+                                kind: InputKind::Rename(name),
                                 value: String::new(),
                             };
                         }
@@ -1132,6 +1195,36 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_selection_keeps_index_in_bounds() {
+        let mut s = ListState::default();
+        s.select(Some(3));
+        clamp_selection(&mut s, 2); // list shrank to 2
+        assert_eq!(s.selected(), Some(1), "clamped to last");
+        clamp_selection(&mut s, 0); // now empty
+        assert_eq!(s.selected(), None, "no selection on empty list");
+        clamp_selection(&mut s, 3); // grew from empty
+        assert_eq!(s.selected(), Some(0), "reselect top when non-empty");
+        s.select(Some(1));
+        clamp_selection(&mut s, 5); // still in range
+        assert_eq!(s.selected(), Some(1), "untouched when in range");
+    }
+
+    #[test]
+    fn click_row_index_accounts_for_scroll_offset() {
+        // top=5, per=1 (a 1-line menu row). No scroll: clicking the first inner
+        // row selects item 0; clicking two rows down selects item 2.
+        assert_eq!(click_row_index(0, 5, 5, 1), 0);
+        assert_eq!(click_row_index(0, 7, 5, 1), 2);
+        // Scrolled down by 3: the first VISIBLE row is item 3, not 0 - the old
+        // math returned 0 here and opened a hidden earlier session.
+        assert_eq!(click_row_index(3, 5, 5, 1), 3);
+        assert_eq!(click_row_index(3, 7, 5, 1), 5);
+        // 3-line Main rows (per=3): two text rows down is still the same entry.
+        assert_eq!(click_row_index(0, 6, 5, 3), 0);
+        assert_eq!(click_row_index(0, 8, 5, 3), 1);
+    }
 
     #[test]
     fn new_conv_only_offers_the_profiles_tools() {

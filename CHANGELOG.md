@@ -4,6 +4,48 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.24.6] - 2026-07-14
+
+Onboarding and TUI robustness across less-common conditions (empty sessionwiki
+index, a corrupt single-tool login, a concurrent `swapdex rm`), from a
+cross-model review of the onboarding and menu paths.
+
+### Fixed
+- **An empty sessionwiki index no longer hides your real sessions.** When
+  sessionwiki was installed but never `sync`ed (or its index was genuinely
+  empty), `swapdex ui`'s "open a conversation" menu stopped at the empty
+  sessionwiki result and showed a blank list. It now falls through to the
+  native on-disk reader, so the sessions you can see on disk still appear.
+- **The post-switch "open" prompt only offers tools the profile holds.** A
+  Codex-only profile used to offer "c new claude"; pressing it opened your
+  unrelated live Claude account in a new conversation. The plain menu now
+  filters the new-conversation keys to the switched profile's own tools, the
+  same rule the full TUI already applied.
+- **`swapdex setup` no longer aborts when one tool's login is unreadable.** A
+  corrupt or hand-edited credentials file for a single tool aborted the whole
+  wizard before the other, valid tools were saved. It now warns for that tool
+  and continues, just as it does for a tool you are simply not logged into.
+- **The TUI no longer panics if a `swapdex rm` shrinks the list mid-session.**
+  Switch, open, rename, and delete now use bounds-checked row access and clamp
+  the selection after the row count changes, so a stale highlight can never
+  index past the end.
+- **Mouse clicks below the list no longer switch an account.** A click on the
+  footer/help rows under the list box mapped to a hidden entry and could
+  synthesize a switch; clicks are now confined to the list's inner area.
+- **Mouse clicks on a scrolled session list open the row you clicked.** The
+  click-to-row math ignored the list's scroll offset, so on a long, scrolled
+  "open a conversation" menu a click opened an earlier, hidden session -
+  possibly from another account. It is now offset-aware.
+- **`o` (open a profile's sessions) switches to that profile first.** Opening a
+  new conversation launches under whichever account is live, so pressing `o` on
+  a profile you had not switched to opened your *currently live* account
+  instead. `o` now switches first, exactly like Enter (it still differs by
+  always showing the full menu rather than shortcutting a single-tool profile).
+- **The welcome screen after deleting your last profile no longer claims you
+  are logged out.** Deleting the final profile drops to the onboarding screen,
+  which had stale "logged-in tools" state and hid the "save these" shortcut for
+  a login the delete never touched; it is now recomputed after a delete.
+
 ## [0.24.5] - 2026-07-14
 
 ### Added

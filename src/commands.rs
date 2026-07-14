@@ -1552,7 +1552,10 @@ pub(crate) fn recent_menu_sessions(
                 );
             }
         }
-        return (Vec::new(), String::new());
+        // sessionwiki is present but returned NOTHING (installed yet never
+        // `sessionwiki sync`ed, or a genuinely empty index). Do NOT stop here -
+        // fall through to the native reader so the real on-disk sessions still
+        // show, instead of a blank menu that hides sessions the user can see.
     }
     // Native path: straight from ~/.claude and ~/.codex.
     let events = crate::session_link::read_timeline(paths);
@@ -1609,6 +1612,32 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
     // `first_time` is captured by the CALLER before the switch writes its own
     // timeline event.
     let (recent, label) = recent_menu_sessions(paths, name, first_time, 3);
+    // Offer "open a NEW X" only for tools THIS profile actually holds: launching
+    // a tool that was NOT switched would open the user's unrelated live account
+    // (the plain-picker twin of the TUI's new_conv_for filtering).
+    let ptools = profile_tools(paths, name);
+    let choices: Vec<(&str, &str, &str)> = [
+        ("c", "claude-code", "claude"),
+        ("x", "codex", "codex"),
+        ("g", "gemini", "gemini"),
+        ("a", "antigravity", "agy"),
+    ]
+    .into_iter()
+    .filter(|(_, tool, _)| ptools.iter().any(|t| t == tool))
+    .collect();
+    let new_hint = if choices.is_empty() {
+        String::new()
+    } else {
+        let keys = choices
+            .iter()
+            .map(|(k, _, p)| format!("{k} new {p}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(", {keys}")
+    };
+    let pick = |ans: &str| -> Option<&'static str> {
+        launch_letter(ans).filter(|t| choices.iter().any(|(_, ct, _)| ct == t))
+    };
     if !recent.is_empty() {
         println!("\n{label}");
         for (i, s) in recent.iter().enumerate() {
@@ -1625,7 +1654,7 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
         }
         if let Some(ans) = prompt(
             &format!(
-                "open: [1-{}] resume that session, c/x/g/a new claude/codex/gemini/agy, Enter skips: ",
+                "open: [1-{}] resume that session{new_hint}, Enter skips: ",
                 recent.len()
             ),
             "",
@@ -1635,19 +1664,31 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
                     return Err(exec_menu_resume(&recent[k - 1]));
                 }
             }
-            if let Some(tool) = launch_letter(&ans) {
+            if let Some(tool) = pick(&ans) {
                 return Err(launch_in_folder(tool));
             }
         }
-    } else if let Some(ans) = prompt(
-        "open now? c/x/g/a = new claude/codex/gemini/agy (Enter skips): ",
-        "",
-    ) {
-        if let Some(tool) = launch_letter(&ans) {
-            return Err(launch_in_folder(tool));
+    } else if !choices.is_empty() {
+        if let Some(ans) = prompt(&format!("open now?{new_hint} (Enter skips): "), "") {
+            if let Some(tool) = pick(&ans) {
+                return Err(launch_in_folder(tool));
+            }
         }
     }
     Ok(())
+}
+
+/// The tools a saved profile holds (empty if the profile is unknown).
+fn profile_tools(paths: &Paths, name: &str) -> Vec<String> {
+    Store::open(paths)
+        .ok()
+        .and_then(|s| {
+            s.list()
+                .into_iter()
+                .find(|p| p.name == name)
+                .map(|p| p.tools)
+        })
+        .unwrap_or_default()
 }
 
 /// Ask for the project folder (conversations are per-directory), then exec.
@@ -2977,10 +3018,22 @@ pub fn setup(paths: &Paths) -> Result<i32> {
     // 1) Save the accounts you're currently logged into.
     for adapter in adapters::all() {
         let tool = adapter.name();
-        let id = match adapter.identity(paths)? {
-            Some(id) => id,
-            None => {
+        // A corrupt/unreadable login for ONE tool (e.g. a hand-edited
+        // ~/.claude.json) must not abort the whole wizard before the other,
+        // valid tools get saved. Treat an error like "not logged in": warn
+        // and continue to the next tool.
+        let id = match adapter.identity(paths) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
                 println!("{}: not logged in - skipping.\n", pretty_tool(tool));
+                continue;
+            }
+            Err(e) => {
+                println!(
+                    "{}: login present but unreadable ({}) - skipping.\n",
+                    pretty_tool(tool),
+                    crate::util::redact_path(&format!("{e:#}"))
+                );
                 continue;
             }
         };
