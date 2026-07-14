@@ -23,28 +23,42 @@ else does.)
 ## Why
 
 If you run Claude Code, Codex, Gemini CLI, or Antigravity under more than one
-account -- a work seat and a
-personal subscription, a client's org and your own -- switching means logging
-out and back in every time. swapdex snapshots each logged-in account once, then
-swaps between them in place: the running CLI picks up the new account on your
-next message.
+account -- a work seat and a personal subscription, a client's org and your own
+-- switching means logging out and back in every time.
+
+swapdex gives each account its **own permanent space** -- its own
+`CLAUDE_CONFIG_DIR` slot -- and flips between them without ever copying a token.
+`swapdex use work` points your default account there and a plain `claude`
+follows it; `swapdex run work` launches straight into that account (each terminal
+can be a different one). Because nothing is copied, **a switch can never log an
+account out** -- even if a session is still running when you switch.
+`swapdex onboard` sets this up in a few prompts.
 
 It is a **switcher, not a rotator.** It manages accounts you already own for
-distinct purposes. It has no feature for cycling accounts to get around a rate
-limit -- see [What it will not do](#what-it-will-not-do).
+distinct purposes, with no feature for cycling them to get around a rate limit
+-- see [What it will not do](#what-it-will-not-do).
 
-Safety is the design center: swapdex captures the *live* login before it swaps,
-so a switch can never lose or clobber an account, and it only ever hands the
-official CLI its own credentials -- no wrapper, no proxy, no client spoofing.
+Safety is the design center: in the slot model swapdex never writes a credential
+at all -- each account's own login creates and refreshes its token, in its own
+slot -- and it only ever hands the official CLI its own credentials: no wrapper,
+no proxy, no client spoofing.
 
 ## Concepts
 
-- **Profile** -- a named, point-in-time snapshot of a live login (the credential
-  files, captured with `add`). It is a copy, not a live link.
-- **Account** -- the redacted identity a profile resolves to (email, tier,
-  expiry). Shown by `ls` and `status`; never a token.
-- **Switch** -- `use` writes a profile's snapshot back into place atomically,
-  backing up the current login first. One account is active per tool at a time.
+- **Account** -- one login you own (a work seat, a personal subscription). Its
+  redacted identity (email, tier) is shown by `slots`, `status`, and `doctor`;
+  never a token.
+- **Slot** -- an account's own permanent `CLAUDE_CONFIG_DIR`, where its login
+  lives and refreshes in place. swapdex creates one per account (or adopts a
+  `~/.claude-*` dir you already use) and never copies tokens between them.
+- **Default account** -- the one a plain `claude` uses, via a tiny shim on your
+  PATH. `swapdex use <name>` repoints it; `swapdex run <name>` ignores it and
+  launches a specific account directly.
+
+<sub>swapdex still keeps the classic snapshot commands (`add` copies a live login
+into a profile, `use` on that profile swaps it back, guarded against the
+running-session logout) for the shared-slot workflow; `swapdex migrate` moves
+those profiles onto their own slots.</sub>
 
 ## Install
 
@@ -70,24 +84,28 @@ reference: [docs/COMMANDS.md](docs/COMMANDS.md).
 ## Use
 
 ```sh
-# Save the account you're currently logged in as
-swapdex add work            # snapshots Claude + Codex, whichever is logged in
-swapdex add personal --tool claude
+# First run: guided setup -- registers ~/.claude-* dirs you already use,
+# moves old profiles onto slots, offers the shim. A bare `swapdex` runs this
+# automatically the first time there is something to set up.
+swapdex onboard
 
-# See what you have and who's active
-swapdex ls
+# Launch an account in its own slot (first time = sign in; concurrent-safe,
+# so each terminal can be a different account)
+swapdex run work
+swapdex run personal
+
+# Make a plain `claude` follow a default account
+swapdex shim                # installs the claude shim once (prints a PATH line)
+swapdex use personal        # a plain `claude` now runs as personal
+swapdex use work            # switch the default -- no re-login, never logs out
+
+# See your accounts and who's active
+swapdex slots
 swapdex status
 
-# Switch (takes effect on your next message -- no restart)
-swapdex ui                          # full-screen picker: switch, then open a
-                                    # conversation right there (resume or new)
-swapdex use work --tool claude --open --dir ~/proj   # switch + launch in one
-swapdex login personal --tool claude  # sign in to a NEW account and save it
-swapdex use personal
-swapdex use -                       # toggle back to the previous profile
-swapdex use w                       # a unique prefix is enough
-swapdex use work --tool codex
-swapdex use work --dry-run          # show what would change, write nothing
+# Register a config dir you already run by hand; move old profiles to slots
+swapdex adopt company ~/.claude-company
+swapdex migrate
 
 # Sessions grouped by the account active when they ran (needs sessionwiki)
 swapdex sessions
@@ -98,12 +116,15 @@ swapdex usage
 # Remaining quota per Claude account -- the one opt-in network read
 swapdex quota
 
-# Made a bad switch? Put back the login that was live before it
-swapdex restore
-
 # Anything off? Every finding comes with its fix
 swapdex doctor
 ```
+
+The classic snapshot commands still work for the shared-slot workflow: `swapdex
+add <name>` snapshots the current login, `swapdex use <name>` swaps it back
+(backed up first, and refused while a `claude` session is running on that login
+so it can't be logged out), `swapdex restore` undoes the last swap, and `swapdex
+ui` is the full-screen picker. `swapdex migrate` moves these onto their own slots.
 
 `status` shows the live account per tool, matched back to a saved profile:
 
@@ -176,7 +197,20 @@ also in `swapdex ui` under the `%` key.
 
 ## How it works
 
-Each CLI keeps its login in a small on-disk file:
+**Slots (the model swapdex uses now).** Each account gets its own
+`CLAUDE_CONFIG_DIR` -- a directory under `~/.local/share/swapdex/slots/`, or a
+`~/.claude-*` dir you adopt. Claude keys its login to that dir (a file on Linux,
+a Keychain item on macOS), so each account's token lives and refreshes *in its
+own slot*. swapdex never copies a token between slots: `swapdex run <name>`
+`exec`s `claude` with that slot's `CLAUDE_CONFIG_DIR`, and `swapdex use <name>`
+writes a one-line pointer that a small `claude` shim on your PATH reads. Shared
+config (`settings.json`, global `CLAUDE.md`) is symlinked into each new slot;
+the token and history stay per-slot. Because no credential is ever moved, a
+token refresh in one account can never revoke another -- **a switch cannot log
+you out**.
+
+**Classic snapshots (still supported).** Each CLI also keeps its login in a
+small on-disk file:
 
 - Claude Code: `~/.claude/.credentials.json` plus the `oauthAccount` block inside
   `~/.claude.json`
@@ -184,17 +218,14 @@ Each CLI keeps its login in a small on-disk file:
 - Gemini CLI: `~/.gemini/oauth_creds.json` plus `~/.gemini/google_accounts.json`
 - Antigravity: `~/.gemini/antigravity-cli/antigravity-oauth-token`
 
-`add` copies the current login into a private store at
-`~/.local/share/swapdex`. `use` writes a saved snapshot back into place
-atomically, backing up the current login first. For Claude, only the
-`oauthAccount` block of `~/.claude.json` is swapped -- your projects, MCP
-servers, and settings in that file are never touched.
-
-On macOS the Claude token lives in the login Keychain, one item per
-`CLAUDE_CONFIG_DIR` profile. swapdex manages **the profile of the environment
-it runs in**, exactly like `claude` itself resolves it: plain `swapdex`
-manages the default profile; profiles you run side by side via
-`CLAUDE_CONFIG_DIR` aliases are never touched.
+`add` copies the current login into a private store at `~/.local/share/swapdex`;
+`use` on a snapshot profile writes it back atomically, backing up the current
+login first, and only the `oauthAccount` block of `~/.claude.json` is swapped so
+your projects, MCP servers, and settings are untouched. That switch is refused
+while a `claude` session is running on the same login slot, since the session's
+next token refresh would otherwise revoke the saved copy. On macOS the Claude
+token lives in the login Keychain, one item per `CLAUDE_CONFIG_DIR`. `swapdex
+migrate` moves these profiles onto their own slots, retiring the shared slot.
 
 ## Safety
 
@@ -295,6 +326,11 @@ spoof the official client.
   Claude's login inside the macOS Keychain via `/usr/bin/security`, resolves
   the item exactly the way `claude` itself does (one item per
   `CLAUDE_CONFIG_DIR` profile), and `doctor` diagnoses any mismatch.
+- ~~Permanent per-account slots.~~ **Shipped** (0.26): each account gets its own
+  `CLAUDE_CONFIG_DIR`, so a switch copies no token and can never log an account
+  out -- even with a session running. `run`, `use` (repoint) + the `claude`
+  shim, `onboard`, `adopt`, `migrate`. (Sharing MCP config across slots is the
+  one piece still open -- it lives in the per-account `.claude.json`.)
 
 Being considered, explicitly opt-in and advisory-only:
 
