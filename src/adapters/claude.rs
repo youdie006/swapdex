@@ -16,15 +16,19 @@ const SECURITY: &str = "/usr/bin/security";
 /// The prefix of the Keychain service Claude Code stores its OAuth token under.
 const KEYCHAIN_PREFIX: &str = "Claude Code-credentials";
 
-/// Whether Keychain operations may run at all. Two conditions:
-/// - macOS (elsewhere Claude is file-based), and
+/// Whether Keychain operations may run at all. Three conditions:
+/// - macOS (elsewhere Claude is file-based),
+/// - NOT a unit-test build: lib tests exercise `apply` with `Paths::rooted`
+///   temp dirs but no env, so on a contributor's Mac `cargo test` would write
+///   sentinel tokens into the REAL Keychain (integration tests are covered
+///   separately - they spawn the binary with SWAPDEX_ROOT), and
 /// - NOT under SWAPDEX_ROOT. SWAPDEX_ROOT redirects every FILE path into a
 ///   sandbox, but the login Keychain is machine-global - without this gate a
 ///   `SWAPDEX_ROOT=/tmp/x swapdex use fake` test on a Mac would write the fake
 ///   token into the REAL Keychain item and clobber the user's actual login.
 ///   Under SWAPDEX_ROOT, Claude handling is file-only, like Linux.
 fn keychain_enabled() -> bool {
-    cfg!(target_os = "macos") && std::env::var_os("SWAPDEX_ROOT").is_none()
+    cfg!(target_os = "macos") && !cfg!(test) && std::env::var_os("SWAPDEX_ROOT").is_none()
 }
 
 /// The Keychain `acct` attribute Claude Code uses: `$USER`, else the OS

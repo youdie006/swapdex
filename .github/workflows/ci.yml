@@ -13,8 +13,16 @@ env:
 
 jobs:
   test:
-    name: build & test
-    runs-on: ubuntu-latest
+    # macOS included: 0.17-0.24 were almost entirely macOS Keychain behavior,
+    # yet tests only ever ran on Linux. Keychain operations are disabled in
+    # test builds (cfg!(test) gate) and under SWAPDEX_ROOT (integration tests
+    # spawn the binary with it), so runners and contributor Macs stay clean.
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +42,7 @@ jobs:
             exit 1
           fi
       - name: Cargo audit
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo install cargo-audit --locked || true
+          cargo install cargo-audit --locked
           cargo audit
