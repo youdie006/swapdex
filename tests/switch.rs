@@ -1677,6 +1677,9 @@ fn use_open_dir_launches_in_that_folder() {
         .output()
         .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
+    // canonicalize: on macOS the tempdir sits behind the /var -> /private/var
+    // symlink, and the child's pwd reports the RESOLVED path.
+    let proj = proj.canonicalize().unwrap();
     assert!(
         o.contains(&format!("OPENED-IN {}", proj.display())),
         "launched in the chosen folder: {o}"
@@ -1741,6 +1744,8 @@ fn post_switch_native_sessions_without_sessionwiki() {
         o.contains("RESUME-ARGS --resume 0a000000-0000-4000-8000-0000000000aa"),
         "claude --resume exec'd: {o}"
     );
+    // canonicalized for the macOS /var -> /private/var symlink (see above).
+    let proj_dir = proj_dir.canonicalize().unwrap();
     assert!(
         o.contains(&format!("RESUME-PWD {}", proj_dir.display())),
         "opened in the session's own folder: {o}"
