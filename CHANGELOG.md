@@ -4,6 +4,27 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.27.0] - 2026-07-15
+
+### Added
+- **`swapdex sync-mcp`** shares your MCP servers across slots. `settings.json`
+  and global `CLAUDE.md` are symlinked into each new slot automatically, but MCP
+  config lives in the per-account `.claude.json` (mixed with the account
+  identity), so it is shared with an explicit merge: the `mcpServers` block from
+  `~/.claude.json` is copied into every slot's own `.claude.json`, preserving
+  each slot's `oauthAccount`. Run it after logging into your slots.
+
+### Fixed
+- **The `claude` shim never bakes a self-reference.** Re-running `swapdex shim`
+  with the shim dir already on `PATH` could pick the shim itself as the "real"
+  claude and create an exec loop. It now skips any `claude` that carries the
+  shim marker, robust against `~`/symlink/relative `PATH` spellings.
+
+### Docs
+- README and `docs/COMMANDS.md` now document the permanent-slot model end to end
+  (`run`, `use` repoint + the `claude` shim, `onboard`, `adopt`, `migrate`,
+  `sync-mcp`), with the classic snapshot commands kept as the coexisting path.
+
 ## [0.26.1] - 2026-07-14
 
 ### Fixed
