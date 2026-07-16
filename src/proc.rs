@@ -406,29 +406,32 @@ mod tests {
             .env("CLAUDE_CONFIG_DIR", "/home/tester/.claude-company")
             .spawn()
             .unwrap();
-        // Give the kernel a moment to publish /proc for the child.
-        for _ in 0..50 {
-            if std::path::Path::new(&format!("/proc/{}/environ", child.id())).exists() {
+        // Retry the whole detection, not just a /proc existence poll: on a loaded
+        // CI runner the child can take a moment to be published in /proc with a
+        // readable environ, and a single shot after the poll can still race.
+        let mut mine = None;
+        let mut last = Vec::new();
+        for _ in 0..150 {
+            last = running_claude_procs();
+            if let Some(p) = last
+                .iter()
+                .find(|p| p.config_dir.as_deref() == Some("/home/tester/.claude-company"))
+            {
+                mine = Some(p.clone());
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let procs = running_claude_procs();
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mine = procs
-            .iter()
-            .find(|p| p.config_dir.as_deref() == Some("/home/tester/.claude-company"));
-        assert!(
-            mine.is_some(),
-            "the spawned claude session's CLAUDE_CONFIG_DIR should be detected; got {procs:?}"
-        );
-        assert!(
-            mine.unwrap().env_read,
-            "env was readable for our own process"
-        );
+        let mine = mine.unwrap_or_else(|| {
+            panic!(
+                "the spawned claude session's CLAUDE_CONFIG_DIR should be detected; got {last:?}"
+            )
+        });
+        assert!(mine.env_read, "env was readable for our own process");
         let _ = std::io::stdout().flush();
     }
 
