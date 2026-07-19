@@ -225,6 +225,62 @@ fn keychain_read() -> Option<Vec<u8>> {
     (!v.is_empty()).then_some(v)
 }
 
+/// The prior state of a Keychain read, kept tri-state so apply's rollback can
+/// tell a genuinely-absent item (nothing to restore, delete what we create)
+/// apart from a read it could not perform (must abort before mutating).
+#[derive(Debug, PartialEq)]
+enum KcRead {
+    Present(Vec<u8>),
+    Absent,
+    Error,
+}
+
+/// Classify a `security find-generic-password -w` result. `security` exits 44
+/// for "item not found" (a genuine absent), any other non-zero is a read error
+/// we must not treat as absent. Pure so the exit-code discrimination is tested.
+fn classify_kc_read(success: bool, code: Option<i32>, stdout: Vec<u8>) -> KcRead {
+    if success {
+        let mut v = stdout;
+        while v.last() == Some(&b'\n') {
+            v.pop();
+        }
+        return if v.is_empty() {
+            KcRead::Absent
+        } else {
+            KcRead::Present(v)
+        };
+    }
+    match code {
+        Some(44) => KcRead::Absent, // documented "item not found"
+        _ => KcRead::Error,
+    }
+}
+
+/// The prior Keychain token for apply's rollback: `Ok(Some)` present,
+/// `Ok(None)` genuinely absent, `Err` a read we could not classify. apply
+/// aborts on `Err` BEFORE touching anything, so a rollback is always possible.
+fn keychain_prior() -> Result<Option<Vec<u8>>> {
+    let Some(service) = keychain_service() else {
+        return Ok(None);
+    };
+    let out = std::process::Command::new(SECURITY)
+        .args([
+            "find-generic-password",
+            "-s",
+            &service,
+            "-a",
+            &keychain_account_name(),
+            "-w",
+        ])
+        .output()
+        .context("read the current Keychain token")?;
+    match classify_kc_read(out.status.success(), out.status.code(), out.stdout) {
+        KcRead::Present(v) => Ok(Some(v)),
+        KcRead::Absent => Ok(None),
+        KcRead::Error => bail!("could not read the current Keychain token"),
+    }
+}
+
 /// Write the Claude token into the Keychain, updating Claude's own item. The
 /// token is passed as HEX over `security -i` stdin (via `-X`), never in argv,
 /// so it can't be read from `ps`.
@@ -412,7 +468,22 @@ impl AuthTool for Claude {
         } else {
             None
         };
-        let prev_kc = if macos { keychain_read() } else { None };
+        // Read the prior Keychain token BEFORE any mutation, tri-state: a read
+        // we cannot perform aborts HERE (a later rollback would be impossible),
+        // never proceeds as if the item were absent.
+        let prev_kc = if macos {
+            match keychain_prior() {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(e.context(
+                        "apply aborted before any change - could not read the current \
+                         Keychain token, so a failed switch could not be rolled back",
+                    ))
+                }
+            }
+        } else {
+            None
+        };
 
         let restore_file = |prev: &Option<Vec<u8>>| match prev {
             Some(p) => crate::atomic::write_secret(&cred_path, p).is_ok(),
@@ -435,7 +506,15 @@ impl AuthTool for Claude {
             let k_ok = if macos {
                 match &prev_kc {
                     Some(p) => keychain_write(p).is_ok(),
-                    None => true, // nothing prior; leave the new token
+                    None => {
+                        // The item was CREATED by this apply (no prior token).
+                        // Leaving it would strand A's token in the Keychain while
+                        // the file+config roll back to B - a token/identity
+                        // mismatch a later `use` would silently apply. Delete
+                        // exactly what we created.
+                        keychain_delete();
+                        true
+                    }
                 }
             } else {
                 true
@@ -588,6 +667,26 @@ mod tests {
             Some("Claude Code-credentials-5953ba74")
         );
         assert_eq!(super::parse_kc_attr("no attr here", "acct"), None);
+    }
+
+    // #3: apply's rollback must tell a genuinely-absent Keychain item (delete
+    // what we created) from a read it could not perform (abort before mutating).
+    // The real Keychain is macOS-only and off under SWAPDEX_ROOT, so the
+    // exit-code discrimination that drives that decision is tested here.
+    #[test]
+    fn classify_kc_read_distinguishes_absent_from_error() {
+        use super::{classify_kc_read, KcRead};
+        // exit 44 is `security`'s documented "item not found" - genuinely absent.
+        assert_eq!(classify_kc_read(false, Some(44), vec![]), KcRead::Absent);
+        // any other non-zero is a read we could NOT perform - never "absent".
+        assert_eq!(classify_kc_read(false, Some(1), vec![]), KcRead::Error);
+        assert_eq!(classify_kc_read(false, None, vec![]), KcRead::Error);
+        // success with bytes = present (trailing newline stripped); empty = absent.
+        assert_eq!(
+            classify_kc_read(true, Some(0), b"tok\n".to_vec()),
+            KcRead::Present(b"tok".to_vec())
+        );
+        assert_eq!(classify_kc_read(true, Some(0), vec![]), KcRead::Absent);
     }
 
     // C1: if the .claude.json write fails after credentials are written, the

@@ -809,27 +809,36 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
             println!("would restore {tool} from the backup taken {age}");
             continue;
         }
-        // Same safe order as `use`: back up the CURRENT login first, so restore
-        // is itself reversible (run it again to toggle back).
-        if adapter.present(paths) {
+        // Capture the CURRENT login first, but do NOT back it up yet: if
+        // apply(target) fails, backing it up now would make it the NEWEST backup,
+        // and a retry would see it as "already active" - stranding the very
+        // backup we were asked to restore. Promote it only after apply succeeds.
+        let live_snap = if adapter.present(paths) {
             match adapter.capture(paths) {
-                Ok(live_snap) => {
-                    store.backup(&live_snap)?;
-                    // Same rotation invariant as `use`: the outgoing live
-                    // login carries this account's freshest tokens.
-                    if let Some(id) = &live_id {
-                        for pname in matching_profile_names(&store, tool, id) {
-                            store.save(&pname, &live_snap)?;
-                        }
-                    }
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!(
+                        "swapdex: note - the current {tool} login could not be read ({e:#}); \
+                         restoring without a backup of it"
+                    );
+                    None
                 }
-                Err(e) => eprintln!(
-                    "swapdex: note - the current {tool} login could not be read ({e:#}); \
-                     restoring without a backup of it"
-                ),
+            }
+        } else {
+            None
+        };
+        adapter.apply(paths, &target)?;
+        // apply(target) succeeded: NOW it is safe to record the outgoing login as
+        // a backup (so `restore` toggles back) and refresh its profile(s) with
+        // its freshest tokens - the same rotation invariant as `use`.
+        if let Some(live_snap) = &live_snap {
+            store.backup(live_snap)?;
+            if let Some(id) = &live_id {
+                for pname in matching_profile_names(&store, tool, id) {
+                    store.save(&pname, live_snap)?;
+                }
             }
         }
-        adapter.apply(paths, &target)?;
         // Attribute the timeline event to the restored account's profile name
         // when one matches, or `sessions` would blame "(backup)" forever after.
         let restored = adapter.identity(paths).ok().flatten();
@@ -4067,6 +4076,72 @@ mod tests {
         let (ok, msg) = keychain_verdict(&s(&[BARE]), Some(BARE), BARE).unwrap();
         assert!(ok);
         assert!(msg.contains("managing this environment's profile"), "{msg}");
+    }
+
+    // #4: a restore whose apply FAILS must not strand the requested backup. The
+    // outgoing login is backed up only AFTER apply succeeds; otherwise it becomes
+    // the newest backup and a retry sees it as "already active", never restoring
+    // the target we were asked for.
+    #[test]
+    fn failed_restore_keeps_the_requested_backup_newest() {
+        use crate::adapters::claude::Claude;
+        use crate::adapters::AuthTool;
+        use crate::paths::Paths;
+        use crate::store::Store;
+
+        fn seed(p: &Paths, uuid: &str, email: &str) {
+            std::fs::create_dir_all(p.claude_credentials().parent().unwrap()).unwrap();
+            std::fs::write(
+                p.claude_credentials(),
+                serde_json::to_vec(&serde_json::json!({"claudeAiOauth": {
+                    "accessToken": "AT", "refreshToken": "RT", "expiresAt": 9999999999999i64,
+                    "scopes": ["x"], "subscriptionType": "max", "rateLimitTier": "default"}}))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                p.claude_config_json(),
+                serde_json::to_vec(&serde_json::json!({
+                    "oauthAccount": {"accountUuid": uuid, "emailAddress": email}}))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        // Backup A (the target) lives in the LIVE machine's store.
+        let liveroot = tempfile::tempdir().unwrap();
+        let plive = Paths::rooted(liveroot.path());
+        let aroot = tempfile::tempdir().unwrap();
+        let pa = Paths::rooted(aroot.path());
+        seed(&pa, "uuid-A", "a@x.com");
+        let snap_a = Claude.capture(&pa).unwrap();
+        let store = Store::open(&plive).unwrap();
+        store.backup(&snap_a).unwrap();
+
+        // The live login is B (a different account).
+        seed(&plive, "uuid-B", "b@y.com");
+
+        // Force apply(A) to fail: plant a dir at the .claude.json atomic temp path.
+        let cfg = plive.claude_config_json();
+        let tmp = cfg.parent().unwrap().join(format!(
+            ".{}.swapdex.tmp",
+            cfg.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir(&tmp).unwrap();
+
+        assert!(
+            super::restore(&plive, None, false).is_err(),
+            "apply must fail (planted temp dir)"
+        );
+
+        // A must still be the NEWEST backup: B was never promoted, so a retry
+        // restores A instead of hitting "already active".
+        let (_stamp, newest) = store.load_backup("claude-code").unwrap().unwrap();
+        assert_eq!(
+            super::snapshot_account_id(&newest, "claude-code").as_deref(),
+            Some("uuid-A"),
+            "a failed restore must not strand A by making B the newest backup"
+        );
     }
 
     #[test]

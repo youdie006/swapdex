@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Fixed
+- **Classic-path hardening from the 0.24.3 adversarial review (#4), the two findings reachable on a plain I/O failure (not only a crash):**
+  - `claude` apply rollback no longer strands a freshly-created Keychain item. When a `.claude.json` write fails after the Keychain token was written AND no prior item existed, the rollback now deletes exactly the item it created instead of leaving A's token in the Keychain against B's file/config (a mismatch a later `use` would silently apply). The prior-token read is now tri-state: a read it cannot perform aborts before any mutation, so a rollback is always possible.
+  - A `restore` whose apply fails no longer strands the requested backup. The outgoing login is backed up only AFTER apply succeeds; previously it was backed up first, becoming the newest backup, so a retry saw it as "already active" and never restored the target.
+
 ## [0.27.0] - 2026-07-15
 
 ### Added
