@@ -3219,6 +3219,20 @@ fn sel_for_tool(tool: &str) -> Option<ToolSel> {
 
 /// Run the tool's own sign-in command, terminal inherited. codex has a real
 /// `login` subcommand; the other three sign in on first run of the app.
+/// Whether `codex login` should get `--device-auth` (the device-code flow):
+/// on by DEFAULT, opt out with `SWAPDEX_CODEX_LOGIN=browser`. Codex's default
+/// login is a localhost-redirect browser flow, which needs a browser that can
+/// reach localhost on the SAME machine - it fails over SSH / on a headless box
+/// (swapdex's common remote use). Pure so the policy is unit-tested.
+fn codex_device_auth(opt_out_browser: bool) -> bool {
+    !opt_out_browser
+}
+
+/// Read the opt-out from the environment: `SWAPDEX_CODEX_LOGIN=browser`.
+fn codex_login_opts_out_of_device() -> bool {
+    std::env::var("SWAPDEX_CODEX_LOGIN").is_ok_and(|v| v.eq_ignore_ascii_case("browser"))
+}
+
 fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
     // A shell Ctrl+C during the interactive sign-in hits the whole foreground
     // process group. With the default disposition it would kill swapdex before
@@ -3238,6 +3252,12 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
         // detour); Gemini / Antigravity sign in on first run of the app.
         "codex" => {
             cmd.arg("login");
+            // Device-code flow by default so login works over SSH / headless
+            // (opt out with SWAPDEX_CODEX_LOGIN=browser). A codex old enough to
+            // lack the flag can opt out; current codex ships it.
+            if codex_device_auth(codex_login_opts_out_of_device()) {
+                cmd.arg("--device-auth");
+            }
         }
         "claude-code" => {
             cmd.args(["auth", "login"]);
@@ -4076,6 +4096,15 @@ mod tests {
         let (ok, msg) = keychain_verdict(&s(&[BARE]), Some(BARE), BARE).unwrap();
         assert!(ok);
         assert!(msg.contains("managing this environment's profile"), "{msg}");
+    }
+
+    // Device-code login policy: on by default, SWAPDEX_CODEX_LOGIN=browser opts
+    // out. (That the flag actually reaches `codex login` is the argv test below.)
+    #[test]
+    fn device_auth_policy() {
+        use super::codex_device_auth;
+        assert!(codex_device_auth(false), "device-auth by default");
+        assert!(!codex_device_auth(true), "opt-out -> browser flow");
     }
 
     // #4: a restore whose apply FAILS must not strand the requested backup. The

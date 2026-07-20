@@ -2829,6 +2829,36 @@ printf '%s' '{{"auth_mode":"chatgpt","tokens":{{"id_token":"h.eyJlbWFpbCI6ImJAeC
     );
 }
 
+// Codex login uses the device-code flow (--device-auth) by DEFAULT so it works
+// over SSH / headless (opt out with SWAPDEX_CODEX_LOGIN=browser). The fake
+// records its argv to prove swapdex passes the flag.
+#[test]
+fn codex_login_uses_device_auth_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-A"); // live = A, matched to 'work'
+    let script = r#"#!/bin/sh
+case "$1" in --version) echo 1.0.0; exit 0;; logout) rm -f "$SWAPDEX_ROOT/.codex/auth.json"; exit 0;; esac
+printf '%s\n' "$@" > "$SWAPDEX_ROOT/codex-argv.txt"
+mkdir -p "$SWAPDEX_ROOT/.codex"
+printf '%s' '{"auth_mode":"chatgpt","tokens":{"id_token":"h.eyJlbWFpbCI6ImJAeC5jb20ifQ.s","access_token":"AT-B","refresh_token":"RT-B","account_id":"acct-B"},"last_refresh":"2026-07-08T00:00:00Z"}' > "$SWAPDEX_ROOT/.codex/auth.json"
+"#;
+    let bin_dir = fake_tool(root.path(), "codex", script);
+    let (o, e, _c) = run_login_tty(
+        root.path(),
+        &bin_dir,
+        &["login", "second", "--tool", "codex"],
+        "\ny\n",
+    );
+    let argv = std::fs::read_to_string(root.path().join("codex-argv.txt"))
+        .unwrap_or_else(|_| panic!("fake codex login was never spawned: {o}{e}"));
+    assert!(
+        argv.contains("login") && argv.contains("--device-auth"),
+        "codex login must get --device-auth by default: {argv:?}"
+    );
+}
+
 // A safe switcher must NEVER run `claude auth logout` during add-account: that
 // revokes the OAuth token server-side, which would kill the snapshot swapdex
 // just captured AND every saved profile sharing the account (the "all my

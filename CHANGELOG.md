@@ -6,6 +6,9 @@ All notable changes to swapdex are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+- **`swapdex login --tool codex` uses codex's device-code flow (`--device-auth`) by default**, so sign-in works over SSH / on a headless box - codex's default login is a localhost-redirect browser flow that needs a browser reaching localhost on the same machine, which fails remotely. Opt back into the browser flow with `SWAPDEX_CODEX_LOGIN=browser`. (Claude Code already falls back to its device-code URL+paste-code flow in headless/SSH environments, so `--tool claude` needs no change.)
+
 ### Fixed
 - **Classic-path hardening from the 0.24.3 adversarial review (#4), the two findings reachable on a plain I/O failure (not only a crash):**
   - `claude` apply rollback no longer strands a freshly-created Keychain item. When a `.claude.json` write fails after the Keychain token was written AND no prior item existed, the rollback now deletes exactly the item it created instead of leaving A's token in the Keychain against B's file/config (a mismatch a later `use` would silently apply). The prior-token read is now tri-state: a read it cannot perform aborts before any mutation, so a rollback is always possible.
