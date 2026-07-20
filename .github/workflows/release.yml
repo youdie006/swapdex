@@ -16,10 +16,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "swapdex ${{ github.ref_name }}" \
-            --notes "Prebuilt binaries for Linux and macOS. Install with \`cargo install swapdex\`, \`brew install youdie006/tap/swapdex\`, or \`npm i -g @youdie006/swapdex\`." \
-            || true
+          # Idempotent + resilient. The build jobs upload INTO this release, so a
+          # silently-failed create (the old `|| true`) left them retrying
+          # "release not found" until they gave up. Retry a transient failure
+          # (GitHub API 5xx), skip when it already exists, never mask a real one.
+          for attempt in 1 2 3 4 5; do
+            if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+              echo "release ${{ github.ref_name }} already exists"
+              exit 0
+            fi
+            if gh release create "${{ github.ref_name }}" \
+                 --title "swapdex ${{ github.ref_name }}" \
+                 --notes "Prebuilt binaries for Linux and macOS. Install with \`cargo install swapdex\`, \`brew install youdie006/tap/swapdex\`, or \`npm i -g @youdie006/swapdex\`."; then
+              echo "release created"
+              exit 0
+            fi
+            echo "attempt $attempt: create failed (transient?), retrying in 15s"
+            sleep 15
+          done
+          echo "could not create the GitHub release after retries" >&2
+          exit 1
 
   build:
     needs: create-release
