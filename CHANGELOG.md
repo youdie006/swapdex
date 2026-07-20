@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Changed
+- **npm distribution no longer runs an install script.** `@youdie006/swapdex` used a `postinstall` (`node install.js`) that downloaded the platform binary, which trips npm's allow-scripts prompt (`npm install -g --allow-scripts=@youdie006/swapdex` friction). It now ships the prebuilt binary as per-platform packages (`@youdie006/swapdex-{darwin,linux}-{arm64,x64}`) listed in `optionalDependencies`, `os`/`cpu`-gated so npm installs only the one matching the machine (the esbuild / @biomejs pattern). A tiny `bin/swapdex.js` launcher `require.resolve`s that binary and execs it - no install script, no prompt. cargo/homebrew unchanged.
+
 ## [0.29.0] - 2026-07-20
 
 The last three findings from the 0.24.3 adversarial review - crash-atomicity and
