@@ -4,7 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.29.0] - 2026-07-20
+
+The last three findings from the 0.24.3 adversarial review - crash-atomicity and
+concurrency hardening for the classic snapshot path. Completes issue #4 (all five
+findings #1-#5 now fixed). Narrow by nature (each needs a crash / I/O failure /
+concurrency-timing window), and on the classic path the slot model does not use.
 
 ### Fixed
 - **`apply` is now crash-atomic via a roll-back journal (#1, the last of the 0.24.3 review).** Applying a Claude login mutates three resources in order (the credential file, the macOS Keychain, `.claude.json`'s oauthAccount); a SIGKILL/power loss BETWEEN them left A's token with B's identity, which a later `use` would silently apply. `apply` now writes+fsyncs a WAL of each resource's prior state BEFORE the first mutation and removes it once the state is consistent again; a surviving WAL means the run was interrupted and is rolled back to the pre-switch state on the next apply/capture (`recover_interrupted_apply`). The credential-file + config path is covered by tests (it is the path that protects Linux/WSL, where there is no Keychain); the macOS Keychain slice is journaled and recovered the same way.
