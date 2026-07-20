@@ -285,6 +285,19 @@ fn keychain_prior() -> Result<Option<Vec<u8>>> {
 /// token is passed as HEX over `security -i` stdin (via `-X`), never in argv,
 /// so it can't be read from `ps`.
 fn keychain_write(value: &[u8]) -> Result<()> {
+    // Write ONLY to the item this environment DERIVES - a `claude` launched
+    // from the same env reads exactly that one. Never write to a DISCOVERED
+    // item: with no env and a single existing alias, keychain_service()'s scan
+    // fallback would return that alias, so a plain `swapdex use` would overwrite
+    // a DIFFERENT profile's login. The env-derived name is exact and, when the
+    // item does not exist yet, is the correct slot to create.
+    keychain_write_service(&effective_computed_service(), value)
+}
+
+/// Write `value` to an EXACT Keychain `service`. apply-WAL recovery restores the
+/// exact service it recorded before the interrupted write, rather than
+/// re-deriving it.
+fn keychain_write_service(service: &str, value: &[u8]) -> Result<()> {
     use std::io::Write;
     // Defense in depth: apply() already skips the Keychain when disabled, but
     // a future caller must never be able to write a sandboxed test token into
@@ -292,13 +305,6 @@ fn keychain_write(value: &[u8]) -> Result<()> {
     if !keychain_enabled() {
         return Ok(());
     }
-    // Write ONLY to the item this environment DERIVES - a `claude` launched
-    // from the same env reads exactly that one. Never write to a DISCOVERED
-    // item: with no env and a single existing alias, keychain_service()'s scan
-    // fallback would return that alias, so a plain `swapdex use` would overwrite
-    // a DIFFERENT profile's login. The env-derived name is exact and, when the
-    // item does not exist yet, is the correct slot to create.
-    let service = effective_computed_service();
     let acct = keychain_account_name();
     let hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
     let cmd = format!("add-generic-password -U -a \"{acct}\" -s \"{service}\" -X {hex}\n");
@@ -330,17 +336,145 @@ fn keychain_write(value: &[u8]) -> Result<()> {
 /// "also clear the bare name" extra could kill a LIVE default profile. No-op
 /// off macOS or when nothing resolves.
 pub(crate) fn keychain_delete() {
-    if !keychain_enabled() {
-        return;
-    }
     // Delete the env-DERIVED item only, never a discovered one: sign-out during
     // add-account must not remove some OTHER CLAUDE_CONFIG_DIR profile's login
     // just because it happens to be the single item the scan found.
-    let service = effective_computed_service();
+    keychain_delete_service(&effective_computed_service());
+}
+
+/// Delete an EXACT Keychain `service`. apply-WAL recovery deletes the exact item
+/// it created (the recorded service) when rolling back a created-item apply.
+fn keychain_delete_service(service: &str) {
+    if !keychain_enabled() {
+        return;
+    }
     let acct = keychain_account_name();
     let _ = std::process::Command::new(SECURITY)
-        .args(["delete-generic-password", "-s", &service, "-a", &acct])
+        .args(["delete-generic-password", "-s", service, "-a", &acct])
         .output();
+}
+
+/// A roll-back journal for the multi-resource `apply` (#1). apply mutates three
+/// resources in order - the credential FILE, the macOS Keychain, and
+/// `.claude.json`'s oauthAccount. A SIGKILL / power loss BETWEEN them would
+/// leave A's token with B's identity, which a later `use` would silently apply.
+/// So apply writes+fsyncs this journal (the PRIOR state of each resource) BEFORE
+/// the first mutation, and removes it once the state is consistent again (all
+/// three written, or all three rolled back). On the next apply/capture, a
+/// surviving journal means the run was interrupted: `recover_interrupted_apply`
+/// rolls the login back to that prior state. Roll-back, not roll-forward: the
+/// interrupted switch is simply undone and the user re-runs it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ApplyWal {
+    cred_path: String,
+    /// prior credential-file bytes as hex; None = the file was absent.
+    cred_prior_hex: Option<String>,
+    cfg_path: String,
+    /// prior `oauthAccount` value; None = the key was absent.
+    cfg_oauth_prior: Option<Value>,
+    /// the exact Keychain service (macOS only); None off macOS.
+    kc_service: Option<String>,
+    /// prior Keychain token as hex; None = the item was absent (created by apply).
+    kc_prior_hex: Option<String>,
+}
+
+fn to_hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+fn apply_wal_path(paths: &Paths) -> std::path::PathBuf {
+    paths.store_dir().join("apply-claude.wal")
+}
+
+fn write_apply_wal(paths: &Paths, wal: &ApplyWal) -> Result<()> {
+    let p = apply_wal_path(paths);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    let bytes = serde_json::to_vec(wal).context("serialize apply WAL")?;
+    // 0600 + atomic + fsync: the journal must be durable before the first write.
+    crate::atomic::write_secret(&p, &bytes)
+}
+
+fn remove_apply_wal(paths: &Paths) {
+    let _ = std::fs::remove_file(apply_wal_path(paths));
+}
+
+/// Roll the Claude login back to the pre-switch state a surviving WAL records,
+/// so a crash mid-`apply` never leaves a mixed token/identity. Best-effort per
+/// resource; the WAL is removed only once every restore that applies has
+/// succeeded, so an unrecoverable slice is retried on the next call rather than
+/// silently left mixed. No-op when there is no WAL.
+pub(crate) fn recover_interrupted_apply(paths: &Paths) {
+    let p = apply_wal_path(paths);
+    let Ok(bytes) = std::fs::read(&p) else {
+        return;
+    };
+    let Ok(wal) = serde_json::from_slice::<ApplyWal>(&bytes) else {
+        return; // unparseable: leave for inspection, never guess
+    };
+    let mut ok = true;
+
+    // .claude.json oauthAccount -> prior (or remove the key if it was absent).
+    let cfg_path = std::path::PathBuf::from(&wal.cfg_path);
+    if cfg_path.exists() {
+        if let Ok(cur) = crate::atomic::read_regular(&cfg_path) {
+            if let Ok(mut v) = serde_json::from_slice::<Value>(&cur) {
+                if let Some(obj) = v.as_object_mut() {
+                    match &wal.cfg_oauth_prior {
+                        Some(prior) => {
+                            obj.insert("oauthAccount".into(), prior.clone());
+                        }
+                        None => {
+                            obj.remove("oauthAccount");
+                        }
+                    }
+                    match serde_json::to_vec(&v) {
+                        Ok(nb) => ok &= crate::atomic::write_secret(&cfg_path, &nb).is_ok(),
+                        Err(_) => ok = false,
+                    }
+                }
+            }
+        }
+    }
+
+    // credential file -> prior (or delete if it was absent).
+    let cred_path = std::path::PathBuf::from(&wal.cred_path);
+    match &wal.cred_prior_hex {
+        Some(hex) => match from_hex(hex) {
+            Some(b) => ok &= crate::atomic::write_secret(&cred_path, &b).is_ok(),
+            None => ok = false,
+        },
+        None => {
+            let _ = std::fs::remove_file(&cred_path);
+        }
+    }
+
+    // macOS Keychain -> prior (or delete the item apply created). Off macOS the
+    // service is None and this is skipped.
+    if let Some(service) = &wal.kc_service {
+        match &wal.kc_prior_hex {
+            Some(hex) => match from_hex(hex) {
+                Some(b) => ok &= keychain_write_service(service, &b).is_ok(),
+                None => ok = false,
+            },
+            None => keychain_delete_service(service),
+        }
+    }
+
+    if ok {
+        remove_apply_wal(paths);
+    }
 }
 
 /// The Claude token JSON from wherever it lives: the file when present,
@@ -392,6 +526,9 @@ impl AuthTool for Claude {
     }
 
     fn capture(&self, paths: &Paths) -> Result<Snapshot> {
+        // Heal a crashed apply before reading, so we never capture a mixed
+        // (A-token + B-identity) live state into a profile.
+        recover_interrupted_apply(paths);
         let Some(cred_bytes) = cred_read(paths) else {
             bail!("not logged in to Claude Code");
         };
@@ -422,6 +559,9 @@ impl AuthTool for Claude {
     }
 
     fn apply(&self, paths: &Paths, snap: &Snapshot) -> Result<()> {
+        // Heal a previously-interrupted apply (roll it back to its pre-switch
+        // state) before starting, so we never build on a crashed, mixed login.
+        recover_interrupted_apply(paths);
         let cred = snap
             .part("credentials")
             .context("snapshot missing credentials")?;
@@ -447,6 +587,9 @@ impl AuthTool for Claude {
         } else {
             Value::Object(Default::default())
         };
+        // The prior oauthAccount, captured before we overwrite it - the WAL's
+        // roll-back target for the config resource.
+        let cfg_oauth_prior = cfg.get("oauthAccount").cloned();
         match cfg.as_object_mut() {
             Some(obj) => {
                 obj.insert("oauthAccount".into(), oauth_val);
@@ -485,6 +628,23 @@ impl AuthTool for Claude {
             None
         };
 
+        // Journal every resource's PRIOR state and fsync it BEFORE the first
+        // mutation, so a crash mid-apply is rolled back on the next apply/capture
+        // (recover_interrupted_apply). Removed once the state is consistent again.
+        let wal = ApplyWal {
+            cred_path: cred_path.to_string_lossy().into_owned(),
+            cred_prior_hex: prev_file.as_deref().map(to_hex),
+            cfg_path: cfg_path.to_string_lossy().into_owned(),
+            cfg_oauth_prior,
+            kc_service: if macos {
+                Some(effective_computed_service())
+            } else {
+                None
+            },
+            kc_prior_hex: prev_kc.as_deref().map(to_hex),
+        };
+        write_apply_wal(paths, &wal)?;
+
         let restore_file = |prev: &Option<Vec<u8>>| match prev {
             Some(p) => crate::atomic::write_secret(&cred_path, p).is_ok(),
             None => std::fs::remove_file(&cred_path).is_ok() || !cred_path.exists(),
@@ -496,7 +656,9 @@ impl AuthTool for Claude {
         // 2) macOS Keychain - the source of truth for Claude on macOS.
         if macos {
             if let Err(e) = keychain_write(cred.expose()) {
-                restore_file(&prev_file);
+                if restore_file(&prev_file) {
+                    remove_apply_wal(paths); // rolled back to a consistent state
+                }
                 return Err(e.context("apply aborted; credential file rolled back"));
             }
         }
@@ -520,13 +682,18 @@ impl AuthTool for Claude {
                 true
             };
             let msg = if f_ok && k_ok {
+                // Rolled back to a consistent (pre-switch) state - retire the WAL.
+                remove_apply_wal(paths);
                 "apply aborted; the credential change was rolled back"
             } else {
+                // Left mixed: keep the WAL so recover_interrupted_apply retries.
                 "apply aborted and the rollback FAILED - the login may be half-swapped; \
                  run `swapdex restore --tool claude` once the underlying problem is fixed"
             };
             return Err(e.context(msg));
         }
+        // All three resources written: the login is consistent - retire the WAL.
+        remove_apply_wal(paths);
         Ok(())
     }
 
@@ -717,6 +884,77 @@ mod tests {
             std::fs::read(pb.claude_credentials()).unwrap(),
             orig_creds,
             "credentials must roll back to B - never half-swapped"
+        );
+    }
+
+    // #1: a clean apply retires its WAL (no leftover journal to recover from).
+    #[test]
+    fn apply_leaves_no_wal_on_success() {
+        let a = tempfile::tempdir().unwrap();
+        let pa = Paths::rooted(a.path());
+        seed_claude(&pa, "uuid-A", "a@x.com");
+        let snap = Claude.capture(&pa).unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let pb = Paths::rooted(b.path());
+        seed_claude(&pb, "uuid-B", "b@y.com");
+        Claude.apply(&pb, &snap).unwrap();
+        assert!(
+            !apply_wal_path(&pb).exists(),
+            "WAL is retired once the apply is consistent"
+        );
+    }
+
+    // #1: a crash mid-apply (WAL survives beside a half-written login) is rolled
+    // back to the pre-switch state - never a mixed A-token + B-identity. The
+    // macOS Keychain slice is exercised only on macOS; here (file + config) is
+    // the path that protects Linux/WSL.
+    #[test]
+    fn recover_rolls_back_a_crashed_apply_to_prior() {
+        let b = tempfile::tempdir().unwrap();
+        let pb = Paths::rooted(b.path());
+        seed_claude(&pb, "uuid-B", "b@y.com");
+        let cred_path = pb.claude_credentials();
+        let cfg_path = pb.claude_config_json();
+        let prior_cred = std::fs::read(&cred_path).unwrap();
+        let prior_oauth: Value =
+            serde_json::from_slice::<Value>(&std::fs::read(&cfg_path).unwrap())
+                .unwrap()
+                .get("oauthAccount")
+                .cloned()
+                .unwrap();
+        // Journal B's prior state, as apply does before its first mutation.
+        let wal = ApplyWal {
+            cred_path: cred_path.to_string_lossy().into_owned(),
+            cred_prior_hex: Some(to_hex(&prior_cred)),
+            cfg_path: cfg_path.to_string_lossy().into_owned(),
+            cfg_oauth_prior: Some(prior_oauth.clone()),
+            kc_service: None, // Linux/WSL: no Keychain
+            kc_prior_hex: None,
+        };
+        write_apply_wal(&pb, &wal).unwrap();
+        // Simulate the crash: A's token + A's identity were written, WAL survived.
+        std::fs::write(&cred_path, br#"{"claudeAiOauth":{"accessToken":"AT-A"}}"#).unwrap();
+        std::fs::write(
+            &cfg_path,
+            serde_json::to_vec(&json!({"oauthAccount": {"accountUuid": "uuid-A"}})).unwrap(),
+        )
+        .unwrap();
+
+        recover_interrupted_apply(&pb);
+
+        assert_eq!(
+            std::fs::read(&cred_path).unwrap(),
+            prior_cred,
+            "credential file rolled back to B"
+        );
+        let after: Value = serde_json::from_slice(&std::fs::read(&cfg_path).unwrap()).unwrap();
+        assert_eq!(
+            after["oauthAccount"], prior_oauth,
+            "oauthAccount rolled back to B"
+        );
+        assert!(
+            !apply_wal_path(&pb).exists(),
+            "WAL removed after a successful recovery"
         );
     }
 
