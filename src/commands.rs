@@ -611,6 +611,22 @@ fn use_account_inner(
                 crate::proc::GuardVerdict::Clear => {}
             }
         }
+        // Exclude a concurrent `login` mid-sign-in on THIS tool: it holds the
+        // per-tool credential lock across its interactive wait (while the store
+        // lock is free), so switching now would race its sign-out/capture. Skip
+        // this tool, keep switching the others. Held for the rest of this tool's
+        // credential work.
+        let _cred_lock = match store.lock_tool(tool) {
+            Ok(g) => g,
+            Err(_) => {
+                eprintln!(
+                    "swapdex: {tool}: a `swapdex login` is signing this tool in right now; \
+                     skipped. Retry after it finishes."
+                );
+                failed.push(tool);
+                continue;
+            }
+        };
         // Safe order (A6): back up the CURRENT live login first (atomic + fsync
         // inside write_secret); if the backup fails, `?` aborts BEFORE we touch
         // the live login. An unreadable live file only skips its own backup -
@@ -809,6 +825,19 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
             println!("would restore {tool} from the backup taken {age}");
             continue;
         }
+        // Same per-tool credential lock as `use`: a `login` mid-sign-in on this
+        // tool holds it across its interactive wait, so restoring now would race
+        // its sign-out/capture. Skip this tool, keep restoring the others.
+        let _cred_lock = match store.lock_tool(tool) {
+            Ok(g) => g,
+            Err(_) => {
+                eprintln!(
+                    "swapdex: {tool}: a `swapdex login` is signing this tool in right now; \
+                     skipped. Retry after it finishes."
+                );
+                continue;
+            }
+        };
         // Capture the CURRENT login first, but do NOT back it up yet: if
         // apply(target) fails, backing it up now would make it the NEWEST backup,
         // and a retry would see it as "already active" - stranding the very
@@ -3013,6 +3042,21 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             return Ok(4);
         }
     };
+    // Take the per-tool credential lock and HOLD it across the whole flow -
+    // including the interactive sign-in, during which the store lock (lock1) is
+    // released so unrelated ops proceed. This is what stops a concurrent
+    // `swapdex use` on THIS tool from interleaving with our sign-out/sign-in and
+    // pairing the wrong token with the new account. Held to end of function.
+    let _tool_lock = match store.lock_tool(tool) {
+        Ok(g) => g,
+        Err(_) => {
+            eprintln!(
+                "swapdex: another swapdex is signing {tool} in/out right now. \
+                 Finish or close it, then retry."
+            );
+            return Ok(4);
+        }
+    };
     // 1) The current login, saved twice over: a store backup (restore can
     //    always bring it back) plus a refresh of every profile holding it -
     //    and, if unmatched, an offer to keep it under a name.
@@ -3092,11 +3136,24 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     // avoid it BEFORE it happens.
     println!("  tip: {}", same_account_hint(tool));
     let spawn = spawn_tool_login(bin, tool);
-    // Re-take the lock for the final store writes. Best-effort: the sign-in is
-    // done, a single profile save is an atomic per-file write, and we must not
-    // discard the user's completed login just because another swapdex is
-    // momentarily active.
-    let _lock = store.lock().ok();
+    // Re-take the STORE lock for the final store-global writes (timeline,
+    // profile save). The per-tool credential lock above already excludes a
+    // concurrent switch on THIS tool, so this only serializes with other-tool
+    // ops - a bounded retry instead of the old single-shot best-effort that
+    // could write the timeline unlocked. No other op holds the store lock for
+    // long (only login has an interactive wait, and same-tool login is excluded
+    // by the per-tool lock), so this settles in well under the bound; the None
+    // fallback only avoids discarding the user's completed sign-in in the rare
+    // case it truly can't be taken.
+    let mut relock = store.lock().ok();
+    for _ in 0..25 {
+        if relock.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        relock = store.lock().ok();
+    }
+    let _lock = relock;
     // 4) Capture, or restore the stash on any failure.
     let new_id = adapter.identity(paths).ok().flatten();
     match (spawn, new_id) {

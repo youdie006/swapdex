@@ -95,6 +95,26 @@ impl Store {
         Ok(LockGuard(f))
     }
 
+    /// A per-tool credential lock, distinct from the whole-store [`lock`](Self::lock).
+    /// `login` holds it across its interactive sign-in - during which the store
+    /// lock is deliberately RELEASED so unrelated swapdex ops proceed - and
+    /// `use`/`restore` take it for the tools they switch. So a concurrent switch
+    /// can never interleave with a sign-in on the SAME tool (the credential-race
+    /// the store lock alone can't prevent once it is released for the wait). It
+    /// try-locks: a caller fails fast with `Busy` rather than blocking.
+    pub fn lock_tool(&self, tool: &str) -> std::result::Result<LockGuard, LockError> {
+        let path = self.dir.join(format!(".cred.{tool}.lock"));
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| LockError::Unwritable(format!("{e}")))?;
+        f.try_lock_exclusive().map_err(|_| LockError::Busy)?;
+        Ok(LockGuard(f))
+    }
+
     fn account_dir(&self, name: &str) -> PathBuf {
         self.dir.join("accounts").join(name)
     }
@@ -648,6 +668,28 @@ mod tests {
         assert!(
             cur.exists() && !staging.exists() && !old.exists(),
             "healed cleanly"
+        );
+    }
+
+    // #5: the per-tool credential lock excludes a concurrent switch on the SAME
+    // tool (what a `use` racing an in-progress `login` would hit), while leaving
+    // a different tool free.
+    #[test]
+    fn per_tool_credential_lock_excludes_a_concurrent_switch() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let s1 = Store::open(&p).unwrap();
+        let held = s1.lock_tool("claude-code").unwrap(); // a login holds it
+        let s2 = Store::open(&p).unwrap();
+        assert!(
+            matches!(s2.lock_tool("claude-code"), Err(LockError::Busy)),
+            "a switch on the same tool must be refused while login holds it"
+        );
+        assert!(s2.lock_tool("codex").is_ok(), "a different tool is free");
+        drop(held);
+        assert!(
+            s2.lock_tool("claude-code").is_ok(),
+            "released after the login finishes"
         );
     }
 

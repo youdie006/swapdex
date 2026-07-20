@@ -7,6 +7,7 @@ All notable changes to swapdex are documented here. This project follows
 ## [Unreleased]
 
 ### Fixed
+- **Interactive `login` no longer races a concurrent switch (#5).** A per-tool credential lock is held across the whole `login` flow - including the interactive sign-in, during which the store lock is deliberately released so unrelated ops proceed - and `use`/`restore` take it for the tools they switch. So a `swapdex use`/`restore` can no longer interleave with a sign-in on the SAME tool (pairing the wrong token with the new account). The final store writes re-acquire the store lock with a bounded retry, replacing the old best-effort that could write the timeline unlocked.
 - **Profile save is now crash-transactional (#2, from the 0.24.3 review).** Overwriting a profile (a token refresh on `use`/`login`/`restore`) wrote its blobs one at a time, so a crash between the credential and identity writes could leave A's token paired with B's identity - a mismatch a later `use` would silently apply. `save` now builds the full generation in a `.<tool>.staging` dir, fsyncs, and swaps it in atomically; a crash in the swap window is healed on the next read/write (`reconcile_tool`) to a complete generation, never a mixed one.
 
 ## [0.28.0] - 2026-07-20
