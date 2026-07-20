@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.28.0] - 2026-07-20
 
 ### Added
 - **`swapdex login --tool codex` uses codex's device-code flow (`--device-auth`) by default**, so sign-in works over SSH / on a headless box - codex's default login is a localhost-redirect browser flow that needs a browser reaching localhost on the same machine, which fails remotely. Opt back into the browser flow with `SWAPDEX_CODEX_LOGIN=browser`. (Claude Code already falls back to its device-code URL+paste-code flow in headless/SSH environments, so `--tool claude` needs no change.)
