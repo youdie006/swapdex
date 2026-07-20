@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Fixed
+- **Profile save is now crash-transactional (#2, from the 0.24.3 review).** Overwriting a profile (a token refresh on `use`/`login`/`restore`) wrote its blobs one at a time, so a crash between the credential and identity writes could leave A's token paired with B's identity - a mismatch a later `use` would silently apply. `save` now builds the full generation in a `.<tool>.staging` dir, fsyncs, and swaps it in atomically; a crash in the swap window is healed on the next read/write (`reconcile_tool`) to a complete generation, never a mixed one.
+
 ## [0.28.0] - 2026-07-20
 
 ### Added

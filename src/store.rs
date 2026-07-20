@@ -95,28 +95,89 @@ impl Store {
         Ok(LockGuard(f))
     }
 
+    fn account_dir(&self, name: &str) -> PathBuf {
+        self.dir.join("accounts").join(name)
+    }
+
     fn account_tool_dir(&self, name: &str, tool: &str) -> PathBuf {
-        self.dir.join("accounts").join(name).join(tool)
+        self.account_dir(name).join(tool)
+    }
+
+    fn staging_dir(&self, name: &str, tool: &str) -> PathBuf {
+        self.account_dir(name).join(format!(".{tool}.staging"))
+    }
+
+    fn old_dir(&self, name: &str, tool: &str) -> PathBuf {
+        self.account_dir(name).join(format!(".{tool}.old"))
+    }
+
+    /// Heal a tool dir after a crash mid-`save`, so a reader never sees a torn
+    /// (A's token + B's identity) profile. `save` builds a full generation in
+    /// `.<tool>.staging`, then swaps it in via two renames (current -> `.old`,
+    /// staging -> current). A crash in that window leaves the current dir ABSENT
+    /// with a COMPLETE `.staging` and/or `.old` beside it. Resolution, always to
+    /// a complete generation (never a mixed one): a present current wins and the
+    /// stale staging/old are dropped; else a complete staging is promoted; else
+    /// `.old` is restored.
+    fn reconcile_tool(&self, name: &str, tool: &str) {
+        let cur = self.account_tool_dir(name, tool);
+        let staging = self.staging_dir(name, tool);
+        let old = self.old_dir(name, tool);
+        if cur.exists() {
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_dir_all(&old);
+        } else if staging.exists() {
+            let _ = fs::rename(&staging, &cur);
+            let _ = fs::remove_dir_all(&old);
+        } else if old.exists() {
+            let _ = fs::rename(&old, &cur);
+        }
     }
 
     pub fn save(&self, name: &str, snap: &Snapshot) -> Result<()> {
-        let d = self.account_tool_dir(name, snap.tool);
-        fs::create_dir_all(&d).ok();
-        fs::set_permissions(
-            self.dir.join("accounts").join(name),
-            fs::Permissions::from_mode(0o700),
-        )
-        .ok();
-        fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).ok();
+        let tool = snap.tool;
+        // Heal any leftover from a prior interrupted save before starting.
+        self.reconcile_tool(name, tool);
+        let account = self.account_dir(name);
+        fs::create_dir_all(&account).ok();
+        fs::set_permissions(&account, fs::Permissions::from_mode(0o700)).ok();
+
+        // Build the full new generation in a staging dir, so the multi-blob
+        // write is transactional: a crash mid-write leaves the CURRENT dir
+        // untouched (reconcile keeps it), never a half-updated one.
+        let staging = self.staging_dir(name, tool);
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)
+            .with_context(|| format!("create staging {}", staging.display()))?;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).ok();
         for (part, secret) in &snap.blobs {
-            let dest = d.join(part);
+            let dest = staging.join(part);
             crate::atomic::refuse_symlink_below(&self.dir, &dest)?;
             crate::atomic::write_secret(&dest, secret.expose())?;
         }
+        // fsync the staging dir so every blob is durable before the swap.
+        if let Ok(f) = fs::File::open(&staging) {
+            let _ = f.sync_all();
+        }
+
+        // Atomic swap: move the current generation aside, move staging in, drop
+        // the old. A crash between the two renames leaves the current dir absent
+        // with a complete staging/old, which `reconcile_tool` heals - the reader
+        // never observes a mixed pair.
+        let cur = self.account_tool_dir(name, tool);
+        let old = self.old_dir(name, tool);
+        if cur.exists() {
+            let _ = fs::remove_dir_all(&old);
+            fs::rename(&cur, &old).with_context(|| format!("swap out {}", cur.display()))?;
+        }
+        fs::rename(&staging, &cur).with_context(|| format!("swap in {}", cur.display()))?;
+        let _ = fs::remove_dir_all(&old);
         Ok(())
     }
 
     pub fn load(&self, name: &str, tool: &str) -> Result<Option<Snapshot>> {
+        // Heal any interrupted save before reading, so we never load a torn pair.
+        self.reconcile_tool(name, tool);
         let d = self.account_tool_dir(name, tool);
         if !d.exists() {
             return Ok(None);
@@ -510,6 +571,102 @@ mod tests {
             mode_before,
             "external file's mode is untouched (never chmod-ed through the symlink)"
         );
+    }
+
+    // A two-blob (token + identity) snapshot, so a torn write could pair one
+    // account's token with another's identity - the #2 mismatch.
+    fn claude_snap(cred: &str, oauth: &str) -> Snapshot {
+        Snapshot {
+            tool: "claude-code",
+            blobs: vec![
+                ("credentials".into(), Secret::new(cred.as_bytes().to_vec())),
+                (
+                    "oauth_account".into(),
+                    Secret::new(oauth.as_bytes().to_vec()),
+                ),
+            ],
+        }
+    }
+
+    fn blob(snap: &Snapshot, part: &str) -> String {
+        snap.blobs
+            .iter()
+            .find(|(n, _)| n == part)
+            .map(|(_, v)| String::from_utf8_lossy(v.expose()).into_owned())
+            .unwrap()
+    }
+
+    // #2: overwriting a profile must be transactional - the reader sees the new
+    // matched pair or the old one, never credB+oauthA. A clean save also leaves
+    // no swap leftovers.
+    #[test]
+    fn save_over_existing_profile_is_transactional() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let s = Store::open(&p).unwrap();
+        s.save("work", &claude_snap("credA", "oauthA")).unwrap();
+        s.save("work", &claude_snap("credB", "oauthB")).unwrap();
+        let loaded = s.load("work", "claude-code").unwrap().unwrap();
+        assert_eq!(blob(&loaded, "credentials"), "credB");
+        assert_eq!(
+            blob(&loaded, "oauth_account"),
+            "oauthB",
+            "matched pair, not torn"
+        );
+        let acct = p.store_dir().join("accounts").join("work");
+        assert!(
+            !acct.join(".claude-code.staging").exists(),
+            "no staging leftover"
+        );
+        assert!(!acct.join(".claude-code.old").exists(), "no old leftover");
+    }
+
+    // #2: a crash BETWEEN the two swap renames leaves the current dir absent with
+    // a COMPLETE staging (new gen). load must promote it - never surface a torn
+    // or missing profile.
+    #[test]
+    fn reconcile_promotes_complete_staging_when_current_absent() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let s = Store::open(&p).unwrap();
+        s.save("work", &claude_snap("credA", "oauthA")).unwrap();
+        let acct = p.store_dir().join("accounts").join("work");
+        let cur = acct.join("claude-code");
+        let old = acct.join(".claude-code.old");
+        let staging = acct.join(".claude-code.staging");
+        // Hand-simulate the crash window: current -> .old done, staging (B)
+        // fully written, staging -> current NOT yet done.
+        fs::rename(&cur, &old).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("credentials"), b"credB").unwrap();
+        fs::write(staging.join("oauth_account"), b"oauthB").unwrap();
+        assert!(!cur.exists(), "precondition: current absent mid-swap");
+
+        let loaded = s.load("work", "claude-code").unwrap().unwrap();
+        assert_eq!(blob(&loaded, "credentials"), "credB");
+        assert_eq!(blob(&loaded, "oauth_account"), "oauthB");
+        assert!(
+            cur.exists() && !staging.exists() && !old.exists(),
+            "healed cleanly"
+        );
+    }
+
+    // #2 (defensive): if only `.old` survives, restore it rather than lose the
+    // profile.
+    #[test]
+    fn reconcile_restores_old_when_only_old_survives() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let s = Store::open(&p).unwrap();
+        s.save("work", &claude_snap("credA", "oauthA")).unwrap();
+        let acct = p.store_dir().join("accounts").join("work");
+        let cur = acct.join("claude-code");
+        let old = acct.join(".claude-code.old");
+        fs::rename(&cur, &old).unwrap(); // current gone, only .old left
+        let loaded = s.load("work", "claude-code").unwrap().unwrap();
+        assert_eq!(blob(&loaded, "credentials"), "credA");
+        assert_eq!(blob(&loaded, "oauth_account"), "oauthA");
+        assert!(cur.exists() && !old.exists(), "old restored to current");
     }
 
     fn walk_files(dir: &std::path::Path) -> Vec<PathBuf> {
