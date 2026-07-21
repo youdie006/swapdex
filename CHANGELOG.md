@@ -9,6 +9,9 @@ All notable changes to swapdex are documented here. This project follows
 ### Changed
 - **npm distribution no longer runs an install script.** `@youdie006/swapdex` used a `postinstall` (`node install.js`) that downloaded the platform binary, which trips npm's allow-scripts prompt (`npm install -g --allow-scripts=@youdie006/swapdex` friction). It now ships the prebuilt binary as per-platform packages (`@youdie006/swapdex-{darwin,linux}-{arm64,x64}`) listed in `optionalDependencies`, `os`/`cpu`-gated so npm installs only the one matching the machine (the esbuild / @biomejs pattern). A tiny `bin/swapdex.js` launcher `require.resolve`s that binary and execs it - no install script, no prompt. cargo/homebrew unchanged.
 
+### Fixed
+- **`swapdex use --tool codex` guards against switching while a codex is running.** Codex's OAuth token rotates on refresh; swapping the shared `~/.codex/auth.json` under a running `codex` - a terminal session, or a `codex` MCP server used from Claude - lets its next refresh revoke the account swapdex is switching around, logging it out (the "use a codex MCP from Claude, get logged out" report). `use` now refuses a codex switch while a `codex` process is running (the running-session analog of Claude's 0.25.0 guard); `--force` overrides. Codex is not slot-isolated, so detection is by process name (any running codex). Note: this protects the SWITCH; two codex sessions run concurrently on the SAME account (e.g. an MCP codex plus a terminal codex) can still rotate each other out - that is Codex's own OAuth behaviour, not a switch.
+
 ## [0.29.0] - 2026-07-20
 
 The last three findings from the 0.24.3 adversarial review - crash-atomicity and

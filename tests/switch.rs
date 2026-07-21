@@ -2859,6 +2859,49 @@ printf '%s' '{"auth_mode":"chatgpt","tokens":{"id_token":"h.eyJlbWFpbCI6ImJAeC5j
     );
 }
 
+// A codex switch is refused while a `codex` process is running - the running-
+// session guard (Claude's 0.25.0 analog for Codex). This is the "use a codex MCP
+// from Claude, the account logs out" class: swapping the shared auth.json under a
+// running codex lets its next token refresh revoke the account. --force overrides.
+#[test]
+fn codex_switch_is_guarded_while_a_codex_runs() {
+    let acct = |r: &Path| -> String {
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(r.join(".codex/auth.json")).unwrap()).unwrap();
+        v["tokens"]["account_id"].as_str().unwrap().to_string()
+    };
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "work", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B"); // the live login is B now
+
+    // With a codex running, `use work` (acct-A) is refused; live stays B.
+    let (o, e, c) = run_env(
+        root.path(),
+        &["use", "work", "--tool", "codex"],
+        &[("SWAPDEX_TEST_CODEX_RUNNING", "1")],
+    );
+    assert_ne!(c, 0, "switch must be refused while a codex runs: {o}{e}");
+    assert!(
+        format!("{o}{e}").contains("a `codex` process is running"),
+        "the guard message is shown: {o}{e}"
+    );
+    assert_eq!(
+        acct(root.path()),
+        "acct-B",
+        "the live login was NOT switched"
+    );
+
+    // --force overrides -> switches to work (acct-A).
+    let (o2, e2, c2) = run_env(
+        root.path(),
+        &["use", "work", "--tool", "codex", "--force"],
+        &[("SWAPDEX_TEST_CODEX_RUNNING", "1")],
+    );
+    assert_eq!(c2, 0, "--force switches anyway: {o2}{e2}");
+    assert_eq!(acct(root.path()), "acct-A", "the forced switch applied");
+}
+
 // A safe switcher must NEVER run `claude auth logout` during add-account: that
 // revokes the OAuth token server-side, which would kill the snapshot swapdex
 // just captured AND every saved profile sharing the account (the "all my
