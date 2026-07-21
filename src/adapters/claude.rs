@@ -378,11 +378,11 @@ struct ApplyWal {
     kc_prior_hex: Option<String>,
 }
 
-fn to_hex(b: &[u8]) -> String {
+pub(crate) fn to_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn from_hex(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn from_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
     }
