@@ -2879,11 +2879,11 @@ fn codex_switch_is_guarded_while_a_codex_runs() {
     let (o, e, c) = run_env(
         root.path(),
         &["use", "work", "--tool", "codex"],
-        &[("SWAPDEX_TEST_CODEX_RUNNING", "1")],
+        &[("SWAPDEX_TEST_RUNNING", "codex")],
     );
     assert_ne!(c, 0, "switch must be refused while a codex runs: {o}{e}");
     assert!(
-        format!("{o}{e}").contains("a `codex` process is running"),
+        format!("{o}{e}").contains("running codex session"),
         "the guard message is shown: {o}{e}"
     );
     assert_eq!(
@@ -2896,10 +2896,85 @@ fn codex_switch_is_guarded_while_a_codex_runs() {
     let (o2, e2, c2) = run_env(
         root.path(),
         &["use", "work", "--tool", "codex", "--force"],
-        &[("SWAPDEX_TEST_CODEX_RUNNING", "1")],
+        &[("SWAPDEX_TEST_RUNNING", "codex")],
     );
     assert_eq!(c2, 0, "--force switches anyway: {o2}{e2}");
     assert_eq!(acct(root.path()), "acct-A", "the forced switch applied");
+}
+
+// Same rotation-logout guard for Gemini (also non-slotted, tokens rotate).
+#[test]
+fn gemini_switch_is_guarded_while_a_gemini_runs() {
+    let active = |r: &Path| -> String {
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(r.join(".gemini/google_accounts.json")).unwrap())
+                .unwrap();
+        v["active"].as_str().unwrap().to_string()
+    };
+    let root = tempfile::tempdir().unwrap();
+    seed_gemini(root.path(), "sub-a", "a@x.com");
+    run(root.path(), &["add", "work", "--tool", "gemini"]);
+    seed_gemini(root.path(), "sub-b", "b@x.com"); // live is b@x.com
+
+    let (o, e, c) = run_env(
+        root.path(),
+        &["use", "work", "--tool", "gemini"],
+        &[("SWAPDEX_TEST_RUNNING", "gemini")],
+    );
+    assert_ne!(c, 0, "refused while a gemini runs: {o}{e}");
+    assert!(
+        format!("{o}{e}").contains("running gemini session"),
+        "guard msg: {o}{e}"
+    );
+    assert_eq!(
+        active(root.path()),
+        "b@x.com",
+        "the live login was NOT switched"
+    );
+
+    let (_o, _e, c2) = run_env(
+        root.path(),
+        &["use", "work", "--tool", "gemini", "--force"],
+        &[("SWAPDEX_TEST_RUNNING", "gemini")],
+    );
+    assert_eq!(c2, 0, "--force switches anyway");
+    assert_eq!(active(root.path()), "a@x.com", "the forced switch applied");
+}
+
+// Same rotation-logout guard for Antigravity (non-slotted, refresh token rotates).
+#[test]
+fn antigravity_switch_is_guarded_while_an_antigravity_runs() {
+    let rt = |r: &Path| -> String {
+        let v: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(r.join(".gemini/antigravity-cli/antigravity-oauth-token")).unwrap(),
+        )
+        .unwrap();
+        v["token"]["refresh_token"].as_str().unwrap().to_string()
+    };
+    let root = tempfile::tempdir().unwrap();
+    seed_antigravity(root.path(), "RT-A");
+    run(root.path(), &["add", "work", "--tool", "antigravity"]);
+    seed_antigravity(root.path(), "RT-B"); // live is RT-B
+
+    let (o, e, c) = run_env(
+        root.path(),
+        &["use", "work", "--tool", "antigravity"],
+        &[("SWAPDEX_TEST_RUNNING", "antigravity")],
+    );
+    assert_ne!(c, 0, "refused while an antigravity runs: {o}{e}");
+    assert!(
+        format!("{o}{e}").contains("running antigravity session"),
+        "guard msg: {o}{e}"
+    );
+    assert_eq!(rt(root.path()), "RT-B", "the live login was NOT switched");
+
+    let (_o, _e, c2) = run_env(
+        root.path(),
+        &["use", "work", "--tool", "antigravity", "--force"],
+        &[("SWAPDEX_TEST_RUNNING", "antigravity")],
+    );
+    assert_eq!(c2, 0, "--force switches anyway");
+    assert_eq!(rt(root.path()), "RT-A", "the forced switch applied");
 }
 
 // A safe switcher must NEVER run `claude auth logout` during add-account: that

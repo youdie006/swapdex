@@ -392,6 +392,23 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
     Ok(if capture_failed.is_empty() { 0 } else { 1 })
 }
 
+/// Whether a name-detectable, non-slotted tool (codex/gemini/antigravity) has a
+/// live process - the rotation-logout guard input. A dry-run and SWAPDEX_ROOT
+/// never scan real processes (an isolated root's credentials are not the ones a
+/// real session uses); under SWAPDEX_ROOT a test hook names the tools to treat
+/// as running, e.g. `SWAPDEX_TEST_RUNNING=codex,gemini`.
+fn tool_session_running(tool: &str, running: &[String], dry_run: bool) -> bool {
+    if dry_run {
+        return false;
+    }
+    if std::env::var_os("SWAPDEX_ROOT").is_some() {
+        return std::env::var("SWAPDEX_TEST_RUNNING")
+            .map(|v| v.split(',').any(|t| t.trim() == tool))
+            .unwrap_or(false);
+    }
+    crate::proc::tool_running(tool, running)
+}
+
 pub fn use_account(
     paths: &Paths,
     name: &str,
@@ -515,19 +532,6 @@ fn use_account_inner(
             &crate::proc::running_claude_procs(),
         )
     };
-    // Pre-switch guard for Codex: its OAuth refresh tokens rotate too, but Codex
-    // is not slot-isolated - swapdex swaps the shared ~/.codex/auth.json. So a
-    // running `codex` (a terminal session, or a `codex` MCP server spawned from
-    // Claude) will, on its next refresh, revoke the account swapdex is switching
-    // around, logging it out. Name-only detection (no slot), computed once.
-    let codex_running = if dry_run {
-        false
-    } else if std::env::var_os("SWAPDEX_ROOT").is_some() {
-        // Sandbox: never scan real processes; a test hook exercises enforcement.
-        std::env::var_os("SWAPDEX_TEST_CODEX_RUNNING").is_some()
-    } else {
-        crate::proc::tool_running("codex", &running)
-    };
     // One shared timestamp for every tool this invocation switches, so a later
     // bare `restore` can identify exactly this switch's tool set.
     let switch_ts = now_secs();
@@ -624,16 +628,24 @@ fn use_account_inner(
                 crate::proc::GuardVerdict::Clear => {}
             }
         }
-        // Pre-switch guard for Codex (the running-session analog of Claude's):
-        // swapping the shared auth.json while a `codex` runs lets that session's
-        // next token refresh revoke the account - a switch-back then logs it out.
-        // This is the "use a codex MCP from Claude, get logged out" report.
-        if tool == "codex" && !force && codex_running {
+        // Pre-switch rotation-logout guard for the NON-slotted tools (codex,
+        // gemini, antigravity), the running-session analog of Claude's guard.
+        // They all rotate their OAuth token on refresh, and swapdex swaps their
+        // shared credential files - so switching while the tool runs lets that
+        // session's next refresh revoke the account being switched, logging it
+        // out (e.g. a `codex` MCP server used from Claude). Claude is slot-
+        // isolated and guarded above. Detection is by process name (no slot);
+        // --force overrides.
+        if matches!(tool, "codex" | "gemini" | "antigravity")
+            && !force
+            && tool_session_running(tool, &running, dry_run)
+        {
             eprintln!(
-                "swapdex: {tool}: a `codex` process is running. Codex rotates its OAuth token \
-                 on refresh, so switching now can log that account out on the running session's \
-                 next refresh (e.g. a `codex` MCP server used from Claude). Quit that codex and \
-                 retry, or `swapdex use {name} --tool codex --force` to switch anyway."
+                "swapdex: {tool}: a running {tool} session was detected. {tool} rotates its \
+                 OAuth token on refresh, so switching now can log that account out on the \
+                 session's next refresh. Quit it and retry, or `swapdex use {name} --tool \
+                 {} --force` to switch anyway.",
+                pretty_tool_flag(tool)
             );
             failed.push(tool);
             continue;
