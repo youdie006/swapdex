@@ -6,6 +6,12 @@ All notable changes to swapdex are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-07-22
+
+### Added
+- **The `swapdex ui` main screen now shows local usage without a keypress.** A compact `usage - 5h / 7d, local` panel sits below the accounts list, so consumed-token usage (per tool, broken down per account) is visible at a glance instead of only behind the `u` key. Fetched once, lazily, after the first frame (the UI still opens instantly); machine-wide, so it never refetches on a switch. Shown only when the terminal has room (`u` still opens the full view). Quota (`%`) stays opt-in - unlike usage it hits the network per account.
+- **Saving a profile now shows which account was captured.** The message went from `saved profile <name> (<tools>)` to `saved profile <name> (claude-code = <email>)`, so saving a profile while a stale Claude `oauthAccount` is the live identity (which would silently attach the wrong account, only surfacing later on `use`) is caught at save time. Claude has no token-side account id to cross-check, so the human seeing the email is the guard.
+
 ### Changed
 - **npm distribution no longer runs an install script.** `@youdie006/swapdex` used a `postinstall` (`node install.js`) that downloaded the platform binary, which trips npm's allow-scripts prompt (`npm install -g --allow-scripts=@youdie006/swapdex` friction). It now ships the prebuilt binary as per-platform packages (`@youdie006/swapdex-{darwin,linux}-{arm64,x64}`) listed in `optionalDependencies`, `os`/`cpu`-gated so npm installs only the one matching the machine (the esbuild / @biomejs pattern). A tiny `bin/swapdex.js` launcher `require.resolve`s that binary and execs it - no install script, no prompt. cargo/homebrew unchanged.
 
