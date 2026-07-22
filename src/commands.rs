@@ -333,7 +333,15 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             }
         };
         store.save(name, &snap)?;
-        saved.push(tool);
+        // Surface the captured identity so a stale oauthAccount (saving 'rnd'
+        // while bsgong is the live account) is caught at save, not discovered
+        // later when `use` connects the wrong account.
+        let email = adapter
+            .identity(paths)
+            .ok()
+            .flatten()
+            .and_then(|id| id.email);
+        saved.push((tool, email));
     }
     if saved.is_empty() {
         if !declined.is_empty() {
@@ -376,7 +384,15 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             skipped.join(", ")
         )
     };
-    println!("saved profile '{name}' ({}){note}", saved.join(", "));
+    let saved_disp = saved
+        .iter()
+        .map(|(tool, email)| match email {
+            Some(e) => format!("{tool} = {e}"),
+            None => tool.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("saved profile '{name}' ({saved_disp}){note}");
     if !capture_failed.is_empty() {
         eprintln!(
             "swapdex: {} tool(s) could not be read and were NOT saved: {}",
