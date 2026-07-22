@@ -109,9 +109,6 @@ pub struct Row {
     pub tools: String,
     pub active: bool,
     pub warn: Option<&'static str>,
-    /// Compact local usage for this account (e.g. "5h 1.6M · 7d 1.6M"), shown
-    /// inline on the row. None when there's no attributed usage.
-    pub usage: Option<String>,
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -143,6 +140,12 @@ pub trait TuiCtx {
     /// Run `quota` and return its lines (remaining quota per Claude account -
     /// the one opt-in network read).
     fn quota(&mut self) -> Vec<String>;
+    /// Per-account 5h utilization percent (0..100) from the live quota endpoint,
+    /// for the inline right-aligned bars. Network; called lazily. Default empty
+    /// so test contexts need not implement it.
+    fn quota_pct(&mut self) -> Vec<(String, f64)> {
+        Vec::new()
+    }
     /// Is `sessionwiki` installed? When not, the session menu is native and a
     /// one-line hint points at what installing it would add.
     fn sessionwiki_present(&mut self) -> bool;
@@ -284,6 +287,30 @@ enum Screen {
     },
 }
 
+/// A 10-wide utilization bar for a 0..100 percent (filled blocks over dim ones).
+fn quota_bar(pct: f64) -> String {
+    let w = 10usize;
+    let filled = ((pct / 100.0) * w as f64).round().clamp(0.0, w as f64) as usize;
+    format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(w - filled)
+    )
+}
+
+/// Bar colour by how full the window is - calm green / amber / red (palette
+/// tones, not neon), so a nearly-spent account reads at a glance.
+fn quota_color(pct: f64) -> Style {
+    let c = if pct >= 80.0 {
+        Color::Rgb(200, 90, 90)
+    } else if pct >= 50.0 {
+        Color::Rgb(200, 150, 90)
+    } else {
+        Color::Rgb(95, 158, 125)
+    };
+    Style::default().fg(c)
+}
+
 /// The persistent loop. Enters the alternate screen once and stays there
 /// until an [`Outcome`] leaves it.
 pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
@@ -314,6 +341,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // The list-body Rect from the last draw, so a mouse click can map its row
     // to a selection index.
     let mut main_area = Rect::default();
+    // Per-account 5h utilization percent for the inline right-aligned bars.
+    // Network, so fetched once lazily after the first frame (the UI opens
+    // instantly; bars fill in). None = not fetched yet.
+    let mut quota_pct: Option<std::collections::HashMap<String, f64>> = None;
 
     let outcome = 'ui: loop {
         terminal.draw(|f| {
@@ -370,19 +401,25 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     Style::default().fg(Color::Rgb(200, 150, 90)),
                                 ));
                             }
-                            let mut tools_line = vec![Span::styled(
-                                format!("    {}", r.tools),
-                                Style::default().fg(Color::DarkGray),
-                            )];
-                            if let Some(u) = &r.usage {
-                                tools_line.push(Span::styled(
-                                    format!("   {u}"),
-                                    Style::default().fg(DEXGRAY),
-                                ));
+                            // Right-aligned 5h utilization bar + percent (from the
+                            // live quota endpoint), like a team dashboard's usage.
+                            if let Some(pct) =
+                                quota_pct.as_ref().and_then(|q| q.get(&r.name).copied())
+                            {
+                                let label = format!("{} {:>3.0}%", quota_bar(pct), pct);
+                                let left_w: usize =
+                                    top.iter().map(|s| s.content.chars().count()).sum();
+                                let inner = (body.width as usize).saturating_sub(4);
+                                let pad = inner.saturating_sub(left_w + label.chars().count());
+                                top.push(Span::raw(" ".repeat(pad)));
+                                top.push(Span::styled(label, quota_color(pct)));
                             }
                             ListItem::new(vec![
                                 Line::from(top),
-                                Line::from(tools_line),
+                                Line::from(Span::styled(
+                                    format!("    {}", r.tools),
+                                    Style::default().fg(Color::DarkGray),
+                                )),
                                 Line::from(""),
                             ])
                         })
@@ -756,6 +793,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 scroll: 0,
                 pending: false,
             };
+            continue;
+        }
+        // Fill the inline per-account quota bars once, lazily, after the first
+        // frame has drawn (so the UI opens instantly). Network per account.
+        if matches!(screen, Screen::Main) && quota_pct.is_none() && !rows.is_empty() {
+            quota_pct = Some(ctx.quota_pct().into_iter().collect());
             continue;
         }
         // A left click on a menu item both selects AND activates it; treat
