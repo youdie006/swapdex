@@ -9,7 +9,7 @@ All notable changes to swapdex are documented here. This project follows
 ## [0.30.0] - 2026-07-22
 
 ### Added
-- **The `swapdex ui` main screen now shows local usage without a keypress.** A compact `usage - 5h / 7d, local` panel sits below the accounts list, so consumed-token usage (per tool, broken down per account) is visible at a glance instead of only behind the `u` key. Fetched once, lazily, after the first frame (the UI still opens instantly); machine-wide, so it never refetches on a switch. Shown only when the terminal has room (`u` still opens the full view). Quota (`%`) stays opt-in - unlike usage it hits the network per account.
+- **The `swapdex ui` main screen now shows each account's local usage inline, without a keypress.** Every account row carries its own `5h <n> · 7d <n>` consumed-token count (summed across its tools, attributed via the switch timeline), so you can see who's been used heavily right where the account is - the way a team dashboard shows per-member usage - instead of only behind the `u` key. `u` still opens the full breakdown; quota (`%`) stays opt-in since, unlike usage, it hits the network per account.
 - **Saving a profile now shows which account was captured.** The message went from `saved profile <name> (<tools>)` to `saved profile <name> (claude-code = <email>)`, so saving a profile while a stale Claude `oauthAccount` is the live identity (which would silently attach the wrong account, only surfacing later on `use`) is caught at save time. Claude has no token-side account id to cross-check, so the human seeing the email is the guard.
 
 ### Changed

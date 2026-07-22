@@ -109,6 +109,9 @@ pub struct Row {
     pub tools: String,
     pub active: bool,
     pub warn: Option<&'static str>,
+    /// Compact local usage for this account (e.g. "5h 1.6M · 7d 1.6M"), shown
+    /// inline on the row. None when there's no attributed usage.
+    pub usage: Option<String>,
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -311,37 +314,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // The list-body Rect from the last draw, so a mouse click can map its row
     // to a selection index.
     let mut main_area = Rect::default();
-    // Local per-tool usage (5h/7d) shown on the main screen without a keypress.
-    // Fetched once, lazily, after the first frame (so the UI opens instantly);
-    // machine-wide, so it doesn't change when you switch account.
-    let mut main_usage: Option<Vec<String>> = None;
 
     let outcome = 'ui: loop {
         terminal.draw(|f| {
-            let full = f.area();
-            // Reserve a compact usage panel on the main screen when there are
-            // accounts and the terminal has room. It sits BELOW `main`, so the
-            // list rect (main_area) and its mouse mapping are unchanged.
-            // Only when there is genuine room (logo 8 + list + panel + 2 hint
-            // rows) so a short terminal never overlaps; below this, `u` still
-            // opens the full usage view.
-            let usage_h: u16 = if matches!(screen, Screen::Main) && !rows.is_empty() && full.height >= 20
-            {
-                match &main_usage {
-                    Some(l) if !l.is_empty() => (l.len() as u16 + 2).min(6),
-                    Some(_) => 0,
-                    None => 3, // "computing..." frame before the first fetch
-                }
-            } else {
-                0
-            };
-            let [main, usage_area, foot, help] = Layout::vertical([
+            let [main, foot, help] = Layout::vertical([
                 Constraint::Min(3),
-                Constraint::Length(usage_h),
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
-            .areas(full);
+            .areas(f.area());
             main_area = main;
             match &screen {
                 Screen::Main => {
@@ -389,12 +370,19 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     Style::default().fg(Color::Rgb(200, 150, 90)),
                                 ));
                             }
+                            let mut tools_line = vec![Span::styled(
+                                format!("    {}", r.tools),
+                                Style::default().fg(Color::DarkGray),
+                            )];
+                            if let Some(u) = &r.usage {
+                                tools_line.push(Span::styled(
+                                    format!("   {u}"),
+                                    Style::default().fg(DEXGRAY),
+                                ));
+                            }
                             ListItem::new(vec![
                                 Line::from(top),
-                                Line::from(Span::styled(
-                                    format!("    {}", r.tools),
-                                    Style::default().fg(Color::DarkGray),
-                                )),
+                                Line::from(tools_line),
                                 Line::from(""),
                             ])
                         })
@@ -488,28 +476,6 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         ]
                     };
                     f.render_widget(Paragraph::new(key_hints(hints)), help);
-                    if usage_h > 0 {
-                        let lines: Vec<Line> = match &main_usage {
-                            Some(l) => l
-                                .iter()
-                                .take(4)
-                                .map(|s| {
-                                    Line::from(Span::styled(
-                                        format!("  {s}"),
-                                        Style::default().fg(MUTED),
-                                    ))
-                                })
-                                .collect(),
-                            None => vec![Line::from(Span::styled(
-                                "  computing usage...",
-                                Style::default().fg(Color::DarkGray),
-                            ))],
-                        };
-                        f.render_widget(
-                            Paragraph::new(lines).block(list_block(" usage - 5h / 7d, local ")),
-                            usage_area,
-                        );
-                    }
                 }
                 Screen::Open { label, entries, new_conv } => {
                     let mut items: Vec<ListItem> = entries
@@ -790,13 +756,6 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 scroll: 0,
                 pending: false,
             };
-            continue;
-        }
-        // Fill the main-screen usage panel once, after its "computing..." frame
-        // has drawn (so opening the UI is instant). Machine-wide, so it does not
-        // need to refresh on every switch.
-        if matches!(screen, Screen::Main) && main_usage.is_none() && !rows.is_empty() {
-            main_usage = Some(ctx.usage());
             continue;
         }
         // A left click on a menu item both selects AND activates it; treat

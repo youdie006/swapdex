@@ -1937,6 +1937,17 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 return Vec::new();
             };
             let active = active_by_tool(&store, self.paths);
+            // Per-account usage (profile name -> summed 5h/7d across tools), from
+            // the switch timeline - shown inline on each row.
+            let mut acc_usage: std::collections::HashMap<String, (u64, u64)> =
+                std::collections::HashMap::new();
+            for tu in crate::usage::tool_usage(self.paths) {
+                for (name, (w5, w7)) in tu.accounts {
+                    let e = acc_usage.entry(name).or_insert((0, 0));
+                    e.0 += w5;
+                    e.1 += w7;
+                }
+            }
             store
                 .list()
                 .iter()
@@ -1947,6 +1958,15 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .filter(|(_, n)| n == &p.name)
                         .map(|(t, _)| *t)
                         .collect();
+                    let usage = acc_usage.get(&p.name).and_then(|&(w5, w7)| {
+                        (w5 > 0 || w7 > 0).then(|| {
+                            format!(
+                                "5h {} \u{b7} 7d {}",
+                                crate::usage::human(w5),
+                                crate::usage::human(w7)
+                            )
+                        })
+                    });
                     crate::tui::Row {
                         name: p.name.clone(),
                         ident: identity_column(email, tier),
@@ -1964,6 +1984,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .join(", "),
                         active: !at.is_empty(),
                         warn: marker,
+                        usage,
                     }
                 })
                 .collect()
