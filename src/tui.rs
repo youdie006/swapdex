@@ -421,12 +421,18 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
     // borders, so a bar reads as part of this UI rather than a pasted-in widget.
     let empty_bg = Color::Rgb(52, 50, 64);
     let Some(pct) = pct else {
+        // No data: an empty track, still visibly a track.
         return vec![Span::styled(
-            " ".repeat(width),
-            Style::default().bg(empty_bg),
+            "\u{2591}".repeat(width),
+            Style::default().bg(empty_bg).fg(Color::Rgb(72, 70, 88)),
         )];
     };
     let pct = pct.clamp(0.0, 100.0);
+    // Blocks, not bare background colour: a bar drawn only in colour vanishes
+    // wherever colour does (a capture, a plain terminal, a piped log), leaving
+    // just a number floating in whitespace.
+    const FILL: char = '\u{2588}';
+    const TRACK: char = '\u{2591}';
     // The label: "62%", plus "59m" when there is room for the countdown too.
     let short = format!("{pct:.0}%");
     let label = match reset_secs.map(fmt_reset) {
@@ -437,14 +443,23 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
     };
     let lw = label.chars().count().min(width);
     let left_pad = (width - lw) / 2;
-    let text: String = " ".repeat(left_pad)
-        + &label.chars().take(lw).collect::<String>()
-        + &" ".repeat(width - left_pad - lw);
-    // Split the drawn text where the fill ends, so the number is legible on both
-    // halves of the bar.
     let filled = ((pct / 100.0) * width as f64)
         .round()
         .clamp(0.0, width as f64) as usize;
+    // Every cell the label does not occupy draws the bar itself, so the shape
+    // survives without colour and the label sits on top of it.
+    let text: String = (0..width)
+        .map(|i| {
+            if i >= left_pad && i < left_pad + lw {
+                label.chars().nth(i - left_pad).unwrap_or(' ')
+            } else if i < filled {
+                FILL
+            } else {
+                TRACK
+            }
+        })
+        .collect();
+    // Split where the fill ends, so the number stays legible on both halves.
     let head: String = text.chars().take(filled).collect();
     let tail: String = text.chars().skip(filled).collect();
     vec![
@@ -1654,6 +1669,11 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text.chars().count(), 11, "the bar is exactly its width");
         assert!(text.contains("62%"), "the percentage is inside: {text:?}");
+        // The bar must be visible without colour: blocks either side of the label.
+        assert!(
+            text.contains('\u{2588}') && text.contains('\u{2591}'),
+            "filled and empty cells are drawn, not just coloured: {text:?}"
+        );
         // 62% of 11 -> 7 filled cells, so the split lands there.
         assert_eq!(spans[0].content.chars().count(), 7);
         assert_eq!(spans[1].content.chars().count(), 4);
@@ -1674,7 +1694,11 @@ mod tests {
         // No data: one empty cell run, no number invented.
         let none = quota_bar(None, None, 6);
         assert_eq!(none.len(), 1);
-        assert_eq!(none[0].content.trim(), "");
+        assert_eq!(
+            none[0].content.as_ref(),
+            "\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}",
+            "no data still shows a track, so the column does not look absent"
+        );
     }
 
     #[test]
