@@ -165,18 +165,21 @@ fn click_item_index(offset: usize, click_row: u16, top: u16, heights: &[u16]) ->
 /// line up with each other AND stay beside the account they describe - right-edge
 /// alignment scattered them to the far side of a wide terminal.
 fn usage_bar_column(rows: &[Row]) -> usize {
-    const DOT: usize = 2; // the "* " / "o " glyph
-    const GAP: usize = 2; // between name and identity
-    rows.iter()
-        .map(|r| {
-            DOT + r.name.chars().count()
-                + GAP
-                + r.ident.chars().count()
-                + r.warn.map_or(0, |w| w.chars().count() + 4) // "  (warn)"
-        })
+    const NUM: usize = 3; // " 1 "
+    const DOT: usize = 2; // the filled/hollow glyph
+    const GAP: usize = 2;
+    const STATUS: usize = 8; // the status word, padded
+    let name_w = rows
+        .iter()
+        .map(|r| r.name.chars().count())
         .max()
-        .unwrap_or(0)
-        + GAP
+        .unwrap_or(0);
+    let ident_w = rows
+        .iter()
+        .map(|r| r.ident.chars().count())
+        .max()
+        .unwrap_or(0);
+    NUM + DOT + name_w + GAP + ident_w + GAP + STATUS + GAP
 }
 
 /// Key hints shown on the Main screen when at least one profile exists. A pure
@@ -187,6 +190,7 @@ fn usage_bar_column(rows: &[Row]) -> usize {
 /// harder to find than none at all.
 const ALL_KEYS: &[KeyHint] = &[
     ("\u{21b5}", "switch to it"),
+    ("1-9", "switch by number"),
     ("o", "open a chat"),
     ("r", "back to last account"),
     ("a", "add account"),
@@ -197,6 +201,25 @@ const ALL_KEYS: &[KeyHint] = &[
     ("%", "quota detail"),
     ("?", "health check"),
 ];
+
+/// What an account is doing right now, for the status column. Following the shape
+/// teamclaude uses: one word per row that answers "can this account serve me?"
+/// without reading the bars.
+fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
+    const SPENT: f64 = 99.0;
+    if let Some(w) = r.warn {
+        // A snapshot problem outranks quota: the account cannot serve at all.
+        return (w, Color::Rgb(200, 150, 90));
+    }
+    let spent = u.is_some_and(|u| {
+        u.five_h.is_some_and(|p| p >= SPENT) || u.seven_d.is_some_and(|p| p >= SPENT)
+    });
+    match (spent, r.active) {
+        (true, _) => ("spent", Color::Rgb(196, 92, 96)),
+        (false, true) => ("active", VIOLET),
+        (false, false) => ("ready", Color::Rgb(120, 118, 140)),
+    }
+}
 
 /// A key and what it does.
 type KeyHint = (&'static str, &'static str);
@@ -580,6 +603,14 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     // The column every usage bar starts at: past the widest
                     // "dot name  identity (warn)" so the bars form one vertical
                     // line right beside the accounts.
+                    // Pad name and identity to the widest, so status and bars form
+                    // straight columns down the list.
+                    let name_w = rows.iter().map(|r| r.name.chars().count()).max().unwrap_or(0);
+                    let ident_w = rows
+                        .iter()
+                        .map(|r| r.ident.chars().count())
+                        .max()
+                        .unwrap_or(0);
                     let bar_col = usage_bar_column(&rows);
                     let heads = group_heads(&rows);
                     let items: Vec<ListItem> = rows
@@ -598,18 +629,25 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             } else {
                                 Style::default().add_modifier(Modifier::BOLD)
                             };
+                            // Number the rows so an account can be reached by
+                            // typing its digit, not only by arrowing to it.
+                            let u_now = quota_pct.as_ref().and_then(|q| q.get(&r.name));
+                            let (st, st_color) = account_status(r, u_now);
                             let mut top = vec![
+                                Span::styled(
+                                    format!("{:>2} ", ri + 1),
+                                    Style::default().fg(Color::Rgb(96, 94, 116)),
+                                ),
                                 Span::styled(glyph, gstyle),
-                                Span::styled(r.name.clone(), name_style),
+                                Span::styled(format!("{:<name_w$}", r.name), name_style),
                                 Span::raw("  "),
-                                Span::styled(r.ident.clone(), Style::default().fg(DEXGRAY)),
+                                Span::styled(
+                                    format!("{:<ident_w$}", r.ident),
+                                    Style::default().fg(DEXGRAY),
+                                ),
+                                Span::raw("  "),
+                                Span::styled(format!("{st:<8}"), Style::default().fg(st_color)),
                             ];
-                            if let Some(w) = r.warn {
-                                top.push(Span::styled(
-                                    format!("  ({w})"),
-                                    Style::default().fg(Color::Rgb(200, 150, 90)),
-                                ));
-                            }
                             // Session (5h) and weekly (7d) windows, each drawn
                             // as a bar with its own number inside it, both at one
                             // shared column so they line up beside the accounts.
@@ -1202,6 +1240,24 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         let i = state.selected().unwrap_or(0);
                         state.select(Some(i.saturating_sub(1)));
                     }
+                    // A digit jumps straight to that numbered account and
+                    // switches - the fastest path when you can see the list.
+                    KeyCode::Char(c) if c.is_ascii_digit() && c != '0' && !rows.is_empty() => {
+                        let idx = (c as usize) - ('1' as usize);
+                        if let Some(name) = rows.get(idx).map(|r| r.name.clone()) {
+                            state.select(Some(idx));
+                            let (ok, msg) = ctx.switch(&name);
+                            rows = ctx.rows();
+                            clamp_selection(&mut state, rows.len());
+                            status = if !ok {
+                                msg
+                            } else if ctx.proxy_running() {
+                                format!("{name} now serves the running session")
+                            } else {
+                                msg
+                            };
+                        }
+                    }
                     KeyCode::Enter if !rows.is_empty() => {
                         // rows.get, not rows[i]: the stored selection can point
                         // past the list if a concurrent `swapdex rm` shrank it.
@@ -1714,23 +1770,30 @@ mod tests {
 
     #[test]
     fn usage_bar_column_clears_the_widest_row() {
-        let row = |name: &str, ident: &str, warn: Option<&'static str>| Row {
+        let row = |name: &str, ident: &str| Row {
             name: name.into(),
             ident: ident.into(),
             tools: String::new(),
             active: false,
-            warn,
+            warn: None,
         };
-        // "* " + "bsgong"(6) + "  " + "bsgong@polarisai.co.kr"(22) = 32, +2 = 34
+        // " N " + dot(2) + name + 2 + ident + 2 + status(8) + 2, using the WIDEST
+        // name and identity so every bar starts at the same column.
         let rows = vec![
-            row("rnd", "rnd@x.co", None),
-            row("bsgong", "bsgong@polarisai.co.kr", None),
+            row("rnd", "rnd@x.co"),
+            row("bsgong", "bsgong@polarisai.co.kr"),
         ];
-        assert_eq!(usage_bar_column(&rows), 34);
-        // A warning marker widens that row, and the column follows the widest.
-        let with_warn = vec![row("rnd", "rnd@x.co", Some("stale"))];
-        assert_eq!(usage_bar_column(&with_warn), 2 + 3 + 2 + 8 + 9 + 2);
-        assert_eq!(usage_bar_column(&[]), 2, "no rows: just the gap");
+        assert_eq!(usage_bar_column(&rows), 3 + 2 + 6 + 2 + 22 + 2 + 8 + 2);
+        // One narrow row: the column shrinks with it.
+        assert_eq!(
+            usage_bar_column(&[row("a", "b")]),
+            3 + 2 + 1 + 2 + 1 + 2 + 8 + 2
+        );
+        assert_eq!(
+            usage_bar_column(&[]),
+            3 + 2 + 0 + 2 + 0 + 2 + 8 + 2,
+            "no rows: just the fixed columns"
+        );
     }
 
     #[test]
