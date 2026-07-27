@@ -184,13 +184,8 @@ fn rotate_away_from(current: &str, paths: &Paths, sh: &Shared, spent: bool) {
 
 fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -> Result<()> {
     let slot = pick_slot(paths, opts, sh)?;
-    let token = creds::slot_token(&slot.config_dir).ok_or_else(|| {
-        anyhow!(
-            "account '{}' has no usable login - `swapdex run {}` once signs it in",
-            slot.name,
-            slot.name
-        )
-    })?;
+    let token = creds::slot_token_detail(&slot.config_dir)
+        .map_err(|why| anyhow!("{}", why.remedy(&slot.name)))?;
 
     let mut headers: Vec<(String, String)> = rq
         .headers()

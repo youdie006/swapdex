@@ -9,13 +9,50 @@ use std::path::Path;
 /// Keychain item, whose service name is derived from the config dir the way
 /// Claude Code derives it.
 pub fn slot_token(dir: &Path) -> Option<Secret> {
+    slot_token_detail(dir).ok()
+}
+
+/// Why a slot's token could not be read, phrased as the thing the user should do.
+/// A LOCKED Keychain is the case worth separating: the account is signed in and
+/// the environment is what is wrong (a non-interactive ssh session cannot read a
+/// secret from the login keychain), so telling the user to sign in again would
+/// send them to fix something that is not broken.
+pub fn slot_token_detail(dir: &Path) -> Result<Secret, TokenUnavailable> {
     if let Ok(bytes) = std::fs::read(dir.join(".credentials.json")) {
         if let Some(t) = access_token(&bytes) {
-            return Some(t);
+            return Ok(t);
         }
     }
-    let bytes = crate::adapters::claude::slot_keychain_read(dir)?;
-    access_token(&bytes)
+    use crate::adapters::claude::KeychainReadError as K;
+    match crate::adapters::claude::slot_keychain_read_detail(dir) {
+        Ok(bytes) => access_token(&bytes).ok_or(TokenUnavailable::NoLogin),
+        Err(K::Locked) => Err(TokenUnavailable::KeychainLocked),
+        Err(K::Missing | K::NotApplicable) => Err(TokenUnavailable::NoLogin),
+    }
+}
+
+pub enum TokenUnavailable {
+    /// The slot has never been signed into (or its login is unreadable).
+    NoLogin,
+    /// macOS: the login exists but the keychain will not release it here.
+    KeychainLocked,
+}
+
+impl TokenUnavailable {
+    /// The one next step, for the account named `name`.
+    pub fn remedy(&self, name: &str) -> String {
+        match self {
+            Self::NoLogin => format!(
+                "account '{name}' has no usable login - `swapdex run {name}` once signs it in"
+            ),
+            Self::KeychainLocked => format!(
+                "account '{name}' is signed in, but macOS will not release its login here: \
+                 reading a Keychain secret needs an unlocked login keychain, which a remote \
+                 or non-interactive shell does not have. Run the proxy from a terminal on \
+                 the Mac itself (or unlock with `security unlock-keychain`)."
+            ),
+        }
+    }
 }
 
 /// This slot's own account UUID, from its `.claude.json` `oauthAccount` - the

@@ -263,9 +263,26 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// account's OWN item rather than the environment-derived one - which is what
 /// lets proxy mode use an account other than the one this shell points at.
 /// `None` off macOS, under SWAPDEX_ROOT, or when the item does not exist.
-pub(crate) fn slot_keychain_read(dir: &std::path::Path) -> Option<Vec<u8>> {
+/// Why reading a slot's Keychain login failed. The distinction matters: a LOCKED
+/// Keychain means the login is fine and the ENVIRONMENT is wrong (reading a
+/// secret needs an unlocked login keychain, which a non-interactive ssh session
+/// does not have - `errSecInteractionNotAllowed`, exit 36). Reporting that as
+/// "no login" would send the user to re-sign-in an account that is already
+/// signed in.
+pub(crate) enum KeychainReadError {
+    /// Not a Keychain environment at all (non-macOS, tests, SWAPDEX_ROOT).
+    NotApplicable,
+    /// The item exists but its secret cannot be read here.
+    Locked,
+    /// No such item, or it is empty.
+    Missing,
+}
+
+pub(crate) fn slot_keychain_read_detail(
+    dir: &std::path::Path,
+) -> std::result::Result<Vec<u8>, KeychainReadError> {
     if !keychain_enabled() {
-        return None;
+        return Err(KeychainReadError::NotApplicable);
     }
     let service = format!(
         "{KEYCHAIN_PREFIX}-{}",
@@ -281,15 +298,24 @@ pub(crate) fn slot_keychain_read(dir: &std::path::Path) -> Option<Vec<u8>> {
             "-w",
         ])
         .output()
-        .ok()?;
+        .map_err(|_| KeychainReadError::Missing)?;
     if !out.status.success() {
-        return None;
+        // 36 = errSecInteractionNotAllowed: the item is there, the keychain is
+        // locked. Anything else (44 = item not found) is a genuine absence.
+        return Err(if out.status.code() == Some(36) {
+            KeychainReadError::Locked
+        } else {
+            KeychainReadError::Missing
+        });
     }
     let mut v = out.stdout;
     while v.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
         v.pop();
     }
-    (!v.is_empty()).then_some(v)
+    if v.is_empty() {
+        return Err(KeychainReadError::Missing);
+    }
+    Ok(v)
 }
 
 /// Every Keychain service name starting with the Claude prefix (attribute dump
