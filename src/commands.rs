@@ -1654,6 +1654,50 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
     Ok(1)
 }
 
+/// The Claude Code slash command swapdex installs. Kept deliberately small: it
+/// tells Claude to run one swapdex command and report what happened, so switching
+/// accounts does not mean leaving the conversation for another terminal.
+const SLASH_BODY: &str = "\
+---
+description: Switch the Claude account serving this session (swapdex)
+---
+
+Run this, then report the result in one line:
+
+- If arguments were given: `swapdex use $ARGUMENTS`
+- If not: `swapdex ls` and list the accounts, saying which is active
+
+With a swapdex proxy running, the switch reaches THIS session: the next turn is
+served by the new account, with no new chat and no resume. If the output says the
+shim is not taking effect, say so and stop - the switch will not have landed.
+";
+
+/// `slash` - install the Claude Code slash command, so an account switch can be
+/// typed into the conversation instead of another terminal.
+pub fn install_slash(paths: &Paths) -> Result<i32> {
+    let _ = paths; // the commands dir is Claude's, not swapdex's store
+    let Some(home) = dirs::home_dir() else {
+        eprintln!("swapdex: cannot find your home directory");
+        return Ok(1);
+    };
+    let dir = home.join(".claude").join("commands");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("swapdex: cannot create {}: {e}", dir.display());
+        return Ok(1);
+    }
+    let file = dir.join("sx.md");
+    if let Err(e) = std::fs::write(&file, SLASH_BODY) {
+        eprintln!("swapdex: cannot write {}: {e}", file.display());
+        return Ok(1);
+    }
+    println!(
+        "installed {} - type `/sx <account>` in Claude Code to switch, or `/sx` to list",
+        crate::util::redact_path(&file.display().to_string())
+    );
+    println!("  (a plain `!swapdex use <account>` works too, without installing anything)");
+    Ok(0)
+}
+
 /// `auto [on|off]` - read or set auto-continue: whether proxy mode may hand a
 /// spent session to another account by itself. Kept as its own setting rather
 /// than a flag you must remember, since the whole point is not having to think

@@ -686,3 +686,43 @@ fn shim_puts_itself_on_path_via_the_shell_profile() {
         "nothing was written for a shell we do not handle"
     );
 }
+
+/// Switching should not mean leaving the conversation for another terminal, so
+/// swapdex installs a Claude Code slash command that does it in place.
+#[test]
+fn slash_installs_a_claude_code_command() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = String::from_utf8_lossy(
+        &Command::new(bin())
+            .args(["slash"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .into_owned();
+    assert!(out.contains("/sx"), "it names the command: {out}");
+    let f = home.join(".claude/commands/sx.md");
+    let body = std::fs::read_to_string(&f).expect("command file written");
+    assert!(body.starts_with("---"), "it carries frontmatter: {body}");
+    assert!(
+        body.contains("description:"),
+        "the picker needs a description: {body}"
+    );
+    assert!(
+        body.contains("swapdex use $ARGUMENTS"),
+        "with an argument it switches: {body}"
+    );
+    assert!(body.contains("swapdex ls"), "with none it lists: {body}");
+    // Re-running just rewrites it - no duplicate, no error.
+    Command::new(bin())
+        .args(["slash"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), body);
+}
