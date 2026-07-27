@@ -718,11 +718,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     } else {
                         let list = List::new(items)
                             .block(list_block(" accounts "))
-                            .highlight_style(
-                                Style::default()
-                                    .bg(Color::Rgb(50, 47, 68))
-                                    .add_modifier(Modifier::BOLD),
-                            )
+                            // Bold + the bar marker only: a highlight BACKGROUND
+                            // would paint over the gauge's own background, which is
+                            // what draws the fill - the selected row's bars simply
+                            // vanished. The marker and the violet name already say
+                            // which row is selected.
+                            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
                             .highlight_symbol("\u{2503} ");
                         f.render_stateful_widget(list, body, &mut state);
                     }
