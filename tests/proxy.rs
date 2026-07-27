@@ -384,3 +384,70 @@ fn auto_moves_on_when_an_accounts_login_is_refused() {
         "a refused login hands the session to another account"
     );
 }
+
+/// A throttle 429 (x-should-retry, no unified headers - the real shape) is fixed
+/// by waiting and retrying the SAME account, not by abandoning it. The client
+/// sees the eventual success, never the throttle.
+#[test]
+fn a_throttled_turn_is_retried_on_the_same_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port_up = server.server_addr().to_ip().unwrap().port();
+    let s2 = sink.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            s2.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let resp = if first {
+                first = false;
+                tiny_http::Response::from_string("{\"type\":\"error\"}")
+                    .with_status_code(tiny_http::StatusCode(429))
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"x-should-retry"[..], &b"true"[..])
+                            .unwrap(),
+                    )
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}")
+                    .with_status_code(tiny_http::StatusCode(200))
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"x-should-retry"[..], &b"false"[..])
+                            .unwrap(),
+                    )
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+
+    let (mut child, port) = start_proxy(
+        root.path(),
+        &format!("http://127.0.0.1:{port_up}"),
+        &["--auto"],
+    );
+    let body = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+
+    assert!(
+        body.contains("\"ok\":true"),
+        "the client got the retried success, not the throttle: {body}"
+    );
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-RND".to_string()],
+        "retried on the SAME account - a throttle is not exhaustion"
+    );
+}

@@ -228,7 +228,32 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
         }
     }
 
-    let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
+    // A 429 is two different events wearing one status. A THROTTLE ("slow down",
+    // x-should-retry) is fixed by waiting and retrying this same account - the
+    // client would otherwise just see the failure. Real exhaustion is not
+    // retried here; it falls through so rotation can handle it.
+    let mut attempt = 0u32;
+    let up = loop {
+        let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
+        if up.status != 429 {
+            break up;
+        }
+        match ratelimit::classify_429(&up.headers, attempt) {
+            ratelimit::Throttle::RetryAfter(wait) => {
+                println!(
+                    "{} {path} -> 429 throttled, retrying in {}s",
+                    slot.name,
+                    wait.as_secs()
+                );
+                std::io::stdout().flush().ok();
+                // Drop this response (and its body) before sleeping.
+                drop(up);
+                attempt += 1;
+                std::thread::sleep(wait);
+            }
+            ratelimit::Throttle::Exhausted => break up,
+        }
+    };
     // Log the account and the outcome only - never a body, never a token. The
     // quota state rides along on responses the user was making anyway.
     let quota = ratelimit::from_headers(&up.headers);
