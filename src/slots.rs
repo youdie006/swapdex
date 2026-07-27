@@ -90,6 +90,25 @@ impl Slots {
         Ok(rec)
     }
 
+    /// Unregister a slot: drop the name -> directory mapping. The DIRECTORY is
+    /// left alone, always. It holds that account's login, and for an adopted dir
+    /// it is somewhere the user chose - deleting either would turn "stop managing
+    /// this" into "lose this account". Re-registering restores it.
+    /// Returns false when there was no such slot.
+    pub fn remove(&mut self, name: &str) -> Result<bool> {
+        let Some(i) = self.records.iter().position(|r| r.name == name) else {
+            return Ok(false);
+        };
+        let gone = self.records.remove(i);
+        // A dangling default pointer would send a plain `claude` at a directory
+        // swapdex no longer knows about; clear it when it named this slot.
+        if self.default_dir().as_deref() == Some(gone.config_dir.as_path()) {
+            let _ = std::fs::remove_file(self.pointer_file());
+        }
+        self.persist()?;
+        Ok(true)
+    }
+
     fn persist(&self) -> Result<()> {
         if let Some(parent) = self.file.parent() {
             std::fs::create_dir_all(parent).context("create store dir")?;
@@ -249,6 +268,30 @@ mod tests {
             Some(rec.config_dir)
         );
         assert!(s.set_default("missing").is_err(), "unknown name rejected");
+    }
+
+    #[test]
+    fn remove_unregisters_but_never_deletes_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = Slots::open(&paths).unwrap();
+        let rec = s.create("work").unwrap();
+        s.set_default("work").unwrap();
+        assert!(s.remove("work").unwrap());
+        assert!(s.get("work").is_none(), "the mapping is gone");
+        assert!(
+            rec.config_dir.is_dir(),
+            "the directory - and the login in it - is left alone"
+        );
+        assert_eq!(
+            s.default_dir(),
+            None,
+            "a pointer at the removed slot is cleared, not left dangling"
+        );
+        // Gone means gone, and a second removal is not an error.
+        assert!(!s.remove("work").unwrap());
+        // It survives a reopen.
+        assert!(Slots::open(&paths).unwrap().get("work").is_none());
     }
 
     #[test]

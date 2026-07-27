@@ -579,3 +579,38 @@ fn auto_setting_round_trips_and_rejects_nonsense() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "a bad value is refused");
 }
+
+/// Removing a slot account means "stop managing it", never "lose it": the mapping
+/// goes, the directory and the login inside it stay, and `adopt` can bring it back.
+#[test]
+fn rm_unregisters_a_slot_and_leaves_its_login_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let existing = root.path().join("dot-claude-company");
+    std::fs::create_dir_all(&existing).unwrap();
+    std::fs::write(existing.join(".credentials.json"), b"{\"keep\":\"me\"}").unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    run_in(
+        root.path(),
+        &["adopt", "company", existing.to_str().unwrap()],
+        &path,
+    );
+    assert!(run_in(root.path(), &["slots"], &path).contains("company"));
+
+    let out = run_in(root.path(), &["rm", "company", "--yes"], &path);
+    assert!(out.contains("stopped managing"), "{out}");
+    assert!(
+        !run_in(root.path(), &["slots"], &path).contains("company"),
+        "the mapping is gone"
+    );
+    assert!(
+        existing.join(".credentials.json").exists(),
+        "the login was never touched"
+    );
+    // And it can be brought back.
+    run_in(
+        root.path(),
+        &["adopt", "company", existing.to_str().unwrap()],
+        &path,
+    );
+    assert!(run_in(root.path(), &["slots"], &path).contains("company"));
+}

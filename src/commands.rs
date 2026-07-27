@@ -2855,11 +2855,52 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
         return Ok(c);
     }
     let store = Store::open(paths)?;
-    // Existence first - never ask "delete 'ghost'?" about a profile that
-    // does not exist.
-    if !store.list().iter().any(|p| p.name == name) {
-        eprintln!("swapdex: no profile named '{name}'");
+    // A slot account is not a saved snapshot: removing it means "stop managing
+    // this account", and the directory holding its login is left untouched, so
+    // the account itself is never lost.
+    let is_slot = crate::slots::Slots::open(paths)
+        .map(|s| s.get(name).is_some())
+        .unwrap_or(false);
+    let is_profile = store.list().iter().any(|p| p.name == name);
+    if !is_slot && !is_profile {
+        eprintln!("swapdex: no account named '{name}'");
         return Ok(5);
+    }
+    if is_slot {
+        if !yes {
+            use std::io::IsTerminal;
+            let tty =
+                std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
+            if !tty {
+                eprintln!(
+                    "swapdex: `rm {name}` unregisters that account (its login and folder \
+                     stay). Re-run with --yes to confirm."
+                );
+                return Ok(7);
+            }
+            if !yes_no(
+                &format!(
+                    "stop managing account '{name}'? Its login and folder stay, so \
+                     `swapdex adopt` can bring it back. [y/N]: "
+                ),
+                false,
+            ) {
+                println!("kept '{name}'.");
+                return Ok(0);
+            }
+        }
+        let mut slots = crate::slots::Slots::open(paths)?;
+        let dir = slots.get(name).map(|r| r.config_dir);
+        slots.remove(name)?;
+        println!("stopped managing '{name}'.");
+        if let Some(d) = dir {
+            println!(
+                "  its login is untouched at {}",
+                crate::util::redact_path(&d.display().to_string())
+            );
+        }
+        // A profile of the same name is a separate thing; leave it alone.
+        return Ok(0);
     }
     if !yes {
         // On a terminal, just ask; --yes stays for scripts (and remains the
