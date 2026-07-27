@@ -103,6 +103,25 @@ fn key_hints(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The column where every account's usage bar starts: two spaces past the widest
+/// left side ("dot name  identity  (warn)"). One shared column means the bars
+/// line up with each other AND stay beside the account they describe - right-edge
+/// alignment scattered them to the far side of a wide terminal.
+fn usage_bar_column(rows: &[Row]) -> usize {
+    const DOT: usize = 2; // the "* " / "o " glyph
+    const GAP: usize = 2; // between name and identity
+    rows.iter()
+        .map(|r| {
+            DOT + r.name.chars().count()
+                + GAP
+                + r.ident.chars().count()
+                + r.warn.map_or(0, |w| w.chars().count() + 4) // "  (warn)"
+        })
+        .max()
+        .unwrap_or(0)
+        + GAP
+}
+
 /// Key hints shown on the Main screen when at least one profile exists. A pure
 /// function so the `r` binding's label is unit-testable (the event loop is not
 /// otherwise seamed for key-dispatch tests).
@@ -392,6 +411,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         f.render_widget(Paragraph::new(lines), header);
                     }
 
+                    // The column every usage bar starts at: past the widest
+                    // "dot name  identity (warn)" so the bars form one vertical
+                    // line right beside the accounts.
+                    let bar_col = usage_bar_column(&rows);
                     let items: Vec<ListItem> = rows
                         .iter()
                         .map(|r| {
@@ -419,8 +442,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     Style::default().fg(Color::Rgb(200, 150, 90)),
                                 ));
                             }
-                            // Right-aligned 5h utilization bar + percent (from the
-                            // live quota endpoint), like a team dashboard's usage.
+                            // 5h utilization bar + percent (from the live quota
+                            // endpoint). Every row's bar starts at the SAME column,
+                            // just past the widest identity - so the bars line up
+                            // and stay next to the account they belong to. Pinning
+                            // them to the right edge instead pushed name and bar to
+                            // opposite sides of a wide terminal, where the eye
+                            // cannot connect them.
                             if let Some(pct) =
                                 quota_pct.as_ref().and_then(|q| q.get(&r.name).copied())
                             {
@@ -428,7 +456,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
                                 let inner = (body.width as usize).saturating_sub(4);
-                                let pad = inner.saturating_sub(left_w + label.chars().count());
+                                // Keep the whole line inside the panel on a narrow
+                                // terminal; never less than one space of gap.
+                                let start = bar_col.min(inner.saturating_sub(label.chars().count()));
+                                let pad = start.saturating_sub(left_w).max(1);
                                 top.push(Span::raw(" ".repeat(pad)));
                                 top.push(Span::styled(label, quota_color(pct)));
                             }
@@ -1332,6 +1363,29 @@ mod tests {
             assert_eq!(tildify(&home.join("proj")), "~/proj");
         }
         assert_eq!(tildify(std::path::Path::new("/etc")), "/etc");
+    }
+
+    // Every bar starts at one shared column, past the WIDEST row - so the bars
+    // line up and sit beside the accounts instead of at the terminal's edge.
+    #[test]
+    fn usage_bar_column_clears_the_widest_row() {
+        let row = |name: &str, ident: &str, warn: Option<&'static str>| Row {
+            name: name.into(),
+            ident: ident.into(),
+            tools: String::new(),
+            active: false,
+            warn,
+        };
+        // "* " + "bsgong"(6) + "  " + "bsgong@polarisai.co.kr"(22) = 32, +2 = 34
+        let rows = vec![
+            row("rnd", "rnd@x.co", None),
+            row("bsgong", "bsgong@polarisai.co.kr", None),
+        ];
+        assert_eq!(usage_bar_column(&rows), 34);
+        // A warning marker widens that row, and the column follows the widest.
+        let with_warn = vec![row("rnd", "rnd@x.co", Some("stale"))];
+        assert_eq!(usage_bar_column(&with_warn), 2 + 3 + 2 + 8 + 9 + 2);
+        assert_eq!(usage_bar_column(&[]), 2, "no rows: just the gap");
     }
 
     #[test]
