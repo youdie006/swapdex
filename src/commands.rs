@@ -2954,6 +2954,26 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     if let Some(c) = reject_bad_name(new).or_else(|| reject_reserved_name(new)) {
         return Ok(c);
     }
+    // A slot account renames by mapping only: its directory (and so its Keychain
+    // item, and so its login) must not move.
+    if let Ok(mut slots) = crate::slots::Slots::open(paths) {
+        if slots.get(old).is_some() {
+            return match slots.rename(old, new) {
+                Ok(true) => {
+                    println!("renamed account '{old}' to '{new}'");
+                    Ok(0)
+                }
+                Ok(false) => {
+                    eprintln!("swapdex: no account named '{old}'");
+                    Ok(5)
+                }
+                Err(e) => {
+                    eprintln!("swapdex: {e}");
+                    Ok(6)
+                }
+            };
+        }
+    }
     let store = Store::open(paths)?;
     // Take the switch lock like every other store mutation, and make the
     // collision a first-class "already exists" (6) rather than a hard error -

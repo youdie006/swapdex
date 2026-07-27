@@ -90,6 +90,25 @@ impl Slots {
         Ok(rec)
     }
 
+    /// Rename a slot. Only the NAME changes: the id and directory stay, which is
+    /// what keeps the macOS Keychain item (derived from the directory string)
+    /// valid - renaming must never cost an account its login.
+    pub fn rename(&mut self, old: &str, new: &str) -> Result<bool> {
+        let new = new.trim();
+        if new.is_empty() {
+            bail!("a slot name is required");
+        }
+        if self.records.iter().any(|r| r.name == new) {
+            bail!("an account named '{new}' already exists");
+        }
+        let Some(r) = self.records.iter_mut().find(|r| r.name == old) else {
+            return Ok(false);
+        };
+        r.name = new.to_string();
+        self.persist()?;
+        Ok(true)
+    }
+
     /// Unregister a slot: drop the name -> directory mapping. The DIRECTORY is
     /// left alone, always. It holds that account's login, and for an adopted dir
     /// it is somewhere the user chose - deleting either would turn "stop managing
@@ -268,6 +287,27 @@ mod tests {
             Some(rec.config_dir)
         );
         assert!(s.set_default("missing").is_err(), "unknown name rejected");
+    }
+
+    #[test]
+    fn rename_keeps_the_directory_so_the_login_survives() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = Slots::open(&paths).unwrap();
+        let before = s.create("company2").unwrap();
+        assert!(s.rename("company2", "rnd").unwrap());
+        let after = s.get("rnd").expect("renamed");
+        assert_eq!(
+            after.config_dir, before.config_dir,
+            "the directory is untouched - the Keychain item is keyed on it"
+        );
+        assert_eq!(after.id, before.id, "and so is the id");
+        assert!(s.get("company2").is_none());
+        // Colliding and missing names are refused rather than silently applied.
+        s.create("other").unwrap();
+        assert!(s.rename("rnd", "other").is_err(), "duplicate refused");
+        assert!(s.rename("   ", "x").unwrap_or(false) == false);
+        assert!(!s.rename("ghost", "x").unwrap(), "no such slot");
     }
 
     #[test]
