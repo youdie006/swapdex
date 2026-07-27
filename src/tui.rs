@@ -103,6 +103,63 @@ fn key_hints(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Tools in the order the Main screen groups them.
+const TOOL_ORDER: &[&str] = &["claude-code", "codex", "gemini", "antigravity"];
+
+/// The tool an account is grouped under: its first tool in canonical order, so a
+/// profile holding several appears once, under the first one it has.
+fn group_of(tools: &str) -> &'static str {
+    TOOL_ORDER
+        .iter()
+        .find(|t| tools.contains(*t))
+        .copied()
+        .unwrap_or("other")
+}
+
+/// Sort accounts by tool group (canonical order), keeping the original order
+/// inside a group, so accounts of one tool sit together under one heading.
+pub fn group_sorted(mut rows: Vec<Row>) -> Vec<Row> {
+    let rank = |r: &Row| {
+        TOOL_ORDER
+            .iter()
+            .position(|t| r.tools.contains(*t))
+            .unwrap_or(TOOL_ORDER.len())
+    };
+    rows.sort_by_key(rank);
+    rows
+}
+
+/// Which rows start a new tool group (and therefore carry its heading). Index i
+/// is true when row i's group differs from row i-1's.
+fn group_heads(rows: &[Row]) -> Vec<bool> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut prev: Option<&str> = None;
+    for r in rows {
+        let g = group_of(&r.tools);
+        out.push(prev != Some(g));
+        prev = Some(g);
+    }
+    out
+}
+
+/// Map a clicked terminal row to a list index when items have DIFFERENT heights
+/// (a group heading makes its row one line taller). Walks the visible items from
+/// the scroll `offset`, summing heights, so a click always lands on the item that
+/// was actually drawn there.
+fn click_item_index(offset: usize, click_row: u16, top: u16, heights: &[u16]) -> usize {
+    let mut y = top;
+    let mut i = offset;
+    while i < heights.len() {
+        let h = heights[i].max(1);
+        if click_row < y + h {
+            return i;
+        }
+        y += h;
+        i += 1;
+    }
+    heights.len().saturating_sub(1)
+}
+
 /// The column where every account's usage bar starts: two spaces past the widest
 /// left side ("dot name  identity  (warn)"). One shared column means the bars
 /// line up with each other AND stay beside the account they describe - right-edge
@@ -521,9 +578,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     // "dot name  identity (warn)" so the bars form one vertical
                     // line right beside the accounts.
                     let bar_col = usage_bar_column(&rows);
+                    let heads = group_heads(&rows);
                     let items: Vec<ListItem> = rows
                         .iter()
-                        .map(|r| {
+                        .enumerate()
+                        .map(|(ri, r)| {
                             // Filled dot = the active profile, hollow = the
                             // rest - the eye finds the live account fast.
                             let (glyph, gstyle) = if r.active {
@@ -569,14 +628,31 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 top.push(Span::styled("  7d ", Style::default().fg(MUTED)));
                                 top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
                             }
-                            ListItem::new(vec![
-                                Line::from(top),
-                                Line::from(Span::styled(
-                                    format!("    {}", r.tools),
-                                    Style::default().fg(Color::DarkGray),
-                                )),
-                                Line::from(""),
-                            ])
+                            // One heading per tool, on its first account, so the
+                            // Claude accounts and the Codex accounts read as two
+                            // groups instead of one undifferentiated list.
+                            let mut lines = Vec::with_capacity(4);
+                            if heads.get(ri).copied().unwrap_or(false) {
+                                let g = group_of(&r.tools);
+                                let rule_w = bar_col.saturating_sub(g.chars().count() + 4);
+                                lines.push(Line::from(vec![
+                                    Span::styled(
+                                        format!("  {g} "),
+                                        Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::styled(
+                                        "\u{2500}".repeat(rule_w.clamp(2, 40)),
+                                        Style::default().fg(Color::Rgb(72, 70, 88)),
+                                    ),
+                                ]));
+                            }
+                            lines.push(Line::from(top));
+                            lines.push(Line::from(Span::styled(
+                                format!("    {}", r.tools),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                            lines.push(Line::from(""));
+                            ListItem::new(lines)
                         })
                         .collect();
                     if rows.is_empty() {
@@ -1019,7 +1095,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         } else {
                             0
                         };
-                        let per = if is_main { 3 } else { 1 }; // Main rows are 3 lines
+                        let per = if is_main { 3 } else { 1 }; // menu rows are 1 line
                         let top = main_area.y + header + 1;
                         // Bottom of the list box's INNER area (above its border).
                         // A click below it (the foot/help rows) must not map to a
@@ -1029,7 +1105,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // offset(): a scrolled list's first visible row is
                             // sel.offset(), not 0 - without it a click opened a
                             // hidden earlier entry (maybe another account).
-                            let idx = click_row_index(sel.offset(), m.row, top, per);
+                            // Main rows are 3 lines, 4 when they carry a tool
+                            // heading, so the mapping must walk real heights -
+                            // a fixed stride would select the wrong account.
+                            let idx = if is_main {
+                                let heights: Vec<u16> = group_heads(&rows)
+                                    .iter()
+                                    .map(|h| if *h { 4 } else { 3 })
+                                    .collect();
+                                click_item_index(sel.offset(), m.row, top, &heights)
+                            } else {
+                                click_row_index(sel.offset(), m.row, top, per)
+                            };
                             if idx < list_len {
                                 sel.select(Some(idx));
                                 // Click activates a MENU item; on Main it only
@@ -1511,6 +1598,56 @@ mod tests {
     // line up and sit beside the accounts instead of at the terminal's edge.
     // The number is written INSIDE the bar and stays legible: the label is
     // centred, the fill splits it, and a countdown joins only when it fits.
+    // Accounts group by tool, in canonical order, with a heading on the first row
+    // of each group - so Claude accounts and Codex accounts read as two sections.
+    #[test]
+    fn accounts_group_by_tool_with_one_heading_each() {
+        let row = |name: &str, tools: &str| Row {
+            name: name.into(),
+            ident: "e@x".into(),
+            tools: tools.into(),
+            active: false,
+            warn: None,
+        };
+        let sorted = group_sorted(vec![
+            row("codex", "codex*"),
+            row("rnd", "claude-code*"),
+            row("work", "codex"),
+            row("bsgong", "claude-code"),
+        ]);
+        let names: Vec<&str> = sorted.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["rnd", "bsgong", "codex", "work"],
+            "claude accounts first, then codex, original order kept inside a group"
+        );
+        assert_eq!(
+            group_heads(&sorted),
+            vec![true, false, true, false],
+            "one heading per group, on its first account"
+        );
+        assert_eq!(group_of("claude-code*"), "claude-code");
+        assert_eq!(group_of("codex"), "codex");
+        assert_eq!(group_of("mystery"), "other", "an unknown tool still groups");
+    }
+
+    // A heading makes its row taller, so clicks must walk real heights: a fixed
+    // stride would select the wrong account below the first group.
+    #[test]
+    fn clicks_map_through_variable_row_heights() {
+        // rows: [heading+3, 3, heading+3] -> heights 4,3,4 starting at y=5
+        let heights = [4u16, 3, 4];
+        assert_eq!(click_item_index(0, 5, 5, &heights), 0);
+        assert_eq!(click_item_index(0, 8, 5, &heights), 0, "still inside row 0");
+        assert_eq!(click_item_index(0, 9, 5, &heights), 1);
+        assert_eq!(click_item_index(0, 12, 5, &heights), 2);
+        // Scrolled: the first visible item is index 1.
+        assert_eq!(click_item_index(1, 5, 5, &heights), 1);
+        assert_eq!(click_item_index(1, 8, 5, &heights), 2);
+        // Past the end clamps to the last item rather than panicking.
+        assert_eq!(click_item_index(0, 200, 5, &heights), 2);
+    }
+
     #[test]
     fn quota_bar_writes_the_number_inside_the_bar() {
         let spans = quota_bar(Some(62.0), None, 11);

@@ -2056,7 +2056,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 return Vec::new();
             };
             let active = active_by_tool(&store, self.paths);
-            store
+            let list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
                 .map(|p| {
@@ -2085,7 +2085,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         warn: marker,
                     }
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            // Group the list by tool so the Claude accounts and the Codex
+            // accounts read as two sections rather than one mixed list.
+            crate::tui::group_sorted(list)
         }
         fn switch(&mut self, name: &str) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
@@ -2213,7 +2216,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .cloned()
                 .or_else(|| v.get("accounts").and_then(|a| a.as_array()).cloned())
                 .unwrap_or_default();
-            arr.iter()
+            let mut claude: Vec<(String, crate::tui::Usage)> = arr
+                .iter()
                 .filter_map(|acc| {
                     // `name` may carry an " (active)" marker; strip it to match Row.name.
                     let name = acc
@@ -2244,7 +2248,37 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         },
                     ))
                 })
-                .collect()
+                .collect();
+            // Codex reports its own windows into its session transcripts, so its
+            // usage costs a local file read - no network, unlike Claude's. The
+            // transcript does not name the account, so it belongs to whichever
+            // Codex account is active; the others get no bar rather than a guess.
+            if let Ok(store) = Store::open(self.paths) {
+                let active = active_by_tool(&store, self.paths)
+                    .into_iter()
+                    .find(|(tool, _)| *tool == "codex")
+                    .map(|(_, name)| name);
+                if let Some(name) = active {
+                    if let Some(l) = crate::codex_limits::latest(self.paths, now_secs(), 7 * 86_400)
+                    {
+                        let mut u = crate::tui::Usage::default();
+                        // Place each window by its LENGTH, not by the API's
+                        // primary/secondary labels: a ~5h window is the session
+                        // one, anything longer is the weekly column.
+                        for w in [l.short, l.long].into_iter().flatten() {
+                            if w.window_minutes <= 600 {
+                                u.five_h = Some(w.used_pct);
+                                u.five_h_reset = w.resets_at;
+                            } else {
+                                u.seven_d = Some(w.used_pct);
+                                u.seven_d_reset = w.resets_at;
+                            }
+                        }
+                        claude.push((name, u));
+                    }
+                }
+            }
+            claude
         }
         fn proxy_running(&mut self) -> bool {
             crate::proxy::running_port(self.paths).is_some()
