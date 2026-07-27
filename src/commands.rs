@@ -1690,8 +1690,8 @@ fn codex_skill_body() -> String {
         .unwrap_or(SLASH_BODY)
         .trim_start();
     format!(
-        "---\nname: sx\ndescription: >-\n  Switch the account serving this session (swapdex). Use when the user asks to \
-         change accounts, says an account is out of quota, or types /sx.\n---\n\n{steps}"
+        "---\nname: swap\ndescription: >-\n  Switch the account serving this session (swapdex). Use when the user asks to \
+         change accounts, says an account is out of quota, or types /swap.\n---\n\n{steps}"
     )
 }
 
@@ -1708,25 +1708,25 @@ pub fn install_slash(paths: &Paths) -> Result<i32> {
 
     let claude_dir = home.join(".claude").join("commands");
     match std::fs::create_dir_all(&claude_dir)
-        .and_then(|()| std::fs::write(claude_dir.join("sx.md"), SLASH_BODY))
+        .and_then(|()| std::fs::write(claude_dir.join("swap.md"), SLASH_BODY))
     {
         Ok(()) => {
             println!(
-                "Claude Code: /sx  ({})",
-                crate::util::redact_path(&claude_dir.join("sx.md").display().to_string())
+                "Claude Code: /swap  ({})",
+                crate::util::redact_path(&claude_dir.join("swap.md").display().to_string())
             );
             installed += 1;
         }
         Err(e) => eprintln!("swapdex: could not install the Claude command: {e}"),
     }
 
-    let codex_dir = home.join(".codex").join("skills").join("sx");
+    let codex_dir = home.join(".codex").join("skills").join("swap");
     match std::fs::create_dir_all(&codex_dir)
         .and_then(|()| std::fs::write(codex_dir.join("SKILL.md"), codex_skill_body()))
     {
         Ok(()) => {
             println!(
-                "Codex:       /sx  ({})",
+                "Codex:       /swap  ({})",
                 crate::util::redact_path(&codex_dir.join("SKILL.md").display().to_string())
             );
             installed += 1;
@@ -1737,7 +1737,7 @@ pub fn install_slash(paths: &Paths) -> Result<i32> {
     if installed == 0 {
         return Ok(1);
     }
-    println!("  type `/sx` to pick an account, or `/sx <name>` to go straight there");
+    println!("  type `/swap` to pick an account, or `/swap <name>` to go straight there");
     println!("  (a plain `!swapdex use <account>` works too, without installing anything)");
     Ok(0)
 }

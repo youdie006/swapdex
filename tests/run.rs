@@ -704,19 +704,19 @@ fn slash_installs_a_claude_code_command() {
             .stdout,
     )
     .into_owned();
-    assert!(out.contains("/sx"), "it names the command: {out}");
+    assert!(out.contains("/swap"), "it names the command: {out}");
     // Codex gets the same switcher, in the shape Codex reads.
-    let skill = home.join(".codex/skills/sx/SKILL.md");
+    let skill = home.join(".codex/skills/swap/SKILL.md");
     let sbody = std::fs::read_to_string(&skill).expect("codex skill written");
     assert!(
-        sbody.contains("name: sx") && sbody.contains("description:"),
+        sbody.contains("name: swap") && sbody.contains("description:"),
         "codex frontmatter: {sbody}"
     );
     assert!(
         sbody.contains("swapdex use $ARGUMENTS") && sbody.contains("AskUserQuestion"),
         "the codex skill carries the same steps: {sbody}"
     );
-    let f = home.join(".claude/commands/sx.md");
+    let f = home.join(".claude/commands/swap.md");
     let body = std::fs::read_to_string(&f).expect("command file written");
     assert!(body.starts_with("---"), "it carries frontmatter: {body}");
     assert!(
