@@ -451,3 +451,61 @@ fn a_throttled_turn_is_retried_on_the_same_account() {
         "retried on the SAME account - a throttle is not exhaustion"
     );
 }
+
+/// A 429 that is NOT a passing throttle (no retry hint) is the wall: --auto must
+/// continue the session on another account. Before this, a 429 carried no unified
+/// headers, so nothing marked the account spent and the user stayed stuck on it.
+#[test]
+fn auto_continues_the_session_when_a_turn_is_rate_limited() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port_up = server.server_addr().to_ip().unwrap().port();
+    let s2 = sink.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            s2.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            // A hard 429: no x-should-retry, so it is the wall, not a throttle.
+            let resp = if first {
+                first = false;
+                tiny_http::Response::from_string(
+                    "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+                )
+                .with_status_code(tiny_http::StatusCode(429))
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}")
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+
+    let (mut child, port) = start_proxy(
+        root.path(),
+        &format!("http://127.0.0.1:{port_up}"),
+        &["--auto"],
+    );
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
+        "hitting the rate limit hands the session to another account"
+    );
+}

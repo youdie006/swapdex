@@ -278,10 +278,23 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
         );
         sh.unusable.lock().unwrap().insert(slot.name.clone());
     }
+    // Reaching here with a 429 means the retry loop gave up on it: not a passing
+    // throttle, so this account cannot serve the next turn either. Record it as
+    // out of quota (a 429 carries no unified headers to say so) and rotate - the
+    // wall is exactly the moment the user wants to continue elsewhere.
+    let rate_limited = up.status == 429;
+    if rate_limited {
+        sh.quota
+            .lock()
+            .unwrap()
+            .entry(slot.name.clone())
+            .or_default()
+            .rejected = true;
+    }
     // Turn-boundary rotation: this response is already complete, so switching now
     // cannot sever an answer - the NEXT turn carries the new account.
-    if opts.auto && (spent || up.status == 401) {
-        rotate_away_from(&slot.name, paths, sh, spent);
+    if opts.auto && (spent || rate_limited || up.status == 401) {
+        rotate_away_from(&slot.name, paths, sh, spent || rate_limited);
     }
     std::io::stdout().flush().ok();
 
