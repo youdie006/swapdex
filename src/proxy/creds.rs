@@ -18,6 +18,19 @@ pub fn slot_token(dir: &Path) -> Option<Secret> {
     access_token(&bytes)
 }
 
+/// This slot's own account UUID, from its `.claude.json` `oauthAccount` - the
+/// identity Claude reports as "connected". Used to keep a forwarded request's
+/// `metadata.user_id` consistent with the token serving it. An identifier, not a
+/// secret, and never logged.
+pub fn slot_account_uuid(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join(".claude.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v["oauthAccount"]["accountUuid"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Pull `claudeAiOauth.accessToken` out of a Claude credential blob.
 fn access_token(bytes: &[u8]) -> Option<Secret> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -40,6 +53,25 @@ mod tests {
         .unwrap();
         let t = slot_token(dir.path()).expect("token");
         assert_eq!(t.expose(), b"AT-1");
+    }
+
+    #[test]
+    fn slot_account_uuid_comes_from_the_slots_oauth_account() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(slot_account_uuid(dir.path()).is_none(), "no config yet");
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            br#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"a@x.com"}}"#,
+        )
+        .unwrap();
+        assert_eq!(slot_account_uuid(dir.path()).as_deref(), Some("u-1"));
+        // An empty or absent uuid must not become an identity.
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            br#"{"oauthAccount":{"accountUuid":""}}"#,
+        )
+        .unwrap();
+        assert!(slot_account_uuid(dir.path()).is_none());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! neither prompt content nor any token value is ever logged.
 
 pub mod creds;
+pub mod identity;
 pub mod pick;
 pub mod ratelimit;
 pub mod upstream;
@@ -139,6 +140,24 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
     let path = rq.url().to_string();
     let mut body = Vec::new();
     rq.as_reader().read_to_end(&mut body)?;
+
+    // Keep the account identity in the body consistent with the token serving
+    // this turn: after a switch or rotation the client still names the account it
+    // started with. Only UUIDs of swapdex-managed accounts are substituted, and
+    // the body is forwarded byte-for-byte when there is nothing to align.
+    if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
+        let known: Vec<String> = crate::slots::Slots::open(paths)
+            .map(|s| {
+                s.list()
+                    .iter()
+                    .filter_map(|r| creds::slot_account_uuid(&r.config_dir))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(aligned) = identity::align_account(&body, &known, &serving) {
+            body = aligned;
+        }
+    }
 
     let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
     // Log the account and the outcome only - never a body, never a token. The

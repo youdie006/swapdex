@@ -6,9 +6,17 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_swapdex")
 }
 
-/// A fake upstream API: records the Authorization header it was given and
-/// answers with a small body. No test ever reaches the real API.
-fn fake_upstream(auth_sink: Arc<Mutex<Vec<String>>>) -> String {
+/// What the fake upstream saw for one request.
+#[derive(Clone, Debug, PartialEq)]
+struct Seen {
+    auth: String,
+    /// `metadata.user_id` from the body, when the body carried one.
+    user_id: Option<String>,
+}
+
+/// A fake upstream API: records the Authorization header and the body's account
+/// identity, then answers with a small body. No test ever reaches the real API.
+fn fake_upstream(sink: Arc<Mutex<Vec<Seen>>>) -> String {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
     std::thread::spawn(move || {
@@ -21,11 +29,27 @@ fn fake_upstream(auth_sink: Arc<Mutex<Vec<String>>>) -> String {
                 .unwrap_or_default();
             let mut body = Vec::new();
             rq.as_reader().read_to_end(&mut body).ok();
-            auth_sink.lock().unwrap().push(auth);
+            let user_id = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v["metadata"]["user_id"]
+                        .as_str()
+                        .map(std::string::ToString::to_string)
+                });
+            sink.lock().unwrap().push(Seen { auth, user_id });
             let _ = rq.respond(tiny_http::Response::from_string("{\"ok\":true}"));
         }
     });
     format!("http://127.0.0.1:{port}")
+}
+
+/// The Authorization values the upstream saw, in order.
+fn auths(sink: &Arc<Mutex<Vec<Seen>>>) -> Vec<String> {
+    sink.lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.auth.clone())
+        .collect()
 }
 
 /// Write a slot with a known token and make it the default account.
@@ -33,6 +57,14 @@ fn seed_slot(root: &std::path::Path, name: &str, id: &str, token: &str, make_def
     let store = root.join(".local/share/swapdex");
     let slot = store.join("slots").join(id);
     std::fs::create_dir_all(&slot).unwrap();
+    // The slot's own connected identity, as Claude records it after a login.
+    std::fs::write(
+        slot.join(".claude.json"),
+        format!(
+            r#"{{"oauthAccount":{{"accountUuid":"uuid-of-{name}","emailAddress":"{name}@x.com"}}}}"#
+        ),
+    )
+    .unwrap();
     std::fs::write(
         slot.join(".credentials.json"),
         format!(
@@ -138,7 +170,7 @@ fn a_running_session_follows_a_pointer_change_to_another_account() {
     child.kill().ok();
 
     assert_eq!(
-        sink.lock().unwrap().clone(),
+        auths(&sink),
         vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
         "the second turn of the same session was served by the newly chosen account"
     );
@@ -160,8 +192,46 @@ fn proxy_injects_the_slots_token_and_streams_the_response_back() {
         "response streamed back: {body}"
     );
     assert_eq!(
-        sink.lock().unwrap().clone(),
+        auths(&sink),
         vec!["Bearer AT-SLOT".to_string()],
         "the slot's token replaced the client's"
+    );
+}
+
+/// After a switch the client still names the account the conversation started
+/// with; the forwarded body must name the account whose token is serving it, or
+/// the request contradicts itself.
+#[test]
+fn the_forwarded_body_names_the_account_actually_serving_the_turn() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    // The client's body carries rnd's identity, the way Claude wrote it.
+    let turn = r#"{"model":"m","metadata":{"user_id":"{\"account_uuid\":\"uuid-of-rnd\"}"}}"#;
+    post_through(port, turn);
+    point_default_at(root.path(), "bbbb2222");
+    post_through(port, turn);
+    child.kill().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "two turns reached the upstream");
+    assert!(
+        seen[0].user_id.as_deref().unwrap().contains("uuid-of-rnd"),
+        "turn 1 served by rnd keeps rnd's identity: {:?}",
+        seen[0]
+    );
+    assert!(
+        seen[1]
+            .user_id
+            .as_deref()
+            .unwrap()
+            .contains("uuid-of-bsgong")
+            && !seen[1].user_id.as_deref().unwrap().contains("uuid-of-rnd"),
+        "turn 2 served by bsgong carries bsgong's identity: {:?}",
+        seen[1]
     );
 }
