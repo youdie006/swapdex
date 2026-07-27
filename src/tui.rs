@@ -416,7 +416,7 @@ enum Screen {
 /// the percentage (and the reset countdown when it fits) sits centred on the bar
 /// rather than beside it, so two windows fit on one row and each number is
 /// unambiguously attached to its own bar. Returns the spans to render.
-fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Span<'static>> {
+fn quota_bar(pct: Option<f64>, width: usize) -> Vec<Span<'static>> {
     // The unfilled track sits in the same violet-tinted grey family as the panel
     // borders, so a bar reads as part of this UI rather than a pasted-in widget.
     let empty_bg = Color::Rgb(52, 50, 64);
@@ -433,14 +433,10 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
     // just a number floating in whitespace.
     const FILL: char = '\u{2588}';
     const TRACK: char = '\u{2591}';
-    // The label: "62%", plus "59m" when there is room for the countdown too.
-    let short = format!("{pct:.0}%");
-    let label = match reset_secs.map(fmt_reset) {
-        Some(r) if !r.is_empty() && short.chars().count() + 1 + r.chars().count() <= width => {
-            format!("{short} {r}")
-        }
-        _ => short,
-    };
+    // Only the percentage goes inside: adding the countdown here covered most of
+    // the bar, so a full window looked nearly empty. The countdown follows the
+    // bar instead (see the caller).
+    let label = format!("{pct:.0}%");
     let lw = label.chars().count().min(width);
     let left_pad = (width - lw) / 2;
     let filled = ((pct / 100.0) * width as f64)
@@ -488,6 +484,12 @@ fn quota_fill(pct: f64) -> Color {
     } else {
         Color::Rgb(88, 74, 138) // quiet: plenty left, nothing to look at
     }
+}
+
+/// The countdown shown after a bar: `59m` / `2h14m` / `3d4h`, or blank when there
+/// is nothing to count down to. Kept outside the bar so the fill stays readable.
+fn reset_label(reset_secs: Option<i64>) -> String {
+    reset_secs.map(fmt_reset).unwrap_or_default()
 }
 
 /// A reset countdown, shortest useful form: `48m`, `2h14m`, `3d4h`. Empty when
@@ -625,23 +627,46 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // Session (5h) and weekly (7d) windows, each drawn
                             // as a bar with its own number inside it, both at one
                             // shared column so they line up beside the accounts.
-                            if let Some(u) = quota_pct.as_ref().and_then(|q| q.get(&r.name)) {
+                            // Every account gets both columns, even with no data
+                            // to show: an empty track keeps the rows aligned, where
+                            // omitting it made the column look missing.
+                            {
+                                let u = quota_pct
+                                    .as_ref()
+                                    .and_then(|q| q.get(&r.name).copied())
+                                    .unwrap_or_default();
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
                                 let inner = (body.width as usize).saturating_sub(4);
-                                // Two labelled bars ("5h " + bar + "  7d " + bar).
-                                let bw = if inner.saturating_sub(bar_col) >= 32 {
-                                    11
+                                // "5h " + bar + " 59m" + "  7d " + bar + " 3d4h"
+                                let r5 = reset_label(u.five_h_reset);
+                                let r7 = reset_label(u.seven_d_reset);
+                                let rw = r5.chars().count().max(r7.chars().count());
+                                let pad_reset = |t: &str| format!(" {t:<rw$}", rw = rw);
+                                let bw = if inner.saturating_sub(bar_col) >= 30 + 2 * rw {
+                                    10
                                 } else {
-                                    7
+                                    6
                                 };
-                                let needed = 3 + bw + 4 + bw;
+                                let needed = 3 + bw + 1 + rw + 4 + bw + 1 + rw;
                                 let start = bar_col.min(inner.saturating_sub(needed));
                                 top.push(Span::raw(" ".repeat(start.saturating_sub(left_w).max(1))));
                                 top.push(Span::styled("5h ", Style::default().fg(MUTED)));
-                                top.extend(quota_bar(u.five_h, u.five_h_reset, bw));
+                                top.extend(quota_bar(u.five_h, bw));
+                                if rw > 0 {
+                                    top.push(Span::styled(
+                                        pad_reset(&r5),
+                                        Style::default().fg(Color::Rgb(96, 94, 116)),
+                                    ));
+                                }
                                 top.push(Span::styled("  7d ", Style::default().fg(MUTED)));
-                                top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
+                                top.extend(quota_bar(u.seven_d, bw));
+                                if rw > 0 {
+                                    top.push(Span::styled(
+                                        pad_reset(&r7),
+                                        Style::default().fg(Color::Rgb(96, 94, 116)),
+                                    ));
+                                }
                             }
                             // One heading per tool, on its first account, so the
                             // Claude accounts and the Codex accounts read as two
@@ -1665,7 +1690,7 @@ mod tests {
 
     #[test]
     fn quota_bar_writes_the_number_inside_the_bar() {
-        let spans = quota_bar(Some(62.0), None, 11);
+        let spans = quota_bar(Some(62.0), 11);
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text.chars().count(), 11, "the bar is exactly its width");
         assert!(text.contains("62%"), "the percentage is inside: {text:?}");
@@ -1677,22 +1702,23 @@ mod tests {
         // 62% of 11 -> 7 filled cells, so the split lands there.
         assert_eq!(spans[0].content.chars().count(), 7);
         assert_eq!(spans[1].content.chars().count(), 4);
-        // A reset countdown joins when there is room, and is dropped when not.
-        let wide: String = quota_bar(Some(10.0), Some(3600), 14)
+        // A full window fills the whole bar: the label must not crowd out the
+        // fill, which is why the countdown lives outside the bar now.
+        let full: String = quota_bar(Some(100.0), 11)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert!(wide.contains("10%") && wide.contains("1h"), "{wide:?}");
-        let narrow: String = quota_bar(Some(10.0), Some(3600), 5)
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(
-            narrow.contains("10%") && !narrow.contains("1h"),
-            "{narrow:?}"
+        assert_eq!(
+            full.matches('\u{2591}').count(),
+            0,
+            "nothing unfilled at 100%: {full:?}"
         );
-        // No data: one empty cell run, no number invented.
-        let none = quota_bar(None, None, 6);
+        assert!(full.contains("100%"), "{full:?}");
+        // The countdown is its own label, blank when there is nothing to say.
+        assert_eq!(reset_label(Some(3600)), "1h");
+        assert_eq!(reset_label(None), "");
+        // No data: one empty track, no number invented.
+        let none = quota_bar(None, 6);
         assert_eq!(none.len(), 1);
         assert_eq!(
             none[0].content.as_ref(),
