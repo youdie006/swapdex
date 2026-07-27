@@ -129,9 +129,18 @@ enum Cmd {
         /// Serve every request from this account instead of the current default
         #[arg(long)]
         account: Option<String>,
-        /// When an account runs out, continue the SAME session on another one
+        /// Continue the SAME session on another account when one runs out
+        /// (default: the `swapdex auto` setting)
         #[arg(long)]
         auto: bool,
+        /// Force auto-continue OFF for this run, whatever the setting says
+        #[arg(long, conflicts_with = "auto")]
+        no_auto: bool,
+    },
+    /// Turn auto-continue (proxy hands a spent session to another account) on/off
+    Auto {
+        /// `on`, `off`, or omit to show the current setting
+        state: Option<String>,
     },
     /// Local health check: store, snapshots, live logins - with a fix per finding
     Doctor,
@@ -277,7 +286,9 @@ fn main() {
             port,
             account,
             auto,
-        } => commands::proxy(&paths, *port, account.clone(), *auto),
+            no_auto,
+        } => commands::proxy(&paths, *port, account.clone(), *auto, *no_auto),
+        Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Quota { json } => commands::quota(&paths, *json),

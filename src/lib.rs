@@ -10,6 +10,7 @@ pub mod proxy;
 pub mod quota;
 pub mod secret;
 pub mod session_link;
+pub mod settings;
 pub mod shim;
 pub mod slots;
 pub mod store;

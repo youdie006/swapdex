@@ -555,3 +555,27 @@ fn doctor_detects_shim_bypassed_and_active() {
         "engaged shim reported active: {out}"
     );
 }
+
+// `swapdex auto` is the setting proxy mode reads, so it must persist and be
+// readable back - and reject anything that is not on/off rather than guessing.
+#[test]
+fn auto_setting_round_trips_and_rejects_nonsense() {
+    let root = tempfile::tempdir().unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    assert!(
+        run_in(root.path(), &["auto"], &path).contains("off"),
+        "off until asked for"
+    );
+    assert!(run_in(root.path(), &["auto", "on"], &path).contains("on"));
+    assert!(
+        run_in(root.path(), &["auto"], &path).contains("on"),
+        "the setting persisted"
+    );
+    assert!(run_in(root.path(), &["auto", "off"], &path).contains("off"));
+    let out = Command::new(bin())
+        .args(["auto", "sometimes"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "a bad value is refused");
+}

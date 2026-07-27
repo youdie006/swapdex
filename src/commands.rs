@@ -1565,13 +1565,59 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
 /// `proxy` - run proxy mode in the foreground. Claude Code pointed at it
 /// (`ANTHROPIC_BASE_URL`) gets its account chosen per request, so a RUNNING
 /// conversation can change accounts without a restart or a resume.
-pub fn proxy(paths: &Paths, port: u16, account: Option<String>, auto: bool) -> Result<i32> {
+pub fn proxy(
+    paths: &Paths,
+    port: u16,
+    account: Option<String>,
+    auto: bool,
+    no_auto: bool,
+) -> Result<i32> {
+    // Precedence: an explicit flag for this run, else the saved setting.
+    let auto = if auto {
+        true
+    } else if no_auto {
+        false
+    } else {
+        crate::settings::load(paths).auto()
+    };
     let opts = crate::proxy::Opts {
         port,
         account,
         auto,
     };
     crate::proxy::serve(paths, &opts)?;
+    Ok(0)
+}
+
+/// `auto [on|off]` - read or set auto-continue: whether proxy mode may hand a
+/// spent session to another account by itself. Kept as its own setting rather
+/// than a flag you must remember, since the whole point is not having to think
+/// about accounts.
+pub fn auto(paths: &Paths, state: Option<&str>) -> Result<i32> {
+    let mut s = crate::settings::load(paths);
+    let Some(state) = state else {
+        println!("auto-continue is {}", if s.auto() { "on" } else { "off" });
+        return Ok(0);
+    };
+    let on = match state.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => true,
+        "off" | "false" | "no" | "0" => false,
+        other => {
+            eprintln!("swapdex: expected `on` or `off`, got '{other}'");
+            return Ok(2);
+        }
+    };
+    s.proxy_auto = Some(on);
+    crate::settings::save(paths, &s)?;
+    println!(
+        "auto-continue {}{}",
+        if on { "on" } else { "off" },
+        if on {
+            " - a spent account hands the running session to another one"
+        } else {
+            " - the proxy stays on the account you chose"
+        }
+    );
     Ok(0)
 }
 
