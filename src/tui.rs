@@ -185,29 +185,26 @@ fn usage_bar_column(rows: &[Row]) -> usize {
 /// Every Main-screen binding, in the order the help panel lists them. The footer
 /// shows only the first few; ten hints crammed into one line made each of them
 /// harder to find than none at all.
-const ALL_KEYS: &[(&str, &str)] = &[
-    ("\u{21b5}", "switch account"),
-    ("o", "open a conversation"),
-    ("r", "previous account"),
+const ALL_KEYS: &[KeyHint] = &[
+    ("\u{21b5}", "switch to it"),
+    ("o", "open a chat"),
+    ("r", "back to last account"),
     ("a", "add account"),
+    ("q", "quit"),
     ("n", "rename"),
     ("d", "delete"),
-    ("u", "token usage"),
+    ("u", "tokens used"),
     ("%", "quota detail"),
-    ("?", "keys + health"),
-    ("q", "quit"),
+    ("?", "health check"),
 ];
 
-/// The footer: the handful of keys worth naming there, with `?` as the door to the
-/// rest. Fewer, longer labels read faster than a dense row of single words.
-fn footer_hints() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("\u{21b5}", "switch"),
-        ("o", "open"),
-        ("r", "previous"),
-        ("?", "all keys"),
-        ("q", "quit"),
-    ]
+/// A key and what it does.
+type KeyHint = (&'static str, &'static str);
+
+/// The two hint rows: the keys you reach for first on top, the rest below. Every
+/// key is named - a key you cannot see is a key you do not have.
+fn hint_rows() -> (&'static [KeyHint], &'static [KeyHint]) {
+    ALL_KEYS.split_at(5)
 }
 
 /// One account's quota picture: session (5h) and weekly (7d) utilization with
@@ -551,10 +548,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
 
     let outcome = 'ui: loop {
         terminal.draw(|f| {
+            // Two hint rows: ten keys on one line were unreadable, and hiding
+            // most of them behind '?' was worse - you cannot use a key you cannot
+            // see. Two rows fit them all WITH labels that say what they do.
             let [main, foot, help] = Layout::vertical([
                 Constraint::Min(3),
                 Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .areas(f.area());
             main_area = main;
@@ -647,6 +647,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // groups instead of one undifferentiated list.
                             let mut lines = Vec::with_capacity(4);
                             if heads.get(ri).copied().unwrap_or(false) {
+                                // A heading pressed against the previous group's
+                                // last row read as part of it; give it air above.
+                                if ri > 0 {
+                                    lines.push(Line::from(""));
+                                }
                                 let g = group_of(&r.tools);
                                 let rule_w = bar_col.saturating_sub(g.chars().count() + 4);
                                 lines.push(Line::from(vec![
@@ -742,12 +747,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         ))
                     };
                     f.render_widget(Paragraph::new(foot_line), foot);
-                    let hints: &[(&str, &str)] = if rows.is_empty() {
-                        &[("?", "health"), ("q", "quit")]
+                    if rows.is_empty() {
+                        f.render_widget(
+                            Paragraph::new(key_hints(&[("?", "health"), ("q", "quit")])),
+                            help,
+                        );
                     } else {
-                        footer_hints()
-                    };
-                    f.render_widget(Paragraph::new(key_hints(hints)), help);
+                        let (a, b) = hint_rows();
+                        f.render_widget(Paragraph::new(vec![key_hints(a), key_hints(b)]), help);
+                    }
                 }
                 Screen::Open { label, entries, new_conv } => {
                     let mut items: Vec<ListItem> = entries
@@ -1126,7 +1134,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             let idx = if is_main {
                                 let heights: Vec<u16> = group_heads(&rows)
                                     .iter()
-                                    .map(|h| if *h { 4 } else { 3 })
+                                    .enumerate()
+                                    .map(|(i, h)| match (*h, i) {
+                                        (true, 0) => 4,  // heading + row
+                                        (true, _) => 5,  // blank + heading + row
+                                        (false, _) => 3, // row
+                                    })
                                     .collect();
                                 click_item_index(sel.offset(), m.row, top, &heights)
                             } else {
@@ -1199,42 +1212,19 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .map(|r| r.name.clone())
                         {
                             let (ok, msg) = ctx.switch(&name);
-                            status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
-                            // With a proxy running the switch lands in the session
-                            // that is already open, so stay here: opening a new
-                            // conversation would be the wrong next step.
-                            if ok && ctx.proxy_running() {
-                                status = format!("{name} now serves the running session (proxy)");
-                            } else if ok {
-                                let (label, entries, tools) = ctx.sessions(&name);
-                                let new_conv = new_conv_for(&tools);
-                                open_state.select(Some(0));
-                                // A single-tool profile: skip the menu entirely
-                                // when there are no sessions to pick - go
-                                // straight to that tool's folder browser.
-                                if entries.is_empty() && new_conv.len() == 1 {
-                                    let tool = new_conv[0].1;
-                                    let cwd = std::env::current_dir()
-                                        .ok()
-                                        .or_else(dirs::home_dir)
-                                        .unwrap_or_else(|| PathBuf::from("/"));
-                                    let frows = folder_rows(&cwd);
-                                    screen = Screen::Folder {
-                                        tool,
-                                        cwd,
-                                        rows: frows,
-                                        back: (label, entries, new_conv),
-                                    };
-                                } else {
-                                    screen = Screen::Open {
-                                        label,
-                                        entries,
-                                        new_conv,
-                                    };
-                                }
-                            }
+                            // Enter switches and STAYS here. Leaving for a session
+                            // menu on every switch was in the way; `o` is the key
+                            // that opens a conversation, and with a proxy running
+                            // the switch has already reached the open session.
+                            status = if !ok {
+                                msg
+                            } else if ctx.proxy_running() {
+                                format!("{name} now serves the running session")
+                            } else {
+                                msg
+                            };
                         }
                     }
                     KeyCode::Char('o') if !rows.is_empty() => {
@@ -1744,20 +1734,22 @@ mod tests {
         assert!(
             ALL_KEYS
                 .iter()
-                .any(|(k, label)| *k == "r" && label.starts_with("previous")),
-            "the r key is the previous-account toggle"
+                .any(|(k, label)| *k == "r" && label.contains("last account")),
+            "the r key goes back to the previous account"
         );
         assert!(
             !ALL_KEYS.iter().any(|(_, label)| label.contains("restore")),
             "'restore' is no longer a Main-screen binding"
         );
-        // The footer names only a few keys - a dense row of ten was unreadable -
-        // and every one it names must exist in the full list.
-        assert!(footer_hints().len() <= 5, "the footer stays short");
-        for (k, _) in footer_hints() {
+        // Nothing is hidden behind '?': both rows together are the whole set, and
+        // every label explains what its key does.
+        let (a, b) = hint_rows();
+        assert_eq!(a.len() + b.len(), ALL_KEYS.len(), "no key is dropped");
+        assert!(!a.is_empty() && !b.is_empty(), "both rows carry keys");
+        for (k, label) in ALL_KEYS {
             assert!(
-                ALL_KEYS.iter().any(|(ak, _)| ak == k),
-                "footer key {k:?} must be a real binding"
+                label.len() >= 4,
+                "key {k:?} needs a label that explains it: {label:?}"
             );
         }
     }

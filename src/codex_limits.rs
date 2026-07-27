@@ -94,12 +94,24 @@ fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::V
 /// The newest limits Codex recorded, from transcripts touched within
 /// `max_age_secs`. `None` when no recent transcript carries any - Codex only
 /// writes them once the API has reported a window.
+///
+/// This is a SNAPSHOT from when Codex last ran, not a live reading: unlike
+/// Claude's, there is no endpoint to ask. A window whose `resets_at` has since
+/// passed is therefore dropped rather than shown - the number it held describes a
+/// window that no longer exists, and reporting 6% of a window that reset is worse
+/// than reporting nothing.
 pub fn latest(paths: &Paths, now: u64, max_age_secs: u64) -> Option<Limits> {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_jsonl(&paths.codex_sessions(), now, max_age_secs, &mut files);
     // Newest first, and stop at the first transcript that actually has limits.
     files.sort_by_key(|p| std::cmp::Reverse(mtime_secs(p)));
-    files.iter().find_map(|f| from_transcript(f))
+    let raw = files.iter().find_map(|f| from_transcript(f))?;
+    let still_valid = |w: Option<Window>| w.filter(|w| w.resets_at.is_none_or(|r| r > now as i64));
+    let l = Limits {
+        short: still_valid(raw.short),
+        long: still_valid(raw.long),
+    };
+    (l.short.is_some() || l.long.is_some()).then_some(l)
 }
 
 fn mtime_secs(p: &Path) -> u64 {
@@ -184,6 +196,28 @@ mod tests {
         // Corrupt lines are skipped rather than failing the read.
         std::fs::write(d.path().join("d.jsonl"), b"{ broken\n").unwrap();
         assert!(from_transcript(&d.path().join("d.jsonl")).is_none());
+    }
+
+    // A window whose reset has passed describes a window that no longer exists,
+    // so it is dropped rather than reported as still-used.
+    #[test]
+    fn a_window_past_its_reset_is_not_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let sessions = d.path().join(".codex/sessions/2026/07/27");
+        std::fs::create_dir_all(&sessions).unwrap();
+        // Both windows reset at 1785611966 / 1785600000 (fixed in the fixture).
+        write_transcript(&sessions, "a.jsonl", 16.0, Some(42.0));
+        let paths = Paths::rooted(d.path());
+        // "Now" before either reset: both windows stand.
+        let before = 1_785_000_000u64;
+        let l = latest(&paths, before, 10 * 86400).expect("both windows live");
+        assert!(l.short.is_some() && l.long.is_some());
+        // "Now" after both resets: nothing to report rather than stale numbers.
+        let after = 1_785_700_000u64;
+        assert!(
+            latest(&paths, after, 10 * 86400).is_none(),
+            "a reset window is not reported as used"
+        );
     }
 
     #[test]
