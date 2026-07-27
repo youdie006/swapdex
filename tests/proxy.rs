@@ -108,6 +108,42 @@ fn post_through(port: u16, body: &str) -> String {
     out
 }
 
+/// Repoint the default account, the way `swapdex use <name>` does.
+fn point_default_at(root: &std::path::Path, id: &str) {
+    let store = root.join(".local/share/swapdex");
+    let slot = store.join("slots").join(id);
+    std::fs::write(
+        store.join("active-claude"),
+        slot.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+}
+
+/// The whole point of proxy mode: a conversation that is ALREADY running moves to
+/// another account when the pointer changes. No restart, no resume - the next
+/// turn simply carries the other account's token.
+#[test]
+fn a_running_session_follows_a_pointer_change_to_another_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    post_through(port, "{\"turn\":1}");
+    // Mid-conversation: the user switches accounts.
+    point_default_at(root.path(), "bbbb2222");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    assert_eq!(
+        sink.lock().unwrap().clone(),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
+        "the second turn of the same session was served by the newly chosen account"
+    );
+}
+
 #[test]
 fn proxy_injects_the_slots_token_and_streams_the_response_back() {
     let root = tempfile::tempdir().unwrap();

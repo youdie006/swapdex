@@ -4,6 +4,7 @@
 //! neither prompt content nor any token value is ever logged.
 
 pub mod creds;
+pub mod pick;
 pub mod ratelimit;
 pub mod upstream;
 
@@ -13,8 +14,18 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-/// Last seen quota state per account name, shared across request threads.
-type QuotaState = Arc<Mutex<HashMap<String, ratelimit::Quota>>>;
+/// Everything the request threads share: the upstream client, where upstream is,
+/// the per-account quota state, and the account-choice state. One struct so a
+/// request handler keeps a small signature as the proxy grows.
+struct Shared {
+    agent: ureq::Agent,
+    base: String,
+    /// Last seen quota state per account name.
+    quota: Mutex<HashMap<String, ratelimit::Quota>>,
+    chooser: Mutex<pick::Chooser>,
+    /// The proxy's own current account after a rotation, if any.
+    rotated: Mutex<Option<String>>,
+}
 
 pub struct Opts {
     pub port: u16,
@@ -32,9 +43,11 @@ fn skip_header(name: &str) -> bool {
     )
 }
 
-/// The slot the next request should use: an explicit `--account`, else the
-/// `active-claude` pointer resolved to a slot, else the only slot there is.
-fn pick_slot(paths: &Paths, opts: &Opts) -> Result<crate::slots::SlotRecord> {
+/// The slot the next request should use. `--account` pins one absolutely;
+/// otherwise the registry and the `active-claude` pointer are re-read PER
+/// REQUEST, which is what lets `swapdex use <name>` (or Enter in the TUI) move a
+/// conversation that is already running.
+fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::SlotRecord> {
     let slots = crate::slots::Slots::open(paths)?;
     if let Some(name) = &opts.account {
         return slots
@@ -42,13 +55,12 @@ fn pick_slot(paths: &Paths, opts: &Opts) -> Result<crate::slots::SlotRecord> {
             .ok_or_else(|| anyhow!("no account slot named '{name}' - `swapdex slots` lists them"));
     }
     let list = slots.list();
-    if let Some(dir) = slots.default_dir() {
-        if let Some(r) = list.iter().find(|r| r.config_dir == dir) {
-            return Ok(r.clone());
-        }
-    }
-    list.into_iter()
-        .next()
+    let pointer = slots.default_dir();
+    let rotated = sh.rotated.lock().unwrap().clone();
+    sh.chooser
+        .lock()
+        .unwrap()
+        .choose(pointer.as_deref(), rotated.as_deref(), &list)
         .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))
 }
 
@@ -68,40 +80,35 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     std::io::stdout().flush().ok();
 
     let server = Arc::new(server);
-    let agent = Arc::new(upstream::agent());
-    let base = upstream::base_url();
-    let state: QuotaState = Arc::new(Mutex::new(HashMap::new()));
+    let sh = Arc::new(Shared {
+        agent: upstream::agent(),
+        base: upstream::base_url(),
+        quota: Mutex::new(HashMap::new()),
+        chooser: Mutex::new(pick::Chooser::default()),
+        rotated: Mutex::new(None),
+    });
     loop {
         let rq = match server.recv() {
             Ok(r) => r,
             Err(_) => continue,
         };
         let paths = paths.clone();
-        let agent = agent.clone();
-        let base = base.clone();
-        let state = state.clone();
+        let sh = sh.clone();
         let opts = Opts {
             port,
             account: opts.account.clone(),
             auto: opts.auto,
         };
         std::thread::spawn(move || {
-            if let Err(e) = handle(rq, &paths, &opts, &agent, &base, &state) {
+            if let Err(e) = handle(rq, &paths, &opts, &sh) {
                 eprintln!("swapdex proxy: {e:#}");
             }
         });
     }
 }
 
-fn handle(
-    mut rq: tiny_http::Request,
-    paths: &Paths,
-    opts: &Opts,
-    agent: &ureq::Agent,
-    base: &str,
-    state: &QuotaState,
-) -> Result<()> {
-    let slot = pick_slot(paths, opts)?;
+fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -> Result<()> {
+    let slot = pick_slot(paths, opts, sh)?;
     let token = creds::slot_token(&slot.config_dir).ok_or_else(|| {
         anyhow!(
             "account '{}' has no usable login - `swapdex run {}` once signs it in",
@@ -127,13 +134,13 @@ fn handle(
         format!("Bearer {}", String::from_utf8_lossy(token.expose())),
     ));
 
-    let url = format!("{base}{}", rq.url());
+    let url = format!("{}{}", sh.base, rq.url());
     let method = rq.method().as_str().to_string();
     let path = rq.url().to_string();
     let mut body = Vec::new();
     rq.as_reader().read_to_end(&mut body)?;
 
-    let up = upstream::forward(agent, &method, &url, &headers, &body)?;
+    let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
     // Log the account and the outcome only - never a body, never a token. The
     // quota state rides along on responses the user was making anyway.
     let quota = ratelimit::from_headers(&up.headers);
@@ -143,7 +150,7 @@ fn handle(
     }
     std::io::stdout().flush().ok();
     if let Some(q) = quota {
-        state.lock().unwrap().insert(slot.name.clone(), q);
+        sh.quota.lock().unwrap().insert(slot.name.clone(), q);
     }
 
     let out_headers: Vec<tiny_http::Header> = up
