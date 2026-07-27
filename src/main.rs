@@ -129,6 +129,9 @@ enum Cmd {
         /// Serve every request from this account instead of the current default
         #[arg(long)]
         account: Option<String>,
+        /// When an account runs out, continue the SAME session on another one
+        #[arg(long)]
+        auto: bool,
     },
     /// Local health check: store, snapshots, live logins - with a fix per finding
     Doctor,
@@ -270,7 +273,11 @@ fn main() {
         Cmd::Restore { tool, dry_run } => commands::restore(&paths, *tool, *dry_run),
         Cmd::Sessions { json } => commands::sessions(&paths, *json),
         Cmd::Ui => commands::ui(&paths),
-        Cmd::Proxy { port, account } => commands::proxy(&paths, *port, account.clone()),
+        Cmd::Proxy {
+            port,
+            account,
+            auto,
+        } => commands::proxy(&paths, *port, account.clone(), *auto),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Quota { json } => commands::quota(&paths, *json),

@@ -235,3 +235,91 @@ fn the_forwarded_body_names_the_account_actually_serving_the_turn() {
         seen[1]
     );
 }
+
+/// A fake upstream whose FIRST answer reports the account spent, then answers
+/// normally - the shape of hitting a limit mid-conversation.
+fn fake_upstream_spent_once(sink: Arc<Mutex<Vec<Seen>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            sink.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let status = if first { "rejected" } else { "allowed" };
+            first = false;
+            let resp = tiny_http::Response::from_string("{\"ok\":true}").with_header(
+                tiny_http::Header::from_bytes(
+                    &b"anthropic-ratelimit-unified-status"[..],
+                    status.as_bytes(),
+                )
+                .unwrap(),
+            );
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// --auto: when a turn comes back marked spent, the NEXT turn of the same session
+/// continues on another account by itself. The spent turn still reaches the
+/// client intact - rotation happens at the boundary, never mid-answer.
+#[test]
+fn auto_continues_the_session_on_another_account_when_one_is_spent() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream_spent_once(sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+    let first = post_through(port, "{\"turn\":1}");
+    let second = post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    assert!(
+        first.contains("\"ok\":true"),
+        "the spent turn still reached the client: {first}"
+    );
+    assert!(
+        second.contains("\"ok\":true"),
+        "second turn served: {second}"
+    );
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
+        "the session continued on the other account with no user action"
+    );
+}
+
+/// Without --auto nothing rotates: a spent account keeps serving (and failing),
+/// because moving accounts by itself is opt-in.
+#[test]
+fn without_auto_a_spent_account_is_not_rotated_away_from() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream_spent_once(sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-RND".to_string()],
+        "no rotation without --auto"
+    );
+}

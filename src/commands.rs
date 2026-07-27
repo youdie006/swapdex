@@ -1565,11 +1565,11 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
 /// `proxy` - run proxy mode in the foreground. Claude Code pointed at it
 /// (`ANTHROPIC_BASE_URL`) gets its account chosen per request, so a RUNNING
 /// conversation can change accounts without a restart or a resume.
-pub fn proxy(paths: &Paths, port: u16, account: Option<String>) -> Result<i32> {
+pub fn proxy(paths: &Paths, port: u16, account: Option<String>, auto: bool) -> Result<i32> {
     let opts = crate::proxy::Opts {
         port,
         account,
-        auto: false,
+        auto,
     };
     crate::proxy::serve(paths, &opts)?;
     Ok(0)

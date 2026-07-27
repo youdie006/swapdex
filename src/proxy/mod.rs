@@ -169,7 +169,24 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
     }
     std::io::stdout().flush().ok();
     if let Some(q) = quota {
+        let spent = q.rejected;
         sh.quota.lock().unwrap().insert(slot.name.clone(), q);
+        // Turn-boundary rotation: this response is already complete, so switching
+        // now cannot sever an answer - the NEXT turn carries the new account.
+        if spent && opts.auto {
+            let slots = crate::slots::Slots::open(paths)
+                .map(|s| s.list())
+                .unwrap_or_default();
+            let st = sh.quota.lock().unwrap();
+            match pick::rotate_target(&slot.name, &slots, &st) {
+                Some(next) => {
+                    println!("{} is spent - continuing on {next}", slot.name);
+                    *sh.rotated.lock().unwrap() = Some(next);
+                }
+                None => println!("{} is spent and no other account has quota left", slot.name),
+            }
+            std::io::stdout().flush().ok();
+        }
     }
 
     let out_headers: Vec<tiny_http::Header> = up

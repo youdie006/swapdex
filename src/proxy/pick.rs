@@ -42,6 +42,24 @@ impl Chooser {
     }
 }
 
+/// The next account to try after `current` proved spent: the first slot that is
+/// neither `current` nor known-spent. `None` when nothing is left, which the
+/// caller reports rather than silently retrying a dead account.
+///
+/// (Under sustained load "soonest reset first" is the better rule; first-eligible
+/// is enough while accounts are spent one at a time, and it needs no reset clock.)
+pub fn rotate_target(
+    current: &str,
+    slots: &[SlotRecord],
+    state: &std::collections::HashMap<String, crate::proxy::ratelimit::Quota>,
+) -> Option<String> {
+    slots
+        .iter()
+        .filter(|r| r.name != current)
+        .find(|r| !state.get(&r.name).is_some_and(|q| q.rejected))
+        .map(|r| r.name.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +121,38 @@ mod tests {
             "an unresolvable pointer still serves the request"
         );
         assert!(c.choose(None, None, &[]).is_none(), "no slots -> no choice");
+    }
+
+    #[test]
+    fn rotation_skips_the_current_and_the_known_spent_accounts() {
+        use crate::proxy::ratelimit::Quota;
+        let slots = vec![
+            slot("rnd", "/s/rnd"),
+            slot("bsgong", "/s/b"),
+            slot("claude", "/s/c"),
+        ];
+        let spent = |name: &str| {
+            (
+                name.to_string(),
+                Quota {
+                    rejected: true,
+                    ..Default::default()
+                },
+            )
+        };
+        let mut state: std::collections::HashMap<String, Quota> =
+            [spent("rnd"), spent("bsgong")].into_iter().collect();
+        assert_eq!(
+            rotate_target("rnd", &slots, &state).as_deref(),
+            Some("claude"),
+            "the first account that is neither current nor spent"
+        );
+        state.extend([spent("claude")]);
+        assert_eq!(
+            rotate_target("rnd", &slots, &state),
+            None,
+            "every account spent -> nothing to rotate to"
+        );
     }
 
     #[test]
