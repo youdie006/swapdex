@@ -760,6 +760,22 @@ git commit -m "feat(proxy): read per-account quota state from rate-limit respons
 
 ---
 
+### Task 3b: Keep `metadata.user_id` consistent with the injected token
+
+Confirmed by the Task 2 observation (design §4.2): every turn carries
+`metadata.user_id`. Serving a turn with account B's token while the body still
+says account A makes the request internally inconsistent, so rotation (Task 6)
+cannot be correct without this. Rewrite that one field to the serving account's
+own identity — read from the slot's `.claude.json` `oauthAccount` — and touch
+nothing else in the body. When the field is absent, or the slot has no readable
+identity, forward the body byte-for-byte unchanged rather than inventing a value.
+
+**Files:** Modify `src/proxy/mod.rs` (rewrite before forwarding); add unit tests
+covering: field present and rewritten, field absent (body unchanged), body not
+JSON (unchanged), slot identity unreadable (unchanged), and that no other key is
+altered. Observe the real `user_id` format first (structural sketch only, UUIDs
+redacted) so the rewrite matches the client's own format.
+
 ### Task 4: Move the running conversation to a chosen account
 
 The user's ask: switch accounts *now*, from the CLI or the dashboard, without restarting Claude. The pointer `swapdex use` already writes is re-read per request, so no new machinery is needed — plus a rule for how a user's explicit choice interacts with an automatic rotation.

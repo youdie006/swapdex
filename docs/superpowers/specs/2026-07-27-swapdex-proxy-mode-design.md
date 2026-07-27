@@ -126,6 +126,38 @@ proxy**. Therefore v1 starts in an observe step (§7) that records shapes — ne
 prompt content, never token values — and rotation is implemented against those
 recorded facts.
 
+#### Observed 2026-07-27 (Linux/WSL, real `claude`, sandboxed proxy)
+
+The client was pointed at the proxy with `ANTHROPIC_BASE_URL` while the proxy ran
+under `SWAPDEX_ROOT` with a fake slot token and `SWAPDEX_UPSTREAM` aimed at a
+local sink, so no real credential ever left the machine. Recorded shape only.
+
+- **Base-URL interception works.** `claude` sent its turns to the proxy:
+  `POST /v1/messages?beta=true` (the query string is part of the path and must be
+  forwarded verbatim). It also probes `GET /api/hello` first as a connectivity
+  check — a proxy must answer it rather than fail.
+- **The body carries an account identifier**: `metadata.user_id` is present on
+  every turn. So injecting account B's token while leaving A's `user_id` makes the
+  request internally inconsistent — the rewrite in §9 is required, not optional.
+  Other body keys seen: `model`, `messages`, `system`, `tools`, `max_tokens`,
+  `thinking`, `stream` (first turn), `context_management`, `output_config`.
+- **Request headers** include `authorization`, `anthropic-version`,
+  `anthropic-beta`, `anthropic-dangerous-direct-browser-access`, `x-app`,
+  `x-claude-code-session-id`, and the `x-stainless-*` SDK set. Only hop-by-hop
+  headers are dropped; the rest pass through untouched.
+- **Streaming matters**: `stream: true` on the conversation turn, so the response
+  is SSE and the chunked/streamed response path is the normal path, not an edge.
+
+Still unobserved, so still gated:
+
+- **The real rate-limit header names.** The sink faked
+  `anthropic-ratelimit-unified-*`, which exercises the parser but does not confirm
+  the names. The parser therefore matches by prefix rather than an exact list, and
+  the names get confirmed by one real turn through the proxy.
+- **The refresh request shape.** No refresh happened during the observation, so
+  §4.1's `refresh_slot` stays gated: it is implemented only once the client's own
+  refresh has been seen.
+
 ## 5. Choosing the account
 
 - **Utilization** per slot comes from `anthropic-ratelimit-unified-*` response
@@ -214,7 +246,10 @@ Each item below is a bug the fork already hit; they are requirements, not ideas.
   third-party frontends on subscription OAuth; this proxies the real CLI's own
   traffic for accounts the user owns. Body rewriting is limited to keeping a
   request consistent with the credential actually serving it — not
-  impersonating another account.
+  impersonating another account. Concretely (per §4.2's observation): when the
+  injected token belongs to a different account than the one the client wrote
+  into `metadata.user_id`, that field is rewritten to the serving account's own
+  identity. Nothing else in the body is touched, and the prompt never is.
 - Refuse to run as root (existing `ensure_not_root`), and keep the store's 0700
   hygiene.
 - The proxy is **opt-in**: nothing changes for users who never run it.
