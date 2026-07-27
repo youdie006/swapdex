@@ -22,23 +22,22 @@ fn sh_quote(p: &Path) -> String {
 /// The shim script body. Reads the pointer; if a default is set, exec the real
 /// claude with `CLAUDE_CONFIG_DIR`; otherwise exec the real claude unchanged.
 ///
-/// It also picks up a RUNNING `swapdex proxy` and points claude at it, so
-/// mid-session account switching works without the user exporting anything. The
-/// marker carries the proxy's pid, and `kill -0` decides: a stale marker (the
-/// proxy was killed) is ignored rather than sending claude at a dead port.
-pub fn shim_script(pointer: &Path, real_claude: &Path, proxy_marker: &Path) -> String {
+/// It also gets proxy mode for free: the shim asks `swapdex proxy --ensure`,
+/// which prints the port of a running proxy and starts one in the background if
+/// there is none. So mid-session account switching works without the user
+/// launching or exporting anything, and a proxy that cannot start is not an
+/// error - the shim just runs Claude directly.
+pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String {
     format!(
         "#!/bin/sh\n\
          # swapdex claude shim - launch claude in the default account's slot.\n\
          # Managed by swapdex; re-created by `swapdex shim`.\n\
-         p=$(cat {marker} 2>/dev/null)\n\
-         if [ -n \"$p\" ]; then\n\
-         \tpid=${{p%% *}}\n\
-         \tport=${{p##* }}\n\
-         \tif kill -0 \"$pid\" 2>/dev/null; then\n\
-         \t\tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
-         \t\texport ANTHROPIC_BASE_URL\n\
-         \tfi\n\
+         # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
+         # port); silence and a non-zero status mean \"run without one\".\n\
+         port=$({sx} proxy --ensure 2>/dev/null)\n\
+         if [ -n \"$port\" ]; then\n\
+         \tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
+         \texport ANTHROPIC_BASE_URL\n\
          fi\n\
          dir=$(cat {ptr} 2>/dev/null)\n\
          if [ -n \"$dir\" ]; then\n\
@@ -46,7 +45,7 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, proxy_marker: &Path) -> S
          else\n\
          \texec {real} \"$@\"\n\
          fi\n",
-        marker = sh_quote(proxy_marker),
+        sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_claude),
     )
@@ -121,9 +120,12 @@ pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
     let real = find_real_claude(&shim_dir)
         .context("could not find the real `claude` on PATH - install it first")?;
     let pointer = paths.store_dir().join("active-claude");
-    let marker = proxy_marker(paths);
+    // The shim calls back into THIS binary, by absolute path: whatever swapdex
+    // installed the shim is the one that will start its proxy, even if PATH
+    // later changes or a different build lands ahead of it.
+    let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("swapdex"));
     std::fs::create_dir_all(&shim_dir).context("create shim dir")?;
-    std::fs::write(&shim, shim_script(&pointer, &real, &marker)).context("write shim")?;
+    std::fs::write(&shim, shim_script(&pointer, &real, &me)).context("write shim")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -143,7 +145,7 @@ mod tests {
         let s = shim_script(
             Path::new("/store/active-claude"),
             Path::new("/usr/bin/claude"),
-            Path::new("/store/proxy"),
+            Path::new("/bin/swapdex"),
         );
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains("/store/active-claude"), "reads the pointer");
@@ -155,21 +157,27 @@ mod tests {
     // A running proxy is picked up automatically, and a STALE marker is not: the
     // pid gate is what keeps a killed proxy from sending claude at a dead port.
     #[test]
-    fn script_points_claude_at_a_live_proxy_only() {
+    fn script_gets_its_proxy_from_swapdex_and_tolerates_none() {
         let s = shim_script(
             Path::new("/store/active-claude"),
             Path::new("/usr/bin/claude"),
-            Path::new("/store/proxy"),
+            Path::new("/bin/swapdex"),
         );
-        assert!(s.contains("/store/proxy"), "reads the proxy marker");
+        assert!(
+            s.contains("'/bin/swapdex' proxy --ensure"),
+            "asks swapdex by absolute path, so the user starts nothing: {s}"
+        );
         assert!(
             s.contains("ANTHROPIC_BASE_URL"),
             "points claude at the proxy"
         );
-        assert!(s.contains("kill -0"), "ignores a stale marker");
         assert!(
             s.contains("http://127.0.0.1:$port"),
-            "loopback only, port from the marker"
+            "loopback only, port from swapdex"
+        );
+        assert!(
+            s.contains("2>/dev/null") && s.contains("if [ -n \"$port\" ]"),
+            "no proxy is not an error - claude still runs: {s}"
         );
     }
 
@@ -178,10 +186,10 @@ mod tests {
         let s = shim_script(
             Path::new("/a b/active-claude"),
             Path::new("/c d/claude"),
-            Path::new("/e f/proxy"),
+            Path::new("/e f/swapdex"),
         );
         assert!(s.contains("'/a b/active-claude'"), "pointer is quoted");
-        assert!(s.contains("'/e f/proxy'"), "marker is quoted");
+        assert!(s.contains("'/e f/swapdex'"), "swapdex path is quoted");
         assert!(s.contains("'/c d/claude'"), "real claude is quoted");
     }
 
@@ -193,7 +201,7 @@ mod tests {
         let shim = dir.path().join("claude");
         std::fs::write(
             &shim,
-            shim_script(Path::new("/p"), Path::new("/real"), Path::new("/m")),
+            shim_script(Path::new("/p"), Path::new("/real"), Path::new("/sx")),
         )
         .unwrap();
         assert!(is_our_shim(&shim), "our shim is recognized by its marker");

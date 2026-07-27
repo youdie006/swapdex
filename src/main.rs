@@ -136,6 +136,10 @@ enum Cmd {
         /// Force auto-continue OFF for this run, whatever the setting says
         #[arg(long, conflicts_with = "auto")]
         no_auto: bool,
+        /// Print the port of a running proxy, starting one in the background if
+        /// there is none. Used by the `claude` shim; exits non-zero if it cannot.
+        #[arg(long)]
+        ensure: bool,
     },
     /// Turn auto-continue (proxy hands a spent session to another account) on/off
     Auto {
@@ -287,7 +291,8 @@ fn main() {
             account,
             auto,
             no_auto,
-        } => commands::proxy(&paths, *port, account.clone(), *auto, *no_auto),
+            ensure,
+        } => commands::proxy(&paths, *port, account.clone(), *auto, *no_auto, *ensure),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),

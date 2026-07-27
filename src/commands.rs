@@ -1571,7 +1571,11 @@ pub fn proxy(
     account: Option<String>,
     auto: bool,
     no_auto: bool,
+    ensure: bool,
 ) -> Result<i32> {
+    if ensure {
+        return proxy_ensure(paths, port);
+    }
     // Precedence: an explicit flag for this run, else the saved setting.
     let auto = if auto {
         true
@@ -1587,6 +1591,62 @@ pub fn proxy(
     };
     crate::proxy::serve(paths, &opts)?;
     Ok(0)
+}
+
+/// `proxy --ensure` - print the port of a live proxy, starting one in the
+/// background if there is none. This is what lets a plain `claude` (through the
+/// shim) get proxy mode without the user running or remembering anything. Exits
+/// non-zero and prints nothing when a proxy cannot be had, so the shim simply
+/// runs Claude directly.
+fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
+    if let Some(p) = crate::proxy::running_port(paths) {
+        println!("{p}");
+        return Ok(0);
+    }
+    // Proxy mode is only useful with slot accounts; without one there is nothing
+    // to serve and starting a proxy would just add a moving part.
+    if crate::slots::Slots::open(paths)
+        .map(|s| s.list().is_empty())
+        .unwrap_or(true)
+    {
+        return Ok(1);
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(1);
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("proxy")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Detach: the proxy must outlive this short-lived helper and the shell that
+    // started it, and must never take the terminal (it would fight `claude` for
+    // stdin) or die with the session.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    if cmd.spawn().is_err() {
+        return Ok(1);
+    }
+    // Wait briefly for it to announce itself; a proxy that cannot bind must not
+    // hang the launch of Claude.
+    for _ in 0..40 {
+        if let Some(p) = crate::proxy::running_port(paths) {
+            println!("{p}");
+            return Ok(0);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(1)
 }
 
 /// `auto [on|off]` - read or set auto-continue: whether proxy mode may hand a
