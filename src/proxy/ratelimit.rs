@@ -16,6 +16,19 @@ pub struct Quota {
     pub reset_secs: Option<i64>,
 }
 
+impl Quota {
+    /// Which windows reported `rejected` (e.g. `5h-status`, `7d-status`). Named in
+    /// the log so "SPENT" on a successful response is explainable rather than
+    /// mysterious.
+    pub fn rejected_windows(&self) -> Vec<&str> {
+        self.statuses
+            .iter()
+            .filter(|(_, v)| v.trim().eq_ignore_ascii_case("rejected"))
+            .map(|(k, _)| k.as_str())
+            .collect()
+    }
+}
+
 /// `None` when the response carried no unified rate-limit headers at all, so a
 /// non-API response (a probe, an error page) never overwrites a known-good state
 /// with an empty one.
@@ -120,6 +133,20 @@ mod tests {
             from_headers(&h(&[("content-type", "application/json")])).is_none(),
             "a response with no unified headers must not overwrite known state"
         );
+    }
+
+    #[test]
+    fn rejected_windows_names_only_the_closed_ones() {
+        let q = from_headers(&h(&[
+            ("anthropic-ratelimit-unified-5h-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-status", "rejected"),
+            ("anthropic-ratelimit-unified-status", "allowed_warning"),
+        ]))
+        .expect("quota seen");
+        assert_eq!(q.rejected_windows(), vec!["7d-status"]);
+        let none = from_headers(&h(&[("anthropic-ratelimit-unified-status", "allowed")]))
+            .expect("quota seen");
+        assert!(none.rejected_windows().is_empty());
     }
 
     #[test]

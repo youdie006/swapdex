@@ -165,9 +165,14 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
 /// from "login refused" so the line the user reads says which happened. An
 /// account is skipped when it is out of quota OR its login was refused.
 fn rotate_away_from(current: &str, paths: &Paths, sh: &Shared, spent: bool) {
-    let slots = crate::slots::Slots::open(paths)
+    // Only accounts whose login can actually be read are candidates: handing the
+    // session to a slot that was never signed into just fails the next turn.
+    let slots: Vec<crate::slots::SlotRecord> = crate::slots::Slots::open(paths)
         .map(|s| s.list())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.name == current || creds::slot_token(&r.config_dir).is_some())
+        .collect();
     let mut st = sh.quota.lock().unwrap().clone();
     for name in sh.unusable.lock().unwrap().iter() {
         st.entry(name.clone()).or_default().rejected = true;
@@ -258,7 +263,15 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
     // quota state rides along on responses the user was making anyway.
     let quota = ratelimit::from_headers(&up.headers);
     match &quota {
-        Some(q) if q.rejected => println!("{} {path} -> {} SPENT", slot.name, up.status),
+        // Name the window that is rejected: "SPENT" on an otherwise successful
+        // response is confusing without it, and it is the only way to tell a
+        // genuinely exhausted account from one window of many being closed.
+        Some(q) if q.rejected => println!(
+            "{} {path} -> {} SPENT ({})",
+            slot.name,
+            up.status,
+            q.rejected_windows().join(", ")
+        ),
         _ => println!("{} {path} -> {}", slot.name, up.status),
     }
     std::io::stdout().flush().ok();

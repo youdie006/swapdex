@@ -509,3 +509,40 @@ fn auto_continues_the_session_when_a_turn_is_rate_limited() {
         "hitting the rate limit hands the session to another account"
     );
 }
+
+/// Rotation must not hand the session to a slot that was never signed into - that
+/// just fails the next turn. Here only "rnd" (spent) and "fresh" have logins;
+/// "empty" has none, so it must be skipped even though it is listed first.
+#[test]
+fn rotation_skips_a_slot_that_has_no_login() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    // A slot in the registry with NO credential file at all.
+    let store = root.path().join(".local/share/swapdex");
+    let empty = store.join("slots").join("cccc3333");
+    std::fs::create_dir_all(&empty).unwrap();
+    let mut recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(store.join("slots.json")).unwrap()).unwrap();
+    recs.push(serde_json::json!({
+        "name": "empty", "id": "cccc3333", "config_dir": empty, "adopted": false
+    }));
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::to_vec_pretty(&recs).unwrap(),
+    )
+    .unwrap();
+    seed_slot(root.path(), "fresh", "dddd4444", "AT-FRESH", false);
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream_spent_once(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-FRESH".to_string()],
+        "the loginless slot was skipped in favour of one that can actually serve"
+    );
+}
