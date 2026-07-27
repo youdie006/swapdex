@@ -26,6 +26,9 @@ struct Shared {
     chooser: Mutex<pick::Chooser>,
     /// The proxy's own current account after a rotation, if any.
     rotated: Mutex<Option<String>>,
+    /// Accounts the upstream refused outright (401): not a quota problem, so kept
+    /// apart from quota state, but equally out of rotation for this run.
+    unusable: Mutex<std::collections::HashSet<String>>,
 }
 
 pub struct Opts {
@@ -136,6 +139,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         quota: Mutex::new(HashMap::new()),
         chooser: Mutex::new(pick::Chooser::default()),
         rotated: Mutex::new(None),
+        unusable: Mutex::new(std::collections::HashSet::new()),
     });
     loop {
         let rq = match server.recv() {
@@ -154,6 +158,27 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
                 eprintln!("swapdex proxy: {e:#}");
             }
         });
+    }
+}
+
+/// Hand the session to another account. `spent` distinguishes "out of quota"
+/// from "login refused" so the line the user reads says which happened. An
+/// account is skipped when it is out of quota OR its login was refused.
+fn rotate_away_from(current: &str, paths: &Paths, sh: &Shared, spent: bool) {
+    let slots = crate::slots::Slots::open(paths)
+        .map(|s| s.list())
+        .unwrap_or_default();
+    let mut st = sh.quota.lock().unwrap().clone();
+    for name in sh.unusable.lock().unwrap().iter() {
+        st.entry(name.clone()).or_default().rejected = true;
+    }
+    let why = if spent { "is spent" } else { "cannot sign in" };
+    match pick::rotate_target(current, &slots, &st) {
+        Some(next) => {
+            println!("{current} {why} - continuing on {next}");
+            *sh.rotated.lock().unwrap() = Some(next);
+        }
+        None => println!("{current} {why} and no other account is usable"),
     }
 }
 
@@ -217,26 +242,28 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
         _ => println!("{} {path} -> {}", slot.name, up.status),
     }
     std::io::stdout().flush().ok();
+    let mut spent = false;
     if let Some(q) = quota {
-        let spent = q.rejected;
+        spent = q.rejected;
         sh.quota.lock().unwrap().insert(slot.name.clone(), q);
-        // Turn-boundary rotation: this response is already complete, so switching
-        // now cannot sever an answer - the NEXT turn carries the new account.
-        if spent && opts.auto {
-            let slots = crate::slots::Slots::open(paths)
-                .map(|s| s.list())
-                .unwrap_or_default();
-            let st = sh.quota.lock().unwrap();
-            match pick::rotate_target(&slot.name, &slots, &st) {
-                Some(next) => {
-                    println!("{} is spent - continuing on {next}", slot.name);
-                    *sh.rotated.lock().unwrap() = Some(next);
-                }
-                None => println!("{} is spent and no other account has quota left", slot.name),
-            }
-            std::io::stdout().flush().ok();
-        }
     }
+    // A 401 is not a quota problem: that account's login needs re-establishing
+    // (its access token lapsed and swapdex does not mint tokens yet). Say the one
+    // thing that fixes it instead of leaving a bare 401, and take the account out
+    // of rotation for this run so it is not tried again and again.
+    if up.status == 401 {
+        println!(
+            "{}: login no longer accepted - run `swapdex run {}` once to sign it in again",
+            slot.name, slot.name
+        );
+        sh.unusable.lock().unwrap().insert(slot.name.clone());
+    }
+    // Turn-boundary rotation: this response is already complete, so switching now
+    // cannot sever an answer - the NEXT turn carries the new account.
+    if opts.auto && (spent || up.status == 401) {
+        rotate_away_from(&slot.name, paths, sh, spent);
+    }
+    std::io::stdout().flush().ok();
 
     let out_headers: Vec<tiny_http::Header> = up
         .headers

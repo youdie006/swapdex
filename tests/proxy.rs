@@ -126,8 +126,16 @@ fn start_proxy(
     (child, port)
 }
 
+/// Post a turn through the proxy and read the body. Non-2xx is a normal answer
+/// here (a real client sees the upstream's status verbatim), so the agent must not
+/// treat it as an error.
 fn post_through(port: u16, body: &str) -> String {
-    let mut resp = ureq::post(format!("http://127.0.0.1:{port}/v1/messages"))
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
         .header("authorization", "Bearer CLIENT-TOKEN")
         .header("content-type", "application/json")
         .send(body.as_bytes())
@@ -321,5 +329,58 @@ fn without_auto_a_spent_account_is_not_rotated_away_from() {
         auths(&sink),
         vec!["Bearer AT-RND".to_string(), "Bearer AT-RND".to_string()],
         "no rotation without --auto"
+    );
+}
+
+/// A stale slot login is refused by the API (401). That is not a quota problem,
+/// so --auto must move the session on and the reason must be actionable rather
+/// than a bare 401.
+#[test]
+fn auto_moves_on_when_an_accounts_login_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    // First answer 401 (stale login), then serve normally.
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port_up = server.server_addr().to_ip().unwrap().port();
+    let s2 = sink.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            s2.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let code = if first { 401 } else { 200 };
+            first = false;
+            let _ = rq.respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(code)),
+            );
+        }
+    });
+
+    let (mut child, port) = start_proxy(
+        root.path(),
+        &format!("http://127.0.0.1:{port_up}"),
+        &["--auto"],
+    );
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
+        "a refused login hands the session to another account"
     );
 }
