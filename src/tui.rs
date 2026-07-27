@@ -140,6 +140,16 @@ fn main_hints() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// One account's quota picture: session (5h) and weekly (7d) utilization with
+/// their reset countdowns. `None` for a window the endpoint did not report.
+#[derive(Clone, Copy, Default)]
+pub struct Usage {
+    pub five_h: Option<f64>,
+    pub five_h_reset: Option<i64>,
+    pub seven_d: Option<f64>,
+    pub seven_d_reset: Option<i64>,
+}
+
 pub struct Row {
     pub name: String,
     pub ident: String,
@@ -177,10 +187,10 @@ pub trait TuiCtx {
     /// Run `quota` and return its lines (remaining quota per Claude account -
     /// the one opt-in network read).
     fn quota(&mut self) -> Vec<String>;
-    /// Per-account 5h utilization percent (0..100) from the live quota endpoint,
-    /// for the inline right-aligned bars. Network; called lazily. Default empty
-    /// so test contexts need not implement it.
-    fn quota_pct(&mut self) -> Vec<(String, f64)> {
+    /// Per-account session (5h) and weekly (7d) utilization from the live quota
+    /// endpoint, for the inline bars. Network; called lazily. Default empty so
+    /// test contexts need not implement it.
+    fn quota_pct(&mut self) -> Vec<(String, Usage)> {
         Vec::new()
     }
     /// Is `sessionwiki` installed? When not, the session menu is native and a
@@ -325,27 +335,100 @@ enum Screen {
 }
 
 /// A 10-wide utilization bar for a 0..100 percent (filled blocks over dim ones).
-fn quota_bar(pct: f64) -> String {
-    let w = 10usize;
-    let filled = ((pct / 100.0) * w as f64).round().clamp(0.0, w as f64) as usize;
-    format!(
-        "{}{}",
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(w - filled)
-    )
+/// A quota window drawn as a filled block with its number written INSIDE it -
+/// the percentage (and the reset countdown when it fits) sits centred on the bar
+/// rather than beside it, so two windows fit on one row and each number is
+/// unambiguously attached to its own bar. Returns the spans to render.
+fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Span<'static>> {
+    let empty_bg = Color::Rgb(58, 56, 70);
+    let Some(pct) = pct else {
+        return vec![Span::styled(
+            " ".repeat(width),
+            Style::default().bg(empty_bg),
+        )];
+    };
+    let pct = pct.clamp(0.0, 100.0);
+    // The label: "62%", plus "59m" when there is room for the countdown too.
+    let short = format!("{pct:.0}%");
+    let label = match reset_secs.map(fmt_reset) {
+        Some(r) if !r.is_empty() && short.chars().count() + 1 + r.chars().count() <= width => {
+            format!("{short} {r}")
+        }
+        _ => short,
+    };
+    let lw = label.chars().count().min(width);
+    let left_pad = (width - lw) / 2;
+    let text: String = " ".repeat(left_pad)
+        + &label.chars().take(lw).collect::<String>()
+        + &" ".repeat(width - left_pad - lw);
+    // Split the drawn text where the fill ends, so the number is legible on both
+    // halves of the bar.
+    let filled = ((pct / 100.0) * width as f64)
+        .round()
+        .clamp(0.0, width as f64) as usize;
+    let head: String = text.chars().take(filled).collect();
+    let tail: String = text.chars().skip(filled).collect();
+    vec![
+        Span::styled(
+            head,
+            Style::default()
+                .bg(quota_fill(pct))
+                .fg(Color::Rgb(20, 20, 26))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            tail,
+            Style::default().bg(empty_bg).fg(Color::Rgb(210, 210, 220)),
+        ),
+    ]
 }
 
-/// Bar colour by how full the window is - calm green / amber / red (palette
+/// Fill colour by how full the window is - calm green / amber / red (palette
 /// tones, not neon), so a nearly-spent account reads at a glance.
-fn quota_color(pct: f64) -> Style {
-    let c = if pct >= 80.0 {
-        Color::Rgb(200, 90, 90)
-    } else if pct >= 50.0 {
-        Color::Rgb(200, 150, 90)
+fn quota_fill(pct: f64) -> Color {
+    if pct >= 90.0 {
+        Color::Rgb(190, 88, 88)
+    } else if pct >= 70.0 {
+        Color::Rgb(196, 148, 84)
     } else {
-        Color::Rgb(95, 158, 125)
+        Color::Rgb(92, 152, 120)
+    }
+}
+
+/// A reset countdown, shortest useful form: `48m`, `2h14m`, `3d4h`. Empty when
+/// the window has already reset (nothing to count down to).
+fn fmt_reset(resets_at_secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // The endpoint reports either an absolute epoch or a relative span; treat a
+    // small number as "seconds from now" so both shapes render.
+    let left = if resets_at_secs > now {
+        resets_at_secs - now
+    } else if resets_at_secs > 0 && resets_at_secs < 60 * 60 * 24 * 30 {
+        resets_at_secs
+    } else {
+        return String::new();
     };
-    Style::default().fg(c)
+    let mins = left / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let (h, m) = (mins / 60, mins % 60);
+    if h < 24 {
+        return if m > 0 {
+            format!("{h}h{m}m")
+        } else {
+            format!("{h}h")
+        };
+    }
+    let (d, rh) = (h / 24, h % 24);
+    if rh > 0 {
+        format!("{d}d{rh}h")
+    } else {
+        format!("{d}d")
+    }
 }
 
 /// The persistent loop. Enters the alternate screen once and stays there
@@ -381,7 +464,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // Per-account 5h utilization percent for the inline right-aligned bars.
     // Network, so fetched once lazily after the first frame (the UI opens
     // instantly; bars fill in). None = not fetched yet.
-    let mut quota_pct: Option<std::collections::HashMap<String, f64>> = None;
+    let mut quota_pct: Option<std::collections::HashMap<String, Usage>> = None;
 
     let outcome = 'ui: loop {
         terminal.draw(|f| {
@@ -442,26 +525,26 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     Style::default().fg(Color::Rgb(200, 150, 90)),
                                 ));
                             }
-                            // 5h utilization bar + percent (from the live quota
-                            // endpoint). Every row's bar starts at the SAME column,
-                            // just past the widest identity - so the bars line up
-                            // and stay next to the account they belong to. Pinning
-                            // them to the right edge instead pushed name and bar to
-                            // opposite sides of a wide terminal, where the eye
-                            // cannot connect them.
-                            if let Some(pct) =
-                                quota_pct.as_ref().and_then(|q| q.get(&r.name).copied())
-                            {
-                                let label = format!("{} {:>3.0}%", quota_bar(pct), pct);
+                            // Session (5h) and weekly (7d) windows, each drawn
+                            // as a bar with its own number inside it, both at one
+                            // shared column so they line up beside the accounts.
+                            if let Some(u) = quota_pct.as_ref().and_then(|q| q.get(&r.name)) {
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
                                 let inner = (body.width as usize).saturating_sub(4);
-                                // Keep the whole line inside the panel on a narrow
-                                // terminal; never less than one space of gap.
-                                let start = bar_col.min(inner.saturating_sub(label.chars().count()));
-                                let pad = start.saturating_sub(left_w).max(1);
-                                top.push(Span::raw(" ".repeat(pad)));
-                                top.push(Span::styled(label, quota_color(pct)));
+                                // Two labelled bars ("5h " + bar + "  7d " + bar).
+                                let bw = if inner.saturating_sub(bar_col) >= 32 {
+                                    11
+                                } else {
+                                    7
+                                };
+                                let needed = 3 + bw + 4 + bw;
+                                let start = bar_col.min(inner.saturating_sub(needed));
+                                top.push(Span::raw(" ".repeat(start.saturating_sub(left_w).max(1))));
+                                top.push(Span::styled("5h ", Style::default().fg(MUTED)));
+                                top.extend(quota_bar(u.five_h, u.five_h_reset, bw));
+                                top.push(Span::styled("  7d ", Style::default().fg(MUTED)));
+                                top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
                             }
                             ListItem::new(vec![
                                 Line::from(top),
@@ -1367,6 +1450,46 @@ mod tests {
 
     // Every bar starts at one shared column, past the WIDEST row - so the bars
     // line up and sit beside the accounts instead of at the terminal's edge.
+    // The number is written INSIDE the bar and stays legible: the label is
+    // centred, the fill splits it, and a countdown joins only when it fits.
+    #[test]
+    fn quota_bar_writes_the_number_inside_the_bar() {
+        let spans = quota_bar(Some(62.0), None, 11);
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text.chars().count(), 11, "the bar is exactly its width");
+        assert!(text.contains("62%"), "the percentage is inside: {text:?}");
+        // 62% of 11 -> 7 filled cells, so the split lands there.
+        assert_eq!(spans[0].content.chars().count(), 7);
+        assert_eq!(spans[1].content.chars().count(), 4);
+        // A reset countdown joins when there is room, and is dropped when not.
+        let wide: String = quota_bar(Some(10.0), Some(3600), 14)
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(wide.contains("10%") && wide.contains("1h"), "{wide:?}");
+        let narrow: String = quota_bar(Some(10.0), Some(3600), 5)
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            narrow.contains("10%") && !narrow.contains("1h"),
+            "{narrow:?}"
+        );
+        // No data: one empty cell run, no number invented.
+        let none = quota_bar(None, None, 6);
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0].content.trim(), "");
+    }
+
+    #[test]
+    fn fmt_reset_shortens_to_the_useful_unit() {
+        assert_eq!(fmt_reset(48 * 60), "48m");
+        assert_eq!(fmt_reset(2 * 3600 + 14 * 60), "2h14m");
+        assert_eq!(fmt_reset(3 * 3600), "3h");
+        assert_eq!(fmt_reset(3 * 86400 + 4 * 3600), "3d4h");
+        assert_eq!(fmt_reset(0), "", "already reset: nothing to count down");
+    }
+
     #[test]
     fn usage_bar_column_clears_the_widest_row() {
         let row = |name: &str, ident: &str, warn: Option<&'static str>| Row {

@@ -2086,7 +2086,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("quota failed: {e}")],
             }
         }
-        fn quota_pct(&mut self) -> Vec<(String, f64)> {
+        fn quota_pct(&mut self) -> Vec<(String, crate::tui::Usage)> {
             let Ok(exe) = std::env::current_exe() else {
                 return Vec::new();
             };
@@ -2115,8 +2115,28 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .as_str()?
                         .trim_end_matches(" (active)")
                         .to_string();
-                    let pct = acc.get("five_hour")?.get("used_pct")?.as_f64()?;
-                    Some((name, pct))
+                    let win = |key: &str| -> (Option<f64>, Option<i64>) {
+                        let w = acc.get(key);
+                        (
+                            w.and_then(|w| w.get("used_pct")).and_then(|v| v.as_f64()),
+                            w.and_then(|w| w.get("resets_at")).and_then(|v| v.as_i64()),
+                        )
+                    };
+                    let (five_h, five_h_reset) = win("five_hour");
+                    let (seven_d, seven_d_reset) = win("seven_day");
+                    // Nothing to draw when the endpoint reported neither window.
+                    if five_h.is_none() && seven_d.is_none() {
+                        return None;
+                    }
+                    Some((
+                        name,
+                        crate::tui::Usage {
+                            five_h,
+                            five_h_reset,
+                            seven_d,
+                            seven_d_reset,
+                        },
+                    ))
                 })
                 .collect()
         }
