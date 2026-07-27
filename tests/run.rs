@@ -440,3 +440,118 @@ fn sync_mcp_shares_servers_into_slots_preserving_identity() {
         "slot's own account preserved"
     );
 }
+
+// doctor: per-slot login health. A slot that was never signed into and a slot
+// whose login sat unrefreshed past the stale window are each named with the
+// one next step; a slot whose access token expired ROUTINELY (hours ago -
+// Claude refreshes that silently on the next run) is NOT flagged, or doctor
+// would cry "expired" every day. Read-only: doctor never writes a slot.
+#[test]
+fn doctor_flags_slots_without_login_and_stale_logins() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for name in ["empty", "old", "recent", "corrupt"] {
+        run_in(root.path(), &["run", name], &path);
+    }
+    // Slot dirs from the `slots` listing lines: "  <name>  <dir>".
+    let listing = run_in(root.path(), &["slots"], &path);
+    let dir_of = |name: &str| -> std::path::PathBuf {
+        listing
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix(name)
+                    .map(|rest| std::path::PathBuf::from(rest.trim()))
+            })
+            .unwrap_or_else(|| panic!("slot '{name}' in listing: {listing}"))
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let creds = |expires_ms: i64| {
+        format!(
+            "{{\"claudeAiOauth\":{{\"accessToken\":\"AT\",\"refreshToken\":\"RT\",\
+             \"expiresAt\":{expires_ms}}}}}"
+        )
+    };
+    // 'old': expired 40 days ago - the refresh token itself may be revoked.
+    std::fs::write(
+        dir_of("old").join(".credentials.json"),
+        creds(now_ms - 40 * 86_400_000),
+    )
+    .unwrap();
+    // 'recent': expired 2 hours ago - routine, silently refreshed on next run.
+    std::fs::write(
+        dir_of("recent").join(".credentials.json"),
+        creds(now_ms - 2 * 3_600_000),
+    )
+    .unwrap();
+    // 'corrupt': a login artifact EXISTS but is unparseable - not "no login".
+    std::fs::write(dir_of("corrupt").join(".credentials.json"), b"not json").unwrap();
+    let out = Command::new(bin())
+        .args(["doctor"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "informational, stays exit 0: {o}");
+    assert!(
+        o.contains("slot:empty") && o.contains("swapdex run empty"),
+        "never-signed-in slot named with the run remedy: {o}"
+    );
+    assert!(
+        o.contains("slot:old") && o.contains("swapdex run old"),
+        "long-idle slot named with the run remedy: {o}"
+    );
+    assert!(
+        !o.contains("slot:recent"),
+        "routinely-expired slot is not flagged: {o}"
+    );
+    assert!(
+        !o.contains("slot:corrupt"),
+        "a PRESENT but unparseable credential is not 'no login yet' - doctor \
+         only flags what it can determine: {o}"
+    );
+}
+
+// doctor: an installed shim that PATH never reaches is a trap - it LOOKS set
+// up while a plain `claude` still runs bare, so `swapdex use` silently does
+// nothing (the pointer flips but nothing reads it). doctor must say the shim
+// is not taking effect (with the PATH fix), and call it active only when the
+// shim really is what a plain `claude` resolves to.
+#[test]
+fn doctor_detects_shim_bypassed_and_active() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "work"], &path);
+    run_in(root.path(), &["shim"], &path);
+    // Shim dir NOT on PATH: a plain `claude` resolves to the real (fake) one.
+    let out = run_in(root.path(), &["doctor"], &path);
+    assert!(
+        out.contains("NOT taking effect") && out.contains("PATH"),
+        "bypassed shim is called out with the PATH fix: {out}"
+    );
+    // Shim dir FIRST on PATH: the shim genuinely intercepts a plain `claude`.
+    let shim_first = format!(
+        "{}:{}",
+        root.path().join(".local/share/swapdex/bin").display(),
+        path
+    );
+    let out = run_in(root.path(), &["doctor"], &shim_first);
+    assert!(
+        out.contains("shim active"),
+        "engaged shim reported active: {out}"
+    );
+}

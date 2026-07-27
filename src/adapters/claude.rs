@@ -148,6 +148,116 @@ fn keychain_item_exists(service: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A slot's login state, read without ever touching the secret. Doctor's rule
+/// is "flag only what you can DETERMINE": a login artifact whose freshness
+/// cannot be read must not masquerade as "no login yet".
+#[derive(Debug, PartialEq)]
+pub(crate) enum SlotLogin {
+    /// No credential file and no Keychain item - the slot was never signed in.
+    Absent,
+    /// A login artifact exists. The value is its last-refresh signal in unix
+    /// ms when determinable (`expiresAt` from `.credentials.json`, or on macOS
+    /// the Keychain item's mdat, newest of the two); `None` = present but
+    /// unreadable/unparseable - treated as healthy rather than guessed at.
+    Present(Option<i64>),
+}
+
+/// Read a slot's [`SlotLogin`]. The Keychain lookup is attribute-only: no
+/// secret read, no ACL prompt. (Service derivation hashes the raw dir string,
+/// skipping Claude's NFC normalization - same documented caveat as
+/// `env_computed_service`; a non-NFC path can misreport as Absent, whose
+/// "run once" remedy is harmless.)
+pub(crate) fn slot_login(dir: &std::path::Path) -> SlotLogin {
+    let file = dir.join(".credentials.json");
+    let file_present = file.exists();
+    let file_ts = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64());
+    // On macOS the Keychain is the primary store, and a leftover file from the
+    // pre-Keychain era can sit ancient next to a daily-refreshed Keychain item.
+    // Check BOTH and trust whichever signal is newest, or the file alone would
+    // flag a healthy slot as long-idle.
+    let (kc_present, kc_ts) = if keychain_enabled() {
+        let service = format!(
+            "{KEYCHAIN_PREFIX}-{}",
+            &sha256_hex(dir.to_string_lossy().as_bytes())[..8]
+        );
+        if keychain_item_exists(&service) {
+            (true, keychain_mdat_ms(&service))
+        } else {
+            (false, None)
+        }
+    } else {
+        (false, None)
+    };
+    if !file_present && !kc_present {
+        return SlotLogin::Absent;
+    }
+    SlotLogin::Present(match (file_ts, kc_ts) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    })
+}
+
+/// The modification date of a Keychain item as unix ms - the last time Claude
+/// wrote (i.e. refreshed) that login. Attribute lookup only (no `-w`), so no
+/// ACL prompt. `None` when the item does not exist or the date is unparseable.
+fn keychain_mdat_ms(service: &str) -> Option<i64> {
+    let out = std::process::Command::new(SECURITY)
+        .args([
+            "find-generic-password",
+            "-s",
+            service,
+            "-a",
+            &keychain_account_name(),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `security` splits attributes across stdout/stderr by version; scan both.
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text.lines().find_map(parse_mdat_ms)
+}
+
+/// Parse a `security` attribute line like
+///   `    "mdat"<timedate>=0x3230... "20260722094900Z\000"`
+/// into unix ms. The quoted tail is `YYYYMMDDHHMMSSZ` (UTC) plus junk.
+fn parse_mdat_ms(line: &str) -> Option<i64> {
+    if !line.contains("\"mdat\"<timedate>") {
+        return None;
+    }
+    let tail = line.rsplit('"').nth(1)?; // content of the LAST quoted string
+    let d: Vec<u32> = tail.chars().filter_map(|c| c.to_digit(10)).collect();
+    if d.len() < 14 {
+        return None;
+    }
+    let n = |i: usize, j: usize| -> i64 { d[i..j].iter().fold(0i64, |a, &x| a * 10 + x as i64) };
+    let (y, mo, day) = (n(0, 4), n(4, 6), n(6, 8));
+    let (h, mi, s) = (n(8, 10), n(10, 12), n(12, 14));
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&day) || h > 23 || mi > 59 || s > 60 {
+        return None;
+    }
+    Some((days_from_civil(y, mo, day) * 86_400 + h * 3600 + mi * 60 + s) * 1000)
+}
+
+/// Days from 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
 /// Every Keychain service name starting with the Claude prefix (attribute dump
 /// only - no secret, no prompt). Feeds both the resolution fallback and the
 /// `doctor` diagnostic.
@@ -738,6 +848,60 @@ mod tests {
     use super::*;
     use crate::paths::Paths;
     use serde_json::json;
+
+    // The Keychain `mdat` attribute line parses to unix ms; anything else
+    // parses to nothing. The `\000` junk after the date is LITERAL backslash
+    // digits in `security` output and must not corrupt the date.
+    #[test]
+    fn mdat_line_parses_to_unix_ms() {
+        let line = "    \"mdat\"<timedate>=0x32303234303130313030303030305A00  \
+                    \"20240101000000Z\\000\"";
+        assert_eq!(parse_mdat_ms(line), Some(1_704_067_200_000));
+        // Epoch itself.
+        let epoch = "\"mdat\"<timedate>=0x00  \"19700101000000Z\\000\"";
+        assert_eq!(parse_mdat_ms(epoch), Some(0));
+        // Not an mdat line / malformed date -> None.
+        assert_eq!(
+            parse_mdat_ms("\"cdat\"<timedate>=0x00 \"20240101000000Z\""),
+            None
+        );
+        assert_eq!(parse_mdat_ms("\"mdat\"<timedate>=0x00 \"2024\""), None);
+        assert_eq!(
+            parse_mdat_ms("\"mdat\"<timedate>=0x00 \"20241301000000Z\""),
+            None,
+            "month 13 rejected"
+        );
+    }
+
+    // The civil-date helper against known anchors (leap handling included).
+    #[test]
+    fn days_from_civil_matches_known_dates() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2024, 1, 1), 19723);
+        assert_eq!(days_from_civil(2024, 3, 1), 19783, "2024 is a leap year");
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+    }
+
+    // Slot login tri-state (keychain is disabled in unit tests, so file-only):
+    // no file = Absent; a parseable file = Present with its expiresAt; a file
+    // that EXISTS but cannot be parsed = Present(None), never Absent - doctor
+    // must not call a real login "no login yet".
+    #[test]
+    fn slot_login_distinguishes_absent_present_and_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(slot_login(dir.path()), SlotLogin::Absent, "no login yet");
+        std::fs::write(
+            dir.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"AT","expiresAt":1704067200000}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            slot_login(dir.path()),
+            SlotLogin::Present(Some(1_704_067_200_000))
+        );
+        std::fs::write(dir.path().join(".credentials.json"), b"not json").unwrap();
+        assert_eq!(slot_login(dir.path()), SlotLogin::Present(None));
+    }
 
     // The resolution contract: manage the profile of the environment swapdex
     // runs in; fall back to the scan only when it is unambiguous.

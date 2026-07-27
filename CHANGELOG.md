@@ -6,6 +6,13 @@ All notable changes to swapdex are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+- **`swapdex doctor` now reports each account slot's login health.** A slot that was never signed into is named with the one step that fixes it (`swapdex run <name>` once signs it in), and a slot whose login sat unrefreshed past the 30-day stale window is flagged with `login idle ~Nd`. Routine access-token expiry (hours) is deliberately NOT flagged - Claude refreshes that silently on the next run, so flagging it would mean a daily false "expired". The freshness signal is read-only: the `expiresAt` in the slot's own `.credentials.json`, or on macOS the slot's Keychain item modification date via an attribute-only lookup (no secret read, no ACL prompt), taking whichever is newest so a leftover pre-Keychain file cannot make a healthy slot look idle. A login artifact that exists but cannot be parsed stays quiet rather than being misreported as "no login yet" - doctor flags only what it can determine.
+- **`swapdex doctor` now checks whether the `claude` shim actually takes effect, not just whether it exists.** An installed shim that PATH never reaches is a trap: the setup looks complete while a plain `claude` still runs the real binary, so `swapdex use` flips the default pointer and nothing ever reads it - a switch that silently does nothing. doctor now resolves what a plain `claude` really runs and reports `shim active` only when that is the shim; otherwise it says the shim is NOT taking effect, names the binary winning on PATH, and prints the one `export PATH=...` line that fixes it.
+
+### Changed
+- **`swapdex ui`: the `r` key now switches to the account you used before (`use -`), not `restore`.** `restore` puts back the login that was live before the *last switch*, which in hub-and-spoke use (always switching away from one base account) is always that same base - so `r` appeared to return to one fixed account rather than the account you actually used before. `r` is now the previous-account toggle and the key hint reads `previous`. `swapdex restore` remains available as an explicit command and safety net for undoing a switch.
+
 ## [0.30.0] - 2026-07-22
 
 ### Added

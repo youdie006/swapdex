@@ -4,10 +4,10 @@
 //! REFRESHES the list in place; landing in a conversation (resume or new) is
 //! the one action that leaves - by design, that is the goal of a switch.
 //!
-//! No second implementation of anything: a switch/restore runs this same
-//! binary as a subprocess (`swapdex use/restore`) with its output captured
-//! into the status line, and session/launch data comes from the caller
-//! through [`TuiCtx`].
+//! No second implementation of anything: a switch runs this same binary as a
+//! subprocess (`swapdex use <name>`, or `swapdex use -` for the `r` previous-
+//! account toggle) with its output captured into the status line, and
+//! session/launch data comes from the caller through [`TuiCtx`].
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -103,6 +103,24 @@ fn key_hints(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Key hints shown on the Main screen when at least one profile exists. A pure
+/// function so the `r` binding's label is unit-testable (the event loop is not
+/// otherwise seamed for key-dispatch tests).
+fn main_hints() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("\u{21b5}", "switch"),
+        ("o", "open"),
+        ("a", "add"),
+        ("n", "rename"),
+        ("u", "usage"),
+        ("%", "quota"),
+        ("r", "previous"),
+        ("d", "delete"),
+        ("?", "health"),
+        ("q", "quit"),
+    ]
+}
+
 pub struct Row {
     pub name: String,
     pub ident: String,
@@ -120,8 +138,8 @@ pub struct SessionEntry {
 pub trait TuiCtx {
     fn rows(&mut self) -> Vec<Row>;
     /// Perform the switch (subprocess); returns (success, condensed message).
+    /// `"-"` toggles to the previously-used account (the `r` key).
     fn switch(&mut self, name: &str) -> (bool, String);
-    fn restore(&mut self) -> String;
     fn delete(&mut self, name: &str) -> String;
     /// (label, session entries) for the just-switched profile.
     /// (label, session entries, the profile's tools) for the just-switched
@@ -499,18 +517,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     let hints: &[(&str, &str)] = if rows.is_empty() {
                         &[("?", "health"), ("q", "quit")]
                     } else {
-                        &[
-                            ("\u{21b5}", "switch"),
-                            ("o", "open"),
-                            ("a", "add"),
-                            ("n", "rename"),
-                            ("u", "usage"),
-                            ("%", "quota"),
-                            ("r", "restore"),
-                            ("d", "delete"),
-                            ("?", "health"),
-                            ("q", "quit"),
-                        ]
+                        main_hints()
                     };
                     f.render_widget(Paragraph::new(key_hints(hints)), help);
                 }
@@ -1013,7 +1020,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         }
                     }
                     KeyCode::Char('r') => {
-                        status = ctx.restore();
+                        // `r` toggles to the previously-used account (`use -`),
+                        // not `restore`: restore returns the pre-switch login,
+                        // which in hub-and-spoke use is always one fixed base,
+                        // never the account you actually used before.
+                        let (_ok, msg) = ctx.switch("-");
+                        status = msg;
                         rows = ctx.rows();
                     }
                     KeyCode::Char('d') if !rows.is_empty() => {
@@ -1320,5 +1332,23 @@ mod tests {
             assert_eq!(tildify(&home.join("proj")), "~/proj");
         }
         assert_eq!(tildify(std::path::Path::new("/etc")), "/etc");
+    }
+
+    #[test]
+    fn r_key_is_previous_not_restore() {
+        // `r` toggles to the previously-used account (`use -`), not `restore`.
+        // Restore always returned the pre-switch login, which in hub-and-spoke
+        // use is always the one base account - never the account you last used.
+        let hints = main_hints();
+        assert!(
+            hints
+                .iter()
+                .any(|(k, label)| *k == "r" && *label == "previous"),
+            "the r key should be labeled 'previous'"
+        );
+        assert!(
+            !hints.iter().any(|(_, label)| *label == "restore"),
+            "'restore' should no longer be a Main-screen key hint"
+        );
     }
 }

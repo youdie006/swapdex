@@ -55,6 +55,23 @@ fn is_our_shim(path: &Path) -> bool {
     String::from_utf8_lossy(&buf[..n]).contains(SHIM_MARKER)
 }
 
+/// What a plain `claude` typed in THIS environment resolves to: the first
+/// `claude` file on PATH. The bool says whether that is swapdex's own shim (by
+/// content marker, robust to path spelling). `None` when PATH has no `claude`.
+/// Feeds doctor's engagement check - an installed shim that PATH never reaches
+/// LOOKS set up while `swapdex use` silently does nothing.
+pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join("claude");
+        if cand.is_file() {
+            let ours = is_our_shim(&cand);
+            return Some((cand, ours));
+        }
+    }
+    None
+}
+
 /// The first `claude` on PATH that is NOT swapdex's own shim - the real one the
 /// shim should exec. Skips the shim dir AND any `claude` that is itself one of
 /// our shims (so re-running `swapdex shim` can never bake a self-reference).

@@ -1972,9 +1972,6 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
             run_self(&["use", name])
         }
-        fn restore(&mut self) -> String {
-            run_self(&["restore"]).1
-        }
         fn delete(&mut self, name: &str) -> String {
             match Store::open(self.paths).and_then(|s| s.remove(name)) {
                 Ok(true) => format!("removed profile '{name}' (the live login stays)"),
@@ -2451,18 +2448,75 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     "no default account set - `swapdex use <name>`".into(),
                 ),
             }
-            let installed = crate::shim::shim_path(paths).exists();
-            report(
-                "shim",
-                true,
-                if installed {
-                    "claude shim installed".into()
-                } else {
+            // Shim ENGAGEMENT, not mere existence: an installed shim that PATH
+            // never reaches looks set up while a plain `claude` still runs
+            // bare - `swapdex use` flips the pointer and nothing reads it.
+            let shim_file = crate::shim::shim_path(paths);
+            let (shim_ok, shim_msg) = if !shim_file.exists() {
+                (
+                    true,
                     "claude shim not installed - run `swapdex shim` so a plain \
                      `claude` follows `swapdex use`"
-                        .to_string()
-                },
-            );
+                        .to_string(),
+                )
+            } else {
+                let shim_dir = shim_file.parent().unwrap_or(&shim_file).display();
+                match crate::shim::resolved_claude() {
+                    Some((_, true)) => (
+                        true,
+                        "claude shim active - plain `claude` follows `swapdex use`".to_string(),
+                    ),
+                    Some((found, false)) => (
+                        false,
+                        format!(
+                            "claude shim installed but NOT taking effect - plain `claude` \
+                             runs {} instead; add the shim first on PATH: \
+                             export PATH=\"{shim_dir}:$PATH\"",
+                            found.display()
+                        ),
+                    ),
+                    None => (
+                        false,
+                        format!(
+                            "claude shim installed but PATH has no `claude` at all - \
+                             add it: export PATH=\"{shim_dir}:$PATH\""
+                        ),
+                    ),
+                }
+            };
+            report("shim", shim_ok, shim_msg);
+            // Per-slot login health (read-only). Flag only a slot with NO
+            // login yet, or one whose token sat unrefreshed past STALE_DAYS
+            // (by then the refresh token itself may be revoked). Routine
+            // access-token expiry (hours) is NOT flagged - Claude silently
+            // refreshes it on the next run (same no-spam rule as
+            // profile_detail).
+            use crate::adapters::claude::SlotLogin;
+            for r in &list {
+                let key = format!("slot:{}", r.name);
+                match crate::adapters::claude::slot_login(&r.config_dir) {
+                    SlotLogin::Absent => report(
+                        &key,
+                        true,
+                        format!("no login yet - `swapdex run {}` once signs it in", r.name),
+                    ),
+                    SlotLogin::Present(Some(ts)) if now_ms() - ts > STALE_DAYS * 86_400_000 => {
+                        let days = (now_ms() - ts) / 86_400_000;
+                        report(
+                            &key,
+                            true,
+                            format!(
+                                "login idle ~{days}d - `swapdex run {}` once refreshes \
+                                 it (re-login if it asks)",
+                                r.name
+                            ),
+                        );
+                    }
+                    // Fresh, or present-but-undeterminable: stay quiet - doctor
+                    // flags only what it can determine.
+                    SlotLogin::Present(_) => {}
+                }
+            }
         }
     }
 
