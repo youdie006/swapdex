@@ -614,3 +614,75 @@ fn rm_unregisters_a_slot_and_leaves_its_login_alone() {
     );
     assert!(run_in(root.path(), &["slots"], &path).contains("company"));
 }
+
+/// The shim is useless if PATH never reaches it, so installing it edits the shell
+/// profile - once, idempotently, and never for a shell we would only be guessing
+/// about.
+#[test]
+fn shim_puts_itself_on_path_via_the_shell_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let run_shim = || {
+        String::from_utf8_lossy(
+            &Command::new(bin())
+                .args(["shim"])
+                .env("SWAPDEX_ROOT", root.path())
+                .env("PATH", &path)
+                .env("HOME", &home)
+                .env("SHELL", "/bin/zsh")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .into_owned()
+    };
+
+    let out = run_shim();
+    assert!(
+        out.contains("added it to"),
+        "it says what it changed: {out}"
+    );
+    let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("profile written");
+    assert!(
+        zshrc.contains("swapdex") && zshrc.contains("export PATH="),
+        "the line is there: {zshrc}"
+    );
+
+    // Running it again must not stack a second copy.
+    run_shim();
+    let again = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+    assert_eq!(
+        again.matches("export PATH=").count(),
+        1,
+        "idempotent: {again}"
+    );
+
+    // A shell we cannot reason about is told, not edited.
+    let out = String::from_utf8_lossy(
+        &Command::new(bin())
+            .args(["shim"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("SHELL", "/usr/bin/fish")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        out.contains("add this to your shell profile"),
+        "fish gets instructions rather than a guessed edit: {out}"
+    );
+    assert!(
+        !home.join(".config").exists(),
+        "nothing was written for a shell we do not handle"
+    );
+}

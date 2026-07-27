@@ -200,6 +200,7 @@ const ALL_KEYS: &[KeyHint] = &[
     ("r", "back to last account"),
     ("a", "add account"),
     ("q", "quit"),
+    ("l", "sign in / re-login"),
     ("e", "pause / resume"),
     ("n", "rename"),
     ("d", "delete"),
@@ -217,6 +218,10 @@ fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
         // Out of rotation is a deliberate state, so it is said plainly and not
         // dressed as a problem.
         return ("paused", Color::Rgb(110, 108, 128));
+    }
+    if r.needs_login {
+        // Nothing else matters until it can authenticate.
+        return ("no login", Color::Rgb(200, 150, 90));
     }
     if let Some(w) = r.warn {
         // A snapshot problem outranks quota: the account cannot serve at all.
@@ -282,6 +287,9 @@ pub struct Row {
     pub warn: Option<&'static str>,
     /// Kept out of automatic rotation (still switchable by hand).
     pub disabled: bool,
+    /// A slot account with no readable login yet - it cannot serve a turn until
+    /// its tool signs in there.
+    pub needs_login: bool,
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -352,6 +360,9 @@ pub enum Outcome {
     },
     /// Run the add-a-new-account login flow (needs the real terminal).
     AddAccount(&'static str),
+    /// Sign this account in by launching its own slot: the tool's own login runs
+    /// there, which is the only thing that can create a slot's credential.
+    SignIn(String),
 }
 
 const NEW_CONV: [(&str, &str); 4] = [
@@ -676,7 +687,17 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // typing its digit, not only by arrowing to it.
                             let u_now = quota_pct.as_ref().and_then(|q| q.get(&r.name));
                             let (st, st_color) = account_status(r, u_now);
+                            // Draw the selection marker on the ACCOUNT line
+                            // ourselves: the widget puts highlight_symbol on an
+                            // item's FIRST line, which for a group's first account
+                            // is the heading - so the cursor appeared to sit on the
+                            // heading while the selection was really the account.
+                            let selected = state.selected() == Some(ri);
                             let mut top = vec![
+                                Span::styled(
+                                    if selected { "\u{2503} " } else { "  " },
+                                    Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(
                                     format!("{:>2} ", ri + 1),
                                     Style::default().fg(Color::Rgb(96, 94, 116)),
@@ -824,13 +845,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     } else {
                         let list = List::new(items)
                             .block(list_block(" accounts "))
-                            // Bold + the bar marker only: a highlight BACKGROUND
-                            // would paint over the gauge's own background, which is
-                            // what draws the fill - the selected row's bars simply
-                            // vanished. The marker and the violet name already say
-                            // which row is selected.
-                            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-                            .highlight_symbol("\u{2503} ");
+                            // No highlight background (it would paint over the
+                            // gauge fills, which ARE backgrounds) and no
+                            // highlight_symbol: the marker is drawn on the account
+                            // line itself, since the widget would put it on the
+                            // group heading instead.
+                            .highlight_style(Style::default().add_modifier(Modifier::BOLD));
                         f.render_stateful_widget(list, body, &mut state);
                     }
                     let foot_line = if let Some(i) = confirm_delete {
@@ -1428,6 +1448,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     // Pause an account: keep it for manual switching but stop the
                     // proxy from choosing it. Useful for an account that is shared,
                     // billed elsewhere, or being saved for later.
+                    // Sign an account in (or back in): launch its slot so the
+                    // tool's own login runs there. swapdex never writes a
+                    // credential itself, so this is the only way to create one.
+                    KeyCode::Char('l') if !rows.is_empty() => {
+                        if let Some(name) = state
+                            .selected()
+                            .and_then(|i| rows.get(i))
+                            .map(|r| r.name.clone())
+                        {
+                            break 'ui Outcome::SignIn(name);
+                        }
+                    }
                     KeyCode::Char('e') if !rows.is_empty() => {
                         if let Some(name) = state
                             .selected()
@@ -1760,6 +1792,7 @@ mod tests {
             active: false,
             warn: None,
             disabled: false,
+            needs_login: false,
         };
         let sorted = group_sorted(vec![
             row("codex", "codex*"),
@@ -1820,6 +1853,7 @@ mod tests {
             active,
             warn,
             disabled,
+            needs_login: false,
         };
         let spent = Usage {
             five_h: Some(100.0),
@@ -1853,6 +1887,18 @@ mod tests {
             "paused",
             "a deliberate pause is stated plainly, not as a problem"
         );
+        // An account that cannot authenticate says so before anything else: quota
+        // and activity are meaningless until it can.
+        let needs = Row {
+            name: "a".into(),
+            ident: "e@x".into(),
+            tools: "claude-code".into(),
+            active: true,
+            warn: None,
+            disabled: false,
+            needs_login: true,
+        };
+        assert_eq!(account_status(&needs, Some(&fresh)).0, "no login");
         // No quota data is not "spent".
         assert_eq!(account_status(&mk(false, None, false), None).0, "ready");
     }
@@ -1936,6 +1982,7 @@ mod tests {
             active: false,
             warn: None,
             disabled: false,
+            needs_login: false,
         };
         // " N " + dot(2) + name + 2 + ident + 2 + status(8) + 2, using the WIDEST
         // name and identity so every bar starts at the same column.

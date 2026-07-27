@@ -2062,6 +2062,15 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             };
             let active = active_by_tool(&store, self.paths);
             let cfg = crate::settings::load(self.paths);
+            let slot_dirs: std::collections::HashMap<String, std::path::PathBuf> =
+                crate::slots::Slots::open(self.paths)
+                    .map(|s| {
+                        s.list()
+                            .into_iter()
+                            .map(|r| (r.name, r.config_dir))
+                            .collect()
+                    })
+                    .unwrap_or_default();
             let list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
@@ -2074,6 +2083,11 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .collect();
                     crate::tui::Row {
                         disabled: cfg.is_disabled(&p.name),
+                        // A slot with no readable token cannot serve a turn; say so
+                        // rather than letting it look ready and fail later.
+                        needs_login: slot_dirs
+                            .get(&p.name)
+                            .is_some_and(|d| crate::proxy::creds::slot_token(d).is_none()),
                         name: p.name.clone(),
                         ident: identity_column(email, tier),
                         tools: p
@@ -2391,6 +2405,25 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             crate::tui::Outcome::NewConv { tool, dir } => {
                 println!("opening {}...", pretty_tool(tool));
                 return Err(exec_tool(tool, dir.as_deref()));
+            }
+            crate::tui::Outcome::SignIn(name) => {
+                // `run` launches the account's own slot, where the tool's own login
+                // runs - that is what creates the credential swapdex will not write.
+                // For a snapshot profile this also MOVES it onto a slot, which is
+                // the actual fix: a snapshot keeps expiring, a slot does not.
+                let is_slot = crate::slots::Slots::open(paths)
+                    .map(|s| s.get(&name).is_some())
+                    .unwrap_or(false);
+                if is_slot {
+                    println!("signing in '{name}' - its own login will open");
+                } else {
+                    println!(
+                        "moving '{name}' onto its own space and signing in there - \
+                         a saved snapshot keeps expiring, this will not"
+                    );
+                }
+                let code = run_account(paths, &name, &[])?;
+                return Ok(code);
             }
             crate::tui::Outcome::AddAccount(tool) => {
                 let sel = match tool {
@@ -3045,11 +3078,28 @@ fn use_slot_default(paths: &Paths, name: &str, dry_run: bool) -> Result<i32> {
 pub fn install_shim(paths: &Paths) -> Result<i32> {
     let (shim, shim_dir) = crate::shim::install(paths)?;
     println!("installed the claude shim at {}", shim.display());
-    println!(
-        "  add this to your shell profile (once), so it wins over the real claude:\n\
-         \x20     export PATH=\"{}:$PATH\"",
-        shim_dir.display()
-    );
+    // Put it on PATH ourselves. Leaving that to the user is how the shim ends up
+    // installed but never reached: `swapdex use` then flips a pointer nothing
+    // reads, and the switch appears to work while changing nothing.
+    match crate::shim::ensure_on_path(&shim_dir)? {
+        crate::shim::PathSetup::AlreadyThere => {
+            println!("  it is already on your PATH - a plain `claude` goes through it");
+        }
+        crate::shim::PathSetup::Added(profile) => {
+            println!(
+                "  added it to {} - open a new terminal (or `source` that file) and a plain \
+                 `claude` goes through it",
+                crate::util::redact_path(&profile.display().to_string())
+            );
+        }
+        crate::shim::PathSetup::Manual => {
+            println!(
+                "  add this to your shell profile so it wins over the real claude:\n\
+                 \x20     export PATH=\"{}:$PATH\"",
+                shim_dir.display()
+            );
+        }
+    }
     Ok(0)
 }
 

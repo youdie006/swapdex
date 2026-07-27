@@ -109,6 +109,81 @@ fn find_real_claude(shim_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The line a shell profile needs so the shim is found first.
+fn path_line(shim_dir: &Path) -> String {
+    format!("export PATH=\"{}:$PATH\"", shim_dir.display())
+}
+
+/// A marker so the block can be recognised, skipped on a re-run, and found by a
+/// human wondering what edited their profile.
+const PROFILE_MARKER: &str = "# added by swapdex (claude shim)";
+
+/// The shell profile to teach: the one belonging to $SHELL, since that is the
+/// shell the user actually gets. Returns `None` for a shell we should not guess at
+/// (fish and friends keep PATH somewhere else entirely).
+fn shell_profile() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let name = shell.rsplit('/').next().unwrap_or("");
+    match name {
+        "zsh" => Some(home.join(".zshrc")),
+        "bash" => {
+            // Login shells on macOS read .bash_profile; .bashrc elsewhere. Prefer
+            // whichever already exists so the line lands where it is read.
+            let bp = home.join(".bash_profile");
+            if bp.exists() {
+                Some(bp)
+            } else {
+                Some(home.join(".bashrc"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Is the shim dir already on PATH for this session?
+fn already_on_path(shim_dir: &Path) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d == shim_dir))
+        .unwrap_or(false)
+}
+
+/// What `ensure_on_path` did, so the caller can say the right thing.
+pub enum PathSetup {
+    /// Already reachable; nothing to do.
+    AlreadyThere,
+    /// The line was appended to this profile; a new shell will pick it up.
+    Added(PathBuf),
+    /// We will not guess for this shell - the caller prints the line to add.
+    Manual,
+}
+
+/// Put the shim dir on PATH by editing the user's shell profile, because leaving
+/// this to the user means the shim silently does nothing: it is installed, PATH
+/// never reaches it, and `swapdex use` appears to work while changing nothing.
+/// Idempotent - a profile that already carries the marker is left alone.
+pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
+    if already_on_path(shim_dir) {
+        return Ok(PathSetup::AlreadyThere);
+    }
+    let Some(profile) = shell_profile() else {
+        return Ok(PathSetup::Manual);
+    };
+    let existing = std::fs::read_to_string(&profile).unwrap_or_default();
+    let line = path_line(shim_dir);
+    if existing.contains(PROFILE_MARKER) || existing.contains(&line) {
+        // Written before but not active yet: the user has not started a new shell.
+        return Ok(PathSetup::Added(profile));
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("\n{PROFILE_MARKER}\n{line}\n"));
+    std::fs::write(&profile, out).with_context(|| format!("edit {}", profile.display()))?;
+    Ok(PathSetup::Added(profile))
+}
+
 /// Install (or refresh) the shim. Returns (shim_path, shim_dir) so the caller
 /// can print PATH guidance.
 pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
