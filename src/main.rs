@@ -121,6 +121,15 @@ enum Cmd {
     },
     /// Full-screen picker: switch, open a conversation, add accounts
     Ui,
+    /// Run a local proxy so a RUNNING Claude session can change accounts
+    Proxy {
+        /// Port to listen on (0 picks a free one)
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// Serve every request from this account instead of the current default
+        #[arg(long)]
+        account: Option<String>,
+    },
     /// Local health check: store, snapshots, live logins - with a fix per finding
     Doctor,
     /// Recent local token usage per tool (5h/7d), read from session logs
@@ -261,6 +270,7 @@ fn main() {
         Cmd::Restore { tool, dry_run } => commands::restore(&paths, *tool, *dry_run),
         Cmd::Sessions { json } => commands::sessions(&paths, *json),
         Cmd::Ui => commands::ui(&paths),
+        Cmd::Proxy { port, account } => commands::proxy(&paths, *port, account.clone()),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Quota { json } => commands::quota(&paths, *json),

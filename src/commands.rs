@@ -1562,6 +1562,19 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// `proxy` - run proxy mode in the foreground. Claude Code pointed at it
+/// (`ANTHROPIC_BASE_URL`) gets its account chosen per request, so a RUNNING
+/// conversation can change accounts without a restart or a resume.
+pub fn proxy(paths: &Paths, port: u16, account: Option<String>) -> Result<i32> {
+    let opts = crate::proxy::Opts {
+        port,
+        account,
+        auto: false,
+    };
+    crate::proxy::serve(paths, &opts)?;
+    Ok(0)
+}
+
 /// `ui` - a numbered interactive picker: see every profile (active marked from
 /// the live login), type a number, switch. Plain Enter cancels. Deliberately
 /// stdin-only (no raw-mode/TUI crate pulls a socket library into the graph),
