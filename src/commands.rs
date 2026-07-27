@@ -1662,10 +1662,18 @@ const SLASH_BODY: &str = "\
 description: Switch the Claude account serving this session (swapdex)
 ---
 
-Run this, then report the result in one line:
+**If arguments were given**, run `swapdex use $ARGUMENTS`, then report the result
+in one line.
 
-- If arguments were given: `swapdex use $ARGUMENTS`
-- If not: `swapdex ls` and list the accounts, saying which is active
+**If not**, do not make the user recall account names:
+
+1. Run `swapdex ls` to read the accounts, their identities, and which is active.
+2. Ask the user to choose one with the AskUserQuestion tool, so they can pick with
+   the arrow keys. One option per account, labelled with the account name, with
+   its email and current state as the description. Put the active one first and
+   say it is active. If there are more accounts than the tool allows, offer the
+   ones not currently active and let the rest come from free text.
+3. Run `swapdex use <the account they chose>` and report the result in one line.
 
 With a swapdex proxy running, the switch reaches THIS session: the next turn is
 served by the new account, with no new chat and no resume. If the output says the
