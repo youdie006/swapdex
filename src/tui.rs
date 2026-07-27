@@ -704,10 +704,19 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     lines.push(Line::from(""));
                                 }
                                 let g = group_of(&r.tools);
-                                let rule_w = bar_col.saturating_sub(g.chars().count() + 4);
+                                // A terminal cannot change type size, so weight and
+                                // letter-spacing carry it: uppercase, spaced, bold.
+                                // That reads as a section title next to the tight
+                                // account rows below it.
+                                let title: String = g
+                                    .to_uppercase()
+                                    .chars()
+                                    .flat_map(|c| [c, ' '])
+                                    .collect();
+                                let rule_w = bar_col.saturating_sub(title.chars().count() + 3);
                                 lines.push(Line::from(vec![
                                     Span::styled(
-                                        format!("  {g} "),
+                                        format!("  {title}"),
                                         Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
                                     ),
                                     Span::styled(
@@ -715,6 +724,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                         Style::default().fg(Color::Rgb(72, 70, 88)),
                                     ),
                                 ]));
+                                // And air BELOW it: a heading touching its first
+                                // account reads as that account's own line.
+                                lines.push(Line::from(""));
                             }
                             // One line per account. The tools line is gone: the
                             // group heading already says which tool these are, and
@@ -1186,8 +1198,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     .iter()
                                     .enumerate()
                                     .map(|(i, h)| match (*h, i) {
-                                        (true, 0) => 2,  // heading + row
-                                        (true, _) => 3,  // blank + heading + row
+                                        (true, 0) => 3,  // heading + blank + row
+                                        (true, _) => 4,  // blank + heading + blank + row
                                         (false, _) => 1, // row
                                     })
                                     .collect();
@@ -1732,14 +1744,16 @@ mod tests {
         // Scrolled: the first visible item is index 1.
         assert_eq!(click_item_index(1, 5, 5, &heights), 1);
         assert_eq!(click_item_index(1, 8, 5, &heights), 2);
-        // The real shape now: 1-line rows, 2 with a heading, 3 when that heading
-        // also carries its blank separator.
-        let real = [2u16, 1, 3, 1];
-        assert_eq!(click_item_index(0, 5, 5, &real), 0, "heading row");
-        assert_eq!(click_item_index(0, 6, 5, &real), 0, "its account line");
-        assert_eq!(click_item_index(0, 7, 5, &real), 1);
-        assert_eq!(click_item_index(0, 10, 5, &real), 2, "second group heading");
-        assert_eq!(click_item_index(0, 11, 5, &real), 3);
+        // The real shape: a plain row is 1 line; the first row of a group carries
+        // its heading and a blank (3), and a later group also gets a blank above
+        // its heading (4).
+        let real = [3u16, 1, 4, 1];
+        assert_eq!(click_item_index(0, 5, 5, &real), 0, "the heading");
+        assert_eq!(click_item_index(0, 7, 5, &real), 0, "its account line");
+        assert_eq!(click_item_index(0, 8, 5, &real), 1);
+        assert_eq!(click_item_index(0, 9, 5, &real), 2, "second group starts");
+        assert_eq!(click_item_index(0, 12, 5, &real), 2, "still its account");
+        assert_eq!(click_item_index(0, 13, 5, &real), 3);
         // Past the end clamps to the last item rather than panicking.
         assert_eq!(click_item_index(0, 200, 5, &heights), 2);
     }
