@@ -2056,6 +2056,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 return Vec::new();
             };
             let active = active_by_tool(&store, self.paths);
+            let cfg = crate::settings::load(self.paths);
             let list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
@@ -2067,6 +2068,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .map(|(t, _)| *t)
                         .collect();
                     crate::tui::Row {
+                        disabled: cfg.is_disabled(&p.name),
                         name: p.name.clone(),
                         ident: identity_column(email, tier),
                         tools: p
@@ -2093,6 +2095,17 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         fn switch(&mut self, name: &str) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
             run_self(&["use", name])
+        }
+        fn toggle_rotation(&mut self, name: &str) -> String {
+            let mut cfg = crate::settings::load(self.paths);
+            let paused = cfg.toggle_disabled(name);
+            match crate::settings::save(self.paths, &cfg) {
+                Ok(()) if paused => {
+                    format!("{name} paused - the proxy will not pick it (Enter still switches)")
+                }
+                Ok(()) => format!("{name} back in rotation"),
+                Err(e) => format!("could not save that: {e}"),
+            }
         }
         fn delete(&mut self, name: &str) -> String {
             match Store::open(self.paths).and_then(|s| s.remove(name)) {

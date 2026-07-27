@@ -6,18 +6,51 @@ use crate::paths::Paths;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     /// Let proxy mode continue the session on another account when one is spent.
     /// `None` = never set, treated as off; `swapdex proxy --auto` overrides it for
     /// one run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_auto: Option<bool>,
+    /// Accounts kept OUT of automatic rotation. They can still be switched to by
+    /// hand - this only says "do not pick this one for me", which is the useful
+    /// meaning when an account is shared, billed elsewhere, or being saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+    /// Explicit rotation order, lowest first. Accounts absent from this list keep
+    /// the automatic order and are tried after the ranked ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority: Vec<String>,
 }
 
 impl Settings {
     pub fn auto(&self) -> bool {
         self.proxy_auto.unwrap_or(false)
+    }
+
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.disabled.iter().any(|d| d == name)
+    }
+
+    /// Toggle an account's participation in rotation; returns the new state.
+    pub fn toggle_disabled(&mut self, name: &str) -> bool {
+        if let Some(i) = self.disabled.iter().position(|d| d == name) {
+            self.disabled.remove(i);
+            false
+        } else {
+            self.disabled.push(name.to_string());
+            true
+        }
+    }
+
+    /// Rank for rotation: ranked accounts first in their listed order, everything
+    /// else after, so a partial ranking is still meaningful.
+    pub fn rank(&self, name: &str) -> usize {
+        self.priority
+            .iter()
+            .position(|p| p == name)
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -50,6 +83,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disabled_accounts_toggle_and_persist() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = load(&paths);
+        assert!(!s.is_disabled("rnd"));
+        assert!(s.toggle_disabled("rnd"), "first toggle disables");
+        assert!(s.is_disabled("rnd"));
+        save(&paths, &s).unwrap();
+        let mut back = load(&paths);
+        assert!(back.is_disabled("rnd"), "the choice persists");
+        assert!(!back.toggle_disabled("rnd"), "toggling again re-enables");
+        assert!(!back.is_disabled("rnd"));
+    }
+
+    #[test]
+    fn ranked_accounts_sort_before_unranked_ones() {
+        let s = Settings {
+            priority: vec!["work".into(), "rnd".into()],
+            ..Default::default()
+        };
+        assert!(s.rank("work") < s.rank("rnd"), "listed order is the order");
+        assert!(
+            s.rank("rnd") < s.rank("anything-else"),
+            "ranked beats unranked"
+        );
+        assert_eq!(
+            s.rank("a"),
+            s.rank("b"),
+            "unranked accounts keep their existing order"
+        );
+    }
+
+    #[test]
     fn defaults_when_absent_and_round_trips_when_set() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
@@ -60,6 +126,7 @@ mod tests {
             &paths,
             &Settings {
                 proxy_auto: Some(true),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -69,6 +136,7 @@ mod tests {
             &paths,
             &Settings {
                 proxy_auto: Some(false),
+                ..Default::default()
             },
         )
         .unwrap();

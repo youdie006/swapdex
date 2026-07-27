@@ -195,6 +195,7 @@ const ALL_KEYS: &[KeyHint] = &[
     ("r", "back to last account"),
     ("a", "add account"),
     ("q", "quit"),
+    ("e", "pause / resume"),
     ("n", "rename"),
     ("d", "delete"),
     ("u", "tokens used"),
@@ -207,6 +208,11 @@ const ALL_KEYS: &[KeyHint] = &[
 /// without reading the bars.
 fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
     const SPENT: f64 = 99.0;
+    if r.disabled {
+        // Out of rotation is a deliberate state, so it is said plainly and not
+        // dressed as a problem.
+        return ("paused", Color::Rgb(110, 108, 128));
+    }
     if let Some(w) = r.warn {
         // A snapshot problem outranks quota: the account cannot serve at all.
         return (w, Color::Rgb(200, 150, 90));
@@ -246,6 +252,8 @@ pub struct Row {
     pub tools: String,
     pub active: bool,
     pub warn: Option<&'static str>,
+    /// Kept out of automatic rotation (still switchable by hand).
+    pub disabled: bool,
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -260,6 +268,11 @@ pub trait TuiCtx {
     /// `"-"` toggles to the previously-used account (the `r` key).
     fn switch(&mut self, name: &str) -> (bool, String);
     fn delete(&mut self, name: &str) -> String;
+    /// Take an account out of automatic rotation, or put it back. Returns the
+    /// message to show. Default no-op so test contexts need not implement it.
+    fn toggle_rotation(&mut self, _name: &str) -> String {
+        String::new()
+    }
     /// (label, session entries) for the just-switched profile.
     /// (label, session entries, the profile's tools) for the just-switched
     /// profile. The tools drive which "open a NEW ..." entries to show.
@@ -1348,6 +1361,20 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         status = msg;
                         rows = ctx.rows();
                     }
+                    // Pause an account: keep it for manual switching but stop the
+                    // proxy from choosing it. Useful for an account that is shared,
+                    // billed elsewhere, or being saved for later.
+                    KeyCode::Char('e') if !rows.is_empty() => {
+                        if let Some(name) = state
+                            .selected()
+                            .and_then(|i| rows.get(i))
+                            .map(|r| r.name.clone())
+                        {
+                            status = ctx.toggle_rotation(&name);
+                            rows = ctx.rows();
+                            clamp_selection(&mut state, rows.len());
+                        }
+                    }
                     KeyCode::Char('d') if !rows.is_empty() => {
                         confirm_delete = state.selected();
                     }
@@ -1668,6 +1695,7 @@ mod tests {
             tools: tools.into(),
             active: false,
             warn: None,
+            disabled: false,
         };
         let sorted = group_sorted(vec![
             row("codex", "codex*"),
@@ -1714,6 +1742,53 @@ mod tests {
         assert_eq!(click_item_index(0, 11, 5, &real), 3);
         // Past the end clamps to the last item rather than panicking.
         assert_eq!(click_item_index(0, 200, 5, &heights), 2);
+    }
+
+    // The status word answers "can this account serve me?" before the bars do.
+    #[test]
+    fn status_says_what_the_account_can_do() {
+        let mk = |active: bool, warn, disabled| Row {
+            name: "a".into(),
+            ident: "e@x".into(),
+            tools: "claude-code".into(),
+            active,
+            warn,
+            disabled,
+        };
+        let spent = Usage {
+            five_h: Some(100.0),
+            ..Default::default()
+        };
+        let fresh = Usage {
+            five_h: Some(12.0),
+            seven_d: Some(30.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            account_status(&mk(true, None, false), Some(&fresh)).0,
+            "active"
+        );
+        assert_eq!(
+            account_status(&mk(false, None, false), Some(&fresh)).0,
+            "ready"
+        );
+        assert_eq!(
+            account_status(&mk(true, None, false), Some(&spent)).0,
+            "spent",
+            "an exhausted window outranks being active"
+        );
+        assert_eq!(
+            account_status(&mk(true, Some("stale"), false), Some(&fresh)).0,
+            "stale",
+            "an unusable snapshot outranks quota"
+        );
+        assert_eq!(
+            account_status(&mk(true, Some("stale"), true), Some(&spent)).0,
+            "paused",
+            "a deliberate pause is stated plainly, not as a problem"
+        );
+        // No quota data is not "spent".
+        assert_eq!(account_status(&mk(false, None, false), None).0, "ready");
     }
 
     #[test]
@@ -1776,6 +1851,7 @@ mod tests {
             tools: String::new(),
             active: false,
             warn: None,
+            disabled: false,
         };
         // " N " + dot(2) + name + 2 + ident + 2 + status(8) + 2, using the WIDEST
         // name and identity so every bar starts at the same column.
@@ -1789,11 +1865,9 @@ mod tests {
             usage_bar_column(&[row("a", "b")]),
             3 + 2 + 1 + 2 + 1 + 2 + 8 + 2
         );
-        assert_eq!(
-            usage_bar_column(&[]),
-            3 + 2 + 0 + 2 + 0 + 2 + 8 + 2,
-            "no rows: just the fixed columns"
-        );
+        // With no rows the name/identity widths are zero, leaving the fixed
+        // columns: number, glyph, two gaps, the status word, and the trailing gap.
+        assert_eq!(usage_bar_column(&[]), 3 + 2 + 2 + 2 + 8 + 2);
     }
 
     #[test]

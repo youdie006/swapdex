@@ -186,13 +186,21 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
 /// this turn, and not known to be out of quota or refused. `None` when nothing is
 /// left, which the caller reports rather than looping.
 fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::slots::SlotRecord> {
-    let slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
+    let mut slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
+    let cfg = crate::settings::load(paths);
+    // Explicit order first: a ranked account is one the user said to prefer, so
+    // it should be reached for before the automatic order.
+    slots.sort_by_key(|r| cfg.rank(&r.name));
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
     slots.into_iter().find(|r| {
         !tried.contains(&r.name)
             && !unusable.contains(&r.name)
             && !spent.get(&r.name).is_some_and(|q| q.rejected)
+            // "Disabled" means do not pick this one FOR me; switching to it by
+            // hand still works, which is why the check lives here and not in
+            // pick_slot.
+            && !cfg.is_disabled(&r.name)
             // Never offer a slot that was never signed into: it would just fail.
             && creds::slot_token(&r.config_dir).is_some()
     })

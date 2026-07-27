@@ -563,3 +563,37 @@ fn rotation_skips_a_slot_that_has_no_login() {
         "the loginless slot was skipped in favour of one that can actually serve"
     );
 }
+
+/// A disabled account is one the user said not to pick automatically, so
+/// rotation must skip it - while an explicit priority decides who is reached for
+/// first among the rest.
+#[test]
+fn rotation_skips_disabled_accounts_and_follows_priority() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "skipme", "bbbb2222", "AT-SKIP", false);
+    seed_slot(root.path(), "wanted", "cccc3333", "AT-WANTED", false);
+    // skipme is out of rotation; wanted is ranked ahead of everything else.
+    std::fs::write(
+        root.path().join(".local/share/swapdex/settings.json"),
+        br#"{"disabled":["skipme"],"priority":["wanted"]}"#,
+    )
+    .unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream_spent_once(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+
+    let seen = auths(&sink);
+    assert!(
+        !seen.iter().any(|a| a.contains("AT-SKIP")),
+        "the disabled account was never picked: {seen:?}"
+    );
+    assert!(
+        seen.contains(&"Bearer AT-WANTED".to_string()),
+        "the ranked account was reached for first: {seen:?}"
+    );
+}
