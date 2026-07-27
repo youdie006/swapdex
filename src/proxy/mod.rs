@@ -61,11 +61,32 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
     let list = slots.list();
     let pointer = slots.default_dir();
     let rotated = sh.rotated.lock().unwrap().clone();
-    sh.chooser
+    let chosen = sh
+        .chooser
         .lock()
         .unwrap()
         .choose(pointer.as_deref(), rotated.as_deref(), &list)
-        .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))
+        .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))?;
+    // With --auto, an account already known to be out of quota should not serve
+    // the next turn: the previous response said a window was spent, so start
+    // elsewhere instead of walking into the wall. The turn that OBSERVED this was
+    // still served by that account (rotating mid-turn would drop the prompt cache
+    // for nothing), which is why the check belongs here and not there.
+    if opts.auto {
+        let known_spent = sh
+            .quota
+            .lock()
+            .unwrap()
+            .get(&chosen.name)
+            .is_some_and(|q| q.rejected)
+            || sh.unusable.lock().unwrap().contains(&chosen.name);
+        if known_spent {
+            if let Some(better) = next_account(paths, sh, std::slice::from_ref(&chosen.name)) {
+                return Ok(better);
+            }
+        }
+    }
+    Ok(chosen)
 }
 
 /// Run `f` on SIGINT/SIGTERM, then exit. Used to drop the proxy marker when the
@@ -161,38 +182,26 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     }
 }
 
-/// Hand the session to another account. `spent` distinguishes "out of quota"
-/// from "login refused" so the line the user reads says which happened. An
-/// account is skipped when it is out of quota OR its login was refused.
-fn rotate_away_from(current: &str, paths: &Paths, sh: &Shared, spent: bool) {
-    // Only accounts whose login can actually be read are candidates: handing the
-    // session to a slot that was never signed into just fails the next turn.
-    let slots: Vec<crate::slots::SlotRecord> = crate::slots::Slots::open(paths)
-        .map(|s| s.list())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| r.name == current || creds::slot_token(&r.config_dir).is_some())
-        .collect();
-    let mut st = sh.quota.lock().unwrap().clone();
-    for name in sh.unusable.lock().unwrap().iter() {
-        st.entry(name.clone()).or_default().rejected = true;
-    }
-    let why = if spent { "is spent" } else { "cannot sign in" };
-    match pick::rotate_target(current, &slots, &st) {
-        Some(next) => {
-            println!("{current} {why} - continuing on {next}");
-            *sh.rotated.lock().unwrap() = Some(next);
-        }
-        None => println!("{current} {why} and no other account is usable"),
-    }
+/// The next account that can serve this turn: signed in, not already tried on
+/// this turn, and not known to be out of quota or refused. `None` when nothing is
+/// left, which the caller reports rather than looping.
+fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::slots::SlotRecord> {
+    let slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
+    let spent = sh.quota.lock().unwrap();
+    let unusable = sh.unusable.lock().unwrap();
+    slots.into_iter().find(|r| {
+        !tried.contains(&r.name)
+            && !unusable.contains(&r.name)
+            && !spent.get(&r.name).is_some_and(|q| q.rejected)
+            // Never offer a slot that was never signed into: it would just fail.
+            && creds::slot_token(&r.config_dir).is_some()
+    })
 }
 
 fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -> Result<()> {
-    let slot = pick_slot(paths, opts, sh)?;
-    let token = creds::slot_token_detail(&slot.config_dir)
-        .map_err(|why| anyhow!("{}", why.remedy(&slot.name)))?;
-
-    let mut headers: Vec<(String, String)> = rq
+    // The client's request, read once and reusable: serving the same turn on
+    // another account means sending these bytes again with a different token.
+    let client_headers: Vec<(String, String)> = rq
         .headers()
         .iter()
         .filter(|h| !skip_header(h.field.as_str().as_str()))
@@ -204,112 +213,127 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
             )
         })
         .collect();
-    headers.push((
-        "authorization".into(),
-        format!("Bearer {}", String::from_utf8_lossy(token.expose())),
-    ));
-
     let url = format!("{}{}", sh.base, rq.url());
     let method = rq.method().as_str().to_string();
     let path = rq.url().to_string();
-    let mut body = Vec::new();
-    rq.as_reader().read_to_end(&mut body)?;
+    let mut client_body = Vec::new();
+    rq.as_reader().read_to_end(&mut client_body)?;
 
-    // Keep the account identity in the body consistent with the token serving
-    // this turn: after a switch or rotation the client still names the account it
-    // started with. Only UUIDs of swapdex-managed accounts are substituted, and
-    // the body is forwarded byte-for-byte when there is nothing to align.
-    if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
-        let known: Vec<String> = crate::slots::Slots::open(paths)
-            .map(|s| {
-                s.list()
-                    .iter()
-                    .filter_map(|r| creds::slot_account_uuid(&r.config_dir))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(aligned) = identity::align_account(&body, &known, &serving) {
-            body = aligned;
-        }
-    }
+    let known_uuids: Vec<String> = crate::slots::Slots::open(paths)
+        .map(|s| {
+            s.list()
+                .iter()
+                .filter_map(|r| creds::slot_account_uuid(&r.config_dir))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // A 429 is two different events wearing one status. A THROTTLE ("slow down",
-    // x-should-retry) is fixed by waiting and retrying this same account - the
-    // client would otherwise just see the failure. Real exhaustion is not
-    // retried here; it falls through so rotation can handle it.
-    let mut attempt = 0u32;
+    let mut slot = pick_slot(paths, opts, sh)?;
+    let mut tried: Vec<String> = Vec::new();
     let up = loop {
-        let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
-        if up.status != 429 {
+        let token = creds::slot_token_detail(&slot.config_dir)
+            .map_err(|why| anyhow!("{}", why.remedy(&slot.name)))?;
+        let mut headers = client_headers.clone();
+        headers.push((
+            "authorization".into(),
+            format!("Bearer {}", String::from_utf8_lossy(token.expose())),
+        ));
+        // Keep the account identity in the body consistent with the token serving
+        // this turn: the client names the account the conversation started with.
+        let mut body = client_body.clone();
+        if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
+            if let Some(aligned) = identity::align_account(&body, &known_uuids, &serving) {
+                body = aligned;
+            }
+        }
+
+        // A 429 wears two meanings. A THROTTLE ("slow down", x-should-retry) is
+        // fixed by waiting and retrying this same account.
+        let mut attempt = 0u32;
+        let up = loop {
+            let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
+            if up.status != 429 {
+                break up;
+            }
+            match ratelimit::classify_429(&up.headers, attempt) {
+                ratelimit::Throttle::RetryAfter(wait) => {
+                    println!(
+                        "{} {path} -> 429 throttled, retrying in {}s",
+                        slot.name,
+                        wait.as_secs()
+                    );
+                    std::io::stdout().flush().ok();
+                    drop(up); // release this response before sleeping
+                    attempt += 1;
+                    std::thread::sleep(wait);
+                }
+                ratelimit::Throttle::Exhausted => break up,
+            }
+        };
+
+        // Record what this response says about the account, and log it. A
+        // rejected window on a SUCCESSFUL response is noted but not acted on:
+        // the account is still serving, and rotating away would drop the
+        // prompt cache (which is organization-scoped) for nothing.
+        let quota = ratelimit::from_headers(&up.headers);
+        match &quota {
+            Some(q) if q.rejected => println!(
+                "{} {path} -> {} ({} spent)",
+                slot.name,
+                up.status,
+                q.rejected_windows().join(", ")
+            ),
+            _ => println!("{} {path} -> {}", slot.name, up.status),
+        }
+        std::io::stdout().flush().ok();
+        if let Some(q) = quota {
+            sh.quota.lock().unwrap().insert(slot.name.clone(), q);
+        }
+        if up.status == 401 {
+            println!(
+                "{}: login no longer accepted - run `swapdex run {}` once to sign it in again",
+                slot.name, slot.name
+            );
+            sh.unusable.lock().unwrap().insert(slot.name.clone());
+        }
+        if up.status != 429 && up.status != 401 {
             break up;
         }
-        match ratelimit::classify_429(&up.headers, attempt) {
-            ratelimit::Throttle::RetryAfter(wait) => {
+
+        // The wall (or a dead login). Serve THIS turn on another account rather
+        // than handing the client a failure - that is what "continue the session
+        // elsewhere" has to mean. Without --auto, or with nothing left to try,
+        // the client gets the real response.
+        if up.status == 429 {
+            sh.quota
+                .lock()
+                .unwrap()
+                .entry(slot.name.clone())
+                .or_default()
+                .rejected = true;
+        }
+        if !opts.auto || opts.account.is_some() {
+            break up;
+        }
+        tried.push(slot.name.clone());
+        match next_account(paths, sh, &tried) {
+            Some(next) => {
                 println!(
-                    "{} {path} -> 429 throttled, retrying in {}s",
-                    slot.name,
-                    wait.as_secs()
+                    "{} cannot serve this turn - retrying on {}",
+                    slot.name, next.name
                 );
                 std::io::stdout().flush().ok();
-                // Drop this response (and its body) before sleeping.
-                drop(up);
-                attempt += 1;
-                std::thread::sleep(wait);
+                *sh.rotated.lock().unwrap() = Some(next.name.clone());
+                drop(up); // discard the failed response; the retry replaces it
+                slot = next;
             }
-            ratelimit::Throttle::Exhausted => break up,
+            None => {
+                println!("{}: no other account can serve this turn", slot.name);
+                std::io::stdout().flush().ok();
+                break up;
+            }
         }
     };
-    // Log the account and the outcome only - never a body, never a token. The
-    // quota state rides along on responses the user was making anyway.
-    let quota = ratelimit::from_headers(&up.headers);
-    match &quota {
-        // Name the window that is rejected: "SPENT" on an otherwise successful
-        // response is confusing without it, and it is the only way to tell a
-        // genuinely exhausted account from one window of many being closed.
-        Some(q) if q.rejected => println!(
-            "{} {path} -> {} SPENT ({})",
-            slot.name,
-            up.status,
-            q.rejected_windows().join(", ")
-        ),
-        _ => println!("{} {path} -> {}", slot.name, up.status),
-    }
-    std::io::stdout().flush().ok();
-    let mut spent = false;
-    if let Some(q) = quota {
-        spent = q.rejected;
-        sh.quota.lock().unwrap().insert(slot.name.clone(), q);
-    }
-    // A 401 is not a quota problem: that account's login needs re-establishing
-    // (its access token lapsed and swapdex does not mint tokens yet). Say the one
-    // thing that fixes it instead of leaving a bare 401, and take the account out
-    // of rotation for this run so it is not tried again and again.
-    if up.status == 401 {
-        println!(
-            "{}: login no longer accepted - run `swapdex run {}` once to sign it in again",
-            slot.name, slot.name
-        );
-        sh.unusable.lock().unwrap().insert(slot.name.clone());
-    }
-    // Reaching here with a 429 means the retry loop gave up on it: not a passing
-    // throttle, so this account cannot serve the next turn either. Record it as
-    // out of quota (a 429 carries no unified headers to say so) and rotate - the
-    // wall is exactly the moment the user wants to continue elsewhere.
-    let rate_limited = up.status == 429;
-    if rate_limited {
-        sh.quota
-            .lock()
-            .unwrap()
-            .entry(slot.name.clone())
-            .or_default()
-            .rejected = true;
-    }
-    // Turn-boundary rotation: this response is already complete, so switching now
-    // cannot sever an answer - the NEXT turn carries the new account.
-    if opts.auto && (spent || rate_limited || up.status == 401) {
-        rotate_away_from(&slot.name, paths, sh, spent || rate_limited);
-    }
-    std::io::stdout().flush().ok();
 
     let out_headers: Vec<tiny_http::Header> = up
         .headers

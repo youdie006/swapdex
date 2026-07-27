@@ -374,14 +374,22 @@ fn auto_moves_on_when_an_accounts_login_is_refused() {
         &format!("http://127.0.0.1:{port_up}"),
         &["--auto"],
     );
-    post_through(port, "{\"turn\":1}");
+    let first = post_through(port, "{\"turn\":1}");
     post_through(port, "{\"turn\":2}");
     child.kill().ok();
 
+    assert!(
+        !first.is_empty(),
+        "the turn was re-served on another account instead of failing"
+    );
     assert_eq!(
         auths(&sink),
-        vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
-        "a refused login hands the session to another account"
+        vec![
+            "Bearer AT-RND".to_string(),
+            "Bearer AT-BSGONG".to_string(),
+            "Bearer AT-BSGONG".to_string()
+        ],
+        "a refused login re-serves the turn elsewhere, and stays out of the way after"
     );
 }
 
@@ -499,14 +507,23 @@ fn auto_continues_the_session_when_a_turn_is_rate_limited() {
         &format!("http://127.0.0.1:{port_up}"),
         &["--auto"],
     );
-    post_through(port, "{\"turn\":1}");
+    let first = post_through(port, "{\"turn\":1}");
     post_through(port, "{\"turn\":2}");
     child.kill().ok();
 
+    assert!(
+        first.contains("\"ok\":true"),
+        "the client never saw the rate limit - the turn was re-served elsewhere: {first}"
+    );
     assert_eq!(
         auths(&sink),
-        vec!["Bearer AT-RND".to_string(), "Bearer AT-BSGONG".to_string()],
-        "hitting the rate limit hands the session to another account"
+        vec![
+            "Bearer AT-RND".to_string(),
+            "Bearer AT-BSGONG".to_string(),
+            "Bearer AT-BSGONG".to_string()
+        ],
+        "turn 1 hit the wall on rnd and was immediately re-served by bsgong, \
+         which then serves turn 2 as well"
     );
 }
 
