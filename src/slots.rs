@@ -306,7 +306,10 @@ mod tests {
         // Colliding and missing names are refused rather than silently applied.
         s.create("other").unwrap();
         assert!(s.rename("rnd", "other").is_err(), "duplicate refused");
-        assert!(s.rename("   ", "x").unwrap_or(false) == false);
+        assert!(
+            !s.rename("   ", "x").unwrap_or(false),
+            "a blank name is not a rename"
+        );
         assert!(!s.rename("ghost", "x").unwrap(), "no such slot");
     }
 
