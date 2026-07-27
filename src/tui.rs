@@ -17,6 +17,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use std::path::PathBuf;
 
+/// How often the quota bars re-read the usage endpoint while the UI is open. Slow
+/// enough that watching the dashboard is not a stream of requests, often enough
+/// that the numbers are not from when you opened it.
+const QUOTA_REFRESH_SECS: u64 = 90;
+
 const VIOLET: Color = Color::Rgb(157, 107, 255); // the brand accent (#9d6bff)
 const DEXGRAY: Color = Color::Rgb(150, 150, 160); // the dimmed "dex" half
 const MUTED: Color = Color::Rgb(139, 138, 149); // subtitles / hints
@@ -227,6 +232,25 @@ fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
     }
 }
 
+/// A note for figures that are a snapshot: "as of 2h ago", so a stale number is
+/// never mistaken for a live one. Empty when the data IS live, or fresh enough
+/// that the distinction does not matter.
+fn observed_note(observed_at: Option<i64>) -> String {
+    const FRESH: i64 = 15 * 60;
+    let Some(t) = observed_at else {
+        return String::new();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let age = now - t;
+    if age < FRESH {
+        return String::new();
+    }
+    format!("as of {}", fmt_reset(age))
+}
+
 /// A key and what it does.
 type KeyHint = (&'static str, &'static str);
 
@@ -244,6 +268,10 @@ pub struct Usage {
     pub five_h_reset: Option<i64>,
     pub seven_d: Option<f64>,
     pub seven_d_reset: Option<i64>,
+    /// For figures that are a SNAPSHOT rather than a live read (Codex has no
+    /// endpoint to ask): unix seconds when they were recorded. `None` means the
+    /// numbers are current as of this refresh.
+    pub observed_at: Option<i64>,
 }
 
 pub struct Row {
@@ -581,6 +609,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // Network, so fetched once lazily after the first frame (the UI opens
     // instantly; bars fill in). None = not fetched yet.
     let mut quota_pct: Option<std::collections::HashMap<String, Usage>> = None;
+    // When the bars were last refreshed, so they can be kept current.
+    let mut quota_fetched: Option<std::time::Instant> = None;
 
     let outcome = 'ui: loop {
         terminal.draw(|f| {
@@ -692,6 +722,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 top.extend(quota_bar(u.five_h, u.five_h_reset, bw));
                                 top.push(Span::styled("  7d ", Style::default().fg(MUTED)));
                                 top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
+                                // Snapshot figures say when they were taken, so an
+                                // old number is never read as a current one.
+                                let note = observed_note(u.observed_at);
+                                if !note.is_empty() {
+                                    top.push(Span::styled(
+                                        format!("  {note}"),
+                                        Style::default().fg(Color::Rgb(96, 94, 116)),
+                                    ));
+                                }
                             }
                             // One heading per tool, on its first account, so the
                             // Claude accounts and the Codex accounts read as two
@@ -1126,15 +1165,28 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             };
             continue;
         }
-        // Fill the inline per-account quota bars once, lazily, after the first
-        // frame has drawn (so the UI opens instantly). Network per account.
-        if matches!(screen, Screen::Main) && quota_pct.is_none() && !rows.is_empty() {
+        // Fill the inline quota bars after the first frame (so the UI opens
+        // instantly), then keep them current: a dashboard showing what was true
+        // when you opened it is misleading the longer you leave it up. The read is
+        // the same zero-spend usage endpoint `swapdex quota` uses, once per
+        // account, so it is refreshed on a slow cadence rather than every frame.
+        let stale_quota = quota_pct.is_none()
+            || quota_fetched.is_some_and(|t: std::time::Instant| {
+                t.elapsed() >= std::time::Duration::from_secs(QUOTA_REFRESH_SECS)
+            });
+        if matches!(screen, Screen::Main) && stale_quota && !rows.is_empty() {
             quota_pct = Some(ctx.quota_pct().into_iter().collect());
+            quota_fetched = Some(std::time::Instant::now());
             continue;
         }
         // A left click on a menu item both selects AND activates it; treat
         // that as a synthesized Enter so the key handler below does the work.
         let mut click_activate = false;
+        // Wait for input, but not forever: without a timeout the loop blocks until
+        // a keypress, so a dashboard left alone would never refresh its numbers.
+        if !event::poll(std::time::Duration::from_millis(500))? {
+            continue;
+        }
         let key = match event::read()? {
             Event::Key(k) if k.kind == KeyEventKind::Press => k,
             Event::Mouse(m) => {
@@ -1846,6 +1898,24 @@ mod tests {
         assert_eq!(none.len(), 1);
         assert_eq!(none[0].content.chars().count(), 6);
         assert_eq!(none[0].content.trim(), "");
+    }
+
+    // Snapshot figures disclose their age; live ones have nothing to disclose,
+    // and a recent snapshot does not need the caveat either.
+    #[test]
+    fn observed_note_only_appears_for_stale_snapshots() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(observed_note(None), "", "a live read says nothing");
+        assert_eq!(
+            observed_note(Some(now - 60)),
+            "",
+            "a minute old is still current enough"
+        );
+        assert_eq!(observed_note(Some(now - 2 * 3600)), "as of 2h");
+        assert_eq!(observed_note(Some(now - 3 * 86400)), "as of 3d");
     }
 
     #[test]

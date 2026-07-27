@@ -29,6 +29,10 @@ pub struct Window {
 pub struct Limits {
     pub short: Option<Window>,
     pub long: Option<Window>,
+    /// Unix seconds when Codex recorded this. There is no endpoint to ask, so
+    /// these numbers are as old as Codex's last run and the caller should be able
+    /// to say so rather than presenting them as current.
+    pub observed_at: Option<i64>,
 }
 
 fn window_from(v: &serde_json::Value) -> Option<Window> {
@@ -67,7 +71,11 @@ fn from_transcript(path: &Path) -> Option<Limits> {
                     rl.get("primary").and_then(window_from),
                     rl.get("secondary").and_then(window_from),
                 );
-                limits = Some(Limits { short, long });
+                limits = Some(Limits {
+                    short,
+                    long,
+                    observed_at: None,
+                });
             }
         }
     }
@@ -105,11 +113,14 @@ pub fn latest(paths: &Paths, now: u64, max_age_secs: u64) -> Option<Limits> {
     collect_jsonl(&paths.codex_sessions(), now, max_age_secs, &mut files);
     // Newest first, and stop at the first transcript that actually has limits.
     files.sort_by_key(|p| std::cmp::Reverse(mtime_secs(p)));
-    let raw = files.iter().find_map(|f| from_transcript(f))?;
+    let (path, raw) = files
+        .iter()
+        .find_map(|f| from_transcript(f).map(|l| (f, l)))?;
     let still_valid = |w: Option<Window>| w.filter(|w| w.resets_at.is_none_or(|r| r > now as i64));
     let l = Limits {
         short: still_valid(raw.short),
         long: still_valid(raw.long),
+        observed_at: Some(mtime_secs(path) as i64),
     };
     (l.short.is_some() || l.long.is_some()).then_some(l)
 }

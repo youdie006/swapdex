@@ -2258,6 +2258,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             five_h_reset,
                             seven_d,
                             seven_d_reset,
+                            // Claude's figures come from a live read, so there is
+                            // no snapshot age to disclose.
+                            observed_at: None,
                         },
                     ))
                 })
@@ -2274,7 +2277,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 if let Some(name) = active {
                     if let Some(l) = crate::codex_limits::latest(self.paths, now_secs(), 7 * 86_400)
                     {
-                        let mut u = crate::tui::Usage::default();
+                        let mut u = crate::tui::Usage {
+                            observed_at: l.observed_at,
+                            ..Default::default()
+                        };
                         // Place each window by its LENGTH, not by the API's
                         // primary/secondary labels: a ~5h window is the session
                         // one, anything longer is the weekly column.
