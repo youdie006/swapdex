@@ -4,12 +4,17 @@
 //! neither prompt content nor any token value is ever logged.
 
 pub mod creds;
+pub mod ratelimit;
 pub mod upstream;
 
 use crate::paths::Paths;
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Last seen quota state per account name, shared across request threads.
+type QuotaState = Arc<Mutex<HashMap<String, ratelimit::Quota>>>;
 
 pub struct Opts {
     pub port: u16,
@@ -65,6 +70,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     let server = Arc::new(server);
     let agent = Arc::new(upstream::agent());
     let base = upstream::base_url();
+    let state: QuotaState = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let rq = match server.recv() {
             Ok(r) => r,
@@ -73,13 +79,14 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         let paths = paths.clone();
         let agent = agent.clone();
         let base = base.clone();
+        let state = state.clone();
         let opts = Opts {
             port,
             account: opts.account.clone(),
             auto: opts.auto,
         };
         std::thread::spawn(move || {
-            if let Err(e) = handle(rq, &paths, &opts, &agent, &base) {
+            if let Err(e) = handle(rq, &paths, &opts, &agent, &base, &state) {
                 eprintln!("swapdex proxy: {e:#}");
             }
         });
@@ -92,6 +99,7 @@ fn handle(
     opts: &Opts,
     agent: &ureq::Agent,
     base: &str,
+    state: &QuotaState,
 ) -> Result<()> {
     let slot = pick_slot(paths, opts)?;
     let token = creds::slot_token(&slot.config_dir).ok_or_else(|| {
@@ -126,9 +134,17 @@ fn handle(
     rq.as_reader().read_to_end(&mut body)?;
 
     let up = upstream::forward(agent, &method, &url, &headers, &body)?;
-    // Log the account and the outcome only - never a body, never a token.
-    println!("{} {path} -> {}", slot.name, up.status);
+    // Log the account and the outcome only - never a body, never a token. The
+    // quota state rides along on responses the user was making anyway.
+    let quota = ratelimit::from_headers(&up.headers);
+    match &quota {
+        Some(q) if q.rejected => println!("{} {path} -> {} SPENT", slot.name, up.status),
+        _ => println!("{} {path} -> {}", slot.name, up.status),
+    }
     std::io::stdout().flush().ok();
+    if let Some(q) = quota {
+        state.lock().unwrap().insert(slot.name.clone(), q);
+    }
 
     let out_headers: Vec<tiny_http::Header> = up
         .headers
