@@ -21,20 +21,41 @@ fn sh_quote(p: &Path) -> String {
 
 /// The shim script body. Reads the pointer; if a default is set, exec the real
 /// claude with `CLAUDE_CONFIG_DIR`; otherwise exec the real claude unchanged.
-pub fn shim_script(pointer: &Path, real_claude: &Path) -> String {
+///
+/// It also picks up a RUNNING `swapdex proxy` and points claude at it, so
+/// mid-session account switching works without the user exporting anything. The
+/// marker carries the proxy's pid, and `kill -0` decides: a stale marker (the
+/// proxy was killed) is ignored rather than sending claude at a dead port.
+pub fn shim_script(pointer: &Path, real_claude: &Path, proxy_marker: &Path) -> String {
     format!(
         "#!/bin/sh\n\
          # swapdex claude shim - launch claude in the default account's slot.\n\
          # Managed by swapdex; re-created by `swapdex shim`.\n\
+         p=$(cat {marker} 2>/dev/null)\n\
+         if [ -n \"$p\" ]; then\n\
+         \tpid=${{p%% *}}\n\
+         \tport=${{p##* }}\n\
+         \tif kill -0 \"$pid\" 2>/dev/null; then\n\
+         \t\tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
+         \t\texport ANTHROPIC_BASE_URL\n\
+         \tfi\n\
+         fi\n\
          dir=$(cat {ptr} 2>/dev/null)\n\
          if [ -n \"$dir\" ]; then\n\
          \texec env CLAUDE_CONFIG_DIR=\"$dir\" {real} \"$@\"\n\
          else\n\
          \texec {real} \"$@\"\n\
          fi\n",
+        marker = sh_quote(proxy_marker),
         ptr = sh_quote(pointer),
         real = sh_quote(real_claude),
     )
+}
+
+/// Where a running proxy announces itself: `<store_dir>/proxy`, holding
+/// "<pid> <port>". Written on start, removed on exit.
+pub fn proxy_marker(paths: &Paths) -> PathBuf {
+    paths.store_dir().join("proxy")
 }
 
 /// A marker line the generated shim carries, so we can recognize (and never
@@ -100,8 +121,9 @@ pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
     let real = find_real_claude(&shim_dir)
         .context("could not find the real `claude` on PATH - install it first")?;
     let pointer = paths.store_dir().join("active-claude");
+    let marker = proxy_marker(paths);
     std::fs::create_dir_all(&shim_dir).context("create shim dir")?;
-    std::fs::write(&shim, shim_script(&pointer, &real)).context("write shim")?;
+    std::fs::write(&shim, shim_script(&pointer, &real, &marker)).context("write shim")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -121,6 +143,7 @@ mod tests {
         let s = shim_script(
             Path::new("/store/active-claude"),
             Path::new("/usr/bin/claude"),
+            Path::new("/store/proxy"),
         );
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains("/store/active-claude"), "reads the pointer");
@@ -129,10 +152,36 @@ mod tests {
         assert!(s.contains("exec "), "replaces the process");
     }
 
+    // A running proxy is picked up automatically, and a STALE marker is not: the
+    // pid gate is what keeps a killed proxy from sending claude at a dead port.
+    #[test]
+    fn script_points_claude_at_a_live_proxy_only() {
+        let s = shim_script(
+            Path::new("/store/active-claude"),
+            Path::new("/usr/bin/claude"),
+            Path::new("/store/proxy"),
+        );
+        assert!(s.contains("/store/proxy"), "reads the proxy marker");
+        assert!(
+            s.contains("ANTHROPIC_BASE_URL"),
+            "points claude at the proxy"
+        );
+        assert!(s.contains("kill -0"), "ignores a stale marker");
+        assert!(
+            s.contains("http://127.0.0.1:$port"),
+            "loopback only, port from the marker"
+        );
+    }
+
     #[test]
     fn script_quotes_paths_with_spaces() {
-        let s = shim_script(Path::new("/a b/active-claude"), Path::new("/c d/claude"));
+        let s = shim_script(
+            Path::new("/a b/active-claude"),
+            Path::new("/c d/claude"),
+            Path::new("/e f/proxy"),
+        );
         assert!(s.contains("'/a b/active-claude'"), "pointer is quoted");
+        assert!(s.contains("'/e f/proxy'"), "marker is quoted");
         assert!(s.contains("'/c d/claude'"), "real claude is quoted");
     }
 
@@ -142,7 +191,11 @@ mod tests {
         // a self-reference even if the shim dir is spelled oddly on PATH.
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join("claude");
-        std::fs::write(&shim, shim_script(Path::new("/p"), Path::new("/real"))).unwrap();
+        std::fs::write(
+            &shim,
+            shim_script(Path::new("/p"), Path::new("/real"), Path::new("/m")),
+        )
+        .unwrap();
         assert!(is_our_shim(&shim), "our shim is recognized by its marker");
         let real = dir.path().join("real-claude");
         std::fs::write(&real, "#!/bin/sh\nexec node /opt/claude \"$@\"\n").unwrap();

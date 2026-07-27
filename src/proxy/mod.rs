@@ -65,6 +65,34 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
         .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))
 }
 
+/// Run `f` on SIGINT/SIGTERM, then exit. Used to drop the proxy marker when the
+/// user Ctrl-Cs a foreground proxy. Best-effort: a hard kill still leaves the
+/// marker, which the shim's pid check then ignores.
+fn ctrl_c_cleanup<F: Fn() + Send + Sync + 'static>(f: F) -> Result<()> {
+    use std::sync::OnceLock;
+    static HOOK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+    let boxed: Box<dyn Fn() + Send + Sync> = Box::new(f);
+    if HOOK.set(boxed).is_err() {
+        return Ok(());
+    }
+    extern "C" fn on_signal(sig: libc::c_int) {
+        if let Some(f) = HOOK.get() {
+            f();
+        }
+        // Re-raise with the default handler so the exit status is honest.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    let handler = on_signal as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+    }
+    Ok(())
+}
+
 pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     crate::atomic::ensure_not_root()?;
     // Loopback only: this holds a live credential, so it must never be
@@ -76,8 +104,29 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         .to_ip()
         .ok_or_else(|| anyhow!("proxy did not get a TCP port"))?
         .port();
+    // Announce the proxy so the installed `claude` shim points at it by itself -
+    // "<pid> <port>", pid so a stale marker (killed proxy) is detectable.
+    let marker = crate::shim::proxy_marker(paths);
+    let _ = std::fs::create_dir_all(paths.store_dir());
+    let announced = std::fs::write(&marker, format!("{} {port}\n", std::process::id())).is_ok();
+    if announced {
+        // Ctrl-C is the normal way to stop a foreground proxy, so clean up there
+        // too - otherwise the shim would keep pointing at a dead port until the
+        // pid check catches it.
+        let m = marker.clone();
+        let _ = ctrl_c_cleanup(move || {
+            let _ = std::fs::remove_file(&m);
+        });
+    }
     println!("swapdex proxy listening on http://127.0.0.1:{port}");
-    println!("  point Claude at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}");
+    if announced && crate::shim::shim_path(paths).exists() {
+        println!("  a plain `claude` now goes through it (the shim picks it up)");
+    } else {
+        println!("  point Claude at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}");
+    }
+    if opts.auto {
+        println!("  --auto: a spent account hands the session to another one");
+    }
     std::io::stdout().flush().ok();
 
     let server = Arc::new(server);
