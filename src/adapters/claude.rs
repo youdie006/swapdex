@@ -258,6 +258,40 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
+/// Read a SLOT's Keychain credential blob (macOS). The service name is derived
+/// from the slot's config dir the way Claude Code derives it, so this reads that
+/// account's OWN item rather than the environment-derived one - which is what
+/// lets proxy mode use an account other than the one this shell points at.
+/// `None` off macOS, under SWAPDEX_ROOT, or when the item does not exist.
+pub(crate) fn slot_keychain_read(dir: &std::path::Path) -> Option<Vec<u8>> {
+    if !keychain_enabled() {
+        return None;
+    }
+    let service = format!(
+        "{KEYCHAIN_PREFIX}-{}",
+        &sha256_hex(dir.to_string_lossy().as_bytes())[..8]
+    );
+    let out = std::process::Command::new(SECURITY)
+        .args([
+            "find-generic-password",
+            "-s",
+            &service,
+            "-a",
+            &keychain_account_name(),
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut v = out.stdout;
+    while v.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        v.pop();
+    }
+    (!v.is_empty()).then_some(v)
+}
+
 /// Every Keychain service name starting with the Claude prefix (attribute dump
 /// only - no secret, no prompt). Feeds both the resolution fallback and the
 /// `doctor` diagnostic.
