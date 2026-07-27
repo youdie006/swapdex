@@ -665,12 +665,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     ),
                                 ]));
                             }
+                            // One line per account. The tools line is gone: the
+                            // group heading already says which tool these are, and
+                            // three lines each meant five accounts filled a screen
+                            // - the point of a dashboard is seeing them together.
                             lines.push(Line::from(top));
-                            lines.push(Line::from(Span::styled(
-                                format!("    {}", r.tools),
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                            lines.push(Line::from(""));
                             ListItem::new(lines)
                         })
                         .collect();
@@ -1136,9 +1135,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     .iter()
                                     .enumerate()
                                     .map(|(i, h)| match (*h, i) {
-                                        (true, 0) => 4,  // heading + row
-                                        (true, _) => 5,  // blank + heading + row
-                                        (false, _) => 3, // row
+                                        (true, 0) => 2,  // heading + row
+                                        (true, _) => 3,  // blank + heading + row
+                                        (false, _) => 1, // row
                                     })
                                     .collect();
                                 click_item_index(sel.offset(), m.row, top, &heights)
@@ -1649,6 +1648,14 @@ mod tests {
         // Scrolled: the first visible item is index 1.
         assert_eq!(click_item_index(1, 5, 5, &heights), 1);
         assert_eq!(click_item_index(1, 8, 5, &heights), 2);
+        // The real shape now: 1-line rows, 2 with a heading, 3 when that heading
+        // also carries its blank separator.
+        let real = [2u16, 1, 3, 1];
+        assert_eq!(click_item_index(0, 5, 5, &real), 0, "heading row");
+        assert_eq!(click_item_index(0, 6, 5, &real), 0, "its account line");
+        assert_eq!(click_item_index(0, 7, 5, &real), 1);
+        assert_eq!(click_item_index(0, 10, 5, &real), 2, "second group heading");
+        assert_eq!(click_item_index(0, 11, 5, &real), 3);
         // Past the end clamps to the last item rather than panicking.
         assert_eq!(click_item_index(0, 200, 5, &heights), 2);
     }
