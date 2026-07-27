@@ -125,17 +125,30 @@ fn usage_bar_column(rows: &[Row]) -> usize {
 /// Key hints shown on the Main screen when at least one profile exists. A pure
 /// function so the `r` binding's label is unit-testable (the event loop is not
 /// otherwise seamed for key-dispatch tests).
-fn main_hints() -> &'static [(&'static str, &'static str)] {
+/// Every Main-screen binding, in the order the help panel lists them. The footer
+/// shows only the first few; ten hints crammed into one line made each of them
+/// harder to find than none at all.
+const ALL_KEYS: &[(&str, &str)] = &[
+    ("\u{21b5}", "switch account"),
+    ("o", "open a conversation"),
+    ("r", "previous account"),
+    ("a", "add account"),
+    ("n", "rename"),
+    ("d", "delete"),
+    ("u", "token usage"),
+    ("%", "quota detail"),
+    ("?", "keys + health"),
+    ("q", "quit"),
+];
+
+/// The footer: the handful of keys worth naming there, with `?` as the door to the
+/// rest. Fewer, longer labels read faster than a dense row of single words.
+fn footer_hints() -> &'static [(&'static str, &'static str)] {
     &[
         ("\u{21b5}", "switch"),
         ("o", "open"),
-        ("a", "add"),
-        ("n", "rename"),
-        ("u", "usage"),
-        ("%", "quota"),
         ("r", "previous"),
-        ("d", "delete"),
-        ("?", "health"),
+        ("?", "all keys"),
         ("q", "quit"),
     ]
 }
@@ -192,6 +205,13 @@ pub trait TuiCtx {
     /// test contexts need not implement it.
     fn quota_pct(&mut self) -> Vec<(String, Usage)> {
         Vec::new()
+    }
+    /// Is a `swapdex proxy` running right now? When it is, a switch takes effect
+    /// in the session that is ALREADY open, so Enter has no reason to leave the
+    /// screen to start a new conversation. Default false so test contexts need
+    /// not implement it.
+    fn proxy_running(&mut self) -> bool {
+        false
     }
     /// Is `sessionwiki` installed? When not, the session menu is native and a
     /// one-line hint points at what installing it would add.
@@ -340,7 +360,9 @@ enum Screen {
 /// rather than beside it, so two windows fit on one row and each number is
 /// unambiguously attached to its own bar. Returns the spans to render.
 fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Span<'static>> {
-    let empty_bg = Color::Rgb(58, 56, 70);
+    // The unfilled track sits in the same violet-tinted grey family as the panel
+    // borders, so a bar reads as part of this UI rather than a pasted-in widget.
+    let empty_bg = Color::Rgb(52, 50, 64);
     let Some(pct) = pct else {
         return vec![Span::styled(
             " ".repeat(width),
@@ -373,25 +395,26 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
             head,
             Style::default()
                 .bg(quota_fill(pct))
-                .fg(Color::Rgb(20, 20, 26))
+                .fg(Color::Rgb(24, 20, 34)) // near-black with a violet cast
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            tail,
-            Style::default().bg(empty_bg).fg(Color::Rgb(210, 210, 220)),
-        ),
+        Span::styled(tail, Style::default().bg(empty_bg).fg(DEXGRAY)),
     ]
 }
 
-/// Fill colour by how full the window is - calm green / amber / red (palette
-/// tones, not neon), so a nearly-spent account reads at a glance.
+/// Fill colour: swapdex's own violet, deepening as the window fills, with red
+/// reserved for "about to be spent". A traffic-light green/amber/red would read
+/// as a generic dashboard; this keeps the one brand accent doing the work and
+/// spends a second colour only where it means something.
 fn quota_fill(pct: f64) -> Color {
     if pct >= 90.0 {
-        Color::Rgb(190, 88, 88)
-    } else if pct >= 70.0 {
-        Color::Rgb(196, 148, 84)
+        Color::Rgb(196, 92, 96) // the one warning tone
+    } else if pct >= 65.0 {
+        Color::Rgb(157, 107, 255) // full brand violet - hard to miss
+    } else if pct >= 30.0 {
+        Color::Rgb(124, 92, 196) // brand violet, held back
     } else {
-        Color::Rgb(92, 152, 120)
+        Color::Rgb(88, 74, 138) // quiet: plenty left, nothing to look at
     }
 }
 
@@ -631,7 +654,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     let hints: &[(&str, &str)] = if rows.is_empty() {
                         &[("?", "health"), ("q", "quit")]
                     } else {
-                        main_hints()
+                        footer_hints()
                     };
                     f.render_widget(Paragraph::new(key_hints(hints)), help);
                 }
@@ -791,7 +814,32 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     );
                 }
                 Screen::Doctor { lines, scroll, .. } => {
-                    let text: Vec<Line> = lines
+                    // '?' is the door to the full key list, so name the keys here
+                    // rather than crowding them into the footer.
+                    let mut text: Vec<Line> = vec![Line::from(Span::styled(
+                        "  keys",
+                        Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                    ))];
+                    for chunk in ALL_KEYS.chunks(2) {
+                        let mut spans = vec![Span::raw("  ")];
+                        for (k, label) in chunk {
+                            spans.push(Span::styled(
+                                format!("{k:>2} "),
+                                Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                            ));
+                            spans.push(Span::styled(
+                                format!("{label:<22}"),
+                                Style::default().fg(MUTED),
+                            ));
+                        }
+                        text.push(Line::from(spans));
+                    }
+                    text.push(Line::from(""));
+                    text.push(Line::from(Span::styled(
+                        "  health",
+                        Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
+                    )));
+                    let checks: Vec<Line> = lines
                         .iter()
                         .map(|l| {
                             // Colour the verdict word so problems stand out.
@@ -805,10 +853,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             Line::from(Span::styled(format!("  {l}"), style))
                         })
                         .collect();
+                    text.extend(checks);
                     f.render_widget(
                         Paragraph::new(text)
                             .scroll((*scroll, 0))
-                            .block(list_block(" doctor - health check ")),
+                            .block(list_block(" keys and health ")),
                         main,
                     );
                     f.render_widget(Paragraph::new(""), foot);
@@ -1051,7 +1100,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
-                            if ok {
+                            // With a proxy running the switch lands in the session
+                            // that is already open, so stay here: opening a new
+                            // conversation would be the wrong next step.
+                            if ok && ctx.proxy_running() {
+                                status = format!("{name} now serves the running session (proxy)");
+                            } else if ok {
                                 let (label, entries, tools) = ctx.sessions(&name);
                                 let new_conv = new_conv_for(&tools);
                                 open_state.select(Some(0));
@@ -1097,7 +1151,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
-                            if ok {
+                            // With a proxy running the switch lands in the session
+                            // that is already open, so stay here: opening a new
+                            // conversation would be the wrong next step.
+                            if ok && ctx.proxy_running() {
+                                status = format!("{name} now serves the running session (proxy)");
+                            } else if ok {
                                 let (label, entries, tools) = ctx.sessions(&name);
                                 let new_conv = new_conv_for(&tools);
                                 open_state.select(Some(0));
@@ -1516,16 +1575,24 @@ mod tests {
         // `r` toggles to the previously-used account (`use -`), not `restore`.
         // Restore always returned the pre-switch login, which in hub-and-spoke
         // use is always the one base account - never the account you last used.
-        let hints = main_hints();
         assert!(
-            hints
+            ALL_KEYS
                 .iter()
-                .any(|(k, label)| *k == "r" && *label == "previous"),
-            "the r key should be labeled 'previous'"
+                .any(|(k, label)| *k == "r" && label.starts_with("previous")),
+            "the r key is the previous-account toggle"
         );
         assert!(
-            !hints.iter().any(|(_, label)| *label == "restore"),
-            "'restore' should no longer be a Main-screen key hint"
+            !ALL_KEYS.iter().any(|(_, label)| label.contains("restore")),
+            "'restore' is no longer a Main-screen binding"
         );
+        // The footer names only a few keys - a dense row of ten was unreadable -
+        // and every one it names must exist in the full list.
+        assert!(footer_hints().len() <= 5, "the footer stays short");
+        for (k, _) in footer_hints() {
+            assert!(
+                ALL_KEYS.iter().any(|(ak, _)| ak == k),
+                "footer key {k:?} must be a real binding"
+            );
+        }
     }
 }

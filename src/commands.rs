@@ -2140,6 +2140,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 })
                 .collect()
         }
+        fn proxy_running(&mut self) -> bool {
+            crate::proxy::running_port(self.paths).is_some()
+        }
         fn sessionwiki_present(&mut self) -> bool {
             command_exists("sessionwiki")
         }

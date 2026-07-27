@@ -353,3 +353,15 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
     rq.respond(resp)?;
     Ok(())
 }
+
+/// The port a running `swapdex proxy` announced, or `None` when none is up. The
+/// marker holds "<pid> <port>"; a stale marker (hard-killed proxy) is ignored by
+/// checking the pid, the same rule the shim applies.
+pub fn running_port(paths: &Paths) -> Option<u16> {
+    let raw = std::fs::read_to_string(crate::shim::proxy_marker(paths)).ok()?;
+    let mut it = raw.split_whitespace();
+    let pid: i32 = it.next()?.parse().ok()?;
+    let port: u16 = it.next()?.parse().ok()?;
+    // Signal 0 tests for existence without touching the process.
+    (unsafe { libc::kill(pid, 0) } == 0).then_some(port)
+}
