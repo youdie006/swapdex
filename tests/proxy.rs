@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -595,5 +596,76 @@ fn rotation_skips_disabled_accounts_and_follows_priority() {
     assert!(
         seen.contains(&"Bearer AT-WANTED".to_string()),
         "the ranked account was reached for first: {seen:?}"
+    );
+}
+
+/// A stand-in for curl that answers the usage endpoint: the account whose token
+/// matches is reported near its limit, everyone else comfortably below. `quota`
+/// shells out and reads the body followed by the status code on the last line,
+/// so the fixture matches that shape exactly.
+fn fake_curl(root: &std::path::Path, full_token: &str) -> std::path::PathBuf {
+    let dir = root.join("fakebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("curl");
+    std::fs::write(
+        &f,
+        format!(
+            "#!/bin/sh\ncfg=$(cat)\nif echo \"$cfg\" | grep -q '{full_token}'; then\n\
+             printf '{{\"five_hour\":{{\"utilization\":0.99}}}}\\n200'\n\
+             else\n\
+             printf '{{\"five_hour\":{{\"utilization\":0.04}}}}\\n200'\n\
+             fi\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    f
+}
+
+/// With a threshold set, an account measured at or past it does not get the next
+/// turn at all - the conversation steps across BEFORE anything is refused, so no
+/// turn is ever spent discovering the wall.
+#[test]
+fn a_threshold_steps_off_before_the_account_refuses() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "nearly", "aaaa1111", "AT-NEARLY", true);
+    seed_slot(root.path(), "fresh", "bbbb2222", "AT-FRESH", false);
+    let curl = fake_curl(root.path(), "AT-NEARLY");
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_CURL", &curl)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port = {
+        let out = child.stdout.as_mut().unwrap();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 {
+            if b[0] == b'\n' {
+                break;
+            }
+            line.push(b[0]);
+        }
+        String::from_utf8_lossy(&line)
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .expect("port")
+    };
+
+    post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    child.wait().ok(); // reap it, so the test leaves no zombie behind
+
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-FRESH".to_string()],
+        "the near-limit account never served a turn: it was stepped over"
     );
 }

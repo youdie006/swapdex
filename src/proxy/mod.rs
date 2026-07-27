@@ -18,6 +18,13 @@ use std::sync::{Arc, Mutex};
 /// Everything the request threads share: the upstream client, where upstream is,
 /// the per-account quota state, and the account-choice state. One struct so a
 /// request handler keeps a small signature as the proxy grows.
+/// One account's measured utilization: the 5h and 7d percentages, either of which
+/// may be unmeasured.
+type Utilization = (Option<f64>, Option<f64>);
+
+/// Measured utilization per account, with when the reading was taken.
+type Measured = (Option<std::time::Instant>, HashMap<String, Utilization>);
+
 struct Shared {
     agent: ureq::Agent,
     base: String,
@@ -29,13 +36,20 @@ struct Shared {
     /// Accounts the upstream refused outright (401): not a quota problem, so kept
     /// apart from quota state, but equally out of rotation for this run.
     unusable: Mutex<std::collections::HashSet<String>>,
+    /// Measured utilization per account (5h, 7d percentages) from the zero-spend
+    /// usage endpoint, with when it was read. Only used when a threshold is set.
+    measured: Mutex<Measured>,
 }
 
 pub struct Opts {
     pub port: u16,
     pub account: Option<String>,
-    /// Continue on another account when the current one is spent (Task 6).
+    /// Continue on another account when the current one is spent.
     pub auto: bool,
+    /// Step off an account once a window reaches this fraction (0.98 = 98%),
+    /// BEFORE it refuses a turn. `None` waits for the refusal instead, which costs
+    /// one failed turn per wall. Needs one usage read per account, so it is opt-in.
+    pub threshold: Option<f64>,
 }
 
 /// Headers that must not be forwarded: hop-by-hop, or ones the HTTP client sets
@@ -73,6 +87,27 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
     // still served by that account (rotating mid-turn would drop the prompt cache
     // for nothing), which is why the check belongs here and not there.
     if opts.auto {
+        if let Some(t) = opts.threshold {
+            refresh_measured(&list, sh);
+            let full = sh
+                .measured
+                .lock()
+                .unwrap()
+                .1
+                .get(&chosen.name)
+                .is_some_and(|(a, b)| pick::over_threshold(*a, *b, t));
+            if full {
+                if let Some(better) = usable_under_threshold(paths, sh, &chosen.name, t) {
+                    println!(
+                        "{} is near its limit - starting this turn on {}",
+                        chosen.name, better.name
+                    );
+                    std::io::stdout().flush().ok();
+                    *sh.rotated.lock().unwrap() = Some(better.name.clone());
+                    return Ok(better);
+                }
+            }
+        }
         let known_spent = sh
             .quota
             .lock()
@@ -87,6 +122,70 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
         }
     }
     Ok(chosen)
+}
+
+/// How long a utilization reading is trusted before being taken again. Long
+/// enough that the proxy is not a stream of requests, short enough that a fast
+/// burn is noticed before it hits the wall.
+const MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Read each account's utilization from the zero-spend usage endpoint, at most
+/// once per `MEASURE_EVERY`. This is the same read `swapdex quota` performs, with
+/// each account's own token; it spends no message quota.
+fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Shared) {
+    {
+        let m = sh.measured.lock().unwrap();
+        if m.0.is_some_and(|t| t.elapsed() < MEASURE_EVERY) {
+            return;
+        }
+    }
+    let mut out = HashMap::new();
+    for r in slots {
+        let Some(tok) = creds::slot_token(&r.config_dir) else {
+            continue;
+        };
+        let token = String::from_utf8_lossy(tok.expose()).to_string();
+        if !crate::quota::token_usable(&token) {
+            continue;
+        }
+        if let crate::quota::Fetch::Ok(q) = crate::quota::fetch(&token) {
+            out.insert(
+                r.name.clone(),
+                (
+                    q.five_hour.map(|w| w.used_pct),
+                    q.seven_day.map(|w| w.used_pct),
+                ),
+            );
+        }
+    }
+    let mut m = sh.measured.lock().unwrap();
+    *m = (Some(std::time::Instant::now()), out);
+}
+
+/// An account that is signed in, allowed, and measured BELOW the threshold.
+fn usable_under_threshold(
+    paths: &Paths,
+    sh: &Shared,
+    current: &str,
+    threshold: f64,
+) -> Option<crate::slots::SlotRecord> {
+    let mut slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
+    let cfg = crate::settings::load(paths);
+    slots.sort_by_key(|r| cfg.rank(&r.name));
+    let measured = sh.measured.lock().unwrap();
+    let spent = sh.quota.lock().unwrap();
+    let unusable = sh.unusable.lock().unwrap();
+    slots.into_iter().find(|r| {
+        r.name != current
+            && !cfg.is_disabled(&r.name)
+            && !unusable.contains(&r.name)
+            && !spent.get(&r.name).is_some_and(|q| q.rejected)
+            && !measured
+                .1
+                .get(&r.name)
+                .is_some_and(|(a, b)| pick::over_threshold(*a, *b, threshold))
+            && creds::slot_token(&r.config_dir).is_some()
+    })
 }
 
 /// Run `f` on SIGINT/SIGTERM, then exit. Used to drop the proxy marker when the
@@ -161,6 +260,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         chooser: Mutex::new(pick::Chooser::default()),
         rotated: Mutex::new(None),
         unusable: Mutex::new(std::collections::HashSet::new()),
+        measured: Mutex::new((None, HashMap::new())),
     });
     loop {
         let rq = match server.recv() {
@@ -173,6 +273,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
             port,
             account: opts.account.clone(),
             auto: opts.auto,
+            threshold: opts.threshold,
         };
         std::thread::spawn(move || {
             if let Err(e) = handle(rq, &paths, &opts, &sh) {

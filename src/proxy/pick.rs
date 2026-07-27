@@ -42,6 +42,18 @@ impl Chooser {
     }
 }
 
+/// Is this account too full to start a turn on? A window at or past `threshold`
+/// (a fraction, so 0.98 is 98%) is treated as gone: the next turn would very
+/// likely be the one that hits the wall, and stepping across BEFORE that keeps a
+/// conversation from ever seeing a refusal.
+///
+/// `None` for either window means "not measured", never "empty" - an unmeasured
+/// account must not be skipped on a guess.
+pub fn over_threshold(five_h: Option<f64>, seven_d: Option<f64>, threshold: f64) -> bool {
+    let limit = (threshold * 100.0).clamp(0.0, 100.0);
+    [five_h, seven_d].into_iter().flatten().any(|p| p >= limit)
+}
+
 /// The next account to try after `current` proved spent: the first slot that is
 /// neither `current` nor known-spent. `None` when nothing is left, which the
 /// caller reports rather than silently retrying a dead account.
@@ -153,6 +165,23 @@ mod tests {
             None,
             "every account spent -> nothing to rotate to"
         );
+    }
+
+    #[test]
+    fn over_threshold_only_fires_on_a_measured_window() {
+        // 98%: at or past it counts as gone.
+        assert!(over_threshold(Some(98.0), None, 0.98));
+        assert!(over_threshold(Some(99.5), None, 0.98));
+        assert!(
+            over_threshold(None, Some(100.0), 0.98),
+            "either window can trip it"
+        );
+        assert!(!over_threshold(Some(97.9), Some(50.0), 0.98));
+        // Unmeasured is not empty: an account with no reading is left alone.
+        assert!(!over_threshold(None, None, 0.98));
+        // A threshold of 1.0 means "only when actually full".
+        assert!(!over_threshold(Some(99.0), None, 1.0));
+        assert!(over_threshold(Some(100.0), None, 1.0));
     }
 
     #[test]

@@ -68,6 +68,16 @@ pub fn slot_account_uuid(dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// This slot's connected email, from its `.claude.json` - a label, not a secret.
+pub fn slot_email(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join(".claude.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v["oauthAccount"]["emailAddress"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Pull `claudeAiOauth.accessToken` out of a Claude credential blob.
 fn access_token(bytes: &[u8]) -> Option<Secret> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;

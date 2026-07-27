@@ -1572,6 +1572,7 @@ pub fn proxy(
     auto: bool,
     no_auto: bool,
     ensure: bool,
+    threshold: Option<f64>,
 ) -> Result<i32> {
     if ensure {
         return proxy_ensure(paths, port);
@@ -1584,10 +1585,14 @@ pub fn proxy(
     } else {
         crate::settings::load(paths).auto()
     };
+    // A threshold means "step off before the wall", which needs one usage read per
+    // account; opt-in, so the proxy originates no traffic unless asked.
+    let threshold = threshold.map(|t| t.clamp(0.05, 1.0));
     let opts = crate::proxy::Opts {
         port,
         account,
         auto,
+        threshold,
     };
     crate::proxy::serve(paths, &opts)?;
     Ok(0)
@@ -4118,6 +4123,32 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     email
                 },
                 token: if active { live_token.clone() } else { token },
+                active,
+            });
+        }
+    }
+    // Slot accounts too: they hold their own credential (that is the point of the
+    // model), so a quota list without them omits exactly the accounts the proxy
+    // rotates between. Their token is read from the slot, never copied.
+    if let Ok(slots) = crate::slots::Slots::open(paths) {
+        for r in slots.list() {
+            if rows.iter().any(|x| x.name == r.name) {
+                continue;
+            }
+            let token = crate::proxy::creds::slot_token(&r.config_dir)
+                .map(|t| String::from_utf8_lossy(t.expose()).to_string());
+            let uuid = crate::proxy::creds::slot_account_uuid(&r.config_dir);
+            let active = live_uuid.is_some() && uuid == live_uuid;
+            matched_live |= active;
+            rows.push(Row {
+                label: if active {
+                    format!("{} (active)", r.name)
+                } else {
+                    r.name.clone()
+                },
+                name: r.name.clone(),
+                email: crate::proxy::creds::slot_email(&r.config_dir),
+                token,
                 active,
             });
         }
