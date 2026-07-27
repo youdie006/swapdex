@@ -1654,9 +1654,9 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
     Ok(1)
 }
 
-/// The Claude Code slash command swapdex installs. Kept deliberately small: it
-/// tells Claude to run one swapdex command and report what happened, so switching
-/// accounts does not mean leaving the conversation for another terminal.
+/// The instructions both assistants get. Kept deliberately small: run one swapdex
+/// command and report what happened, so switching accounts does not mean leaving
+/// the conversation for another terminal.
 const SLASH_BODY: &str = "\
 ---
 description: Switch the Claude account serving this session (swapdex)
@@ -1682,26 +1682,62 @@ shim is not taking effect, say so and stop - the switch will not have landed.
 
 /// `slash` - install the Claude Code slash command, so an account switch can be
 /// typed into the conversation instead of another terminal.
+/// The Codex form of the same thing: a skill, with the frontmatter Codex reads.
+fn codex_skill_body() -> String {
+    let steps = SLASH_BODY
+        .split("---\n")
+        .nth(2)
+        .unwrap_or(SLASH_BODY)
+        .trim_start();
+    format!(
+        "---\nname: sx\ndescription: >-\n  Switch the account serving this session (swapdex). Use when the user asks to \
+         change accounts, says an account is out of quota, or types /sx.\n---\n\n{steps}"
+    )
+}
+
+/// `slash` - install the in-conversation switcher for both assistants, so an
+/// account change can be typed where you already are rather than in another
+/// terminal. Claude Code reads `~/.claude/commands`, Codex reads `~/.codex/skills`.
 pub fn install_slash(paths: &Paths) -> Result<i32> {
-    let _ = paths; // the commands dir is Claude's, not swapdex's store
+    let _ = paths; // these dirs belong to the assistants, not swapdex's store
     let Some(home) = dirs::home_dir() else {
         eprintln!("swapdex: cannot find your home directory");
         return Ok(1);
     };
-    let dir = home.join(".claude").join("commands");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("swapdex: cannot create {}: {e}", dir.display());
+    let mut installed = 0;
+
+    let claude_dir = home.join(".claude").join("commands");
+    match std::fs::create_dir_all(&claude_dir)
+        .and_then(|()| std::fs::write(claude_dir.join("sx.md"), SLASH_BODY))
+    {
+        Ok(()) => {
+            println!(
+                "Claude Code: /sx  ({})",
+                crate::util::redact_path(&claude_dir.join("sx.md").display().to_string())
+            );
+            installed += 1;
+        }
+        Err(e) => eprintln!("swapdex: could not install the Claude command: {e}"),
+    }
+
+    let codex_dir = home.join(".codex").join("skills").join("sx");
+    match std::fs::create_dir_all(&codex_dir)
+        .and_then(|()| std::fs::write(codex_dir.join("SKILL.md"), codex_skill_body()))
+    {
+        Ok(()) => {
+            println!(
+                "Codex:       /sx  ({})",
+                crate::util::redact_path(&codex_dir.join("SKILL.md").display().to_string())
+            );
+            installed += 1;
+        }
+        Err(e) => eprintln!("swapdex: could not install the Codex skill: {e}"),
+    }
+
+    if installed == 0 {
         return Ok(1);
     }
-    let file = dir.join("sx.md");
-    if let Err(e) = std::fs::write(&file, SLASH_BODY) {
-        eprintln!("swapdex: cannot write {}: {e}", file.display());
-        return Ok(1);
-    }
-    println!(
-        "installed {} - type `/sx <account>` in Claude Code to switch, or `/sx` to list",
-        crate::util::redact_path(&file.display().to_string())
-    );
+    println!("  type `/sx` to pick an account, or `/sx <name>` to go straight there");
     println!("  (a plain `!swapdex use <account>` works too, without installing anything)");
     Ok(0)
 }
