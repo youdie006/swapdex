@@ -2335,6 +2335,31 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // so judging it by the live login would leave the marker stuck where
             // it was.
             let mut list = list;
+            // Codex accounts live in slots too now, and a dashboard that omits
+            // them manages half the accounts while showing the other half's
+            // superseded copy-model profiles beside them.
+            let codex_pointer = crate::slots::Slots::open_for(self.paths, "codex")
+                .ok()
+                .and_then(|s| s.default_dir());
+            for r in crate::slots::Slots::open_for(self.paths, "codex")
+                .map(|s| s.list())
+                .unwrap_or_default()
+            {
+                list.push(crate::tui::Row {
+                    is_slot: true,
+                    disabled: cfg.is_disabled(&r.name),
+                    needs_login: crate::proxy::codex::slot_auth(&r.config_dir).is_none(),
+                    name: r.name.clone(),
+                    // Codex records the signed-in address inside its id_token; the
+                    // account id is what it authenticates with, and it is what
+                    // distinguishes two rows when both are signed in.
+                    ident: identity_column(codex_slot_email(&r.config_dir), None),
+                    tools: "codex".into(),
+                    active: codex_pointer.as_deref() == Some(r.config_dir.as_path()),
+                    warn: None,
+                    also: Vec::new(),
+                });
+            }
             for (name, dir) in &slot_dirs {
                 if list.iter().any(|r| &r.name == name) {
                     continue;
@@ -2375,8 +2400,20 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 });
             match tool {
                 Some(t) => run_self(&["use", name, "--tool", t]),
-                // A slot account has no store profile; it is Claude by definition.
-                None => run_self(&["use", name, "--tool", "claude-code"]),
+                // A slot account has no store profile, so the registry that holds
+                // it says which tool it is. Guessing Claude here switched nothing
+                // when the row was a Codex account.
+                None => {
+                    let t = ["claude-code", "codex"]
+                        .into_iter()
+                        .find(|t| {
+                            crate::slots::Slots::open_for(self.paths, t)
+                                .map(|s| s.get(name).is_some())
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or("claude-code");
+                    run_self(&["use", name, "--tool", t])
+                }
             }
         }
         fn toggle_rotation(&mut self, name: &str) -> String {
@@ -4577,6 +4614,14 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
     }
     println!("(summed locally from session transcripts; accounts via the switch timeline)");
     Ok(0)
+}
+
+/// The address a Codex home is signed in as - a label for the row, read with the
+/// same decoder the adapter uses, which keeps only the `email` claim.
+fn codex_slot_email(dir: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    adapters::codex::decode_email_from_id_token(v["tokens"]["id_token"].as_str())
 }
 
 /// The config dir of the slot registered under `name`, if there is one.
