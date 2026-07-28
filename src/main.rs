@@ -135,6 +135,9 @@ enum Cmd {
         /// Serve every request from this account instead of the current default
         #[arg(long)]
         account: Option<String>,
+        /// Which tool's traffic to carry (default: claude)
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
         /// Continue the SAME session on another account when one runs out
         /// (default: the `swapdex auto` setting)
         #[arg(long)]
@@ -312,6 +315,7 @@ fn main() {
         Cmd::Proxy {
             port,
             account,
+            tool,
             auto,
             no_auto,
             ensure,
@@ -320,6 +324,7 @@ fn main() {
             &paths,
             *port,
             account.clone(),
+            *tool,
             *auto,
             *no_auto,
             *ensure,

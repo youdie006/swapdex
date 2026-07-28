@@ -1569,10 +1569,12 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
 /// `proxy` - run proxy mode in the foreground. Claude Code pointed at it
 /// (`ANTHROPIC_BASE_URL`) gets its account chosen per request, so a RUNNING
 /// conversation can change accounts without a restart or a resume.
+#[allow(clippy::too_many_arguments)]
 pub fn proxy(
     paths: &Paths,
     port: u16,
     account: Option<String>,
+    sel: Option<ToolSel>,
     auto: bool,
     no_auto: bool,
     ensure: bool,
@@ -1599,6 +1601,7 @@ pub fn proxy(
     let opts = crate::proxy::Opts {
         port,
         account,
+        tool: slot_tool(sel).to_string(),
         auto,
         threshold,
     };

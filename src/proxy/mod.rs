@@ -3,6 +3,7 @@
 //! change accounts. Credentials are read from slots and never copied, and
 //! neither prompt content nor any token value is ever logged.
 
+pub mod codex;
 pub mod creds;
 pub mod identity;
 pub mod pick;
@@ -48,6 +49,10 @@ struct Shared {
 pub struct Opts {
     pub port: u16,
     pub account: Option<String>,
+    /// Which tool's traffic this proxy carries. The two differ in where upstream
+    /// is and in how a turn's account is expressed - Claude puts it in the body,
+    /// Codex in a header pair - but not in anything else the proxy does.
+    pub tool: String,
     /// Continue on another account when the current one is spent.
     pub auto: bool,
     /// Step off an account once a window reaches this fraction (0.98 = 98%),
@@ -70,7 +75,7 @@ fn skip_header(name: &str) -> bool {
 /// REQUEST, which is what lets `swapdex use <name>` (or Enter in the TUI) move a
 /// conversation that is already running.
 fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slots::SlotRecord> {
-    let slots = crate::slots::Slots::open(paths)?;
+    let slots = crate::slots::Slots::open_for(paths, &opts.tool)?;
     if let Some(name) = &opts.account {
         return slots
             .get(name)
@@ -364,7 +369,11 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     let server = Arc::new(server);
     let sh = Arc::new(Shared {
         agent: upstream::agent(),
-        base: upstream::base_url(),
+        base: if opts.tool == "codex" {
+            codex::base_url()
+        } else {
+            upstream::base_url()
+        },
         quota: Mutex::new(HashMap::new()),
         chooser: Mutex::new(pick::Chooser::default()),
         rotated: Mutex::new(None),
@@ -382,6 +391,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         let opts = Opts {
             port,
             account: opts.account.clone(),
+            tool: opts.tool.clone(),
             auto: opts.auto,
             threshold: opts.threshold,
         };
@@ -400,8 +410,28 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
 /// The next account that can serve this turn: signed in, not already tried on
 /// this turn, and not known to be out of quota or refused. `None` when nothing is
 /// left, which the caller reports rather than looping.
+fn next_account_for(
+    paths: &Paths,
+    opts: &Opts,
+    sh: &Shared,
+    tried: &[String],
+) -> Option<crate::slots::SlotRecord> {
+    next_account_in(paths, &opts.tool, sh, tried)
+}
+
 fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::slots::SlotRecord> {
-    let mut slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
+    next_account_in(paths, "claude-code", sh, tried)
+}
+
+fn next_account_in(
+    paths: &Paths,
+    tool: &str,
+    sh: &Shared,
+    tried: &[String],
+) -> Option<crate::slots::SlotRecord> {
+    let mut slots = crate::slots::Slots::open_for(paths, tool)
+        .map(|s| s.list())
+        .ok()?;
     let cfg = crate::settings::load(paths);
     // Explicit order first (a ranked account is one the user said to prefer),
     // then most room left - handing the session to whichever account happened to
@@ -516,7 +546,12 @@ fn forward_turn(
             )
         })
         .collect();
-    let url = format!("{}{}", sh.base, rq.url());
+    let is_codex = opts.tool == "codex";
+    let url = if is_codex {
+        codex::upstream_url(&sh.base, rq.url())
+    } else {
+        format!("{}{}", sh.base, rq.url())
+    };
     let method = rq.method().as_str().to_string();
     let path = rq.url().to_string();
     let mut client_body = Vec::new();
@@ -550,6 +585,54 @@ fn forward_turn(
                 headers.push(("authorization".into(), auth));
             }
             return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+        }
+        // Codex expresses the serving account as a header PAIR - the OAuth
+        // bearer and the account id it belongs to - and sends no account
+        // identity in the body at all, so there is nothing to align there.
+        if is_codex {
+            let Some(auth) = codex::slot_auth(&slot.config_dir) else {
+                println!(
+                    "account '{}' has no usable Codex login - passing your own through \
+                     (`swapdex run {} --tool codex` once signs it in)",
+                    slot.name, slot.name
+                );
+                std::io::stdout().flush().ok();
+                let mut headers = client_headers.clone();
+                if let Some(a) = client_auth.clone() {
+                    headers.push(("authorization".into(), a));
+                }
+                return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+            };
+            let mut headers = client_headers.clone();
+            codex::apply_auth(&mut headers, &auth);
+            let up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
+            println!("  {} {} -> {} [{}]", method, path, up.status, slot.name);
+            std::io::stdout().flush().ok();
+            // A refusal means this account cannot serve the turn. With --auto,
+            // hand the SAME turn to another account rather than returning the
+            // failure - that is the whole point of continuing a session.
+            if (up.status == 429 || up.status == 401) && opts.auto {
+                tried.push(slot.name.clone());
+                if up.status == 401 {
+                    sh.unusable.lock().unwrap().insert(slot.name.clone());
+                } else {
+                    sh.quota
+                        .lock()
+                        .unwrap()
+                        .entry(slot.name.clone())
+                        .or_default()
+                        .rejected = true;
+                }
+                if let Some(next) = next_account_for(paths, opts, sh, &tried) {
+                    println!("  {} is out - continuing on {}", slot.name, next.name);
+                    std::io::stdout().flush().ok();
+                    *sh.rotated.lock().unwrap() = Some(next.name.clone());
+                    note_serving(paths, &next.name);
+                    slot = next;
+                    continue;
+                }
+            }
+            break up;
         }
         let token = match creds::slot_token_detail(&slot.config_dir) {
             Ok(t) => t,

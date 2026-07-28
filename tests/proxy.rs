@@ -965,3 +965,178 @@ fn ensure_replaces_a_proxy_from_an_older_build() {
     child.wait().ok();
     unsafe { libc::kill(new_pid, libc::SIGTERM) };
 }
+
+/// A fake Codex backend: records the Authorization and ChatGPT-Account-ID it was
+/// given, plus the path, then answers. No test ever reaches the real backend.
+fn fake_codex_upstream(sink: Arc<Mutex<Vec<(String, String, String)>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let head = |name: &'static str| {
+                rq.headers()
+                    .iter()
+                    .find(|h| h.field.equiv(name))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default()
+            };
+            let seen = (
+                head("authorization"),
+                head("chatgpt-account-id"),
+                rq.url().to_string(),
+            );
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            sink.lock().unwrap().push(seen);
+            let _ = rq.respond(tiny_http::Response::from_string("{\"ok\":true}"));
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Write a Codex slot holding its own ChatGPT login, and optionally make it the
+/// default Codex account.
+fn seed_codex_slot(
+    root: &std::path::Path,
+    name: &str,
+    id: &str,
+    token: &str,
+    account_id: &str,
+    make_default: bool,
+) {
+    let store = root.join(".local/share/swapdex");
+    let slot = store.join("slots").join(id);
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        slot.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{token}",
+               "refresh_token":"RT","account_id":"{account_id}"}}}}"#
+        ),
+    )
+    .unwrap();
+    let mut recs: Vec<serde_json::Value> = std::fs::read(store.join("slots.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    recs.push(serde_json::json!({
+        "name": name, "id": id, "config_dir": slot, "adopted": false, "tool": "codex"
+    }));
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::to_vec_pretty(&recs).unwrap(),
+    )
+    .unwrap();
+    if make_default {
+        std::fs::write(
+            store.join("active-codex"),
+            slot.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+    }
+}
+
+// Codex sends its own OAuth bearer and ChatGPT-Account-ID on every turn, so
+// changing accounts mid-conversation is a rewrite of that pair - and it has to be
+// BOTH, from the same slot, or the backend refuses the request.
+#[test]
+fn a_running_codex_session_follows_a_pointer_change() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "dddd2222",
+        "AT-HOME",
+        "acct-home",
+        false,
+    );
+    let sink: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM_CODEX", &upstream)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port = {
+        let out = child.stdout.as_mut().unwrap();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 {
+            if b[0] == b'\n' {
+                break;
+            }
+            line.push(b[0]);
+        }
+        let line = String::from_utf8_lossy(&line).to_string();
+        line.rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .unwrap_or_else(|| panic!("codex proxy did not announce a port: {line}"))
+    };
+
+    let post = || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut resp = agent
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            // What Codex itself sends: its own pair, which swapdex replaces.
+            .header("authorization", "Bearer CLIENT-TOKEN")
+            .header("chatgpt-account-id", "acct-client")
+            .header("content-type", "application/json")
+            .send(b"{\"input\":[]}".as_slice())
+            .expect("proxy answered");
+        let mut out = String::new();
+        resp.body_mut()
+            .as_reader()
+            .read_to_string(&mut out)
+            .unwrap();
+        out
+    };
+
+    post();
+    // Mid-conversation, the user switches Codex accounts.
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::write(
+        store.join("active-codex"),
+        store
+            .join("slots")
+            .join("dddd2222")
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    post();
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "both turns reached the backend: {seen:?}");
+    assert_eq!(
+        (seen[0].0.as_str(), seen[0].1.as_str()),
+        ("Bearer AT-WORK", "acct-work"),
+        "the first turn used the default account's own pair, not the client's"
+    );
+    assert_eq!(
+        (seen[1].0.as_str(), seen[1].1.as_str()),
+        ("Bearer AT-HOME", "acct-home"),
+        "the running session moved to the other account, token AND account-id"
+    );
+    assert!(
+        seen[0].2.ends_with("/responses"),
+        "forwarded to the backend's responses path: {:?}",
+        seen[0].2
+    );
+}
