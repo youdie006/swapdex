@@ -394,9 +394,22 @@ pub struct Row {
 }
 
 /// This row's reading, under its own name or under any name it absorbed.
-pub fn usage_for<'a, T>(map: &'a std::collections::HashMap<String, T>, r: &Row) -> Option<&'a T> {
-    map.get(&r.name)
-        .or_else(|| r.also.iter().find_map(|n| map.get(n)))
+///
+/// An entry that carries NUMBERS is preferred over one that carries only a reason
+/// there are none. The merged names are one account with one quota, so a snapshot
+/// whose token expired says nothing about the slot that answered for the same
+/// login - and showing its reason instead of the slot's figures loses the only
+/// real information present.
+pub fn usage_for<'a>(
+    map: &'a std::collections::HashMap<String, Usage>,
+    r: &Row,
+) -> Option<&'a Usage> {
+    let has_numbers = |u: &&Usage| u.five_h.is_some() || u.seven_d.is_some();
+    let names = || std::iter::once(&r.name).chain(r.also.iter());
+    names()
+        .filter_map(|n| map.get(n))
+        .find(has_numbers)
+        .or_else(|| names().find_map(|n| map.get(n)))
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -1983,19 +1996,42 @@ mod tests {
         assert_eq!(out[0].name, "rnd-slot");
         assert_eq!(out[0].also, vec!["rnd".to_string()], "the absorbed name");
 
+        let measured = |pct: f64| Usage {
+            five_h: Some(pct),
+            ..Default::default()
+        };
+        let reason = |why: &str| Usage {
+            note: Some(why.into()),
+            ..Default::default()
+        };
         let mut usage = std::collections::HashMap::new();
-        usage.insert("rnd".to_string(), 42.0);
+        usage.insert("rnd".to_string(), measured(42.0));
         assert_eq!(
-            usage_for(&usage, &out[0]).copied(),
+            usage_for(&usage, &out[0]).and_then(|u| u.five_h),
             Some(42.0),
             "a reading taken for the snapshot belongs to the same account"
         );
-        // The row's own name still wins when both are present.
-        usage.insert("rnd-slot".to_string(), 7.0);
-        assert_eq!(usage_for(&usage, &out[0]).copied(), Some(7.0));
+        // The row's own name wins when both were actually measured.
+        usage.insert("rnd-slot".to_string(), measured(7.0));
+        assert_eq!(usage_for(&usage, &out[0]).and_then(|u| u.five_h), Some(7.0));
+        // But a name that only carries a REASON does not outrank a name that
+        // carries numbers: the account has one quota, and 'the snapshot's token
+        // expired' says nothing about the slot that answered for the same login.
+        usage.insert("rnd-slot".to_string(), reason("saved token expired"));
+        assert_eq!(
+            usage_for(&usage, &out[0]).and_then(|u| u.five_h),
+            Some(42.0),
+            "numbers anywhere beat a reason here"
+        );
+        // With no numbers anywhere, the row's own reason is the one to show.
+        usage.insert("rnd".to_string(), reason("endpoint busy"));
+        assert_eq!(
+            usage_for(&usage, &out[0]).and_then(|u| u.note.clone()),
+            Some("saved token expired".into())
+        );
         // And an account with no reading anywhere stays absent, not zero.
         let lonely = row("other", true);
-        assert_eq!(usage_for(&usage, &lonely), None);
+        assert!(usage_for(&usage, &lonely).is_none());
     }
 
     #[test]

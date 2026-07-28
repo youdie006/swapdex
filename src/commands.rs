@@ -2564,6 +2564,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     u.seven_d = e.seven_d;
                     u.seven_d_reset = e.seven_d_reset;
                     u.observed_at = Some(e.at);
+                    // The age now carries the caveat. Keeping "endpoint busy"
+                    // beside numbers that are right there reads as a complaint
+                    // about figures the user can already see.
+                    u.note = None;
                     continue;
                 }
                 if claude.iter().any(|(n, _)| *n == name) {
