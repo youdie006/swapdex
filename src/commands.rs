@@ -2159,7 +2159,11 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             };
             let active = active_by_tool(&store, self.paths);
             let cfg = crate::settings::load(self.paths);
-            let slot_dirs: std::collections::HashMap<String, std::path::PathBuf> =
+            // A Vec, not a HashMap: the rows are rendered in this order, and a
+            // HashMap iterates differently every run - the list visibly reshuffled
+            // itself on each refresh, so a row could move out from under the
+            // cursor between pressing a key and reading the result.
+            let slot_dirs: Vec<(String, std::path::PathBuf)> =
                 crate::slots::Slots::open(self.paths)
                     .map(|s| {
                         s.list()
@@ -2168,6 +2172,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .collect()
                     })
                     .unwrap_or_default();
+            let slot_dir_of = |name: &str| {
+                slot_dirs
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, d)| d.clone())
+            };
             let list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
@@ -2181,7 +2191,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // A profile that ALSO has a slot switches by pointer, so its
                     // active marker has to follow the pointer too - the live login
                     // does not move, and the marker would sit still after a switch.
-                    let by_pointer = slot_dirs.get(&p.name).map(|d| {
+                    let by_pointer = slot_dir_of(&p.name).map(|d| {
                         crate::slots::Slots::open(self.paths)
                             .ok()
                             .and_then(|s| s.default_dir())
@@ -2192,9 +2202,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         disabled: cfg.is_disabled(&p.name),
                         // A slot with no readable token cannot serve a turn; say so
                         // rather than letting it look ready and fail later.
-                        needs_login: slot_dirs
-                            .get(&p.name)
-                            .is_some_and(|d| crate::proxy::creds::slot_token(d).is_none()),
+                        needs_login: slot_dir_of(&p.name)
+                            .is_some_and(|d| crate::proxy::creds::slot_token(&d).is_none()),
                         name: p.name.clone(),
                         ident: identity_column(email, tier),
                         tools: p
