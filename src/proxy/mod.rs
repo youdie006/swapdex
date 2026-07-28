@@ -280,8 +280,17 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     } else {
         println!("  point Claude at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}");
     }
-    if opts.auto {
-        println!("  --auto: a spent account hands the session to another one");
+    // Say what this proxy will actually do. It is usually started in the
+    // background by the shim, so its settings are otherwise invisible - and a
+    // threshold that silently failed to load looks exactly like one that is
+    // working.
+    match (opts.auto, opts.threshold) {
+        (true, Some(t)) => println!(
+            "  auto: hands the session on at {:.0}% used, or when an account refuses",
+            (t * 100.0).round()
+        ),
+        (true, None) => println!("  auto: hands the session on when an account refuses"),
+        (false, _) => println!("  auto is off - `swapdex auto on` lets it move by itself"),
     }
     std::io::stdout().flush().ok();
 
