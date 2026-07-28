@@ -2199,15 +2199,20 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // A profile that ALSO has a slot switches by pointer, so its
                     // active marker has to follow the pointer too - the live login
                     // does not move, and the marker would sit still after a switch.
-                    // While a proxy is serving Claude turns, exactly one Claude
-                    // account is active - the one serving. Judging the others by
-                    // the live login left a second account marked active next to
-                    // the word "spent". Codex is a different tool and keeps its
-                    // own answer.
+                    // Exactly one Claude account is active, and there is an order
+                    // of authority for which: the proxy actually serving turns,
+                    // else the default pointer (the slot model's answer), else the
+                    // live login. Consulting the live login WHILE a pointer exists
+                    // marked two accounts active at once - the pointed-at one, and
+                    // whatever happened to be signed into the bare config.
+                    // Codex is a different tool and keeps its own answer.
                     let is_claude = p.tools.iter().any(|t| t == "claude-code");
-                    let by_pointer = match (&serving, is_claude) {
-                        (Some(s), true) => Some(s == &p.name),
-                        _ => slot_dir_of(&p.name).map(|d| pointer.as_deref() == Some(d.as_path())),
+                    let by_pointer = match (&serving, &pointer, is_claude) {
+                        (Some(s), _, true) => Some(s == &p.name),
+                        (None, Some(ptr), true) => {
+                            Some(slot_dir_of(&p.name).as_deref() == Some(ptr.as_path()))
+                        }
+                        _ => None,
                     };
                     crate::tui::Row {
                         disabled: cfg.is_disabled(&p.name),
