@@ -3741,16 +3741,34 @@ fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
 
 /// List the permanent slots (name + the config dir each launches into).
 pub fn list_slots(paths: &Paths) -> Result<i32> {
-    let slots = crate::slots::Slots::open(paths)?;
-    let list = slots.list();
-    if list.is_empty() {
+    // Both tools, each under its own heading. Listing only Claude's hid half the
+    // accounts from the command whose whole job is to show them.
+    let mut any = false;
+    for tool in ["claude-code", "codex"] {
+        let list = crate::slots::Slots::open_for(paths, tool)?.list();
+        if list.is_empty() {
+            continue;
+        }
+        let pointer = crate::slots::Slots::open_for(paths, tool)?.default_dir();
+        println!("{tool}:");
+        for r in list {
+            // The default is what a plain launch of that tool will use, which is
+            // the one thing a list of directories cannot otherwise show.
+            let mark = if pointer.as_deref() == Some(r.config_dir.as_path()) {
+                "*"
+            } else {
+                " "
+            };
+            println!("{mark} {}  {}", r.name, r.config_dir.display());
+        }
+        any = true;
+    }
+    if !any {
         println!("No slots yet. Run `swapdex onboard` to set up your accounts,");
         println!("  or launch one directly: swapdex run <name>");
         return Ok(0);
     }
-    for r in list {
-        println!("  {}  {}", r.name, r.config_dir.display());
-    }
+    println!("  (* is the account a plain launch uses)");
     Ok(0)
 }
 
