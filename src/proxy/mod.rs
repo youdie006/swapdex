@@ -82,7 +82,10 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             .ok_or_else(|| anyhow!("no account slot named '{name}' - `swapdex slots` lists them"));
     }
     let list = slots.list();
-    let pointer = slots.default_dir();
+    // Who serves is its own answer when one was given: `swapdex serve <name>`
+    // hands turns to an account without moving where sessions start, so a
+    // conversation keeps living where it began while another account pays.
+    let pointer = slots.serving_dir().or_else(|| slots.default_dir());
     let rotated = sh.rotated.lock().unwrap().clone();
     let chosen = sh
         .chooser

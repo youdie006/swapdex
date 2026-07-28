@@ -3964,6 +3964,116 @@ pub fn whereis(paths: &Paths, project: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
+/// `swapdex resume [project]` - reopen a conversation without first working out
+/// which account owns it.
+///
+/// The stores cannot be merged: Claude writes a conversation into whichever
+/// config dir it was launched with, and that separation is the same property
+/// that stopped accounts logging each other out. What CAN be merged is the
+/// looking - so this searches every account, picks the newest match, and
+/// launches Claude against the store that actually holds it.
+pub fn resume(paths: &Paths, project: Option<&str>) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    // No argument means "this project", which is the common case and saves the
+    // user having to spell out a path they are already standing in.
+    let cwd = std::env::current_dir().ok();
+    let filter = project
+        .map(str::to_string)
+        .or_else(|| cwd.as_ref().map(|d| d.display().to_string()));
+    let found = crate::whereis::find(paths, filter.as_deref(), 5);
+    let Some(top) = found.first() else {
+        match project {
+            Some(p) => {
+                eprintln!("swapdex: no conversation under a path matching '{p}', in any account")
+            }
+            None => eprintln!(
+                "swapdex: no conversation for this directory in any account - \
+                 `swapdex whereis` lists what there is"
+            ),
+        }
+        return Ok(5);
+    };
+    println!(
+        "resuming in '{}' ({})",
+        top.account,
+        crate::util::redact_path(&top.config_dir.display().to_string())
+    );
+    if found.len() > 1 {
+        // Say that a choice was made, and how to make a different one.
+        println!(
+            "  (newest of {} here - `swapdex whereis` lists the rest)",
+            found.len()
+        );
+    }
+    if !command_exists("claude") {
+        eprintln!("swapdex: `claude` isn't on your PATH. Install it, then retry.");
+        return Ok(3);
+    }
+    // Naming the store explicitly is what makes this work from any account: the
+    // shim only fills that variable in when it is unset.
+    let err = std::process::Command::new("claude")
+        .arg("-r")
+        .arg(&top.session_id)
+        .env("CLAUDE_CONFIG_DIR", &top.config_dir)
+        .exec();
+    Err(anyhow::anyhow!("failed to launch claude: {err}"))
+}
+
+/// `swapdex serve [name]` - hand turns to an account without moving where new
+/// sessions start.
+///
+/// This is the operation the whole tool exists for: one place where all your
+/// conversations live, and accounts swapped underneath it as they run out. It is
+/// what a credential-copying switcher gets for free by only ever having one
+/// store - and what swapdex had to separate deliberately, because isolating
+/// accounts is also what isolates their conversations.
+pub fn serve(paths: &Paths, name: Option<&str>, off: bool, sel: Option<ToolSel>) -> Result<i32> {
+    let tool = slot_tool(sel);
+    let bin = tool_binary(tool);
+    let slots = crate::slots::Slots::open_for(paths, tool)?;
+    if off {
+        slots.clear_serving()?;
+        println!("each session pays for itself again ({bin})");
+        return Ok(0);
+    }
+    let Some(name) = name else {
+        match slots.serving_dir() {
+            Some(dir) => {
+                let who = slots
+                    .list()
+                    .into_iter()
+                    .find(|r| r.config_dir == dir)
+                    .map(|r| r.name)
+                    .unwrap_or_else(|| "(unknown)".into());
+                println!("turns are served by '{who}' ({bin})");
+            }
+            None => println!(
+                "no account is directing turns ({bin}) - each session pays for itself\n                   `swapdex serve <name>` hands them to one without moving your conversations"
+            ),
+        }
+        return Ok(0);
+    };
+    if slots.get(name).is_none() {
+        eprintln!("swapdex: no account named '{name}' - `swapdex slots` lists them");
+        return Ok(5);
+    }
+    slots.set_serving(name)?;
+    let live = crate::proxy::running_proxy_for(paths, tool).is_some();
+    println!("turns -> {name}");
+    if live {
+        println!("  the session you have open moves from its next turn");
+    } else {
+        println!(
+            "  takes effect once proxy mode is running: swapdex proxy{}",
+            if tool == "codex" { " --tool codex" } else { "" }
+        );
+    }
+    println!(
+        "  your conversations stay where they are - this changed who pays, not where you work"
+    );
+    Ok(0)
+}
+
 /// List the permanent slots (name + the config dir each launches into).
 pub fn list_slots(paths: &Paths) -> Result<i32> {
     // Both tools, each under its own heading. Listing only Claude's hid half the

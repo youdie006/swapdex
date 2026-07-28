@@ -278,6 +278,53 @@ impl Slots {
         store.join(format!("active-{short}"))
     }
 
+    /// The pointer naming the account that SERVES turns, when that is not simply
+    /// the account you launched in: `<store_dir>/serving-claude`.
+    fn serving_file(&self) -> PathBuf {
+        let mut p = self.pointer_file();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().replace("active-", "serving-"))
+            .unwrap_or_else(|| "serving-claude".into());
+        p.set_file_name(name);
+        p
+    }
+
+    /// Hand turns to `name` WITHOUT moving where new sessions start.
+    ///
+    /// These are two different questions - where a conversation lives, and who
+    /// pays for its turns - and answering both with one pointer is what made a
+    /// user's conversations appear to vanish when they only meant to change who
+    /// was paying.
+    pub fn set_serving(&self, name: &str) -> Result<()> {
+        let rec = self
+            .get(name)
+            .with_context(|| format!("no account named '{name}'"))?;
+        let p = self.serving_file();
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).context("create store dir")?;
+        }
+        std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
+            .with_context(|| format!("write {} serving pointer", self.tool))
+    }
+
+    /// Stop directing turns anywhere in particular: the account a session was
+    /// launched in pays for it, which is what anyone would assume by default.
+    pub fn clear_serving(&self) -> Result<()> {
+        match std::fs::remove_file(self.serving_file()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).context("clear serving pointer"),
+        }
+    }
+
+    /// The slot dir of the account serving turns, if one was named.
+    pub fn serving_dir(&self) -> Option<PathBuf> {
+        let s = std::fs::read_to_string(self.serving_file()).ok()?;
+        let s = s.trim();
+        (!s.is_empty()).then(|| PathBuf::from(s))
+    }
+
     /// Point the default account at `name`'s slot. A plain `claude` (via the
     /// shim) then launches in this slot. No credential is moved.
     pub fn set_default(&self, name: &str) -> Result<()> {
@@ -290,6 +337,9 @@ impl Slots {
         }
         std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
             .with_context(|| format!("write {} pointer", self.tool))?;
+        // Starting somewhere new settles who pays for it too, so the two answers
+        // cannot drift into a combination nobody asked for.
+        self.clear_serving()?;
         Ok(())
     }
 
@@ -429,6 +479,39 @@ mod tests {
     // A slot called `claude` reads as ~/.claude and is not: it points wherever it
     // was made. A real user lost their bearings on exactly that, so the name is
     // refused at the point it would be created rather than explained afterwards.
+    // Two different questions were answered by one pointer: WHERE a new session
+    // starts (which decides the conversations `-r` can offer) and WHO pays for a
+    // turn. A user who only wanted the second got the first as well, and their
+    // conversations appeared to vanish.
+    #[test]
+    fn where_you_start_and_who_serves_are_separate_answers() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = Slots::open(&paths).unwrap();
+        let home = s.create("home").unwrap();
+        let payer = s.create("payer").unwrap();
+
+        s.set_default("home").unwrap();
+        assert_eq!(s.default_dir(), Some(home.config_dir.clone()));
+        // Nothing has been said about who serves, so the account you launch in
+        // pays for its own turns - the behaviour anyone would assume.
+        assert_eq!(s.serving_dir(), None);
+
+        // Hand the turns to another account WITHOUT moving where sessions start.
+        s.set_serving("payer").unwrap();
+        assert_eq!(s.serving_dir(), Some(payer.config_dir.clone()));
+        assert_eq!(
+            s.default_dir(),
+            Some(home.config_dir.clone()),
+            "the conversation store is untouched - this is the whole point"
+        );
+
+        // Moving where you start also settles who pays, so the two cannot drift
+        // into a state nobody asked for.
+        s.set_default("payer").unwrap();
+        assert_eq!(s.serving_dir(), None, "a fresh start pays for itself");
+    }
+
     #[test]
     fn a_name_that_reads_as_a_tools_home_is_refused() {
         let root = tempfile::tempdir().unwrap();

@@ -65,6 +65,18 @@ enum Cmd {
         /// Part of the project path, e.g. Project/ROS (omit to list the newest)
         project: Option<String>,
     },
+
+    /// Hand turns to an account without moving where new sessions start
+    Serve {
+        /// The account to serve turns (omit to show, `--off` to stop directing)
+        name: Option<String>,
+        /// Let each session pay for itself again
+        #[arg(long)]
+        off: bool,
+        /// Which tool (default: claude)
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
+    },
     /// List the permanent account slots
     Slots,
     /// Install the `claude` shim so a plain `claude` follows `swapdex use`
@@ -306,6 +318,7 @@ fn main() {
             args,
         } => commands::run_account(&paths, name, *tool, *no_launch, args),
         Cmd::Whereis { project } => commands::whereis(&paths, project.as_deref()),
+        Cmd::Serve { name, off, tool } => commands::serve(&paths, name.as_deref(), *off, *tool),
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),

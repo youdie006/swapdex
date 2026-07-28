@@ -1374,3 +1374,47 @@ fn a_rejected_codex_login_also_hands_the_turn_on() {
         "the rejected account is tried once, then left alone: {tokens:?}"
     );
 }
+
+// The goal the tool exists for: conversations stay in one place, accounts swap
+// underneath as they run out. `serve` says who pays without moving where
+// sessions start, so a running conversation changes account and its store - and
+// therefore everything `claude -r` can offer - is untouched.
+#[test]
+fn serve_moves_who_pays_without_moving_where_sessions_live() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "home", "aaaa1111", "AT-HOME", true);
+    seed_slot(root.path(), "payer", "bbbb2222", "AT-PAYER", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+
+    post_through(port, "{\"turn\":1}");
+
+    // Hand turns to the other account, the way `swapdex serve payer` does.
+    let store = root.path().join(".local/share/swapdex");
+    let payer_dir = store.join("slots").join("bbbb2222");
+    std::fs::write(
+        store.join("serving-claude"),
+        payer_dir.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(
+        auths(&sink),
+        vec![
+            "Bearer AT-HOME".to_string(),
+            "Bearer AT-PAYER".to_string()
+        ],
+        "the running conversation changed account mid-flight"
+    );
+    // And where sessions start never moved: that pointer is what decides which
+    // conversations exist for `-r`, and nothing touched it.
+    let launch = std::fs::read_to_string(store.join("active-claude")).unwrap();
+    assert!(
+        launch.trim().ends_with("aaaa1111"),
+        "the conversation store is untouched: {launch}"
+    );
+}
