@@ -3645,10 +3645,20 @@ pub fn sync_mcp(paths: &Paths) -> Result<i32> {
 }
 
 /// Register an existing `CLAUDE_CONFIG_DIR` directory as a slot, in place.
-pub fn adopt_slot(paths: &Paths, name: &str, dir: &std::path::Path) -> Result<i32> {
-    let mut slots = crate::slots::Slots::open(paths)?;
+pub fn adopt_slot(
+    paths: &Paths,
+    name: &str,
+    dir: &std::path::Path,
+    sel: Option<ToolSel>,
+) -> Result<i32> {
+    let tool = slot_tool(sel);
+    let mut slots = crate::slots::Slots::open_for(paths, tool)?;
     let rec = slots.adopt(name, dir)?;
-    println!("registered '{}' -> {}", rec.name, rec.config_dir.display());
+    println!(
+        "registered '{}' ({tool}) -> {}",
+        rec.name,
+        rec.config_dir.display()
+    );
     Ok(0)
 }
 

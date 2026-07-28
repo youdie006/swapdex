@@ -68,8 +68,11 @@ enum Cmd {
     Adopt {
         /// Name for the account
         name: String,
-        /// The existing config dir (e.g. ~/.claude-work)
+        /// The existing config dir (e.g. ~/.claude-work, ~/.codex-work)
         dir: std::path::PathBuf,
+        /// Which tool the dir belongs to (default: claude)
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
     },
     /// Give each legacy Claude profile its own permanent slot
     Migrate,
@@ -299,7 +302,7 @@ fn main() {
         } => commands::run_account(&paths, name, *tool, *no_launch, args),
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
-        Cmd::Adopt { name, dir } => commands::adopt_slot(&paths, name, dir),
+        Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),
         Cmd::Migrate => commands::migrate(&paths),
         Cmd::Onboard => commands::onboard(&paths),
         Cmd::SyncMcp => commands::sync_mcp(&paths),
