@@ -148,6 +148,11 @@ enum Cmd {
     },
     /// Install a `/sx` slash command for Claude Code (switch without leaving the chat)
     Slash,
+    /// Step off an account at this much used (e.g. 0.9 or 90%), or `off`
+    Threshold {
+        /// A fraction, a percentage, or `off`; omit to show the current setting
+        value: Option<String>,
+    },
     /// Turn auto-continue (proxy hands a spent session to another account) on/off
     Auto {
         /// `on`, `off`, or omit to show the current setting
@@ -311,6 +316,7 @@ fn main() {
         ),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
         Cmd::Slash => commands::install_slash(&paths),
+        Cmd::Threshold { value } => commands::threshold(&paths, value.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
         Cmd::Quota { json } => commands::quota(&paths, *json),

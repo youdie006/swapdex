@@ -745,3 +745,33 @@ fn slash_installs_a_claude_code_command() {
         .unwrap();
     assert_eq!(std::fs::read_to_string(&f).unwrap(), body);
 }
+
+/// The threshold is a setting, not just a flag: the proxy the shim starts takes
+/// no flags, and that is the one doing the work day to day.
+#[test]
+fn threshold_setting_accepts_both_notations_and_off() {
+    let root = tempfile::tempdir().unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    assert!(
+        run_in(root.path(), &["threshold"], &path).contains("no threshold"),
+        "off until asked for"
+    );
+    // Fractions and percentages are both how people say this.
+    assert!(run_in(root.path(), &["threshold", "0.9"], &path).contains("90%"));
+    assert!(
+        run_in(root.path(), &["threshold"], &path).contains("90%"),
+        "it persists"
+    );
+    assert!(run_in(root.path(), &["threshold", "80%"], &path).contains("80%"));
+    assert!(run_in(root.path(), &["threshold", "95"], &path).contains("95%"));
+    // And it can be turned back off.
+    assert!(run_in(root.path(), &["threshold", "off"], &path).contains("threshold off"));
+    assert!(run_in(root.path(), &["threshold"], &path).contains("no threshold"));
+    // Nonsense is refused rather than guessed at.
+    let out = Command::new(bin())
+        .args(["threshold", "soonish"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

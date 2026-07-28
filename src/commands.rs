@@ -1586,8 +1586,12 @@ pub fn proxy(
         crate::settings::load(paths).auto()
     };
     // A threshold means "step off before the wall", which needs one usage read per
-    // account; opt-in, so the proxy originates no traffic unless asked.
-    let threshold = threshold.map(|t| t.clamp(0.05, 1.0));
+    // account; opt-in, so the proxy originates no traffic unless asked. The flag
+    // is for one run; the setting is what the shim-started proxy sees.
+    let cfg = crate::settings::load(paths);
+    let threshold = threshold
+        .map(|t| t.clamp(0.05, 1.0))
+        .or_else(|| cfg.threshold());
     let opts = crate::proxy::Opts {
         port,
         account,
@@ -1702,6 +1706,54 @@ fn codex_skill_body() -> String {
          quota, or types /swap.\n---\n\n{}",
         slash_body("codex", "Codex")
     )
+}
+
+/// `threshold [<fraction>|off]` - read or set the point at which the proxy steps
+/// off an account. A setting rather than a flag because the proxy the shim starts
+/// takes no flags, and that is the one doing the work day to day.
+pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
+    let mut cfg = crate::settings::load(paths);
+    let Some(value) = value else {
+        match cfg.threshold() {
+            Some(t) => println!(
+                "stepping off an account at {:.0}% used",
+                (t * 100.0).round()
+            ),
+            None => println!(
+                "no threshold - the proxy waits for an account to refuse a turn \
+                 (`swapdex threshold 0.9` steps off earlier)"
+            ),
+        }
+        return Ok(0);
+    };
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
+        cfg.proxy_threshold = None;
+        crate::settings::save(paths, &cfg)?;
+        println!("threshold off - the proxy waits for a refusal before moving");
+        return Ok(0);
+    }
+    // Accept "0.9" and "90%"/"90" alike: both are how people say this.
+    let parsed =
+        v.trim_end_matches('%')
+            .parse::<f64>()
+            .ok()
+            .map(|n| if n > 1.0 { n / 100.0 } else { n });
+    let Some(t) = parsed.filter(|t| *t > 0.0 && *t <= 1.0) else {
+        eprintln!(
+            "swapdex: expected a fraction like 0.9, a percentage like 90%, or `off` - got '{v}'"
+        );
+        return Ok(2);
+    };
+    cfg.proxy_threshold = Some(t);
+    crate::settings::save(paths, &cfg)?;
+    let eff = cfg.threshold().unwrap_or(t);
+    println!(
+        "stepping off an account at {:.0}% used - it hands the session on before \
+         being refused",
+        (eff * 100.0).round()
+    );
+    Ok(0)
 }
 
 /// `slash` - install the in-conversation switcher for both assistants, so an

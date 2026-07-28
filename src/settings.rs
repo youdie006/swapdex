@@ -22,11 +22,22 @@ pub struct Settings {
     /// the automatic order and are tried after the ranked ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub priority: Vec<String>,
+    /// Step off an account once a window reaches this fraction, instead of
+    /// waiting for it to refuse a turn. `None` = wait for the refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_threshold: Option<f64>,
 }
 
 impl Settings {
     pub fn auto(&self) -> bool {
         self.proxy_auto.unwrap_or(false)
+    }
+
+    /// The threshold to step off an account at, if one is set. Clamped to a range
+    /// that means something: below 5% every account looks full, and above 1.0 is
+    /// unreachable.
+    pub fn threshold(&self) -> Option<f64> {
+        self.proxy_threshold.map(|t| t.clamp(0.05, 1.0))
     }
 
     pub fn is_disabled(&self, name: &str) -> bool {
@@ -81,6 +92,34 @@ pub fn save(paths: &Paths, s: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_threshold_persists_and_is_clamped_to_a_meaningful_range() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        assert_eq!(load(&paths).threshold(), None, "off until asked for");
+        save(
+            &paths,
+            &Settings {
+                proxy_threshold: Some(0.9),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(load(&paths).threshold(), Some(0.9));
+        // Nonsense values are pulled back rather than making every account look
+        // full (or the setting unreachable).
+        let low = Settings {
+            proxy_threshold: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(low.threshold(), Some(0.05));
+        let high = Settings {
+            proxy_threshold: Some(5.0),
+            ..Default::default()
+        };
+        assert_eq!(high.threshold(), Some(1.0));
+    }
 
     #[test]
     fn disabled_accounts_toggle_and_persist() {
