@@ -19,8 +19,10 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// The shim script body. Reads the pointer; if a default is set, exec the real
-/// claude with `CLAUDE_CONFIG_DIR`; otherwise exec the real claude unchanged.
+/// The shim script body. The default-account pointer only fills in when nothing
+/// has already chosen a config dir: an explicit `CLAUDE_CONFIG_DIR` (what
+/// `swapdex run <account>` sets, or what a user exports by hand) is a decision
+/// already made, and overriding it meant every account opened as the default one.
 ///
 /// It also gets proxy mode for free: the shim asks `swapdex proxy --ensure`,
 /// which prints the port of a running proxy and starts one in the background if
@@ -39,12 +41,14 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
          \tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
          \texport ANTHROPIC_BASE_URL\n\
          fi\n\
-         dir=$(cat {ptr} 2>/dev/null)\n\
-         if [ -n \"$dir\" ]; then\n\
-         \texec env CLAUDE_CONFIG_DIR=\"$dir\" {real} \"$@\"\n\
-         else\n\
-         \texec {real} \"$@\"\n\
-         fi\n",
+         if [ -z \"$CLAUDE_CONFIG_DIR\" ]; then\n\
+         \tdir=$(cat {ptr} 2>/dev/null)\n\
+         \tif [ -n \"$dir\" ]; then\n\
+         \t\tCLAUDE_CONFIG_DIR=\"$dir\"\n\
+         \t\texport CLAUDE_CONFIG_DIR\n\
+         \tfi\n\
+         fi\n\
+         exec {real} \"$@\"\n",
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_claude),
@@ -231,6 +235,26 @@ mod tests {
 
     // A running proxy is picked up automatically, and a STALE marker is not: the
     // pid gate is what keeps a killed proxy from sending claude at a dead port.
+    // `swapdex run <account>` sets CLAUDE_CONFIG_DIR to that account's slot and
+    // then execs claude - which finds the shim. If the shim overwrote it with the
+    // default pointer (it did), every account opened as the default one, so
+    // signing a second account in was impossible.
+    #[test]
+    fn an_explicit_config_dir_wins_over_the_default_pointer() {
+        let s = shim_script(
+            Path::new("/store/active-claude"),
+            Path::new("/usr/bin/claude"),
+            Path::new("/bin/swapdex"),
+        );
+        assert!(
+            s.contains("if [ -z \"$CLAUDE_CONFIG_DIR\" ]"),
+            "the pointer only fills in when nothing chose a dir: {s}"
+        );
+        // The pointer is still applied when nothing else has.
+        assert!(s.contains("/store/active-claude"), "{s}");
+        assert!(s.contains("CLAUDE_CONFIG_DIR="), "{s}");
+    }
+
     #[test]
     fn script_gets_its_proxy_from_swapdex_and_tolerates_none() {
         let s = shim_script(
