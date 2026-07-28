@@ -4596,6 +4596,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             )),
             Some(t) => {
                 let f = q::fetch_with_retry(t);
+                q::pace_between_accounts();
                 let reached = results.iter().any(|(_, x)| !matches!(x, Fetch::Offline(_)));
                 if !reached {
                     if let Fetch::Offline(msg) = &f {

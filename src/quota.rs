@@ -211,13 +211,21 @@ pub fn token_usable(token: &str) -> bool {
 /// rate-limited. Asking for several accounts in a row trips that regularly, and a
 /// single short pause is enough to get an answer rather than a blank.
 pub fn fetch_with_retry(token: &str) -> Fetch {
-    match fetch(token) {
-        Fetch::Throttled => {
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            fetch(token)
+    // Back off rather than give up: the endpoint throttles a burst of accounts,
+    // and a blank reading is indistinguishable from an account with nothing left.
+    for wait_ms in [400u64, 900, 1800] {
+        match fetch(token) {
+            Fetch::Throttled => std::thread::sleep(std::time::Duration::from_millis(wait_ms)),
+            other => return other,
         }
-        other => other,
     }
+    fetch(token)
+}
+
+/// Space out reads of several accounts. The throttling is per burst, so a small
+/// gap between accounts is what keeps the LAST account from always losing.
+pub fn pace_between_accounts() {
+    std::thread::sleep(std::time::Duration::from_millis(250));
 }
 
 pub fn fetch(token: &str) -> Fetch {

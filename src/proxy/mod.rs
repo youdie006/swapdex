@@ -69,7 +69,7 @@ fn skip_header(name: &str) -> bool {
 /// otherwise the registry and the `active-claude` pointer are re-read PER
 /// REQUEST, which is what lets `swapdex use <name>` (or Enter in the TUI) move a
 /// conversation that is already running.
-fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::SlotRecord> {
+fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slots::SlotRecord> {
     let slots = crate::slots::Slots::open(paths)?;
     if let Some(name) = &opts.account {
         return slots
@@ -165,13 +165,38 @@ const PREEMPT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300
 /// Read each account's utilization from the zero-spend usage endpoint, at most
 /// once per `MEASURE_EVERY`. This is the same read `swapdex quota` performs, with
 /// each account's own token; it spends no message quota.
-fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Shared) {
-    {
-        let m = sh.measured.lock().unwrap();
-        if m.0.is_some_and(|t| t.elapsed() < MEASURE_EVERY) {
-            return;
+fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
+    let first = {
+        let mut m = sh.measured.lock().unwrap();
+        match m.0 {
+            Some(t) if t.elapsed() < MEASURE_EVERY => return,
+            // Claim the slot BEFORE the work starts, so concurrent turns do not
+            // each begin their own read of the same accounts.
+            Some(_) => {
+                m.0 = Some(std::time::Instant::now());
+                false
+            }
+            None => true,
         }
+    };
+    // The FIRST read is worth waiting for: with nothing measured there is nothing
+    // to steer by, and the turn would start on whichever account the pointer
+    // happens to name - which is exactly the near-limit one the threshold exists
+    // to step off. Every LATER read happens off the request path: refreshing means
+    // waiting out the usage endpoint's throttling, which is seconds, and by then
+    // there is a previous reading good enough to choose with.
+    if first {
+        measure_now(slots, sh);
+        return;
     }
+    let slots: Vec<crate::slots::SlotRecord> = slots.to_vec();
+    let sh = Arc::clone(sh);
+    std::thread::spawn(move || measure_now(&slots, &sh));
+}
+
+/// The read itself. Records when it finished, not when it began, so a slow read
+/// is not immediately due again.
+fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
     let mut out = HashMap::new();
     for r in slots {
         let Some(tok) = creds::slot_token(&r.config_dir) else {
@@ -181,6 +206,7 @@ fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         if !crate::quota::token_usable(&token) {
             continue;
         }
+        crate::quota::pace_between_accounts();
         if let crate::quota::Fetch::Ok(q) = crate::quota::fetch_with_retry(&token) {
             out.insert(
                 r.name.clone(),
@@ -419,7 +445,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -> Result<()> {
+fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<()> {
     // The request stays owned here so a failure can still be ANSWERED. Dropping it
     // gives the client a bare "500 (no body)" and the reason - a login that could
     // not be read, usually - stays in a log the user cannot reach.
@@ -467,7 +493,7 @@ fn forward_turn(
     rq: &mut tiny_http::Request,
     paths: &Paths,
     opts: &Opts,
-    sh: &Shared,
+    sh: &Arc<Shared>,
 ) -> Result<upstream::Upstream> {
     // The client's request, read once and reusable: serving the same turn on
     // another account means sending these bytes again with a different token.
