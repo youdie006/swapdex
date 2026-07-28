@@ -178,6 +178,27 @@ fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Shared) {
             );
         }
     }
+    // Say what came back. A threshold that never fires because nothing could be
+    // measured is indistinguishable from one that is working, and this read is
+    // the only thing standing between the two.
+    if out.is_empty() {
+        println!("  (no account's usage could be read - the threshold cannot apply)");
+    } else {
+        let mut parts: Vec<String> = out
+            .iter()
+            .map(|(n, (a, b))| {
+                let worst = [*a, *b].into_iter().flatten().fold(f64::NAN, f64::max);
+                if worst.is_finite() {
+                    format!("{n} {worst:.0}%")
+                } else {
+                    format!("{n} ?")
+                }
+            })
+            .collect();
+        parts.sort();
+        println!("  usage: {}", parts.join(", "));
+    }
+    std::io::stdout().flush().ok();
     let mut m = sh.measured.lock().unwrap();
     *m = (Some(std::time::Instant::now()), out);
 }
