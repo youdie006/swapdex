@@ -318,6 +318,29 @@ fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
     }
 }
 
+/// The row the cursor is on has to be findable at a glance. A bold-only
+/// highlight was nearly invisible - the letters change weight and nothing else -
+/// but painting the whole row would cover the quota bars, whose colour IS their
+/// value. So the fill stops where the bars begin: `upto` is the number of leading
+/// spans (marker, number, glyph, name, identity, status) that may be tinted.
+///
+/// Returns the styled spans, so the caller cannot forget to use the result.
+fn mark_selected(mut spans: Vec<Span<'static>>, upto: usize, selected: bool) -> Vec<Span<'static>> {
+    if !selected {
+        return spans;
+    }
+    for sp in spans.iter_mut().take(upto) {
+        // Keep each span's own colour - the status word stays its status colour -
+        // and add the band behind it.
+        sp.style = sp.style.bg(SELECT_BG).add_modifier(Modifier::BOLD);
+    }
+    spans
+}
+
+/// The band behind the selected row: the page's violet, dark enough that white
+/// text and the status colours all stay legible on it.
+const SELECT_BG: Color = Color::Rgb(48, 42, 78);
+
 /// A note for figures that are a snapshot: "as of 2h ago", so a stale number is
 /// never mistaken for a live one. Empty when the data IS live, or fresh enough
 /// that the distinction does not matter.
@@ -813,9 +836,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // is the heading - so the cursor appeared to sit on the
                             // heading while the selection was really the account.
                             let selected = state.selected() == Some(ri);
+                            // How many leading spans are text rather than gauge
+                            // fill - assigned where the bars are appended, which
+                            // every row does.
+                            let text_cols;
                             let mut top = vec![
                                 Span::styled(
-                                    if selected { "\u{2503} " } else { "  " },
+                                    // A solid half-block, not a thin rule: this is
+                                    // the one mark that says "you are here".
+                                    if selected { "\u{258c} " } else { "  " },
                                     Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
@@ -844,6 +873,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     .as_ref()
                                     .and_then(|q| usage_for(q, r).cloned())
                                     .unwrap_or_default();
+                                // Everything up to here may be tinted; the bars
+                                // themselves carry the reading in their fill.
+                                text_cols = top.len();
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
                                 let inner = (body.width as usize).saturating_sub(4);
@@ -873,6 +905,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     ));
                                 }
                             }
+                            let top = mark_selected(top, text_cols, selected);
                             // One heading per tool, on its first account, so the
                             // Claude accounts and the Codex accounts read as two
                             // groups instead of one undifferentiated list.
@@ -1515,12 +1548,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
-                            // With a proxy running the switch lands in the session
-                            // that is already open, so stay here: opening a new
-                            // conversation would be the wrong next step.
-                            if ok && ctx.proxy_running() {
-                                status = format!("{name} now serves the running session (proxy)");
-                            } else if ok {
+                            // `o` means "open a conversation", and it has to keep
+                            // meaning that: with a proxy running this went straight
+                            // back to the list with a note, so the one way to start
+                            // a new chat disappeared exactly when proxy mode became
+                            // the normal setup. The proxy is worth saying - the
+                            // switch already reached the session you have open -
+                            // but it is a note on the screen, not a reason to skip
+                            // showing it.
+                            if ok {
+                                if ctx.proxy_running() {
+                                    status = format!("{name} also serves the session already open");
+                                }
                                 let (label, entries, tools) = ctx.sessions(&name);
                                 let new_conv = new_conv_for(&tools);
                                 open_state.select(Some(0));
@@ -2226,6 +2265,46 @@ mod tests {
     // could not be read, or has genuinely nothing left. Whatever the reader was
     // told goes in the trailing column, and it outranks the age caveat - a reading
     // that failed has no age worth reporting.
+    // The cursor has to be visible without covering the gauges: the bars carry
+    // their own background, and that background IS the reading.
+    #[test]
+    fn the_selected_row_is_banded_only_up_to_the_bars() {
+        let spans = || {
+            vec![
+                Span::raw("  "),
+                Span::styled("work", Style::default().fg(Color::White)),
+                Span::styled("ready", Style::default().fg(Color::Green)),
+                // A bar span, with the fill colour that means "82% used".
+                Span::styled("  ", Style::default().bg(Color::Rgb(1, 2, 3))),
+            ]
+        };
+        let out = mark_selected(spans(), 3, true);
+        assert!(
+            out[..3].iter().all(|s| s.style.bg == Some(SELECT_BG)),
+            "the row reads as selected across its text columns"
+        );
+        assert!(
+            out[..3]
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "and weight still helps"
+        );
+        assert_eq!(
+            out[1].style.fg,
+            Some(Color::White),
+            "each column keeps its own colour"
+        );
+        assert_eq!(out[2].style.fg, Some(Color::Green), "including the status");
+        assert_eq!(
+            out[3].style.bg,
+            Some(Color::Rgb(1, 2, 3)),
+            "the bar's fill is untouched - it is the number, not decoration"
+        );
+        // An unselected row is returned exactly as it came.
+        let plain = mark_selected(spans(), 3, false);
+        assert!(plain.iter().all(|s| s.style.bg != Some(SELECT_BG)));
+    }
+
     #[test]
     fn a_row_with_no_numbers_says_why() {
         let now = std::time::SystemTime::now()
