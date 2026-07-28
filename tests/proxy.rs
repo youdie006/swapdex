@@ -818,3 +818,67 @@ fn a_turn_still_goes_through_when_every_account_is_refused() {
         auths(&sink)
     );
 }
+
+/// Two accounts either side of the threshold must not trade the session back and
+/// forth: after a pre-emptive move, the next turns stay put until the cooldown
+/// passes. Every hop costs the prompt cache, so a flapping proxy is worse than a
+/// slightly full account.
+#[test]
+fn a_preemptive_move_does_not_flap_between_two_full_accounts() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "first", "aaaa1111", "AT-FIRST", true);
+    seed_slot(root.path(), "second", "bbbb2222", "AT-SECOND", false);
+    // Both accounts read as near their limit, which is exactly the shape that
+    // makes a naive threshold switch oscillate.
+    let dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let curl = dir.join("curl");
+    std::fs::write(
+        &curl,
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"five_hour\":{\"utilization\":0.99}}\\n200'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_CURL", &curl)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port = {
+        let out = child.stdout.as_mut().unwrap();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 {
+            if b[0] == b'\n' {
+                break;
+            }
+            line.push(b[0]);
+        }
+        String::from_utf8_lossy(&line)
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .expect("port")
+    };
+
+    for _ in 0..4 {
+        post_through(port, "{\"t\":1}");
+    }
+    child.kill().ok();
+    child.wait().ok();
+
+    // Whatever it settled on, it must have stayed there: at most one change of
+    // account across four turns.
+    let seen = auths(&sink);
+    let hops = seen.windows(2).filter(|w| w[0] != w[1]).count();
+    assert!(
+        hops <= 1,
+        "the session should not bounce between accounts, saw {hops} changes: {seen:?}"
+    );
+}

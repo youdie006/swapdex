@@ -54,6 +54,39 @@ pub fn over_threshold(five_h: Option<f64>, seven_d: Option<f64>, threshold: f64)
     [five_h, seven_d].into_iter().flatten().any(|p| p >= limit)
 }
 
+/// How much room an account has left: the worst of its measured windows, so an
+/// account with a spent 7d is not called roomy because its 5h happens to be
+/// fresh. `None` when nothing about it has been measured.
+pub fn headroom(five_h: Option<f64>, seven_d: Option<f64>) -> Option<f64> {
+    let worst = [five_h, seven_d]
+        .into_iter()
+        .flatten()
+        .fold(f64::NAN, f64::max);
+    worst.is_finite().then(|| (100.0 - worst).clamp(0.0, 100.0))
+}
+
+/// Order candidates by room left, most first. An explicit rank still wins - the
+/// user saying "prefer this one" outranks a percentage - and unmeasured accounts
+/// come after measured ones rather than being assumed empty or assumed free.
+pub fn by_headroom<'a, T>(
+    items: &mut [T],
+    rank: impl Fn(&T) -> usize,
+    room: impl Fn(&T) -> Option<f64>,
+) where
+    T: 'a,
+{
+    items.sort_by(|a, b| {
+        rank(a).cmp(&rank(b)).then_with(|| {
+            match (room(a), room(b)) {
+                (Some(x), Some(y)) => y.total_cmp(&x), // more room first
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        })
+    });
+}
+
 /// The next account to try after `current` proved spent: the first slot that is
 /// neither `current` nor known-spent. `None` when nothing is left, which the
 /// caller reports rather than silently retrying a dead account.
@@ -164,6 +197,31 @@ mod tests {
             rotate_target("rnd", &slots, &state),
             None,
             "every account spent -> nothing to rotate to"
+        );
+    }
+
+    #[test]
+    fn headroom_is_the_worst_window_not_the_best() {
+        // A spent weekly window means little room, however fresh the 5h is.
+        assert_eq!(headroom(Some(2.0), Some(97.0)), Some(3.0));
+        assert_eq!(headroom(Some(40.0), None), Some(60.0));
+        assert_eq!(headroom(None, None), None, "unmeasured is not empty");
+    }
+
+    #[test]
+    fn candidates_sort_by_room_with_explicit_rank_winning() {
+        // (rank, headroom)
+        let mut v = vec![
+            ("plenty", usize::MAX, Some(90.0)),
+            ("scarce", usize::MAX, Some(5.0)),
+            ("unknown", usize::MAX, None),
+            ("pinned", 0, Some(1.0)),
+        ];
+        by_headroom(&mut v, |t| t.1, |t| t.2);
+        assert_eq!(
+            v.iter().map(|t| t.0).collect::<Vec<_>>(),
+            vec!["pinned", "plenty", "scarce", "unknown"],
+            "a pinned account first, then most room, unmeasured last"
         );
     }
 

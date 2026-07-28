@@ -39,6 +39,10 @@ struct Shared {
     /// Measured utilization per account (5h, 7d percentages) from the zero-spend
     /// usage endpoint, with when it was read. Only used when a threshold is set.
     measured: Mutex<Measured>,
+    /// When the last pre-emptive move happened. Threshold switching without a
+    /// cooldown flip-flops: two accounts hovering either side of the line hand the
+    /// session back and forth, and every hop costs the prompt cache.
+    last_preempt: Mutex<Option<std::time::Instant>>,
 }
 
 pub struct Opts {
@@ -96,7 +100,14 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
                 .1
                 .get(&chosen.name)
                 .is_some_and(|(a, b)| pick::over_threshold(*a, *b, t));
-            if full {
+            // A move made moments ago stands: without this, two accounts either
+            // side of the line trade the session back and forth.
+            let cooling = sh
+                .last_preempt
+                .lock()
+                .unwrap()
+                .is_some_and(|t| t.elapsed() < PREEMPT_COOLDOWN);
+            if full && !cooling {
                 if let Some(better) = usable_under_threshold(paths, sh, &chosen.name, t) {
                     println!(
                         "{} is near its limit - starting this turn on {}",
@@ -104,6 +115,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
                     );
                     std::io::stdout().flush().ok();
                     *sh.rotated.lock().unwrap() = Some(better.name.clone());
+                    *sh.last_preempt.lock().unwrap() = Some(std::time::Instant::now());
                     return Ok(better);
                 }
             }
@@ -131,6 +143,11 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
 /// enough that the proxy is not a stream of requests, short enough that a fast
 /// burn is noticed before it hits the wall.
 const MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a pre-emptive move stands before another can happen. Long enough that
+/// two accounts near the line cannot trade the session between them, short enough
+/// that a genuine second wall is still stepped over.
+const PREEMPT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Read each account's utilization from the zero-spend usage endpoint, at most
 /// once per `MEASURE_EVERY`. This is the same read `swapdex quota` performs, with
@@ -174,10 +191,21 @@ fn usable_under_threshold(
 ) -> Option<crate::slots::SlotRecord> {
     let mut slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
     let cfg = crate::settings::load(paths);
-    slots.sort_by_key(|r| cfg.rank(&r.name));
     let measured = sh.measured.lock().unwrap();
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
+    // Most room first, so the session lands somewhere it can stay - picking the
+    // first eligible account tends to land on one that is nearly full too.
+    pick::by_headroom(
+        &mut slots,
+        |r| cfg.rank(&r.name),
+        |r| {
+            measured
+                .1
+                .get(&r.name)
+                .and_then(|(a, b)| pick::headroom(*a, *b))
+        },
+    );
     slots.into_iter().find(|r| {
         r.name != current
             && !cfg.is_disabled(&r.name)
@@ -264,6 +292,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         rotated: Mutex::new(None),
         unusable: Mutex::new(std::collections::HashSet::new()),
         measured: Mutex::new((None, HashMap::new())),
+        last_preempt: Mutex::new(None),
     });
     loop {
         let rq = match server.recv() {
@@ -296,9 +325,22 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
 fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::slots::SlotRecord> {
     let mut slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
     let cfg = crate::settings::load(paths);
-    // Explicit order first: a ranked account is one the user said to prefer, so
-    // it should be reached for before the automatic order.
-    slots.sort_by_key(|r| cfg.rank(&r.name));
+    // Explicit order first (a ranked account is one the user said to prefer),
+    // then most room left - handing the session to whichever account happened to
+    // be listed next tends to land on one that is nearly spent too.
+    {
+        let measured = sh.measured.lock().unwrap();
+        pick::by_headroom(
+            &mut slots,
+            |r| cfg.rank(&r.name),
+            |r| {
+                measured
+                    .1
+                    .get(&r.name)
+                    .and_then(|(a, b)| pick::headroom(*a, *b))
+            },
+        );
+    }
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
     slots.into_iter().find(|r| {
