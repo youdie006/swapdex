@@ -2273,6 +2273,28 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     .find(|(n, _)| n == name)
                     .map(|(_, d)| d.clone())
             };
+            // Codex switches by pointer now too, so the same authority applies:
+            // once a pointer exists it decides which Codex account is active. The
+            // live login does not move when a pointer does, and consulting it
+            // anyway marked two Codex accounts active at once.
+            let codex_slots: Vec<(String, std::path::PathBuf)> =
+                crate::slots::Slots::open_for(self.paths, "codex")
+                    .map(|s| {
+                        s.list()
+                            .into_iter()
+                            .map(|r| (r.name, r.config_dir))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            let codex_pointer = crate::slots::Slots::open_for(self.paths, "codex")
+                .ok()
+                .and_then(|s| s.default_dir());
+            let codex_dir_of = |name: &str| {
+                codex_slots
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, d)| d.clone())
+            };
             let list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
@@ -2294,12 +2316,18 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // whatever happened to be signed into the bare config.
                     // Codex is a different tool and keeps its own answer.
                     let is_claude = p.tools.iter().any(|t| t == "claude-code");
+                    let is_codex = p.tools.iter().any(|t| t == "codex");
                     let by_pointer = match (&serving, &pointer, is_claude) {
                         (Some(s), _, true) => Some(s == &p.name),
                         (None, Some(ptr), true) => {
                             Some(slot_dir_of(&p.name).as_deref() == Some(ptr.as_path()))
                         }
-                        _ => None,
+                        _ => match (&codex_pointer, is_codex) {
+                            (Some(ptr), true) => {
+                                Some(codex_dir_of(&p.name).as_deref() == Some(ptr.as_path()))
+                            }
+                            _ => None,
+                        },
                     };
                     crate::tui::Row {
                         is_slot: slot_dir_of(&p.name).is_some(),
@@ -2338,13 +2366,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // Codex accounts live in slots too now, and a dashboard that omits
             // them manages half the accounts while showing the other half's
             // superseded copy-model profiles beside them.
-            let codex_pointer = crate::slots::Slots::open_for(self.paths, "codex")
-                .ok()
-                .and_then(|s| s.default_dir());
-            for r in crate::slots::Slots::open_for(self.paths, "codex")
-                .map(|s| s.list())
-                .unwrap_or_default()
-            {
+            for (name, dir) in &codex_slots {
+                let r = crate::slots::SlotRecord {
+                    name: name.clone(),
+                    id: String::new(),
+                    config_dir: dir.clone(),
+                    adopted: false,
+                    tool: "codex".into(),
+                };
                 list.push(crate::tui::Row {
                     is_slot: true,
                     disabled: cfg.is_disabled(&r.name),
