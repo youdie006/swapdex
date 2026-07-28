@@ -3107,6 +3107,77 @@ fn quota_json_reports_accounts_with_clean_names() {
     assert_eq!(accounts[1]["status"], "expired");
 }
 
+/// Register a slot pointing at `dir`, signed in with `token`. A slot holds its
+/// own credential - that is the whole point of the model - and the tool that
+/// owns it refreshes that credential in place.
+fn seed_slot(root: &Path, name: &str, dir: &Path, token: &str, email: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join(".credentials.json"),
+        format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"R"}}}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".claude.json"),
+        format!(r#"{{"oauthAccount":{{"accountUuid":"u-{name}","emailAddress":"{email}"}}}}"#),
+    )
+    .unwrap();
+    let store = root.join(".local/share/swapdex");
+    std::fs::create_dir_all(&store).unwrap();
+    let file = store.join("slots.json");
+    let mut list: Vec<serde_json::Value> = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    list.push(serde_json::json!({
+        "name": name,
+        "id": format!("id-{name}"),
+        "config_dir": dir,
+        "adopted": true,
+    }));
+    std::fs::write(&file, serde_json::to_vec(&list).unwrap()).unwrap();
+}
+
+// A saved profile and a slot can carry the SAME name - the profile is the old
+// copied snapshot, the slot is where that account actually lives now. The
+// snapshot's token dies when the refresh token rotates; the slot's is refreshed
+// in place. Reading the dead one and skipping the live one reported a perfectly
+// healthy account as expired.
+#[test]
+fn a_slot_outranks_a_saved_snapshot_of_the_same_name() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "main", "--tool", "claude"]);
+    // 'backup' exists twice: a rotted snapshot, and a slot holding the live "AT".
+    seed_claude_profile(root.path(), "backup", "uuid-B", "b@x.com", "DEAD-TOKEN");
+    seed_slot(
+        root.path(),
+        "backup",
+        &root.path().join("slot-backup"),
+        "AT",
+        "b@x.com",
+    );
+    let curl = write_fake_curl(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let accounts = v["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2, "one row per account, not two: {v}");
+    let backup = accounts
+        .iter()
+        .find(|a| a["name"] == "backup")
+        .unwrap_or_else(|| panic!("no backup row: {v}"));
+    assert_eq!(
+        backup["status"], "ok",
+        "the slot's live token answered, not the snapshot's dead one: {v}"
+    );
+    assert_eq!(backup["five_hour"]["remaining_pct"], 75.0, "{v}");
+}
+
 // A corrupt/unusable saved token is a PER-ACCOUNT finding; it must not
 // masquerade as "the network is down" and abort the other accounts.
 #[test]

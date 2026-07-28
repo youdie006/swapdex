@@ -4473,6 +4473,16 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The config dir of the slot registered under `name`, if there is one.
+fn slot_dir_named(paths: &Paths, name: &str) -> Option<std::path::PathBuf> {
+    crate::slots::Slots::open(paths)
+        .ok()?
+        .list()
+        .into_iter()
+        .find(|r| r.name == name)
+        .map(|r| r.config_dir)
+}
+
 /// `swapdex quota` - the one opt-in network command. Reads each Claude account's
 /// REMAINING quota from Anthropic's usage endpoint (that account's own token,
 /// read-only, zero message spend). The active account uses its live token; a
@@ -4528,6 +4538,19 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 expired = s
                     .part("credentials")
                     .is_some_and(|c| q::credentials_expired(c.expose(), now_ms()));
+            }
+            // A profile and a slot can carry the same name: the profile is the
+            // old copied snapshot, the slot is where that account lives now.
+            // Only one of the two is alive - the tool refreshes the slot's
+            // credential in place, while nothing refreshes a copy - so the slot
+            // answers for the account and the snapshot is not consulted at all.
+            if let Some(dir) = slot_dir_named(paths, &p.name) {
+                if let Some(t) = crate::proxy::creds::slot_token(&dir) {
+                    token = Some(String::from_utf8_lossy(t.expose()).to_string());
+                    expired = crate::proxy::creds::slot_token_expired(&dir, now_ms());
+                    email = crate::proxy::creds::slot_email(&dir).or(email);
+                    uuid = crate::proxy::creds::slot_account_uuid(&dir).or(uuid);
+                }
             }
             let active = live_uuid.is_some() && uuid == live_uuid;
             matched_live |= active;
