@@ -2199,10 +2199,16 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // A profile that ALSO has a slot switches by pointer, so its
                     // active marker has to follow the pointer too - the live login
                     // does not move, and the marker would sit still after a switch.
-                    let by_pointer = slot_dir_of(&p.name).map(|d| match &serving {
-                        Some(s) => s == &p.name,
-                        None => pointer.as_deref() == Some(d.as_path()),
-                    });
+                    // While a proxy is serving Claude turns, exactly one Claude
+                    // account is active - the one serving. Judging the others by
+                    // the live login left a second account marked active next to
+                    // the word "spent". Codex is a different tool and keeps its
+                    // own answer.
+                    let is_claude = p.tools.iter().any(|t| t == "claude-code");
+                    let by_pointer = match (&serving, is_claude) {
+                        (Some(s), true) => Some(s == &p.name),
+                        _ => slot_dir_of(&p.name).map(|d| pointer.as_deref() == Some(d.as_path())),
+                    };
                     crate::tui::Row {
                         disabled: cfg.is_disabled(&p.name),
                         // A slot with no readable token cannot serve a turn; say so
