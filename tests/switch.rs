@@ -3385,3 +3385,40 @@ fn switching_a_codex_slot_repoints_instead_of_copying() {
         "switching Codex must not move where Claude launches"
     );
 }
+
+// Moving the pointer is not moving a conversation. Without a proxy the change
+// reaches the next launch only, and saying otherwise made an assistant report
+// "this account serves you from the next turn" while the session carried on with
+// the old one.
+#[test]
+fn a_slot_switch_says_whether_anything_running_actually_moved() {
+    use swapdex::commands::switch_outcome_line;
+    let without = switch_outcome_line("claude-code", "work", false);
+    assert!(
+        without.contains("NEXT claude you start"),
+        "says when it applies: {without}"
+    );
+    assert!(
+        without.contains("already open keeps the account"),
+        "and what does NOT change: {without}"
+    );
+    assert!(
+        without.contains("swapdex proxy"),
+        "and the one step that would move it: {without}"
+    );
+    assert!(
+        !without.contains("serves this session"),
+        "never claims the running session moved: {without}"
+    );
+
+    let with = switch_outcome_line("claude-code", "work", true);
+    assert!(
+        with.contains("serves this session from the next turn"),
+        "with a proxy it genuinely does: {with}"
+    );
+
+    // Codex names its own proxy flag, so the fix is copy-pasteable.
+    let codex = switch_outcome_line("codex", "work", false);
+    assert!(codex.contains("NEXT codex you start"), "{codex}");
+    assert!(codex.contains("swapdex proxy --tool codex"), "{codex}");
+}

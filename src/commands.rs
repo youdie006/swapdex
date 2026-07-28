@@ -1731,9 +1731,13 @@ fn slash_body(tool: &str, host: &str) -> String {
          3. Run `swapdex use <the account they chose> --tool {tool}` and report the result in \
          one line.\n\
          \n\
-         With a swapdex proxy running, the switch reaches THIS session: the next turn is \
-         served by the new account, with no new chat and no resume. If the output says the \
-         shim is not taking effect, say so and stop - the switch will not have landed.\n"
+         Report what swapdex printed and nothing beyond it. Its last line says whether \
+         anything running actually moved: with a proxy the next turn of THIS session is \
+         served by the new account, and without one the change reaches only the next \
+         launch while this conversation keeps the account it began with. Do not promise \
+         the stronger of the two - a switch announced as live when it was not is worse \
+         than no switch, because the work continues on the account the user thinks they \
+         left. If the output says the shim is not taking effect, say so and stop.\n"
     )
 }
 
@@ -3457,6 +3461,25 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
 /// the app, so for it swapdex guides the two-step manual path.
 /// Repoint the default account at slot `name` (the `claude` shim follows this).
 /// No credential is moved. Called by `use_account` when the name is a slot.
+/// What a slot switch actually did, said plainly.
+///
+/// Moving the pointer is not the same as moving a conversation. Without a proxy
+/// the change reaches the NEXT launch and nothing that is already running, and
+/// reporting it as "this account now serves you" was simply false - the session
+/// carried on with the old account while the line said otherwise.
+pub fn switch_outcome_line(tool: &str, name: &str, proxy_running: bool) -> String {
+    let bin = tool_binary(tool);
+    if proxy_running {
+        format!("{name} serves this session from the next turn ({bin} proxy is running)")
+    } else {
+        format!(
+            "default {bin} account -> {name}\n               this applies to the NEXT {bin} you start - a session already open keeps the \
+             account it began with. To move a running one, start proxy mode:              `swapdex proxy{}`",
+            if tool == "codex" { " --tool codex" } else { "" }
+        )
+    }
+}
+
 fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Result<i32> {
     let bin = tool_binary(tool);
     if dry_run {
@@ -3465,7 +3488,8 @@ fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Res
     }
     let slots = crate::slots::Slots::open_for(paths, tool)?;
     slots.set_default(name)?;
-    println!("default {bin} account -> {name}");
+    let proxy = crate::proxy::running_proxy_for(paths, tool).is_some();
+    println!("{}", switch_outcome_line(tool, name, proxy));
     // First-time nudge: without the shim, a plain launch won't follow this.
     if !crate::shim::shim_path_for(paths, tool).exists() {
         println!(
