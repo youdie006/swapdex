@@ -705,29 +705,37 @@ fn slash_installs_a_claude_code_command() {
     )
     .into_owned();
     assert!(out.contains("/swap"), "it names the command: {out}");
-    // Codex gets the same switcher, in the shape Codex reads.
-    let skill = home.join(".codex/skills/swap/SKILL.md");
-    let sbody = std::fs::read_to_string(&skill).expect("codex skill written");
+
+    // Each assistant only ever sees - and only ever moves - its OWN accounts.
+    let claude_body = std::fs::read_to_string(home.join(".claude/commands/swap.md"))
+        .expect("claude command written");
+    assert!(claude_body.starts_with("---"), "frontmatter: {claude_body}");
     assert!(
-        sbody.contains("name: swap") && sbody.contains("description:"),
-        "codex frontmatter: {sbody}"
+        claude_body.contains("--tool claude-code") && !claude_body.contains("--tool codex"),
+        "the Claude command switches Claude only: {claude_body}"
     );
     assert!(
-        sbody.contains("swapdex use $ARGUMENTS") && sbody.contains("AskUserQuestion"),
-        "the codex skill carries the same steps: {sbody}"
+        claude_body.contains("tagged `claude-code`"),
+        "and lists Claude accounts only: {claude_body}"
+    );
+
+    let codex_body =
+        std::fs::read_to_string(home.join(".codex/skills/swap/SKILL.md")).expect("codex skill");
+    assert!(
+        codex_body.contains("name: swap") && codex_body.contains("description:"),
+        "codex frontmatter: {codex_body}"
+    );
+    assert!(
+        codex_body.contains("--tool codex") && !codex_body.contains("--tool claude-code"),
+        "the Codex skill switches Codex only: {codex_body}"
+    );
+    assert!(
+        codex_body.contains("AskUserQuestion"),
+        "a bare /swap still offers a pick-list: {codex_body}"
     );
     let f = home.join(".claude/commands/swap.md");
-    let body = std::fs::read_to_string(&f).expect("command file written");
-    assert!(body.starts_with("---"), "it carries frontmatter: {body}");
-    assert!(
-        body.contains("description:"),
-        "the picker needs a description: {body}"
-    );
-    assert!(
-        body.contains("swapdex use $ARGUMENTS"),
-        "with an argument it switches: {body}"
-    );
-    assert!(body.contains("swapdex ls"), "with none it lists: {body}");
+    let body = claude_body;
+
     // Re-running just rewrites it - no duplicate, no error.
     Command::new(bin())
         .args(["slash"])

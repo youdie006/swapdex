@@ -1657,41 +1657,50 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
 /// The instructions both assistants get. Kept deliberately small: run one swapdex
 /// command and report what happened, so switching accounts does not mean leaving
 /// the conversation for another terminal.
-const SLASH_BODY: &str = "\
----
-description: Switch the Claude account serving this session (swapdex)
----
-
-**If arguments were given**, run `swapdex use $ARGUMENTS`, then report the result
-in one line.
-
-**If not**, do not make the user recall account names:
-
-1. Run `swapdex ls` to read the accounts, their identities, and which is active.
-2. Ask the user to choose one with the AskUserQuestion tool, so they can pick with
-   the arrow keys. One option per account, labelled with the account name, with
-   its email and current state as the description. Put the active one first and
-   say it is active. If there are more accounts than the tool allows, offer the
-   ones not currently active and let the rest come from free text.
-3. Run `swapdex use <the account they chose>` and report the result in one line.
-
-With a swapdex proxy running, the switch reaches THIS session: the next turn is
-served by the new account, with no new chat and no resume. If the output says the
-shim is not taking effect, say so and stop - the switch will not have landed.
-";
+/// The switcher's instructions, written for ONE tool. A switcher offered inside
+/// Claude that lists Codex accounts (or switches one) is answering a question
+/// nobody asked - each assistant should only ever see, and only ever move, its
+/// own accounts.
+fn slash_body(tool: &str, host: &str) -> String {
+    format!(
+        "**If arguments were given**, run `swapdex use $ARGUMENTS --tool {tool}`, then \
+         report the result in one line.\n\
+         \n\
+         **If not**, do not make the user recall account names:\n\
+         \n\
+         1. Run `swapdex ls` and keep ONLY the accounts tagged `{tool}` - this is {host}, \
+         so accounts for other tools are not offered and never switched.\n\
+         2. Ask the user to choose one with the AskUserQuestion tool, so they can pick with \
+         the arrow keys. One option per account, labelled with the account name, with its \
+         email and current state as the description. Put the active one first and say it is \
+         active. If there are more accounts than the tool allows, offer the ones not \
+         currently active and let the rest come from free text.\n\
+         3. Run `swapdex use <the account they chose> --tool {tool}` and report the result in \
+         one line.\n\
+         \n\
+         With a swapdex proxy running, the switch reaches THIS session: the next turn is \
+         served by the new account, with no new chat and no resume. If the output says the \
+         shim is not taking effect, say so and stop - the switch will not have landed.\n"
+    )
+}
 
 /// `slash` - install the Claude Code slash command, so an account switch can be
 /// typed into the conversation instead of another terminal.
-/// The Codex form of the same thing: a skill, with the frontmatter Codex reads.
-fn codex_skill_body() -> String {
-    let steps = SLASH_BODY
-        .split("---\n")
-        .nth(2)
-        .unwrap_or(SLASH_BODY)
-        .trim_start();
+/// The Claude Code form: a command file with the frontmatter its picker reads.
+fn claude_command_body() -> String {
     format!(
-        "---\nname: swap\ndescription: >-\n  Switch the account serving this session (swapdex). Use when the user asks to \
-         change accounts, says an account is out of quota, or types /swap.\n---\n\n{steps}"
+        "---\ndescription: Switch the Claude account serving this session (swapdex)\n---\n\n{}",
+        slash_body("claude-code", "Claude Code")
+    )
+}
+
+/// The Codex form: a skill, with the frontmatter Codex reads.
+fn codex_skill_body() -> String {
+    format!(
+        "---\nname: swap\ndescription: >-\n  Switch the Codex account serving this session \
+         (swapdex). Use when the user asks to change accounts, says an account is out of \
+         quota, or types /swap.\n---\n\n{}",
+        slash_body("codex", "Codex")
     )
 }
 
@@ -1708,7 +1717,7 @@ pub fn install_slash(paths: &Paths) -> Result<i32> {
 
     let claude_dir = home.join(".claude").join("commands");
     match std::fs::create_dir_all(&claude_dir)
-        .and_then(|()| std::fs::write(claude_dir.join("swap.md"), SLASH_BODY))
+        .and_then(|()| std::fs::write(claude_dir.join("swap.md"), claude_command_body()))
     {
         Ok(()) => {
             println!(
