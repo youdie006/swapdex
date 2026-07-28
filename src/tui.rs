@@ -152,31 +152,38 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
         // Slots first within the same usability.
         (usable, u8::from(!r.is_slot))
     };
-    // (identity, index of the current winner). The winner takes the FIRST-seen
-    // position, so an account does not jump down the list when its slot logs in.
-    let mut slots: Vec<(Option<String>, usize)> = Vec::new();
+    // (identity, index of the current winner, every member's index). The winner
+    // takes the FIRST-seen position, so an account does not jump down the list
+    // when its slot logs in; the members are kept because the losing rows' names
+    // are still how their usage readings are filed.
+    let mut slots: Vec<(Option<String>, usize, Vec<usize>)> = Vec::new();
     let mut rows = rows;
     for i in 0..rows.len() {
         let k = key(&rows[i]);
         match k.as_ref().and_then(|k| {
             slots
                 .iter()
-                .position(|(s, _)| s.as_deref() == Some(k.as_str()))
+                .position(|(s, _, _)| s.as_deref() == Some(k.as_str()))
         }) {
             Some(pos) => {
                 if rank(&rows[i]) < rank(&rows[slots[pos].1]) {
                     slots[pos].1 = i;
                 }
+                slots[pos].2.push(i);
             }
             // No identity to compare on: never merged away.
-            None => slots.push((k, i)),
+            None => slots.push((k, i, vec![i])),
         }
     }
-    let winners: Vec<usize> = slots.into_iter().map(|(_, i)| i).collect();
-    let mut out = Vec::with_capacity(winners.len());
-    for i in winners {
-        out.push(std::mem::replace(
-            &mut rows[i],
+    let mut out = Vec::with_capacity(slots.len());
+    for (_, winner, members) in slots {
+        let also: Vec<String> = members
+            .iter()
+            .filter(|i| **i != winner)
+            .map(|i| rows[*i].name.clone())
+            .collect();
+        let mut row = std::mem::replace(
+            &mut rows[winner],
             Row {
                 name: String::new(),
                 ident: String::new(),
@@ -186,8 +193,11 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
                 disabled: false,
                 needs_login: false,
                 is_slot: false,
+                also: Vec::new(),
             },
-        ));
+        );
+        row.also = also;
+        out.push(row);
     }
     out
 }
@@ -365,6 +375,16 @@ pub struct Row {
     /// is what the proxy and the active marker follow; switching a snapshot copies
     /// credentials and moves no pointer at all.
     pub is_slot: bool,
+    /// Names of rows merged into this one - the same account saved twice. A usage
+    /// reading is filed under the name it was taken for, which may be one of
+    /// these, so they have to stay reachable after the merge.
+    pub also: Vec<String>,
+}
+
+/// This row's reading, under its own name or under any name it absorbed.
+pub fn usage_for<'a, T>(map: &'a std::collections::HashMap<String, T>, r: &Row) -> Option<&'a T> {
+    map.get(&r.name)
+        .or_else(|| r.also.iter().find_map(|n| map.get(n)))
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -760,7 +780,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             };
                             // Number the rows so an account can be reached by
                             // typing its digit, not only by arrowing to it.
-                            let u_now = quota_pct.as_ref().and_then(|q| q.get(&r.name));
+                            let u_now = quota_pct.as_ref().and_then(|q| usage_for(q, r));
                             let (st, st_color) = account_status(r, u_now);
                             // Draw the selection marker on the ACCOUNT line
                             // ourselves: the widget puts highlight_symbol on an
@@ -797,7 +817,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             {
                                 let u = quota_pct
                                     .as_ref()
-                                    .and_then(|q| q.get(&r.name).copied())
+                                    .and_then(|q| usage_for(q, r).copied())
                                     .unwrap_or_default();
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
@@ -1871,6 +1891,7 @@ mod tests {
             disabled: false,
             needs_login,
             is_slot: false,
+            also: Vec::new(),
         };
         // A snapshot and a slot for the same login: the slot with a login wins.
         let out = dedupe_by_identity(vec![
@@ -1928,6 +1949,43 @@ mod tests {
         );
     }
 
+    // Merging two rows into one hides a name, and usage is filed under whichever
+    // name the reading was taken for. The snapshot 'rnd' and the slot 'rnd-slot'
+    // are one account: a reading taken for either has to reach the surviving row,
+    // or a measured account displays as blank - which reads as "nothing left".
+    #[test]
+    fn a_merged_row_still_finds_usage_filed_under_the_name_it_absorbed() {
+        let row = |name: &str, is_slot: bool| Row {
+            name: name.into(),
+            ident: "rnd@x.co".into(),
+            tools: "claude-code".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            is_slot,
+            also: Vec::new(),
+        };
+        let out = dedupe_by_identity(vec![row("rnd", false), row("rnd-slot", true)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "rnd-slot");
+        assert_eq!(out[0].also, vec!["rnd".to_string()], "the absorbed name");
+
+        let mut usage = std::collections::HashMap::new();
+        usage.insert("rnd".to_string(), 42.0);
+        assert_eq!(
+            usage_for(&usage, &out[0]).copied(),
+            Some(42.0),
+            "a reading taken for the snapshot belongs to the same account"
+        );
+        // The row's own name still wins when both are present.
+        usage.insert("rnd-slot".to_string(), 7.0);
+        assert_eq!(usage_for(&usage, &out[0]).copied(), Some(7.0));
+        // And an account with no reading anywhere stays absent, not zero.
+        let lonely = row("other", true);
+        assert_eq!(usage_for(&usage, &lonely), None);
+    }
+
     #[test]
     fn accounts_group_by_tool_with_one_heading_each() {
         let row = |name: &str, tools: &str| Row {
@@ -1939,6 +1997,7 @@ mod tests {
             disabled: false,
             needs_login: false,
             is_slot: false,
+            also: Vec::new(),
         };
         let sorted = group_sorted(vec![
             row("codex", "codex*"),
@@ -2001,6 +2060,7 @@ mod tests {
             disabled,
             needs_login: false,
             is_slot: false,
+            also: Vec::new(),
         };
         let spent = Usage {
             five_h: Some(100.0),
@@ -2045,6 +2105,7 @@ mod tests {
             disabled: false,
             needs_login: true,
             is_slot: false,
+            also: Vec::new(),
         };
         assert_eq!(account_status(&needs, Some(&fresh)).0, "no login");
         // No quota data is not "spent".
@@ -2132,6 +2193,7 @@ mod tests {
             disabled: false,
             needs_login: false,
             is_slot: false,
+            also: Vec::new(),
         };
         // " N " + dot(2) + name + 2 + ident + 2 + status(8) + 2, using the WIDEST
         // name and identity so every bar starts at the same column.

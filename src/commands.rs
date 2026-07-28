@@ -2305,6 +2305,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .join(", "),
                         active: by_pointer.unwrap_or(!at.is_empty()),
                         warn: marker,
+                        also: Vec::new(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -2331,6 +2332,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         None => pointer.as_deref() == Some(dir.as_path()),
                     },
                     warn: None,
+                    also: Vec::new(),
                 });
             }
             // One row per account (a snapshot and a slot for the same login are
@@ -4608,6 +4610,27 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             }
         }
     }
+
+    // Remember what came back, here where the reading is actually taken - every
+    // caller of this command then benefits, including the dashboard, which cannot
+    // record a reading it never received.
+    let remembered: Vec<(String, crate::quota_cache::Entry)> = results
+        .iter()
+        .filter_map(|(i, f)| match f {
+            Fetch::Ok(qd) => Some((
+                rows[*i].name.clone(),
+                crate::quota_cache::Entry {
+                    five_h: qd.five_hour.map(|w| w.used_pct),
+                    five_h_reset: qd.five_hour.and_then(|w| w.resets_at),
+                    seven_d: qd.seven_day.map(|w| w.used_pct),
+                    seven_d_reset: qd.seven_day.and_then(|w| w.resets_at),
+                    at: now,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    crate::quota_cache::update(paths, &remembered);
 
     if json {
         let accounts: Vec<Value> = results
