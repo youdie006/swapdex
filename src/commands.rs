@@ -2511,8 +2511,23 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     };
                     let (five_h, five_h_reset) = win("five_hour");
                     let (seven_d, seven_d_reset) = win("seven_day");
-                    // Nothing to draw when the endpoint reported neither window.
-                    if five_h.is_none() && seven_d.is_none() {
+                    // No numbers is still worth a row: empty tracks alone cannot
+                    // say whether the account was never asked, could not answer,
+                    // or has nothing left, and that ambiguity is exactly what
+                    // makes a healthy account look broken. Carry the reason.
+                    let note = match acc.get("status").and_then(|s| s.as_str()) {
+                        Some("ok") | None => None,
+                        Some("throttled") => Some("endpoint busy - retrying".to_string()),
+                        Some("expired") => Some("login expired".to_string()),
+                        Some("offline") => acc
+                            .get("detail")
+                            .and_then(|d| d.as_str())
+                            // The long-form fix belongs in `swapdex quota`; the
+                            // row has one column, so keep the first clause.
+                            .map(|d| d.split(" - ").next().unwrap_or(d).to_string()),
+                        Some(other) => Some(other.to_string()),
+                    };
+                    if five_h.is_none() && seven_d.is_none() && note.is_none() {
                         return None;
                     }
                     Some((
@@ -2524,32 +2539,33 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             seven_d_reset,
                             // A live read has no age to disclose.
                             observed_at: None,
+                            note,
                         },
                     ))
                 })
                 .collect();
-            // Keep what was read, and fill the gaps from what was read before.
-            // The usage endpoint rate-limits when several accounts are asked in a
-            // row, and an account that could not be read this minute is not an
-            // account with no quota - blanking it looks exactly like a broken one.
-            let now = now_secs() as i64;
-            let fresh: Vec<(String, crate::quota_cache::Entry)> = claude
-                .iter()
-                .map(|(n, u)| {
-                    (
-                        n.clone(),
-                        crate::quota_cache::Entry {
-                            five_h: u.five_h,
-                            five_h_reset: u.five_h_reset,
-                            seven_d: u.seven_d,
-                            seven_d_reset: u.seven_d_reset,
-                            at: now,
-                        },
-                    )
-                })
-                .collect();
-            crate::quota_cache::update(self.paths, &fresh);
+            // Fill the gaps from what was read before. The usage endpoint
+            // rate-limits when several accounts are asked in a row, and an account
+            // that could not be read this minute is not an account with no quota -
+            // blanking it looks exactly like a broken one. The reading is recorded
+            // by `quota` itself, where it is taken; a run that got nothing has
+            // nothing to record and must not overwrite what it failed to refresh.
             for (name, e) in crate::quota_cache::load(self.paths) {
+                // An account read THIS refresh keeps its live numbers. One that
+                // only carries a reason - busy, expired - takes the remembered
+                // numbers instead: an old figure beats an empty track, as long as
+                // it is shown with its age.
+                if let Some((_, u)) = claude
+                    .iter_mut()
+                    .find(|(n, u)| *n == name && u.five_h.is_none() && u.seven_d.is_none())
+                {
+                    u.five_h = e.five_h;
+                    u.five_h_reset = e.five_h_reset;
+                    u.seven_d = e.seven_d;
+                    u.seven_d_reset = e.seven_d_reset;
+                    u.observed_at = Some(e.at);
+                    continue;
+                }
                 if claude.iter().any(|(n, _)| *n == name) {
                     continue;
                 }
@@ -2563,6 +2579,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         // Shown with its age, so a remembered number is never
                         // mistaken for a live one.
                         observed_at: Some(e.at),
+                        note: None,
                     },
                 ));
             }

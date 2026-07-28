@@ -348,7 +348,7 @@ fn hint_rows() -> (&'static [KeyHint], &'static [KeyHint]) {
 
 /// One account's quota picture: session (5h) and weekly (7d) utilization with
 /// their reset countdowns. `None` for a window the endpoint did not report.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Usage {
     pub five_h: Option<f64>,
     pub five_h_reset: Option<i64>,
@@ -358,6 +358,18 @@ pub struct Usage {
     /// endpoint to ask): unix seconds when they were recorded. `None` means the
     /// numbers are current as of this refresh.
     pub observed_at: Option<i64>,
+    /// Why there are no numbers, when there are none. Empty tracks alone cannot
+    /// distinguish "never read" from "could not be read" from "nothing left".
+    pub note: Option<String>,
+}
+
+/// The trailing column for a row's figures: the reason there are none if there
+/// is one, else how old they are.
+fn trailing_note(u: &Usage) -> String {
+    match &u.note {
+        Some(n) if !n.is_empty() => n.clone(),
+        _ => observed_note(u.observed_at),
+    }
 }
 
 pub struct Row {
@@ -817,7 +829,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             {
                                 let u = quota_pct
                                     .as_ref()
-                                    .and_then(|q| usage_for(q, r).copied())
+                                    .and_then(|q| usage_for(q, r).cloned())
                                     .unwrap_or_default();
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
@@ -840,7 +852,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
                                 // Snapshot figures say when they were taken, so an
                                 // old number is never read as a current one.
-                                let note = observed_note(u.observed_at);
+                                let note = trailing_note(&u);
                                 if !note.is_empty() {
                                     top.push(Span::styled(
                                         format!("  {note}"),
@@ -2171,6 +2183,38 @@ mod tests {
         );
         assert_eq!(observed_note(Some(now - 2 * 3600)), "as of 2h");
         assert_eq!(observed_note(Some(now - 3 * 86400)), "as of 3d");
+    }
+
+    // An account with no bars is the one thing the dashboard cannot explain by
+    // drawing: empty tracks look identical whether the account was never read,
+    // could not be read, or has genuinely nothing left. Whatever the reader was
+    // told goes in the trailing column, and it outranks the age caveat - a reading
+    // that failed has no age worth reporting.
+    #[test]
+    fn a_row_with_no_numbers_says_why() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let u = |note: Option<&str>, observed: Option<i64>| Usage {
+            five_h: None,
+            five_h_reset: None,
+            seven_d: None,
+            seven_d_reset: None,
+            observed_at: observed,
+            note: note.map(str::to_string),
+        };
+        assert_eq!(
+            trailing_note(&u(Some("token expired"), None)),
+            "token expired"
+        );
+        assert_eq!(
+            trailing_note(&u(Some("endpoint busy"), Some(now - 3 * 3600))),
+            "endpoint busy",
+            "the reason outranks the age"
+        );
+        assert_eq!(trailing_note(&u(None, Some(now - 2 * 3600))), "as of 2h");
+        assert_eq!(trailing_note(&u(None, None)), "");
     }
 
     #[test]
