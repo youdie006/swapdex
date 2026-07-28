@@ -2178,6 +2178,16 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .filter(|(_, n)| n == &p.name)
                         .map(|(t, _)| *t)
                         .collect();
+                    // A profile that ALSO has a slot switches by pointer, so its
+                    // active marker has to follow the pointer too - the live login
+                    // does not move, and the marker would sit still after a switch.
+                    let by_pointer = slot_dirs.get(&p.name).map(|d| {
+                        crate::slots::Slots::open(self.paths)
+                            .ok()
+                            .and_then(|s| s.default_dir())
+                            .as_deref()
+                            == Some(d.as_path())
+                    });
                     crate::tui::Row {
                         disabled: cfg.is_disabled(&p.name),
                         // A slot with no readable token cannot serve a turn; say so
@@ -2199,11 +2209,35 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             })
                             .collect::<Vec<_>>()
                             .join(", "),
-                        active: !at.is_empty(),
+                        active: by_pointer.unwrap_or(!at.is_empty()),
                         warn: marker,
                     }
                 })
                 .collect::<Vec<_>>();
+            // Slot accounts too. They are what proxy mode rotates between, so a
+            // list without them manages everything except what actually serves the
+            // turns. A slot counts as ACTIVE when the default pointer names it:
+            // switching a slot moves that pointer and never touches a live login,
+            // so judging it by the live login would leave the marker stuck where
+            // it was.
+            let pointer = crate::slots::Slots::open(self.paths)
+                .ok()
+                .and_then(|s| s.default_dir());
+            let mut list = list;
+            for (name, dir) in &slot_dirs {
+                if list.iter().any(|r| &r.name == name) {
+                    continue;
+                }
+                list.push(crate::tui::Row {
+                    disabled: cfg.is_disabled(name),
+                    needs_login: crate::proxy::creds::slot_token(dir).is_none(),
+                    name: name.clone(),
+                    ident: identity_column(crate::proxy::creds::slot_email(dir), None),
+                    tools: "claude-code".into(),
+                    active: pointer.as_deref() == Some(dir.as_path()),
+                    warn: None,
+                });
+            }
             // Group the list by tool so the Claude accounts and the Codex
             // accounts read as two sections rather than one mixed list.
             crate::tui::group_sorted(list)
