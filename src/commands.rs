@@ -3472,11 +3472,15 @@ pub fn switch_outcome_line(tool: &str, name: &str, proxy_running: bool) -> Strin
     if proxy_running {
         format!("{name} serves this session from the next turn ({bin} proxy is running)")
     } else {
-        format!(
-            "default {bin} account -> {name}\n               this applies to the NEXT {bin} you start - a session already open keeps the \
-             account it began with. To move a running one, start proxy mode:              `swapdex proxy{}`",
-            if tool == "codex" { " --tool codex" } else { "" }
-        )
+        let flag = if tool == "codex" { " --tool codex" } else { "" };
+        let mut out = format!("default {bin} account -> {name}\n");
+        out.push_str(&format!(
+            "  this applies to the NEXT {bin} you start; a session already open keeps the account it began with\n"
+        ));
+        out.push_str(&format!(
+            "  to move one that is already running: swapdex proxy{flag}"
+        ));
+        out
     }
 }
 
