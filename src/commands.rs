@@ -40,17 +40,15 @@ fn command_exists(cmd: &str) -> bool {
     std::env::split_paths(&path).any(|dir| is_executable(&dir.join(cmd)))
 }
 
+#[cfg(unix)]
 fn is_executable(p: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        return std::fs::metadata(p)
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    }
-    #[cfg(not(unix))]
-    {
-        p.is_file()
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &std::path::Path) -> bool {
+    p.is_file()
 }
 
 /// Which tool a `--tool` value targets. A clap `ValueEnum`, so an unknown or
