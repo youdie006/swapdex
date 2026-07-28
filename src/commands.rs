@@ -3115,6 +3115,35 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     );
                 }
             }
+            // A slot named after a tool cannot be refused after the fact, but it
+            // can be named: it reads as that tool's home and points elsewhere.
+            {
+                let colliding: Vec<String> = crate::slots::Slots::open_for(paths, "claude-code")
+                    .map(|s| s.list())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(
+                        crate::slots::Slots::open_for(paths, "codex")
+                            .map(|s| s.list())
+                            .unwrap_or_default(),
+                    )
+                    .filter(|r| crate::slots::name_reads_as_a_tool_home(&r.name))
+                    .map(|r| r.name)
+                    .collect();
+                if !colliding.is_empty() {
+                    report(
+                        "account names",
+                        false,
+                        format!(
+                            "account '{}' reads as the tool's own home directory but points \
+                             somewhere else - rename it so the two are not confused: \
+                             `swapdex rename {} <name>` (the folder and login are untouched)",
+                            colliding.join("', '"),
+                            colliding[0]
+                        ),
+                    );
+                }
+            }
             // Shim ENGAGEMENT, not mere existence: an installed shim that PATH
             // never reaches looks set up while a plain `claude` still runs
             // bare - `swapdex use` flips the pointer and nothing reads it.
@@ -3714,9 +3743,23 @@ pub fn migrate(paths: &Paths) -> Result<i32> {
         if slots.get(&p.name).is_some() {
             continue;
         }
-        if let Ok(rec) = slots.create(&p.name) {
+        // A profile named after the tool would become a slot named after the
+        // tool, which reads as the tool's own home and is not. This is where
+        // that collision was minted, so this is where it stops.
+        let taken: Vec<String> = slots.list().into_iter().map(|r| r.name).collect();
+        let name = if crate::slots::name_reads_as_a_tool_home(&p.name) {
+            let safe = crate::slots::suggest_non_colliding(&p.name, &taken);
+            println!(
+                "  '{}' would read as the tool's own home, so its slot is named '{safe}'",
+                p.name
+            );
+            safe
+        } else {
+            p.name.clone()
+        };
+        if let Ok(rec) = slots.create(&name) {
             crate::slots::link_shared_config(&rec.config_dir, paths.claude_dir(), "claude-code");
-            created.push(p.name.clone());
+            created.push(name);
         }
     }
     if created.is_empty() {

@@ -53,6 +53,33 @@ pub fn home_var(tool: &str) -> Option<&'static str> {
     }
 }
 
+/// Names that read as a tool's own home rather than as an account.
+///
+/// A slot called `claude` looks like it points at `~/.claude`. It does not - it
+/// points wherever that slot was made, which for a migrated profile is a fresh
+/// directory inside swapdex's own store. That misreading cost a real user their
+/// bearings: they went looking for conversations in the account named `claude`
+/// and the ones they wanted were in `~/.claude`, a different account entirely.
+pub fn name_reads_as_a_tool_home(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "claude" | "claude-code" | "codex" | "gemini" | "antigravity" | ".claude" | ".codex"
+    )
+}
+
+/// A name that will not be mistaken for a tool's home, built from one that is.
+pub fn suggest_non_colliding(name: &str, taken: &[String]) -> String {
+    let base = format!("{}-account", name.trim().to_ascii_lowercase());
+    if !taken.iter().any(|t| t == &base) {
+        return base;
+    }
+    (2..)
+        .map(|i| format!("{base}{i}"))
+        .find(|c| !taken.iter().any(|t| t == c))
+        .unwrap_or(base)
+}
+
 /// 16 hex chars of sha256(name + a monotonic-ish nanosecond stamp) - opaque and
 /// stable once created. Not derived from the name alone, so a rename is free.
 fn new_id(name: &str) -> String {
@@ -69,6 +96,20 @@ fn new_id(name: &str) -> String {
         .take(8)
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Refuse a name that reads as a tool's own home, naming one that does not.
+fn reject_tool_home_name(name: &str) -> Result<()> {
+    if name_reads_as_a_tool_home(name) {
+        bail!(
+            "'{name}' reads as the tool's own home directory, not as an account - \
+             a slot by that name points wherever it was made, which is somewhere else \
+             entirely. Pick something that names the ACCOUNT (its owner, its purpose): \
+             e.g. '{}'",
+            suggest_non_colliding(name, &[])
+        );
+    }
+    Ok(())
 }
 
 impl Slots {
@@ -114,6 +155,7 @@ impl Slots {
         if self.records.iter().any(|r| r.name == name) {
             bail!("a slot named '{name}' already exists");
         }
+        reject_tool_home_name(name)?;
         let id = new_id(name);
         let config_dir = self.slots_dir.join(&id);
         std::fs::create_dir_all(&config_dir).context("create slot dir")?;
@@ -140,6 +182,8 @@ impl Slots {
         if self.records.iter().any(|r| r.name == new) {
             bail!("an account named '{new}' already exists");
         }
+        // Renaming INTO the confusing name is the same mistake as creating it.
+        reject_tool_home_name(new)?;
         let Some(r) = self.records.iter_mut().find(|r| r.name == old) else {
             return Ok(false);
         };
@@ -198,6 +242,7 @@ impl Slots {
         if self.records.iter().any(|r| r.name == name) {
             bail!("a slot named '{name}' already exists");
         }
+        reject_tool_home_name(name)?;
         if !config_dir.is_absolute() {
             bail!("config dir must be an absolute path");
         }
@@ -379,6 +424,58 @@ mod tests {
         // does not silently unset the user's default account.
         c.set_default("old").unwrap();
         assert!(paths.store_dir().join("active-claude").exists());
+    }
+
+    // A slot called `claude` reads as ~/.claude and is not: it points wherever it
+    // was made. A real user lost their bearings on exactly that, so the name is
+    // refused at the point it would be created rather than explained afterwards.
+    #[test]
+    fn a_name_that_reads_as_a_tools_home_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = Slots::open(&paths).unwrap();
+        for bad in ["claude", "Claude", "codex", "claude-code", ".claude"] {
+            let e = s.create(bad).expect_err("refused");
+            let msg = e.to_string();
+            assert!(msg.contains("reads as the tool's own home"), "{msg}");
+            assert!(msg.contains("-account"), "it names a usable one: {msg}");
+        }
+        // Adoption is the same decision, so it refuses the same names.
+        let dir = root.path().join("some-home");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(s.adopt("codex", &dir).is_err());
+        // Anything that names the ACCOUNT is fine, including a name that merely
+        // contains a tool's name.
+        assert!(s.create("claude-personal").is_ok());
+        assert!(s.create("work").is_ok());
+        // And renaming INTO one is refused too - it is the same mistake, later.
+        assert!(s.rename("work", "codex").is_err());
+        // Renaming a slot that already HAS such a name out of it must work, or
+        // an existing install could never be fixed.
+        s.records.push(SlotRecord {
+            name: "claude".into(),
+            id: "legacy".into(),
+            config_dir: root.path().join("legacy"),
+            adopted: true,
+            tool: "claude-code".into(),
+        });
+        assert!(
+            s.rename("claude", "youdie006").unwrap(),
+            "the way out works"
+        );
+    }
+
+    #[test]
+    fn a_suggested_name_steps_around_what_is_taken() {
+        assert_eq!(suggest_non_colliding("claude", &[]), "claude-account");
+        assert_eq!(
+            suggest_non_colliding("claude", &["claude-account".into()]),
+            "claude-account2"
+        );
+        assert_eq!(
+            suggest_non_colliding("Codex", &["codex-account".into(), "codex-account2".into()]),
+            "codex-account3"
+        );
     }
 
     #[test]
