@@ -761,3 +761,60 @@ fn an_expired_slot_token_never_reaches_upstream() {
     );
     assert_eq!(seen, vec!["Bearer CLIENT-TOKEN".to_string()]);
 }
+
+/// Even when every account swapdex manages refuses, the user must still be able
+/// to work: the turn falls back to the login the client sent, which is what Claude
+/// would have used with no proxy at all.
+#[test]
+fn a_turn_still_goes_through_when_every_account_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+
+    // Upstream refuses the managed token (401) and accepts the client's own.
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port_up = server.server_addr().to_ip().unwrap().port();
+    let s2 = sink.clone();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            let refused = auth.contains("AT-ONE");
+            s2.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let resp = if refused {
+                tiny_http::Response::from_string("{}").with_status_code(tiny_http::StatusCode(401))
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}")
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+
+    let (mut child, port) = start_proxy(
+        root.path(),
+        &format!("http://127.0.0.1:{port_up}"),
+        &["--auto"],
+    );
+    let body = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    child.wait().ok();
+
+    assert!(
+        body.contains("\"ok\":true"),
+        "the user can still work: {body}"
+    );
+    assert!(
+        auths(&sink).contains(&"Bearer CLIENT-TOKEN".to_string()),
+        "it fell back to the client's own login: {:?}",
+        auths(&sink)
+    );
+}

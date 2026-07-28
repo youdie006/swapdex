@@ -544,6 +544,21 @@ fn forward_turn(
                 slot = next;
             }
             None => {
+                // Nothing swapdex offers can serve this turn. Before failing,
+                // fall back to the login the CLIENT sent - that is what Claude
+                // would have used with no proxy, and it is the difference between
+                // "your accounts are all spent" and "you cannot work".
+                if let Some(auth) = client_auth.clone() {
+                    println!(
+                        "{}: no account of mine can serve this - passing your own login through",
+                        slot.name
+                    );
+                    std::io::stdout().flush().ok();
+                    drop(up);
+                    let mut headers = client_headers.clone();
+                    headers.push(("authorization".into(), auth));
+                    return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+                }
                 // Nothing left to try. Say WHY in a way the client will render:
                 // a bare 401 relayed from upstream reads as "log in to Claude",
                 // when the fix is to re-run one account so its token refreshes.

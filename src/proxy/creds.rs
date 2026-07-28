@@ -63,9 +63,13 @@ impl TokenUnavailable {
 pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
     // A minute of slack: a token about to lapse mid-flight is already useless.
     const SLACK_MS: i64 = 60_000;
-    std::fs::read(dir.join(".credentials.json"))
+    // The expiry lives inside the credential blob, wherever that blob is kept -
+    // a file on Linux/WSL, the Keychain on macOS. Reading only the file meant
+    // every macOS slot looked fresh and its lapsed token was sent anyway.
+    let blob = std::fs::read(dir.join(".credentials.json"))
         .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .or_else(|| crate::adapters::claude::slot_keychain_read_detail(dir).ok());
+    blob.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64())
         .is_some_and(|exp| exp - now_ms <= SLACK_MS)
 }
