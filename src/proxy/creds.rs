@@ -55,6 +55,21 @@ impl TokenUnavailable {
     }
 }
 
+/// Has this slot's access token already expired? Sending an expired token just
+/// earns a 401, and nothing here can refresh it - Claude refreshes its OWN
+/// token, not one the proxy injected - so an expired slot must be stepped over
+/// rather than tried. `false` when the expiry cannot be read (macOS keeps the
+/// credential in the Keychain): unknown is not the same as expired.
+pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
+    // A minute of slack: a token about to lapse mid-flight is already useless.
+    const SLACK_MS: i64 = 60_000;
+    std::fs::read(dir.join(".credentials.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64())
+        .is_some_and(|exp| exp - now_ms <= SLACK_MS)
+}
+
 /// This slot's own account UUID, from its `.claude.json` `oauthAccount` - the
 /// identity Claude reports as "connected". Used to keep a forwarded request's
 /// `metadata.user_id` consistent with the token serving it. An identifier, not a
@@ -119,6 +134,31 @@ mod tests {
         )
         .unwrap();
         assert!(slot_account_uuid(dir.path()).is_none());
+    }
+
+    #[test]
+    fn an_expired_slot_is_recognised_and_an_unknown_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_800_000_000_000i64;
+        // Unknown expiry (no file, or a Keychain-backed slot) is NOT "expired":
+        // stepping over an account we simply cannot read would be a guess.
+        assert!(!slot_token_expired(dir.path(), now));
+        let write = |exp: i64| {
+            std::fs::write(
+                dir.path().join(".credentials.json"),
+                format!(r#"{{"claudeAiOauth":{{"accessToken":"A","expiresAt":{exp}}}}}"#),
+            )
+            .unwrap()
+        };
+        write(now + 3_600_000);
+        assert!(!slot_token_expired(dir.path(), now), "an hour left is fine");
+        write(now - 1);
+        assert!(slot_token_expired(dir.path(), now), "already lapsed");
+        write(now + 30_000);
+        assert!(
+            slot_token_expired(dir.path(), now),
+            "about to lapse mid-flight counts as expired"
+        );
     }
 
     #[test]

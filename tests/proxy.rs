@@ -669,3 +669,95 @@ fn a_threshold_steps_off_before_the_account_refuses() {
         "the near-limit account never served a turn: it was stepped over"
     );
 }
+
+/// When swapdex has no usable login to offer, it must get out of the way: the
+/// turn goes upstream with the CLIENT's own Authorization, which is what Claude
+/// would have sent with no proxy at all. Being unable to help is not a reason to
+/// break the tool.
+#[test]
+fn an_unusable_account_falls_back_to_the_clients_own_login() {
+    let root = tempfile::tempdir().unwrap();
+    // A slot in the registry whose credential is unreadable.
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots").join("aaaa1111");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(slot.join(".credentials.json"), b"not json").unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        format!(
+            r#"[{{"name":"broken","id":"aaaa1111","config_dir":"{}","adopted":false}}]"#,
+            slot.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("active-claude"),
+        slot.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    let body = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    child.wait().ok();
+
+    assert!(
+        body.contains("\"ok\":true"),
+        "the turn still went through: {body}"
+    );
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer CLIENT-TOKEN".to_string()],
+        "the client's own login was forwarded, not a failure"
+    );
+}
+
+/// An expired slot token is stepped over BEFORE the request goes out: sending it
+/// would earn a 401 that nothing here can fix, so the client's own login is used
+/// instead and the turn succeeds.
+#[test]
+fn an_expired_slot_token_never_reaches_upstream() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots").join("aaaa1111");
+    std::fs::create_dir_all(&slot).unwrap();
+    // Signed in once, long ago: readable, and long past its expiry.
+    std::fs::write(
+        slot.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"AT-STALE","refreshToken":"R","expiresAt":1}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        format!(
+            r#"[{{"name":"lapsed","id":"aaaa1111","config_dir":"{}","adopted":false}}]"#,
+            slot.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("active-claude"),
+        slot.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    let body = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    child.wait().ok();
+
+    assert!(
+        body.contains("\"ok\":true"),
+        "the turn went through: {body}"
+    );
+    let seen = auths(&sink);
+    assert!(
+        !seen.iter().any(|a| a.contains("AT-STALE")),
+        "the lapsed token was never sent: {seen:?}"
+    );
+    assert_eq!(seen, vec!["Bearer CLIENT-TOKEN".to_string()]);
+}

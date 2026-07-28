@@ -114,7 +114,10 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
             .unwrap()
             .get(&chosen.name)
             .is_some_and(|q| q.rejected)
-            || sh.unusable.lock().unwrap().contains(&chosen.name);
+            || sh.unusable.lock().unwrap().contains(&chosen.name)
+            // A lapsed token cannot serve and cannot be refreshed from here, so
+            // treat it the same as spent when choosing where to start.
+            || creds::slot_token_expired(&chosen.config_dir, now_ms());
         if known_spent {
             if let Some(better) = next_account(paths, sh, std::slice::from_ref(&chosen.name)) {
                 return Ok(better);
@@ -306,9 +309,20 @@ fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::s
             // hand still works, which is why the check lives here and not in
             // pick_slot.
             && !cfg.is_disabled(&r.name)
-            // Never offer a slot that was never signed into: it would just fail.
+            // Never offer a slot that was never signed into, or whose token has
+            // already lapsed: either one just earns a 401, and nothing here can
+            // refresh it.
             && creds::slot_token(&r.config_dir).is_some()
+            && !creds::slot_token_expired(&r.config_dir, now_ms())
     })
+}
+
+/// Unix milliseconds, for expiry comparisons.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -> Result<()> {
@@ -363,6 +377,13 @@ fn forward_turn(
 ) -> Result<upstream::Upstream> {
     // The client's request, read once and reusable: serving the same turn on
     // another account means sending these bytes again with a different token.
+    // Keep the client's own Authorization: if swapdex cannot supply a login, the
+    // honest fallback is to send what Claude itself would have sent.
+    let client_auth = rq
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("authorization"))
+        .map(|h| h.value.as_str().to_string());
     let client_headers: Vec<(String, String)> = rq
         .headers()
         .iter()
@@ -393,8 +414,41 @@ fn forward_turn(
     let mut slot = pick_slot(paths, opts, sh)?;
     let mut tried: Vec<String> = Vec::new();
     let up = loop {
-        let token = creds::slot_token_detail(&slot.config_dir)
-            .map_err(|why| anyhow!("{}", why.remedy(&slot.name)))?;
+        // An already-lapsed token earns a 401 and cannot be refreshed from here,
+        // so treat it exactly like having no login: step aside rather than spend
+        // the turn proving it.
+        if creds::slot_token_expired(&slot.config_dir, now_ms()) {
+            println!(
+                "{}: its login has expired - passing your own login through \
+                 (`swapdex run {}` once refreshes it)",
+                slot.name, slot.name
+            );
+            std::io::stdout().flush().ok();
+            let mut headers = client_headers.clone();
+            if let Some(auth) = client_auth.clone() {
+                headers.push(("authorization".into(), auth));
+            }
+            return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+        }
+        let token = match creds::slot_token_detail(&slot.config_dir) {
+            Ok(t) => t,
+            Err(why) => {
+                // swapdex has no login to offer for this account. Rather than
+                // failing the turn, get out of the way: forward what the CLIENT
+                // sent, which is the login Claude would have used with no proxy at
+                // all. Being unable to help is not a reason to break the tool.
+                println!(
+                    "{} - passing your own login through",
+                    why.remedy(&slot.name)
+                );
+                std::io::stdout().flush().ok();
+                let mut headers = client_headers.clone();
+                if let Some(auth) = client_auth.clone() {
+                    headers.push(("authorization".into(), auth));
+                }
+                return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+            }
+        };
         let mut headers = client_headers.clone();
         headers.push((
             "authorization".into(),
