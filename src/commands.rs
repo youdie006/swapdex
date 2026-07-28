@@ -1608,9 +1608,25 @@ pub fn proxy(
 /// non-zero and prints nothing when a proxy cannot be had, so the shim simply
 /// runs Claude directly.
 fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
-    if let Some(p) = crate::proxy::running_port(paths) {
-        println!("{p}");
-        return Ok(0);
+    let mut port = port;
+    if let Some((pid, running, build)) = crate::proxy::running_proxy(paths) {
+        if build == crate::proxy::build_id() {
+            println!("{running}");
+            return Ok(0);
+        }
+        // A proxy from an older build is still answering: updating swapdex does
+        // not update what is already running, so a fix can be installed, verified,
+        // and still not be what serves the next request. Replace it on the SAME
+        // port, because sessions already point at that port and would otherwise
+        // be left talking to nothing.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        for _ in 0..40 {
+            if crate::proxy::running_proxy(paths).is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        port = running;
     }
     // Proxy mode is only useful with slot accounts; without one there is nothing
     // to serve and starting a proxy would just add a moving part.

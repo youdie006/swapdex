@@ -911,3 +911,57 @@ fn the_proxy_records_which_account_is_serving() {
         "after rotating, the record follows the account actually serving"
     );
 }
+
+/// Updating swapdex does not update a proxy that is already running, so a fix can
+/// be installed, verified, and still not be what answers the next request. The
+/// marker records which build is serving, and --ensure replaces an outdated one on
+/// the SAME port - sessions already point there.
+#[test]
+fn ensure_replaces_a_proxy_from_an_older_build() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+
+    let marker = root.path().join(".local/share/swapdex/proxy");
+    let before = std::fs::read_to_string(&marker).unwrap();
+    let mut parts = before.split_whitespace();
+    let pid: i32 = parts.next().unwrap().parse().unwrap();
+    assert_eq!(
+        parts.next().unwrap().parse::<u16>().unwrap(),
+        port,
+        "the marker carries the port"
+    );
+    assert!(
+        parts.next().is_some_and(|b| !b.is_empty()),
+        "and which build is serving: {before}"
+    );
+
+    // Pretend it is an older build.
+    std::fs::write(&marker, format!("{pid} {port} 0.0.0-old\n")).unwrap();
+    let out = Command::new(bin())
+        .args(["proxy", "--ensure"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .output()
+        .unwrap();
+    let printed: u16 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("a port was printed");
+    assert_eq!(printed, port, "the replacement keeps the port sessions use");
+
+    let after = std::fs::read_to_string(&marker).unwrap();
+    let new_pid: i32 = after.split_whitespace().next().unwrap().parse().unwrap();
+    assert_ne!(new_pid, pid, "it is a different process: {after}");
+    assert!(
+        !after.contains("0.0.0-old"),
+        "and the current build: {after}"
+    );
+
+    // Clean up whichever proxies are left.
+    child.kill().ok();
+    child.wait().ok();
+    unsafe { libc::kill(new_pid, libc::SIGTERM) };
+}

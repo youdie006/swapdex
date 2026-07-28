@@ -296,7 +296,14 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // "<pid> <port>", pid so a stale marker (killed proxy) is detectable.
     let marker = crate::shim::proxy_marker(paths);
     let _ = std::fs::create_dir_all(paths.store_dir());
-    let announced = std::fs::write(&marker, format!("{} {port}\n", std::process::id())).is_ok();
+    // The marker carries the pid, the port, AND which build is serving. Updating
+    // swapdex leaves the running proxy on the old code - which is how a fix can be
+    // installed, verified, and still not be what answers the next request.
+    let announced = std::fs::write(
+        &marker,
+        format!("{} {port} {}\n", std::process::id(), build_id()),
+    )
+    .is_ok();
     if announced {
         // Ctrl-C is the normal way to stop a foreground proxy, so clean up there
         // too - otherwise the shim would keep pointing at a dead port until the
@@ -672,6 +679,20 @@ fn forward_turn(
     Ok(up)
 }
 
+/// Identifies the build a proxy is running. The version alone is too coarse - a
+/// day's worth of fixes can land under one version - so the binary's own mtime
+/// stands in for "this exact build".
+pub fn build_id() -> String {
+    let stamp = std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}-{stamp}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Where a running proxy records the account actually serving turns. The default
 /// pointer says which account was CHOSEN; after a rotation the proxy may be
 /// serving a different one, and a marker that shows the choice rather than the
@@ -702,10 +723,18 @@ fn note_serving(paths: &Paths, name: &str) {
 /// marker holds "<pid> <port>"; a stale marker (hard-killed proxy) is ignored by
 /// checking the pid, the same rule the shim applies.
 pub fn running_port(paths: &Paths) -> Option<u16> {
+    running_proxy(paths).map(|(_, port, _)| port)
+}
+
+/// The running proxy as (pid, port, build). `None` when none is up.
+pub fn running_proxy(paths: &Paths) -> Option<(i32, u16, String)> {
     let raw = std::fs::read_to_string(crate::shim::proxy_marker(paths)).ok()?;
     let mut it = raw.split_whitespace();
     let pid: i32 = it.next()?.parse().ok()?;
     let port: u16 = it.next()?.parse().ok()?;
+    // A marker written by an older build carries no build id; treat that as
+    // "unknown", which is not the current one and so gets replaced.
+    let build = it.next().unwrap_or("").to_string();
     // Signal 0 tests for existence without touching the process.
-    (unsafe { libc::kill(pid, 0) } == 0).then_some(port)
+    (unsafe { libc::kill(pid, 0) } == 0).then_some((pid, port, build))
 }
