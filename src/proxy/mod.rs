@@ -477,10 +477,21 @@ fn next_account_in(
             && !cfg.is_disabled(&r.name)
             // Never offer a slot that was never signed into, or whose token has
             // already lapsed: either one just earns a 401, and nothing here can
-            // refresh it.
-            && creds::slot_token(&r.config_dir).is_some()
-            && !creds::slot_token_expired(&r.config_dir, now_ms())
+            // refresh it. What a login LOOKS like differs per tool, and asking
+            // the Claude question about a Codex slot answered "no login" for
+            // every one of them - so a refused Codex turn had nowhere to go.
+            && has_usable_login(tool, &r.config_dir)
     })
+}
+
+/// Can this slot serve a turn for `tool` right now?
+fn has_usable_login(tool: &str, dir: &std::path::Path) -> bool {
+    match tool {
+        // Codex refreshes its own token inside its home and records no expiry
+        // swapdex can read, so the question is only whether a login is there.
+        "codex" => codex::slot_auth(dir).is_some(),
+        _ => creds::slot_token(dir).is_some() && !creds::slot_token_expired(dir, now_ms()),
+    }
 }
 
 /// Unix milliseconds, for expiry comparisons.

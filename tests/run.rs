@@ -152,8 +152,19 @@ fn shim_makes_plain_claude_follow_use() {
         "{installed}"
     );
     // Run the shim directly; it should exec the fake claude with the slot dir.
+    // With the test's own environment: the shim asks swapdex for a proxy, and
+    // without SWAPDEX_ROOT that question is asked of the DEVELOPER's real store -
+    // which answered by starting a daemon against their real accounts, on the
+    // default port, outliving the test.
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let shim = root.path().join(".local/share/swapdex/bin/claude");
-    let out = Command::new(&shim).output().unwrap();
+    let out = Command::new(&shim)
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
     let slots = root.path().join(".local/share/swapdex/slots");
     assert!(
@@ -161,6 +172,16 @@ fn shim_makes_plain_claude_follow_use() {
             .any(|l| l.starts_with("CFG=") && l.contains(slots.to_str().unwrap())),
         "the shim launched claude in the default account's slot: {o}"
     );
+    // Stop whatever proxy the shim started for this temp store.
+    if let Ok(marker) = std::fs::read_to_string(root.path().join(".local/share/swapdex/proxy")) {
+        if let Some(pid) = marker
+            .split_whitespace()
+            .next()
+            .and_then(|p| p.parse::<i32>().ok())
+        {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
 }
 
 #[test]
@@ -782,4 +803,49 @@ fn threshold_setting_accepts_both_notations_and_off() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// A stand-in `codex` that reports the home it was launched with.
+fn fake_codex(root: &Path) -> std::path::PathBuf {
+    let dir = root.join("fakebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("codex");
+    std::fs::write(
+        &f,
+        "#!/bin/sh\necho \"HOME_DIR=$CODEX_HOME\"\necho \"ARGS=$*\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+// `run` is how an account gets its login in the first place: it makes the slot
+// and launches the tool pointed at it, so the sign-in lands in that account's own
+// home instead of the shared one every other account also reads.
+#[test]
+fn run_launches_codex_in_the_accounts_own_home() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_codex(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = run_in(root.path(), &["run", "work", "--tool", "codex"], &path);
+    let store = root.path().join(".local/share/swapdex");
+    let recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(store.join("slots.json")).unwrap()).unwrap();
+    let rec = recs
+        .iter()
+        .find(|r| r["name"] == "work")
+        .expect("the slot was created");
+    assert_eq!(rec["tool"], "codex", "registered as a Codex account");
+    let dir = rec["config_dir"].as_str().unwrap();
+    assert!(
+        out.contains(&format!("HOME_DIR={dir}")),
+        "codex was launched with that home: {out}"
+    );
+    // Claude's variable is not involved - one tool's launch must never point the
+    // other tool anywhere.
+    assert!(!out.contains("CLAUDE_CONFIG_DIR"), "{out}");
 }

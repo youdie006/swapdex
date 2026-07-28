@@ -128,8 +128,7 @@ fn start_proxy(
         line.push(b[0]);
     }
     let line = String::from_utf8_lossy(&line).to_string();
-    let port =
-        parse_port(&line).unwrap_or_else(|| panic!("proxy did not announce a port: {line}"));
+    let port = parse_port(&line).unwrap_or_else(|| panic!("proxy did not announce a port: {line}"));
     (child, port)
 }
 
@@ -1144,5 +1143,234 @@ fn a_running_codex_session_follows_a_pointer_change() {
         seen[0].2.ends_with("/responses"),
         "forwarded to the backend's responses path: {:?}",
         seen[0].2
+    );
+}
+
+/// A fake Codex backend that refuses ONE account and serves every other. Records
+/// the (authorization, account-id) pair of each request it saw.
+fn fake_codex_upstream_refusing(
+    sink: Arc<Mutex<Vec<(String, String)>>>,
+    refuse_token: &'static str,
+    status: u16,
+) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let head = |name: &'static str| {
+                rq.headers()
+                    .iter()
+                    .find(|h| h.field.equiv(name))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default()
+            };
+            let auth = head("authorization");
+            let acct = head("chatgpt-account-id");
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            sink.lock().unwrap().push((auth.clone(), acct));
+            let refused = auth.contains(refuse_token);
+            let (code, text) = if refused {
+                (status, "{\"error\":\"no\"}")
+            } else {
+                (200, "{\"ok\":true}")
+            };
+            let _ = rq.respond(
+                tiny_http::Response::from_string(text)
+                    .with_status_code(tiny_http::StatusCode(code)),
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Start a Codex proxy against `upstream` and return (child, port).
+fn start_codex_proxy(
+    root: &std::path::Path,
+    upstream: &str,
+    extra: &[&str],
+) -> (std::process::Child, u16) {
+    let mut args = vec!["proxy", "--port", "0", "--tool", "codex"];
+    args.extend_from_slice(extra);
+    let mut child = Command::new(bin())
+        .args(&args)
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.stdout.as_mut().unwrap();
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while out.read(&mut b).unwrap_or(0) == 1 {
+        if b[0] == b'\n' {
+            break;
+        }
+        line.push(b[0]);
+    }
+    let line = String::from_utf8_lossy(&line).to_string();
+    let port =
+        parse_port(&line).unwrap_or_else(|| panic!("codex proxy did not announce a port: {line}"));
+    (child, port)
+}
+
+/// Post one Codex turn through the proxy and return (status, body).
+fn post_codex_turn(port: u16) -> (u16, String) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .header("chatgpt-account-id", "acct-client")
+        .header("content-type", "application/json")
+        .send(b"{\"input\":[]}".as_slice())
+        .expect("proxy answered");
+    let status = resp.status().as_u16();
+    let mut out = String::new();
+    resp.body_mut()
+        .as_reader()
+        .read_to_string(&mut out)
+        .unwrap();
+    (status, out)
+}
+
+// The point of --auto for Codex: a turn the current account cannot serve is
+// handed to another one and served THERE, rather than handed back as a failure.
+// Codex has no zero-spend usage endpoint to read ahead of the wall, so this
+// refusal is the only signal there is - if it is not acted on, nothing is.
+#[test]
+fn a_refused_codex_turn_is_re_served_on_another_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "dddd2222",
+        "AT-HOME",
+        "acct-home",
+        false,
+    );
+    let sink: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(sink.clone(), "AT-WORK", 429);
+
+    let (mut child, port) = start_codex_proxy(root.path(), &upstream, &["--auto"]);
+    let (status, body) = post_codex_turn(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        2,
+        "the same turn was tried twice - once refused, once served: {seen:?}"
+    );
+    assert_eq!(
+        (seen[0].0.as_str(), seen[0].1.as_str()),
+        ("Bearer AT-WORK", "acct-work"),
+        "the default account went first"
+    );
+    assert_eq!(
+        (seen[1].0.as_str(), seen[1].1.as_str()),
+        ("Bearer AT-HOME", "acct-home"),
+        "and the pair moved together to the account that could serve it"
+    );
+    assert_eq!(status, 200, "the client got the answer, not the refusal");
+    assert!(body.contains("ok"), "body relayed from the serving account");
+}
+
+// Without --auto the refusal is the answer. Moving a session on by itself is a
+// decision the user opts into, and a proxy that quietly reached for another
+// account would spend quota nobody asked it to spend.
+#[test]
+fn without_auto_a_refused_codex_turn_is_returned_as_is() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "eeee1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "ffff2222",
+        "AT-HOME",
+        "acct-home",
+        false,
+    );
+    let sink: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(sink.clone(), "AT-WORK", 429);
+
+    let (mut child, port) = start_codex_proxy(root.path(), &upstream, &[]);
+    let (status, _) = post_codex_turn(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(status, 429, "the upstream's answer, verbatim");
+    assert_eq!(
+        sink.lock().unwrap().len(),
+        1,
+        "no other account was touched"
+    );
+}
+
+// A 401 is not a quota problem, but it is equally a turn this account cannot
+// serve - so with --auto it moves too, and the refused account is kept out of
+// the rest of the run rather than tried again on the next turn.
+#[test]
+fn a_rejected_codex_login_also_hands_the_turn_on() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "aaaa9999",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "bbbb9999",
+        "AT-HOME",
+        "acct-home",
+        false,
+    );
+    let sink: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(sink.clone(), "AT-WORK", 401);
+
+    let (mut child, port) = start_codex_proxy(root.path(), &upstream, &["--auto"]);
+    let (first, _) = post_codex_turn(port);
+    // A second turn must not walk back into the account that just refused.
+    let (second, _) = post_codex_turn(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!((first, second), (200, 200), "both turns were served");
+    let tokens: Vec<String> = sink
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(a, _)| a.clone())
+        .collect();
+    assert_eq!(
+        tokens,
+        vec![
+            "Bearer AT-WORK".to_string(),
+            "Bearer AT-HOME".to_string(),
+            "Bearer AT-HOME".to_string(),
+        ],
+        "the rejected account is tried once, then left alone: {tokens:?}"
     );
 }

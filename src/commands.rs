@@ -27,14 +27,30 @@ fn now_nanos() -> u128 {
         .unwrap_or(0)
 }
 
+/// Is `cmd` on PATH? Answered by LOOKING, never by running it.
+///
+/// This used to shell out to `cmd --version`, which meant `swapdex doctor` -
+/// whose whole job is to observe - executed whatever `claude` resolved to. With
+/// the shim installed that is the shim, and the shim starts a proxy: a
+/// diagnostic that silently launched a daemon every time it ran.
 fn command_exists(cmd: &str) -> bool {
-    Command::new(cmd)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| is_executable(&dir.join(cmd)))
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(p)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
 }
 
 /// Which tool a `--tool` value targets. A clap `ValueEnum`, so an unknown or
