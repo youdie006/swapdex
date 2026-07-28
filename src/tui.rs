@@ -129,13 +129,15 @@ fn group_of(tools: &str) -> &'static str {
 /// Rows with no identity to compare (no email yet) are always kept - they cannot
 /// be proven to be duplicates.
 pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
+    // An account is an email ON A TOOL. One person very often signs into Claude
+    // and ChatGPT with the same address, and merging those would delete a real
+    // account from the list - which it did.
     let key = |r: &Row| {
-        // The identity column is "email [tier]"; the email alone identifies it.
         r.ident
             .split_whitespace()
             .next()
             .filter(|e| e.contains('@'))
-            .map(str::to_string)
+            .map(|e| format!("{}\u{0}{}", group_of(&r.tools), e))
     };
     // Prefer, in order: signed in and active, then signed in, then the rest - so
     // the surviving row is the one that would actually take a turn.
@@ -1871,6 +1873,19 @@ mod tests {
             row("b", "b@x.co", false, false),
         ]);
         assert_eq!(out.len(), 2);
+        // The SAME address on two different tools is two accounts - signing into
+        // Claude and ChatGPT with one email is normal, and merging them would
+        // delete a real account from the list.
+        let mut claude = row("claude", "me@x.co [max]", false, false);
+        let mut codex = row("codex", "me@x.co [chatgpt]", false, true);
+        claude.tools = "claude-code".into();
+        codex.tools = "codex".into();
+        let out = dedupe_by_identity(vec![claude, codex]);
+        assert_eq!(
+            out.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["claude", "codex"],
+            "one email on two tools stays two accounts"
+        );
         // No identity yet: cannot be proven a duplicate, so it stays.
         let out = dedupe_by_identity(vec![
             row("fresh", "", true, false),
