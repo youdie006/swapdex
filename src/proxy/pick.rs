@@ -112,6 +112,7 @@ mod tests {
 
     fn slot(name: &str, dir: &str) -> crate::slots::SlotRecord {
         crate::slots::SlotRecord {
+            tool: "claude-code".into(),
             name: name.into(),
             id: name.into(),
             config_dir: PathBuf::from(dir),

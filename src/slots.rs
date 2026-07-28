@@ -1,9 +1,14 @@
 //! The permanent-slot registry: a name -> slot mapping persisted to
 //! `<store_dir>/slots.json`. Each slot is a directory under
-//! `<store_dir>/slots/<id>/` used as a Claude `CLAUDE_CONFIG_DIR`. swapdex never
-//! writes a credential into a slot; the tool's own login does. The id is opaque
-//! and name-independent so a rename never changes the directory (and therefore
-//! never changes the Keychain service, which is derived from the dir string).
+//! `<store_dir>/slots/<id>/` handed to the tool as its own home - Claude's
+//! `CLAUDE_CONFIG_DIR`, Codex's `CODEX_HOME`. swapdex never writes a credential
+//! into a slot; the tool's own login does. The id is opaque and
+//! name-independent so a rename never changes the directory (and therefore never
+//! changes the Keychain service, which is derived from the dir string).
+//!
+//! A registry is opened FOR one tool and sees only that tool's slots. The same
+//! account name on two tools is two accounts, and each tool has its own default
+//! pointer, so switching Codex never moves where Claude launches.
 
 use crate::paths::Paths;
 use anyhow::{bail, Context, Result};
@@ -17,12 +22,35 @@ pub struct SlotRecord {
     pub config_dir: PathBuf,
     #[serde(default)]
     pub adopted: bool,
+    /// Which tool this slot is a home for. Absent in registries written before
+    /// tools were distinguished, and those are Claude's - the only kind that
+    /// existed - so the default keeps an upgraded install working untouched.
+    #[serde(default = "default_tool")]
+    pub tool: String,
+}
+
+fn default_tool() -> String {
+    "claude-code".to_string()
 }
 
 pub struct Slots {
     file: PathBuf,
     slots_dir: PathBuf,
+    /// Every slot on disk, of every tool: writes must preserve the tools this
+    /// registry is not scoped to rather than dropping them.
+    all: Vec<SlotRecord>,
+    /// Just this tool's, in registry order.
     records: Vec<SlotRecord>,
+    tool: String,
+}
+
+/// The environment variable a tool reads to find the home it should use.
+pub fn home_var(tool: &str) -> Option<&'static str> {
+    match tool {
+        "claude-code" => Some("CLAUDE_CONFIG_DIR"),
+        "codex" => Some("CODEX_HOME"),
+        _ => None,
+    }
 }
 
 /// 16 hex chars of sha256(name + a monotonic-ish nanosecond stamp) - opaque and
@@ -44,19 +72,29 @@ fn new_id(name: &str) -> String {
 }
 
 impl Slots {
+    /// Claude's registry - the established caller, kept so every existing call
+    /// site keeps meaning what it meant.
     pub fn open(paths: &Paths) -> Result<Slots> {
+        Self::open_for(paths, "claude-code")
+    }
+
+    /// The registry as `tool` sees it.
+    pub fn open_for(paths: &Paths, tool: &str) -> Result<Slots> {
         let store = paths.store_dir();
         let file = store.join("slots.json");
-        let records = if file.exists() {
+        let all: Vec<SlotRecord> = if file.exists() {
             let bytes = std::fs::read(&file).context("read slots.json")?;
             serde_json::from_slice(&bytes).context("slots.json is corrupt")?
         } else {
             Vec::new()
         };
+        let records = all.iter().filter(|r| r.tool == tool).cloned().collect();
         Ok(Slots {
             file,
             slots_dir: store.join("slots"),
+            all,
             records,
+            tool: tool.to_string(),
         })
     }
 
@@ -84,6 +122,7 @@ impl Slots {
             id,
             config_dir,
             adopted: false,
+            tool: self.tool.clone(),
         };
         self.records.push(rec.clone());
         self.persist()?;
@@ -128,12 +167,23 @@ impl Slots {
         Ok(true)
     }
 
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
         if let Some(parent) = self.file.parent() {
             std::fs::create_dir_all(parent).context("create store dir")?;
         }
-        let bytes = serde_json::to_vec_pretty(&self.records)?;
+        // One file holds every tool's slots. Writing only the scoped view would
+        // delete the other tools' accounts, so the others are carried through
+        // untouched and this tool's are replaced wholesale.
+        let mut out: Vec<SlotRecord> = self
+            .all
+            .iter()
+            .filter(|r| r.tool != self.tool)
+            .cloned()
+            .collect();
+        out.extend(self.records.iter().cloned());
+        let bytes = serde_json::to_vec_pretty(&out)?;
         std::fs::write(&self.file, bytes).context("write slots.json")?;
+        self.all = out;
         Ok(())
     }
 
@@ -159,14 +209,16 @@ impl Slots {
             id: new_id(name),
             config_dir: config_dir.to_path_buf(),
             adopted: true,
+            tool: self.tool.clone(),
         };
         self.records.push(rec.clone());
         self.persist()?;
         Ok(rec)
     }
 
-    /// The pointer file the `claude` shim reads to find the default account's
-    /// slot: `<store_dir>/active-claude`.
+    /// The pointer file this tool's shim reads to find the default account's
+    /// slot: `<store_dir>/active-claude`, `<store_dir>/active-codex`. Claude's
+    /// keeps the name it has always had, so upgrading never loses a default.
     fn pointer_file(&self) -> PathBuf {
         // `self.file` is `<store_dir>/slots.json`; its parent is the store dir.
         let store = self
@@ -174,7 +226,11 @@ impl Slots {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        store.join("active-claude")
+        let short = match self.tool.as_str() {
+            "claude-code" => "claude",
+            other => other,
+        };
+        store.join(format!("active-{short}"))
     }
 
     /// Point the default account at `name`'s slot. A plain `claude` (via the
@@ -188,7 +244,7 @@ impl Slots {
             std::fs::create_dir_all(parent).context("create store dir")?;
         }
         std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
-            .context("write active-claude pointer")?;
+            .with_context(|| format!("write {} pointer", self.tool))?;
         Ok(())
     }
 
@@ -200,20 +256,38 @@ impl Slots {
     }
 }
 
-/// The shared, account-agnostic config files symlinked from the bare `~/.claude`
+/// The shared, account-agnostic config files symlinked from the bare home dir
 /// into a freshly-created slot, so switching accounts does not change the user's
-/// tooling. The token, history, and `.claude.json` (account identity) stay
-/// per-slot and are NOT linked. (MCP config lives inside `.claude.json`, which is
-/// per-account; sharing it needs the resolution noted in the design's open
-/// questions, so it is intentionally left per-slot for now.)
+/// tooling. The token, history, and the file holding account identity stay
+/// per-slot and are NOT linked. (For Claude, MCP config lives inside
+/// `.claude.json`, which is per-account; sharing it needs the resolution noted
+/// in the design's open questions, so it is intentionally left per-slot.)
 pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md"];
+
+/// Codex keeps its settings in `config.toml` and its project instructions in
+/// `AGENTS.md`; its credential lives apart in `auth.json`, which is what makes
+/// the same split work. `sessions/` stays per-slot - it is that account's
+/// history, and it is also where Codex records the rate limits swapdex reads.
+pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &["config.toml", "AGENTS.md"];
+
+/// The files `tool` shares across its accounts.
+pub fn shared_files(tool: &str) -> &'static [&'static str] {
+    match tool {
+        "codex" => SHARED_CONFIG_FILES_CODEX,
+        _ => SHARED_CONFIG_FILES,
+    }
+}
 
 /// Symlink the shared config files from `source` into `slot` (best-effort; skips
 /// files absent in source or already present in the slot). Returns the names
 /// linked.
-pub fn link_shared_config(slot: &std::path::Path, source: &std::path::Path) -> Vec<String> {
+pub fn link_shared_config(
+    slot: &std::path::Path,
+    source: &std::path::Path,
+    tool: &str,
+) -> Vec<String> {
     let mut linked = Vec::new();
-    for name in SHARED_CONFIG_FILES {
+    for name in shared_files(tool) {
         let src = source.join(name);
         let dst = slot.join(name);
         if src.exists() && !dst.exists() {
@@ -248,6 +322,63 @@ mod tests {
         let s2 = Slots::open(&paths).unwrap();
         assert_eq!(s2.get("work").unwrap().id, rec.id);
         assert_eq!(s2.list().len(), 1);
+    }
+
+    // Codex isolates an account the same way Claude does - its own home dir via
+    // CODEX_HOME - so the slot model has to hold both without either tool seeing
+    // the other's accounts or moving the other's pointer.
+    #[test]
+    fn slots_are_scoped_to_their_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut c = Slots::open_for(&paths, "claude-code").unwrap();
+            c.create("work").unwrap();
+        }
+        {
+            // The SAME name on another tool is a different account, not a clash.
+            let mut x = Slots::open_for(&paths, "codex").unwrap();
+            x.create("work").unwrap();
+        }
+        let c = Slots::open_for(&paths, "claude-code").unwrap();
+        let x = Slots::open_for(&paths, "codex").unwrap();
+        assert_eq!(c.list().len(), 1, "claude sees only its own");
+        assert_eq!(x.list().len(), 1, "codex sees only its own");
+        assert_ne!(
+            c.get("work").unwrap().config_dir,
+            x.get("work").unwrap().config_dir,
+            "two tools never share a directory"
+        );
+        // Pointers are independent: switching Codex must not move Claude.
+        c.set_default("work").unwrap();
+        assert_eq!(c.default_dir(), Some(c.get("work").unwrap().config_dir));
+        assert_eq!(x.default_dir(), None, "codex has no default yet");
+        x.set_default("work").unwrap();
+        assert_eq!(c.default_dir(), Some(c.get("work").unwrap().config_dir));
+        assert_eq!(x.default_dir(), Some(x.get("work").unwrap().config_dir));
+    }
+
+    // Slots registered before tools were distinguished are Claude's - that is the
+    // only kind that existed - and must keep working across the upgrade.
+    #[test]
+    fn a_slot_recorded_without_a_tool_is_claudes() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        std::fs::create_dir_all(paths.store_dir()).unwrap();
+        std::fs::write(
+            paths.store_dir().join("slots.json"),
+            br#"[{"name":"old","id":"abc","config_dir":"/tmp/old-slot","adopted":true}]"#,
+        )
+        .unwrap();
+        let c = Slots::open_for(&paths, "claude-code").unwrap();
+        assert_eq!(c.list().len(), 1, "the pre-upgrade slot still lists");
+        assert_eq!(c.get("old").unwrap().tool, "claude-code");
+        let x = Slots::open_for(&paths, "codex").unwrap();
+        assert!(x.list().is_empty(), "it was never a codex slot");
+        // And Claude's pointer file keeps its established name, so an upgrade
+        // does not silently unset the user's default account.
+        c.set_default("old").unwrap();
+        assert!(paths.store_dir().join("active-claude").exists());
     }
 
     #[test]

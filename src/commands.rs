@@ -436,8 +436,12 @@ pub fn use_account(
     // claude shim follows it) - no credential copy, so no rotation logout. A
     // legacy copy-model profile (not in the slot registry) falls through to the
     // old guarded switch.
-    if crate::slots::Slots::open(paths)?.get(name).is_some() {
-        return use_slot_default(paths, name, dry_run);
+    let tool = slot_tool(sel);
+    if crate::slots::Slots::open_for(paths, tool)?
+        .get(name)
+        .is_some()
+    {
+        return use_slot_default(paths, name, tool, dry_run);
     }
     use_account_inner(paths, name, sel, dry_run, false, None, force)
 }
@@ -2725,7 +2729,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                          a saved snapshot keeps expiring, this will not"
                     );
                 }
-                let code = run_account(paths, &name, &[])?;
+                let code = run_account(paths, &name, None, false, &[])?;
                 return Ok(code);
             }
             crate::tui::Outcome::AddAccount(tool) => {
@@ -3358,18 +3362,19 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
 /// the app, so for it swapdex guides the two-step manual path.
 /// Repoint the default account at slot `name` (the `claude` shim follows this).
 /// No credential is moved. Called by `use_account` when the name is a slot.
-fn use_slot_default(paths: &Paths, name: &str, dry_run: bool) -> Result<i32> {
+fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Result<i32> {
+    let bin = tool_binary(tool);
     if dry_run {
-        println!("would set the default account -> {name}");
+        println!("would set the default {bin} account -> {name}");
         return Ok(0);
     }
-    let slots = crate::slots::Slots::open(paths)?;
+    let slots = crate::slots::Slots::open_for(paths, tool)?;
     slots.set_default(name)?;
-    println!("default account -> {name}");
-    // First-time nudge: without the shim, a plain `claude` won't follow this.
-    if !crate::shim::shim_path(paths).exists() {
+    println!("default {bin} account -> {name}");
+    // First-time nudge: without the shim, a plain launch won't follow this.
+    if !crate::shim::shim_path_for(paths, tool).exists() {
         println!(
-            "  tip: run `swapdex shim` once so a plain `claude` follows your switches\n\
+            "  tip: run `swapdex shim` once so a plain `{bin}` follows your switches\n\
              \x20      (or launch directly with `swapdex run {name}`)"
         );
     }
@@ -3381,6 +3386,13 @@ fn use_slot_default(paths: &Paths, name: &str, dry_run: bool) -> Result<i32> {
 pub fn install_shim(paths: &Paths) -> Result<i32> {
     let (shim, shim_dir) = crate::shim::install(paths)?;
     println!("installed the claude shim at {}", shim.display());
+    // Codex switches by pointer too, so a plain `codex` needs the same wrapper.
+    // Not having Codex installed is not a failure - there is simply nothing to
+    // wrap - so it is reported either way and never aborts the claude shim.
+    match crate::shim::install_codex(paths)? {
+        Some(p) => println!("installed the codex shim at {}", p.display()),
+        None => println!("  (no `codex` on PATH - skipped its shim)"),
+    }
     // Put it on PATH ourselves. Leaving that to the user is how the shim ends up
     // installed but never reached: `swapdex use` then flips a pointer nothing
     // reads, and the switch appears to work while changing nothing.
@@ -3545,7 +3557,7 @@ pub fn migrate(paths: &Paths) -> Result<i32> {
             continue;
         }
         if let Ok(rec) = slots.create(&p.name) {
-            crate::slots::link_shared_config(&rec.config_dir, paths.claude_dir());
+            crate::slots::link_shared_config(&rec.config_dir, paths.claude_dir(), "claude-code");
             created.push(p.name.clone());
         }
     }
@@ -3629,26 +3641,77 @@ pub fn adopt_slot(paths: &Paths, name: &str, dir: &std::path::Path) -> Result<i3
 /// swapdex never writes the credential here - the tool's own login does, into
 /// the slot's own `CLAUDE_CONFIG_DIR`. `exec` replaces this process, so this
 /// only returns on failure.
-pub fn run_account(paths: &Paths, name: &str, args: &[String]) -> Result<i32> {
+pub fn run_account(
+    paths: &Paths,
+    name: &str,
+    sel: Option<ToolSel>,
+    no_launch: bool,
+    args: &[String],
+) -> Result<i32> {
     use std::os::unix::process::CommandExt;
-    let mut slots = crate::slots::Slots::open(paths)?;
+    let tool = slot_tool(sel);
+    let Some(home_var) = crate::slots::home_var(tool) else {
+        eprintln!(
+            "swapdex: {tool} has no per-account home to launch into - only claude and codex do"
+        );
+        return Ok(2);
+    };
+    let mut slots = crate::slots::Slots::open_for(paths, tool)?;
     let rec = match slots.get(name) {
         Some(r) => r,
         None => {
             let r = slots.create(name)?;
-            crate::slots::link_shared_config(&r.config_dir, paths.claude_dir());
+            crate::slots::link_shared_config(&r.config_dir, &shared_source(paths, tool), tool);
             r
         }
     };
-    if !command_exists("claude") {
-        eprintln!("swapdex: `claude` isn't on your PATH. Install it, then retry.");
+    if no_launch {
+        println!("account '{name}' is ready ({tool})");
+        println!(
+            "  its home: {}",
+            crate::util::redact_path(&rec.config_dir.display().to_string())
+        );
+        return Ok(0);
+    }
+    let bin = tool_binary(tool);
+    if !command_exists(bin) {
+        eprintln!("swapdex: `{bin}` isn't on your PATH. Install it, then retry.");
         return Ok(3);
     }
-    let err = std::process::Command::new("claude")
+    let err = std::process::Command::new(bin)
         .args(args)
-        .env("CLAUDE_CONFIG_DIR", &rec.config_dir)
+        .env(home_var, &rec.config_dir)
         .exec();
-    Err(anyhow::anyhow!("failed to launch claude: {err}"))
+    Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
+}
+
+/// The tool a slot command means. Slots exist for the two tools that can be
+/// pointed at a per-account home; anything else is the caller's error to report.
+pub(crate) fn slot_tool(sel: Option<ToolSel>) -> &'static str {
+    match sel {
+        Some(ToolSel::Codex) => "codex",
+        Some(ToolSel::Gemini) => "gemini",
+        Some(ToolSel::Antigravity) => "antigravity",
+        // Claude is the default: it is what slots were built for, and every
+        // existing `swapdex run <name>` must keep meaning the same thing.
+        _ => "claude-code",
+    }
+}
+
+fn tool_binary(tool: &str) -> &'static str {
+    match tool {
+        "codex" => "codex",
+        _ => "claude",
+    }
+}
+
+/// The bare config dir a new slot borrows its shared, account-agnostic files
+/// from.
+fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
+    match tool {
+        "codex" => paths.codex_dir().to_path_buf(),
+        _ => paths.claude_dir().to_path_buf(),
+    }
 }
 
 /// List the permanent slots (name + the config dir each launches into).

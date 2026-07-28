@@ -10,7 +10,16 @@ use std::path::{Path, PathBuf};
 
 /// Where swapdex installs the shim: `<store_dir>/bin/claude`.
 pub fn shim_path(paths: &Paths) -> PathBuf {
-    paths.store_dir().join("bin").join("claude")
+    shim_path_for(paths, "claude-code")
+}
+
+/// Where a given tool's shim lives: `<store_dir>/bin/<binary>`.
+pub fn shim_path_for(paths: &Paths, tool: &str) -> PathBuf {
+    let bin = match tool {
+        "codex" => "codex",
+        _ => "claude",
+    };
+    paths.store_dir().join("bin").join(bin)
 }
 
 /// Single-quote a path for safe embedding in the /bin/sh shim script.
@@ -55,6 +64,28 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
     )
 }
 
+/// The `codex` shim. Same shape as Claude's - fill the tool's home from the
+/// default pointer, and only when nothing has already chosen one - but with
+/// Codex's own variable and pointer. It never mentions Claude's: one tool's shim
+/// moving the other tool's account is exactly what the per-tool split prevents.
+pub fn codex_shim_script(pointer: &Path, real_codex: &Path, _swapdex: &Path) -> String {
+    format!(
+        "#!/bin/sh\n\
+         # swapdex codex shim - launch codex in the default account's slot.\n\
+         # Managed by swapdex; re-created by `swapdex shim`.\n\
+         if [ -z \"$CODEX_HOME\" ]; then\n\
+         \tdir=$(cat {ptr} 2>/dev/null)\n\
+         \tif [ -n \"$dir\" ]; then\n\
+         \t\tCODEX_HOME=\"$dir\"\n\
+         \t\texport CODEX_HOME\n\
+         \tfi\n\
+         fi\n\
+         exec {real} \"$@\"\n",
+        ptr = sh_quote(pointer),
+        real = sh_quote(real_codex),
+    )
+}
+
 /// Where a running proxy announces itself: `<store_dir>/proxy`, holding
 /// "<pid> <port>". Written on start, removed on exit.
 pub fn proxy_marker(paths: &Paths) -> PathBuf {
@@ -64,6 +95,9 @@ pub fn proxy_marker(paths: &Paths) -> PathBuf {
 /// A marker line the generated shim carries, so we can recognize (and never
 /// re-exec) our own shim regardless of how its dir is spelled on PATH.
 const SHIM_MARKER: &str = "swapdex claude shim";
+
+/// The same, for the codex shim.
+const SHIM_MARKER_CODEX: &str = "swapdex codex shim";
 
 /// True if `path` is one of swapdex's own `claude` shims (by content), not the
 /// real binary. Robust against path-spelling: a `~`, symlink, or relative PATH
@@ -76,7 +110,8 @@ fn is_our_shim(path: &Path) -> bool {
     };
     use std::io::Read;
     let n = f.read(&mut buf).unwrap_or(0);
-    String::from_utf8_lossy(&buf[..n]).contains(SHIM_MARKER)
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.contains(SHIM_MARKER) || head.contains(SHIM_MARKER_CODEX)
 }
 
 /// What a plain `claude` typed in THIS environment resolves to: the first
@@ -100,12 +135,17 @@ pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
 /// shim should exec. Skips the shim dir AND any `claude` that is itself one of
 /// our shims (so re-running `swapdex shim` can never bake a self-reference).
 fn find_real_claude(shim_dir: &Path) -> Option<PathBuf> {
+    find_real(shim_dir, "claude")
+}
+
+/// The real `bin` on PATH, skipping our own shim dir and any shim we wrote.
+fn find_real(shim_dir: &Path, bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         if dir == shim_dir {
             continue;
         }
-        let cand = dir.join("claude");
+        let cand = dir.join(bin);
         if cand.is_file() && !is_our_shim(&cand) {
             return Some(cand);
         }
@@ -205,19 +245,73 @@ pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
     let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("swapdex"));
     std::fs::create_dir_all(&shim_dir).context("create shim dir")?;
     std::fs::write(&shim, shim_script(&pointer, &real, &me)).context("write shim")?;
+    make_executable(&shim)?;
+    Ok((shim, shim_dir))
+}
+
+/// Install the `codex` shim beside Claude's. Returns the path, or `None` when
+/// there is no real `codex` on PATH to wrap - not having Codex installed is not
+/// an error, it just means there is nothing to shim.
+pub fn install_codex(paths: &Paths) -> Result<Option<PathBuf>> {
+    let shim = shim_path_for(paths, "codex");
+    let shim_dir = shim
+        .parent()
+        .map(|p| p.to_path_buf())
+        .context("shim path has no parent")?;
+    let Some(real) = find_real(&shim_dir, "codex") else {
+        return Ok(None);
+    };
+    let pointer = paths.store_dir().join("active-codex");
+    let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("swapdex"));
+    std::fs::create_dir_all(&shim_dir).context("create shim dir")?;
+    std::fs::write(&shim, codex_shim_script(&pointer, &real, &me)).context("write codex shim")?;
+    make_executable(&shim)?;
+    Ok(Some(shim))
+}
+
+fn make_executable(p: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755))
             .context("chmod shim")?;
     }
-    Ok((shim, shim_dir))
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    // Codex reads CODEX_HOME the way Claude reads CLAUDE_CONFIG_DIR, so its shim
+    // is the same shape: fill the home from the pointer, and only when nothing
+    // has already chosen one - `swapdex run` sets it explicitly, and overriding
+    // that would open every account as the default one.
+    #[test]
+    fn the_codex_shim_points_codex_home_at_the_default_slot() {
+        let s = codex_shim_script(
+            Path::new("/store/active-codex"),
+            Path::new("/usr/bin/codex"),
+            Path::new("/bin/swapdex"),
+        );
+        assert!(s.starts_with("#!/bin/sh"));
+        assert!(
+            s.contains("/store/active-codex"),
+            "reads codex's own pointer"
+        );
+        assert!(s.contains("/usr/bin/codex"), "execs the real codex");
+        assert!(s.contains("CODEX_HOME="), "sets the slot env");
+        assert!(
+            s.contains("if [ -z \"$CODEX_HOME\" ]"),
+            "an explicit CODEX_HOME is a decision already made"
+        );
+        assert!(s.contains("exec "), "replaces the process");
+        // It must never touch Claude's variables - one tool's shim moving the
+        // other tool's account is the bug this whole split exists to prevent.
+        assert!(!s.contains("CLAUDE_CONFIG_DIR"));
+        assert!(!s.contains("ANTHROPIC_BASE_URL"));
+    }
 
     #[test]
     fn script_references_pointer_real_claude_and_config_dir() {

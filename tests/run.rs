@@ -110,10 +110,17 @@ fn slots_empty_state_is_friendly() {
 }
 
 fn run_in(root: &Path, args: &[&str], path_env: &str) -> String {
+    // HOME must point inside the temp root. `swapdex shim` offers to put itself
+    // on PATH by editing the shell profile of $HOME, and without this a test run
+    // appended an export line - naming a temp dir that is deleted moments later -
+    // to the developer's own ~/.bashrc.
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let out = Command::new(bin())
         .args(args)
         .env("SWAPDEX_ROOT", root)
         .env("PATH", path_env)
+        .env("HOME", &home)
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -134,7 +141,8 @@ fn shim_makes_plain_claude_follow_use() {
     run_in(root.path(), &["run", "work"], &path);
     let used = run_in(root.path(), &["use", "work"], &path);
     assert!(
-        used.contains("default account -> work"),
+        // The tool is named now that Claude and Codex both switch by pointer.
+        used.contains("default claude account -> work"),
         "use repoints: {used}"
     );
     // Install the shim (finds the fake claude on PATH as the real one).

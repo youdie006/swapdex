@@ -83,6 +83,11 @@ impl Paths {
     pub fn claude_dir(&self) -> &Path {
         &self.claude_dir
     }
+    /// The bare Codex home (`~/.codex`, or `$CODEX_HOME`) - the source of
+    /// shared, account-agnostic config linked into new Codex slots.
+    pub fn codex_dir(&self) -> &Path {
+        &self.codex_dir
+    }
     /// Sibling `~/.claude-*` config dirs a user already runs via aliases -
     /// adoptable as slots during onboarding. Excludes the bare `~/.claude`.
     /// Best-effort; empty on failure.

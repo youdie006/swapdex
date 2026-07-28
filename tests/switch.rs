@@ -3350,3 +3350,38 @@ fn claude_switch_fails_closed_when_a_running_session_slot_is_unknown() {
     let (o, _e, _c) = run(root.path(), &["status"]);
     assert!(o.contains("b@x.com"), "live login unchanged: {o}");
 }
+
+// Codex isolates an account with CODEX_HOME the same way Claude does with
+// CLAUDE_CONFIG_DIR. Given a slot, switching Codex must repoint - never copy
+// auth.json, which is the whole reason saved Codex logins went stale and the
+// reason a running session could revoke the account being switched.
+#[test]
+fn switching_a_codex_slot_repoints_instead_of_copying() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-LIVE");
+    let live = root.path().join(".codex/auth.json");
+    let before = std::fs::read(&live).unwrap();
+
+    let (o, e, c) = run(
+        root.path(),
+        &["run", "other", "--tool", "codex", "--no-launch"],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let (o, e, c) = run(root.path(), &["use", "other", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+
+    // The live login is untouched: no copy happened.
+    assert_eq!(
+        std::fs::read(&live).unwrap(),
+        before,
+        "switching a slot must not write the live auth.json"
+    );
+    // The pointer moved, and it is CODEX's own - Claude's default is separate.
+    let store = root.path().join(".local/share/swapdex");
+    let ptr = std::fs::read_to_string(store.join("active-codex")).expect("codex pointer");
+    assert!(!ptr.trim().is_empty(), "pointer names the slot dir");
+    assert!(
+        !store.join("active-claude").exists(),
+        "switching Codex must not move where Claude launches"
+    );
+}

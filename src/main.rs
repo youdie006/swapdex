@@ -50,7 +50,13 @@ enum Cmd {
     Run {
         /// The account to launch
         name: String,
-        /// Extra args passed straight to `claude` (after `--`)
+        /// Which tool to launch it in (default: claude)
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
+        /// Create the slot without launching anything
+        #[arg(long)]
+        no_launch: bool,
+        /// Extra args passed straight to the tool (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -282,7 +288,12 @@ fn main() {
                 commands::use_account(&paths, name, *tool, *dry_run, *force)
             }
         }
-        Cmd::Run { name, args } => commands::run_account(&paths, name, args),
+        Cmd::Run {
+            name,
+            tool,
+            no_launch,
+            args,
+        } => commands::run_account(&paths, name, *tool, *no_launch, args),
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir } => commands::adopt_slot(&paths, name, dir),
