@@ -518,6 +518,12 @@ const NEW_CONV: [(&str, &str); 4] = [
 /// The "open a NEW <tool> conversation" entries for the tools a profile
 /// actually has - so a Claude-only account doesn't offer Codex/Gemini/etc.
 fn new_conv_for(tools: &[&str]) -> Vec<(&'static str, &'static str)> {
+    // An account with no saved profile has no tool list to filter by - and every
+    // slot account is one, so filtering left them with no way to start anything.
+    // Offer the two swapdex can launch into an account's own home instead.
+    if tools.is_empty() {
+        return NEW_CONV[..2].to_vec();
+    }
     NEW_CONV
         .iter()
         .filter(|(_, t)| tools.contains(t))
@@ -1032,16 +1038,24 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     }
                 }
                 Screen::Open { label, entries, new_conv } => {
-                    let mut items: Vec<ListItem> = entries
+                    // Starting something new comes first. Appended after the
+                    // recent sessions it sat below the fold on any account with a
+                    // few of them, so the screen looked like it could only reopen
+                    // the past.
+                    let mut items: Vec<ListItem> = new_conv
                         .iter()
-                        .map(|e| ListItem::new(Line::from(e.line.clone())))
+                        .map(|(nlabel, _)| {
+                            ListItem::new(Line::from(Span::styled(
+                                *nlabel,
+                                Style::default().fg(VIOLET),
+                            )))
+                        })
                         .collect();
-                    for (nlabel, _) in new_conv {
-                        items.push(ListItem::new(Line::from(Span::styled(
-                            *nlabel,
-                            Style::default().fg(VIOLET),
-                        ))));
-                    }
+                    items.extend(
+                        entries
+                            .iter()
+                            .map(|e| ListItem::new(Line::from(e.line.clone()))),
+                    );
                     let list = List::new(items)
                         .block(list_block_titled(&format!(" {label} ")))
                         .highlight_style(
@@ -1678,12 +1692,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     open_state.select(Some(i.saturating_sub(1)));
                 }
                 KeyCode::Enter => {
+                    // The new-conversation entries are drawn FIRST, so the index
+                    // has to be read the same way round - reading it the old way
+                    // after the reorder would open a session when the user asked
+                    // for a new chat.
                     let i = open_state.selected().unwrap_or(0);
-                    if i < entries.len() {
-                        break 'ui Outcome::OpenSession(i);
-                    }
-                    let Some(&(_, tool)) = new_conv.get(i - entries.len()) else {
-                        continue;
+                    let Some(&(_, tool)) = new_conv.get(i) else {
+                        break 'ui Outcome::OpenSession(i - new_conv.len());
                     };
                     let cwd = std::env::current_dir()
                         .ok()
@@ -2267,6 +2282,29 @@ mod tests {
     // that failed has no age worth reporting.
     // The cursor has to be visible without covering the gauges: the bars carry
     // their own background, and that background IS the reading.
+    // Starting a new conversation is the point of the screen, so it must be
+    // reachable: at the TOP, and offered even for an account with no saved
+    // profile - every slot account is exactly that, and they had no entry at all.
+    #[test]
+    fn the_new_conversation_entries_lead_and_never_vanish() {
+        assert_eq!(
+            new_conv_for(&["claude-code"]),
+            vec![("open a NEW Claude Code conversation", "claude-code")],
+            "only the tools the account actually has"
+        );
+        assert_eq!(
+            new_conv_for(&["codex"]),
+            vec![("open a NEW Codex conversation", "codex")]
+        );
+        // An account whose tools could not be determined still gets somewhere to
+        // go, rather than a screen that can only reopen the past.
+        assert_eq!(
+            new_conv_for(&[]),
+            NEW_CONV[..2].to_vec(),
+            "the two tools swapdex can launch, rather than nothing"
+        );
+    }
+
     #[test]
     fn the_selected_row_is_banded_only_up_to_the_bars() {
         let spans = || {
