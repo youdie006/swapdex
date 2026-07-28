@@ -276,6 +276,10 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
             threshold: opts.threshold,
         };
         std::thread::spawn(move || {
+            // A failure here is the user's problem to see: answering with a bare
+            // 500 tells them only that something broke, and the client shows
+            // "500 (no body)" while the reason - a login that could not be read,
+            // usually - sits in a log they cannot reach.
             if let Err(e) = handle(rq, &paths, &opts, &sh) {
                 eprintln!("swapdex proxy: {e:#}");
             }
@@ -308,6 +312,55 @@ fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::s
 }
 
 fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -> Result<()> {
+    // The request stays owned here so a failure can still be ANSWERED. Dropping it
+    // gives the client a bare "500 (no body)" and the reason - a login that could
+    // not be read, usually - stays in a log the user cannot reach.
+    let up = match forward_turn(&mut rq, paths, opts, sh) {
+        Ok(up) => up,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let body = serde_json::json!({
+                "type": "error",
+                "error": { "type": "swapdex_proxy_error", "message": msg.clone() }
+            })
+            .to_string();
+            let resp = tiny_http::Response::from_string(body)
+                .with_status_code(tiny_http::StatusCode(502))
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"content-type"[..], &b"application/json"[..])
+                        .expect("static header"),
+                );
+            let _ = rq.respond(resp);
+            return Err(anyhow!(msg));
+        }
+    };
+    let out_headers: Vec<tiny_http::Header> = up
+        .headers
+        .iter()
+        .filter(|(n, _)| !skip_header(n))
+        .filter_map(|(n, v)| tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()).ok())
+        .collect();
+    // The length is unknown (responses stream, and SSE has no length at all), so
+    // answer chunked and let the reader drive.
+    let resp = tiny_http::Response::new(
+        tiny_http::StatusCode(up.status),
+        out_headers,
+        up.reader,
+        None,
+        None,
+    );
+    rq.respond(resp)?;
+    Ok(())
+}
+
+/// Choose the account, serve the turn (retrying and rotating as needed), and hand
+/// back the upstream response for the caller to relay.
+fn forward_turn(
+    rq: &mut tiny_http::Request,
+    paths: &Paths,
+    opts: &Opts,
+    sh: &Shared,
+) -> Result<upstream::Upstream> {
     // The client's request, read once and reusable: serving the same turn on
     // another account means sending these bytes again with a different token.
     let client_headers: Vec<(String, String)> = rq
@@ -437,6 +490,21 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
                 slot = next;
             }
             None => {
+                // Nothing left to try. Say WHY in a way the client will render:
+                // a bare 401 relayed from upstream reads as "log in to Claude",
+                // when the fix is to re-run one account so its token refreshes.
+                let names: Vec<String> = crate::slots::Slots::open(paths)
+                    .map(|s| s.list().into_iter().map(|r| r.name).collect())
+                    .unwrap_or_default();
+                let unusable = sh.unusable.lock().unwrap().clone();
+                if !unusable.is_empty() && unusable.len() >= names.len().max(1) {
+                    let first = names.first().cloned().unwrap_or_else(|| "<name>".into());
+                    return Err(anyhow!(
+                        "every account's login has expired. Run `swapdex run {first}` once \
+                         (its own login refreshes there), then try again - swapdex does not \
+                         mint tokens itself."
+                    ));
+                }
                 println!("{}: no other account can serve this turn", slot.name);
                 std::io::stdout().flush().ok();
                 break up;
@@ -444,23 +512,7 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Shared) -
         }
     };
 
-    let out_headers: Vec<tiny_http::Header> = up
-        .headers
-        .iter()
-        .filter(|(n, _)| !skip_header(n))
-        .filter_map(|(n, v)| tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()).ok())
-        .collect();
-    // The length is unknown (responses stream, and SSE has no length at all), so
-    // answer chunked and let the reader drive.
-    let resp = tiny_http::Response::new(
-        tiny_http::StatusCode(up.status),
-        out_headers,
-        up.reader,
-        None,
-        None,
-    );
-    rq.respond(resp)?;
-    Ok(())
+    Ok(up)
 }
 
 /// The port a running `swapdex proxy` announced, or `None` when none is up. The
