@@ -96,7 +96,11 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
     // still served by that account (rotating mid-turn would drop the prompt cache
     // for nothing), which is why the check belongs here and not there.
     if opts.auto {
-        if let Some(t) = opts.threshold {
+        // Stepping off BEFORE the wall needs a reading, and the only zero-spend
+        // reading that exists is Anthropic's usage endpoint. Codex has none, so
+        // its accounts are moved when one actually refuses a turn - never by
+        // asking one API about another's account.
+        if let Some(t) = opts.threshold.filter(|_| opts.tool != "codex") {
             refresh_measured(&list, sh);
             let full = sh
                 .measured
@@ -346,9 +350,21 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
             let _ = std::fs::remove_file(&serving);
         });
     }
-    println!("swapdex proxy listening on http://127.0.0.1:{port}");
-    if announced && crate::shim::shim_path(paths).exists() {
-        println!("  a plain `claude` now goes through it (the shim picks it up)");
+    let is_codex = opts.tool == "codex";
+    let bin = if is_codex { "codex" } else { "claude" };
+    // The port ends this line: it is how the tests read it back, and anything
+    // appended after it turns the port into an unparseable token.
+    println!("swapdex {bin} proxy listening on http://127.0.0.1:{port}");
+    if announced && crate::shim::shim_path_for(paths, &opts.tool).exists() {
+        println!("  a plain `{bin}` now goes through it (the shim picks it up)");
+    } else if is_codex {
+        // Codex reaches a proxy through a model provider, not an env var, and
+        // the block must declare no api key or Codex sends one instead of the
+        // ChatGPT login this proxy switches between.
+        println!("  point Codex at it:  codex -c model_provider=swapdex \\");
+        println!("    -c model_providers.swapdex.name=swapdex \\");
+        println!("    -c model_providers.swapdex.base_url=http://127.0.0.1:{port}/v1 \\");
+        println!("    -c model_providers.swapdex.wire_api=responses");
     } else {
         println!("  point Claude at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}");
     }
@@ -356,7 +372,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // background by the shim, so its settings are otherwise invisible - and a
     // threshold that silently failed to load looks exactly like one that is
     // working.
-    match (opts.auto, opts.threshold) {
+    match (opts.auto, opts.threshold.filter(|_| !is_codex)) {
         (true, Some(t)) => println!(
             "  auto: hands the session on at {:.0}% used, or when an account refuses",
             (t * 100.0).round()

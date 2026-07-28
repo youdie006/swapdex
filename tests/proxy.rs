@@ -94,6 +94,15 @@ fn seed_slot(root: &std::path::Path, name: &str, id: &str, token: &str, make_def
     }
 }
 
+/// The port out of the proxy's announcement line, wherever in it the address
+/// sits. A stricter parser meant a reworded first line panicked the test BEFORE
+/// it could kill the child, stranding one proxy per test.
+fn parse_port(line: &str) -> Option<u16> {
+    line.split_whitespace()
+        .filter_map(|w| w.rsplit(':').next())
+        .find_map(|p| p.trim().parse::<u16>().ok())
+}
+
 /// Start `swapdex proxy --port 0` and return (child, port) once it announces.
 fn start_proxy(
     root: &std::path::Path,
@@ -119,11 +128,8 @@ fn start_proxy(
         line.push(b[0]);
     }
     let line = String::from_utf8_lossy(&line).to_string();
-    let port = line
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.trim().parse::<u16>().ok())
-        .unwrap_or_else(|| panic!("proxy did not announce a port: {line}"));
+    let port =
+        parse_port(&line).unwrap_or_else(|| panic!("proxy did not announce a port: {line}"));
     (child, port)
 }
 
