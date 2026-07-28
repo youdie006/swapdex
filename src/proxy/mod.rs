@@ -108,15 +108,28 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Shared) -> Result<crate::slots::Sl
                 .unwrap()
                 .is_some_and(|t| t.elapsed() < PREEMPT_COOLDOWN);
             if full && !cooling {
-                if let Some(better) = usable_under_threshold(paths, sh, &chosen.name, t) {
-                    println!(
-                        "{} is near its limit - starting this turn on {}",
-                        chosen.name, better.name
-                    );
-                    std::io::stdout().flush().ok();
-                    *sh.rotated.lock().unwrap() = Some(better.name.clone());
-                    *sh.last_preempt.lock().unwrap() = Some(std::time::Instant::now());
-                    return Ok(better);
+                match usable_under_threshold(paths, sh, &chosen.name, t) {
+                    Some(better) => {
+                        println!(
+                            "{} is near its limit - starting this turn on {}",
+                            chosen.name, better.name
+                        );
+                        std::io::stdout().flush().ok();
+                        *sh.rotated.lock().unwrap() = Some(better.name.clone());
+                        *sh.last_preempt.lock().unwrap() = Some(std::time::Instant::now());
+                        return Ok(better);
+                    }
+                    // Staying put on a full account is the right call when every
+                    // other one is full too - but silence here is indistinguishable
+                    // from the threshold not working at all.
+                    None => {
+                        println!(
+                            "{} is past the threshold, and no other account is below it - \
+                             staying here",
+                            chosen.name
+                        );
+                        std::io::stdout().flush().ok();
+                    }
                 }
             }
         }
