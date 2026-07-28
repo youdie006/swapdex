@@ -71,6 +71,18 @@ pub fn token_from_credentials(bytes: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Has this saved credential's access token already lapsed? A snapshot holds the
+/// token as it was at capture, and refresh tokens rotate, so an old snapshot's
+/// token is dead - firing it at the endpoint earns a refusal that looks like the
+/// endpoint being busy, which sends the user to wait for something that will
+/// never come. `false` when the blob carries no expiry: unknown is not expired.
+pub fn credentials_expired(bytes: &[u8], now_ms: i64) -> bool {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64())
+        .is_some_and(|exp| exp <= now_ms)
+}
+
 /// Interpret one window object leniently: the exact field names of the usage
 /// endpoint are treated as best-effort (fraction fields first, then percentage
 /// fields), so a small schema drift degrades to "unexpected" rather than lying.
@@ -405,6 +417,25 @@ mod tests {
             Fetch::Unexpected(500, _)
         ));
         assert!(matches!(classify(0, String::new()), Fetch::Offline(_)));
+    }
+
+    // A saved snapshot's token dies when the refresh token rotates, and the
+    // endpoint answers a dead token the same way it answers a burst - so without
+    // this check a rotted profile reads as "busy, try again", forever.
+    #[test]
+    fn a_lapsed_snapshot_is_recognised_before_it_is_sent() {
+        let now = 1_800_000_000_000i64;
+        let blob =
+            |exp: i64| format!(r#"{{"claudeAiOauth":{{"accessToken":"A","expiresAt":{exp}}}}}"#);
+        assert!(credentials_expired(blob(now - 1).as_bytes(), now));
+        assert!(!credentials_expired(blob(now + 3_600_000).as_bytes(), now));
+        // No expiry recorded, or nothing parseable: unknown is not expired, and
+        // refusing to ask would hide an account that may answer perfectly well.
+        assert!(!credentials_expired(
+            br#"{"claudeAiOauth":{"accessToken":"A"}}"#,
+            now
+        ));
+        assert!(!credentials_expired(b"not json", now));
     }
 
     // A 429 from the usage endpoint says the ENDPOINT is busy, not that the

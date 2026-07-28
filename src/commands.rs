@@ -4469,6 +4469,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         email: Option<String>,
         token: Option<String>,
         active: bool,
+        /// The saved token has already lapsed. Sending it earns a refusal that
+        /// looks like the endpoint being busy, so it is never sent.
+        expired: bool,
     }
 
     let live_id = adapters::claude::Claude.identity(paths).ok().flatten();
@@ -4489,6 +4492,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             }
             let snap = store.load(&p.name, "claude-code").ok().flatten();
             let (mut email, mut uuid, mut token) = (None, None, None);
+            let mut expired = false;
             if let Some(s) = &snap {
                 if let Some(o) = s
                     .part("oauth_account")
@@ -4500,6 +4504,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 token = s
                     .part("credentials")
                     .and_then(|c| q::token_from_credentials(c.expose()));
+                expired = s
+                    .part("credentials")
+                    .is_some_and(|c| q::credentials_expired(c.expose(), now_ms()));
             }
             let active = live_uuid.is_some() && uuid == live_uuid;
             matched_live |= active;
@@ -4517,6 +4524,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 },
                 token: if active { live_token.clone() } else { token },
                 active,
+                // The live login is refreshed by Claude itself, so only a
+                // SNAPSHOT can be stale.
+                expired: expired && !active,
             });
         }
     }
@@ -4543,6 +4553,8 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 email: crate::proxy::creds::slot_email(&r.config_dir),
                 token,
                 active,
+                // A slot's token is refreshed in place by the tool that owns it.
+                expired: crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms()),
             });
         }
     }
@@ -4556,6 +4568,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 email: live_id.as_ref().and_then(|a| a.email.clone()),
                 token: live_token.clone(),
                 active: true,
+                expired: false,
             },
         );
     }
@@ -4585,6 +4598,19 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     for (i, r) in rows.iter().enumerate() {
         match &r.token {
             None => results.push((i, Fetch::Offline("no saved token".into()))),
+            // Do not ask on behalf of a token that has already lapsed. The
+            // endpoint refuses it the same way it refuses a burst, so the answer
+            // would read as "busy, try again in a moment" - advice that can never
+            // come true, and three retries per dead account that make the
+            // endpoint busier for the accounts that CAN answer.
+            Some(_) if r.expired => results.push((
+                i,
+                Fetch::Offline(
+                    "saved token expired - snapshots go stale as refresh tokens rotate; \
+                     `swapdex run <name>` gives this account a slot that stays fresh"
+                        .into(),
+                ),
+            )),
             // An unusable token is a PER-ACCOUNT problem (corrupt snapshot),
             // not a transport failure - it must never masquerade as "the
             // network is down" and abort the whole run.
