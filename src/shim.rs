@@ -68,11 +68,24 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
 /// default pointer, and only when nothing has already chosen one - but with
 /// Codex's own variable and pointer. It never mentions Claude's: one tool's shim
 /// moving the other tool's account is exactly what the per-tool split prevents.
-pub fn codex_shim_script(pointer: &Path, real_codex: &Path, _swapdex: &Path) -> String {
+pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> String {
+    // The provider block deliberately carries no `env_key`: that omission is what
+    // makes Codex attach its OWN ChatGPT OAuth bearer and account-id, which is
+    // the pair the proxy rewrites. Naming a key instead would have it send an API
+    // key and there would be nothing to switch.
     format!(
         "#!/bin/sh\n\
          # swapdex codex shim - launch codex in the default account's slot.\n\
          # Managed by swapdex; re-created by `swapdex shim`.\n\
+         # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
+         # port); silence means \"run without one\", exactly as before.\n\
+         port=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
+         if [ -n \"$port\" ]; then\n\
+         \tset -- -c model_provider=swapdex \\\n\
+         \t\t-c model_providers.swapdex.name=swapdex \\\n\
+         \t\t-c model_providers.swapdex.base_url=\"http://127.0.0.1:$port/v1\" \\\n\
+         \t\t-c model_providers.swapdex.wire_api=responses \"$@\"\n\
+         fi\n\
          if [ -z \"$CODEX_HOME\" ]; then\n\
          \tdir=$(cat {ptr} 2>/dev/null)\n\
          \tif [ -n \"$dir\" ]; then\n\
@@ -81,6 +94,7 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, _swapdex: &Path) -> 
          \tfi\n\
          fi\n\
          exec {real} \"$@\"\n",
+        sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_codex),
     )
@@ -89,7 +103,19 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, _swapdex: &Path) -> 
 /// Where a running proxy announces itself: `<store_dir>/proxy`, holding
 /// "<pid> <port>". Written on start, removed on exit.
 pub fn proxy_marker(paths: &Paths) -> PathBuf {
-    paths.store_dir().join("proxy")
+    proxy_marker_for(paths, "claude-code")
+}
+
+/// One marker per tool, so a Claude proxy and a Codex proxy can both be up: they
+/// carry different traffic on different ports, and a single marker would have
+/// each mistake the other for itself and stop it.
+pub fn proxy_marker_for(paths: &Paths, tool: &str) -> PathBuf {
+    match tool {
+        "codex" => paths.store_dir().join("proxy-codex"),
+        // Claude's keeps the name it has always had, so an upgrade does not
+        // orphan a proxy that is already running.
+        _ => paths.store_dir().join("proxy"),
+    }
 }
 
 /// A marker line the generated shim carries, so we can recognize (and never
@@ -288,6 +314,41 @@ mod tests {
     // is the same shape: fill the home from the pointer, and only when nothing
     // has already chosen one - `swapdex run` sets it explicitly, and overriding
     // that would open every account as the default one.
+    // The shim is also how Codex reaches proxy mode. Codex only sends its own
+    // OAuth to a provider that declares no api key, so the block names a base
+    // url and a wire protocol and nothing else - adding an env_key would make it
+    // send an API key instead and the whole mechanism would fall over.
+    #[test]
+    fn the_codex_shim_routes_through_a_running_proxy() {
+        let s = codex_shim_script(
+            Path::new("/store/active-codex"),
+            Path::new("/usr/bin/codex"),
+            Path::new("/bin/swapdex"),
+        );
+        assert!(
+            s.contains("proxy --ensure --tool codex"),
+            "asks swapdex for a live codex proxy: {s}"
+        );
+        assert!(s.contains("model_provider=swapdex"), "selects the provider");
+        assert!(
+            s.contains("model_providers.swapdex.base_url=\"http://127.0.0.1:$port/v1\""),
+            "points it at the proxy: {s}"
+        );
+        assert!(
+            s.contains("model_providers.swapdex.wire_api=responses"),
+            "the protocol codex speaks"
+        );
+        assert!(
+            !s.contains("env_key"),
+            "declaring an api key would stop codex attaching its own OAuth"
+        );
+        // Without a proxy, codex runs exactly as it would have.
+        assert!(
+            s.contains("if [ -n \"$port\" ]"),
+            "the overrides are conditional: {s}"
+        );
+    }
+
     #[test]
     fn the_codex_shim_points_codex_home_at_the_default_slot() {
         let s = codex_shim_script(

@@ -1581,7 +1581,7 @@ pub fn proxy(
     threshold: Option<f64>,
 ) -> Result<i32> {
     if ensure {
-        return proxy_ensure(paths, port);
+        return proxy_ensure(paths, port, slot_tool(sel));
     }
     // Precedence: an explicit flag for this run, else the saved setting.
     let auto = if auto {
@@ -1609,14 +1609,24 @@ pub fn proxy(
     Ok(0)
 }
 
+/// The port `swapdex proxy` listens on unless told otherwise. Codex's proxy
+/// takes the next one, so both tools' shims can start their own.
+pub const DEFAULT_PROXY_PORT: u16 = 8787;
+
 /// `proxy --ensure` - print the port of a live proxy, starting one in the
 /// background if there is none. This is what lets a plain `claude` (through the
 /// shim) get proxy mode without the user running or remembering anything. Exits
 /// non-zero and prints nothing when a proxy cannot be had, so the shim simply
 /// runs Claude directly.
-fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
-    let mut port = port;
-    if let Some((pid, running, build)) = crate::proxy::running_proxy(paths) {
+fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
+    // Two proxies cannot share a port. Codex takes the next one, so the shim for
+    // either tool can start its own without asking the user to pick.
+    let mut port = if tool == "codex" && port == DEFAULT_PROXY_PORT {
+        port + 1
+    } else {
+        port
+    };
+    if let Some((pid, running, build)) = crate::proxy::running_proxy_for(paths, tool) {
         if build == crate::proxy::build_id() {
             println!("{running}");
             return Ok(0);
@@ -1628,7 +1638,7 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
         // be left talking to nothing.
         unsafe { libc::kill(pid, libc::SIGTERM) };
         for _ in 0..40 {
-            if crate::proxy::running_proxy(paths).is_none() {
+            if crate::proxy::running_proxy_for(paths, tool).is_none() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1637,7 +1647,7 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
     }
     // Proxy mode is only useful with slot accounts; without one there is nothing
     // to serve and starting a proxy would just add a moving part.
-    if crate::slots::Slots::open(paths)
+    if crate::slots::Slots::open_for(paths, tool)
         .map(|s| s.list().is_empty())
         .unwrap_or(true)
     {
@@ -1650,6 +1660,8 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
     cmd.arg("proxy")
         .arg("--port")
         .arg(port.to_string())
+        .arg("--tool")
+        .arg(tool)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1672,7 +1684,7 @@ fn proxy_ensure(paths: &Paths, port: u16) -> Result<i32> {
     // Wait briefly for it to announce itself; a proxy that cannot bind must not
     // hang the launch of Claude.
     for _ in 0..40 {
-        if let Some(p) = crate::proxy::running_port(paths) {
+        if let Some((_, p, _)) = crate::proxy::running_proxy_for(paths, tool) {
             println!("{p}");
             return Ok(0);
         }

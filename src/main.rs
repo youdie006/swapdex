@@ -130,7 +130,7 @@ enum Cmd {
     /// Run a local proxy so a RUNNING Claude session can change accounts
     Proxy {
         /// Port to listen on (0 picks a free one)
-        #[arg(long, default_value_t = 8787)]
+        #[arg(long, default_value_t = commands::DEFAULT_PROXY_PORT)]
         port: u16,
         /// Serve every request from this account instead of the current default
         #[arg(long)]

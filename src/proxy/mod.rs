@@ -325,7 +325,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         .port();
     // Announce the proxy so the installed `claude` shim points at it by itself -
     // "<pid> <port>", pid so a stale marker (killed proxy) is detectable.
-    let marker = crate::shim::proxy_marker(paths);
+    let marker = crate::shim::proxy_marker_for(paths, &opts.tool);
     let _ = std::fs::create_dir_all(paths.store_dir());
     // The marker carries the pid, the port, AND which build is serving. Updating
     // swapdex leaves the running proxy on the old code - which is how a fix can be
@@ -837,7 +837,12 @@ pub fn running_port(paths: &Paths) -> Option<u16> {
 
 /// The running proxy as (pid, port, build). `None` when none is up.
 pub fn running_proxy(paths: &Paths) -> Option<(i32, u16, String)> {
-    let raw = std::fs::read_to_string(crate::shim::proxy_marker(paths)).ok()?;
+    running_proxy_for(paths, "claude-code")
+}
+
+/// The same, for one tool's proxy.
+pub fn running_proxy_for(paths: &Paths, tool: &str) -> Option<(i32, u16, String)> {
+    let raw = std::fs::read_to_string(crate::shim::proxy_marker_for(paths, tool)).ok()?;
     let mut it = raw.split_whitespace();
     let pid: i32 = it.next()?.parse().ok()?;
     let port: u16 = it.next()?.parse().ok()?;
