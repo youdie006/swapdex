@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.31.0] - 2026-07-28
 
 ### Added
 - **Codex accounts now get the same permanent slots Claude has, and the same mid-session switching.** Codex reads `CODEX_HOME` the way Claude reads `CLAUDE_CONFIG_DIR`, so everything that stopped Claude accounts rotting applies unchanged: the account lives in its own home, Codex refreshes that credential in place, and switching moves a pointer instead of copying `auth.json`. Copying is what made saved Codex logins go stale and what let a running session revoke the account being switched away from. `swapdex run <name> --tool codex` creates and launches one, `--no-launch` just creates it, `swapdex adopt <name> <dir> --tool codex` registers a `CODEX_HOME` you already run by hand (in place - never moved, copied, or written to), `swapdex use <name> --tool codex` repoints, and `swapdex slots` lists both tools with the account each plain launch would use. Each tool keeps its own default pointer, so switching Codex never moves where Claude launches; slots recorded before tools were distinguished are Claude's, the only kind that existed.
@@ -23,6 +23,8 @@ All notable changes to swapdex are documented here. This project follows
 - **`swapdex ui`: the `r` key now switches to the account you used before (`use -`), not `restore`.** `restore` puts back the login that was live before the *last switch*, which in hub-and-spoke use (always switching away from one base account) is always that same base - so `r` appeared to return to one fixed account rather than the account you actually used before. `r` is now the previous-account toggle and the key hint reads `previous`. `swapdex restore` remains available as an explicit command and safety net for undoing a switch.
 
 ## [0.30.0] - 2026-07-22
+
+Never published: the version was bumped but no tag, crate, package, or formula ever carried it. Everything below ships in 0.31.0.
 
 ### Added
 - **The `swapdex ui` main screen shows each account's 5h utilization as a right-aligned bar + percent.** Every Claude account row carries its own filled/empty bar and `NN%` of the 5h limit used (calm green -> amber -> red as it fills) at the right edge - the way a team dashboard shows per-member usage - so you can see who's near their limit at a glance. It's the real quota utilization (from the live usage endpoint), fetched once lazily after the first frame (the UI still opens instantly; the bars fill in) and per account, so it does one network read per account when you open the UI. `u` still opens the local token breakdown; `%` opens the full quota view.
