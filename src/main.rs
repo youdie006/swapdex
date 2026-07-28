@@ -60,6 +60,11 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Find which account holds a conversation (searches every account's store)
+    Whereis {
+        /// Part of the project path, e.g. Project/ROS (omit to list the newest)
+        project: Option<String>,
+    },
     /// List the permanent account slots
     Slots,
     /// Install the `claude` shim so a plain `claude` follows `swapdex use`
@@ -300,6 +305,7 @@ fn main() {
             no_launch,
             args,
         } => commands::run_account(&paths, name, *tool, *no_launch, args),
+        Cmd::Whereis { project } => commands::whereis(&paths, project.as_deref()),
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),

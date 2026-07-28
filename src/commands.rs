@@ -3478,8 +3478,15 @@ pub fn switch_outcome_line(tool: &str, name: &str, proxy_running: bool) -> Strin
             "  this applies to the NEXT {bin} you start; a session already open keeps the account it began with\n"
         ));
         out.push_str(&format!(
-            "  to move one that is already running: swapdex proxy{flag}"
+            "  to move one that is already running: swapdex proxy{flag}\n"
         ));
+        // The surprise that costs people the most time: conversations live inside
+        // the store they were started in, so a switch changes which ones -c and
+        // -r can see. They are not gone, they are in the other account.
+        out.push_str(
+            "  note: past conversations stay with the account they were started in - \
+             `swapdex whereis` finds one",
+        );
         out
     }
 }
@@ -3845,6 +3852,40 @@ fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
         "codex" => paths.codex_dir().to_path_buf(),
         _ => paths.claude_dir().to_path_buf(),
     }
+}
+
+/// `swapdex whereis [project]` - which account's store holds a conversation.
+///
+/// Switching accounts also switches which conversations `claude -c` and
+/// `claude -r` can see, because Claude keeps them inside the config dir it was
+/// launched with. Nothing is lost, but "no conversation found" reads exactly
+/// like it was, so this says where the conversation actually is and how to
+/// reopen it from any account.
+pub fn whereis(paths: &Paths, project: Option<&str>) -> Result<i32> {
+    let found = crate::whereis::find(paths, project, 15);
+    if found.is_empty() {
+        match project {
+            Some(p) => println!("No conversation under a path matching '{p}', in any account."),
+            None => println!("No conversations found in any account's store yet."),
+        }
+        return Ok(0);
+    }
+    println!("conversations, newest first - the account column is whose store holds it\n");
+    let now = now_secs();
+    for f in &found {
+        println!(
+            "  {:<16} {:>8}  {}",
+            fit(&f.account, 16),
+            age_line((now.saturating_sub(f.modified) as u128) * 1_000_000_000),
+            fit(&f.project, 52),
+        );
+        println!("    {}", f.resume_command());
+    }
+    println!(
+        "\nnaming the config dir is what makes these work from any account - the shim\n\
+         only fills that variable in when it is unset, so an explicit one always wins."
+    );
+    Ok(0)
 }
 
 /// List the permanent slots (name + the config dir each launches into).
