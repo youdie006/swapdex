@@ -882,3 +882,32 @@ fn a_preemptive_move_does_not_flap_between_two_full_accounts() {
         "the session should not bounce between accounts, saw {hops} changes: {seen:?}"
     );
 }
+
+/// The UI marks the account that is actually taking turns, so the proxy has to
+/// record it: after a rotation the pointer and the server differ, and a marker
+/// showing the pointer sits on an account that cannot serve.
+#[test]
+fn the_proxy_records_which_account_is_serving() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "spare", "bbbb2222", "AT-SPARE", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    // The first account is spent; the turn moves to the other one.
+    let upstream = fake_upstream_spent_once(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+
+    post_through(port, "{\"t\":1}");
+    let serving = root.path().join(".local/share/swapdex/proxy-serving");
+    let first = std::fs::read_to_string(&serving).unwrap_or_default();
+    assert_eq!(first.trim(), "rnd", "it starts on the pointed-at account");
+
+    post_through(port, "{\"t\":2}");
+    let after = std::fs::read_to_string(&serving).unwrap_or_default();
+    child.kill().ok();
+    child.wait().ok();
+    assert_eq!(
+        after.trim(),
+        "spare",
+        "after rotating, the record follows the account actually serving"
+    );
+}

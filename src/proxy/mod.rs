@@ -268,8 +268,10 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         // too - otherwise the shim would keep pointing at a dead port until the
         // pid check catches it.
         let m = marker.clone();
+        let serving = serving_file(paths);
         let _ = ctrl_c_cleanup(move || {
             let _ = std::fs::remove_file(&m);
+            let _ = std::fs::remove_file(&serving);
         });
     }
     println!("swapdex proxy listening on http://127.0.0.1:{port}");
@@ -454,6 +456,7 @@ fn forward_turn(
         .unwrap_or_default();
 
     let mut slot = pick_slot(paths, opts, sh)?;
+    note_serving(paths, &slot.name);
     let mut tried: Vec<String> = Vec::new();
     let up = loop {
         // An already-lapsed token earns a 401 and cannot be refreshed from here,
@@ -624,6 +627,32 @@ fn forward_turn(
     };
 
     Ok(up)
+}
+
+/// Where a running proxy records the account actually serving turns. The default
+/// pointer says which account was CHOSEN; after a rotation the proxy may be
+/// serving a different one, and a marker that shows the choice rather than the
+/// reality reads as "active" next to an account that cannot serve at all.
+pub fn serving_file(paths: &Paths) -> std::path::PathBuf {
+    paths.store_dir().join("proxy-serving")
+}
+
+/// The account a running proxy is serving turns from, if one is running.
+pub fn serving_account(paths: &Paths) -> Option<String> {
+    running_port(paths)?;
+    std::fs::read_to_string(serving_file(paths))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Record who is serving, but only on a change - this runs per request.
+fn note_serving(paths: &Paths, name: &str) {
+    let f = serving_file(paths);
+    if std::fs::read_to_string(&f).is_ok_and(|c| c.trim() == name) {
+        return;
+    }
+    let _ = std::fs::write(&f, name);
 }
 
 /// The port a running `swapdex proxy` announced, or `None` when none is up. The

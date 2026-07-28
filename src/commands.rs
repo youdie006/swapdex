@@ -2172,6 +2172,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .collect()
                     })
                     .unwrap_or_default();
+            // Which account is actually taking turns. With a proxy running that is
+            // the account SERVING them, not the one the pointer names: after a
+            // rotation those differ, and marking a spent account "active" next to
+            // the word "spent" is a contradiction the user has to decode.
+            let pointer = crate::slots::Slots::open(self.paths)
+                .ok()
+                .and_then(|s| s.default_dir());
+            let serving = crate::proxy::serving_account(self.paths);
             let slot_dir_of = |name: &str| {
                 slot_dirs
                     .iter()
@@ -2191,12 +2199,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // A profile that ALSO has a slot switches by pointer, so its
                     // active marker has to follow the pointer too - the live login
                     // does not move, and the marker would sit still after a switch.
-                    let by_pointer = slot_dir_of(&p.name).map(|d| {
-                        crate::slots::Slots::open(self.paths)
-                            .ok()
-                            .and_then(|s| s.default_dir())
-                            .as_deref()
-                            == Some(d.as_path())
+                    let by_pointer = slot_dir_of(&p.name).map(|d| match &serving {
+                        Some(s) => s == &p.name,
+                        None => pointer.as_deref() == Some(d.as_path()),
                     });
                     crate::tui::Row {
                         disabled: cfg.is_disabled(&p.name),
@@ -2229,9 +2234,6 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // switching a slot moves that pointer and never touches a live login,
             // so judging it by the live login would leave the marker stuck where
             // it was.
-            let pointer = crate::slots::Slots::open(self.paths)
-                .ok()
-                .and_then(|s| s.default_dir());
             let mut list = list;
             for (name, dir) in &slot_dirs {
                 if list.iter().any(|r| &r.name == name) {
@@ -2243,7 +2245,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     name: name.clone(),
                     ident: identity_column(crate::proxy::creds::slot_email(dir), None),
                     tools: "claude-code".into(),
-                    active: pointer.as_deref() == Some(dir.as_path()),
+                    active: match &serving {
+                        Some(s) => s == name,
+                        None => pointer.as_deref() == Some(dir.as_path()),
+                    },
                     warn: None,
                 });
             }
