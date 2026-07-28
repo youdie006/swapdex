@@ -121,6 +121,68 @@ fn group_of(tools: &str) -> &'static str {
         .unwrap_or("other")
 }
 
+/// One account is one row, even when swapdex holds it two ways. A saved snapshot
+/// and a slot for the same login are two storage details, not two accounts, and
+/// showing both asks the user to know which is which. The row that can actually
+/// serve wins: a slot with a login, else whatever else names that identity.
+///
+/// Rows with no identity to compare (no email yet) are always kept - they cannot
+/// be proven to be duplicates.
+pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
+    let key = |r: &Row| {
+        // The identity column is "email [tier]"; the email alone identifies it.
+        r.ident
+            .split_whitespace()
+            .next()
+            .filter(|e| e.contains('@'))
+            .map(str::to_string)
+    };
+    // Prefer, in order: signed in and active, then signed in, then the rest - so
+    // the surviving row is the one that would actually take a turn.
+    let rank = |r: &Row| match (r.needs_login, r.active) {
+        (false, true) => 0,
+        (false, false) => 1,
+        (true, _) => 2,
+    };
+    // (identity, index of the current winner). The winner takes the FIRST-seen
+    // position, so an account does not jump down the list when its slot logs in.
+    let mut slots: Vec<(Option<String>, usize)> = Vec::new();
+    let mut rows = rows;
+    for i in 0..rows.len() {
+        let k = key(&rows[i]);
+        match k.as_ref().and_then(|k| {
+            slots
+                .iter()
+                .position(|(s, _)| s.as_deref() == Some(k.as_str()))
+        }) {
+            Some(pos) => {
+                if rank(&rows[i]) < rank(&rows[slots[pos].1]) {
+                    slots[pos].1 = i;
+                }
+            }
+            // No identity to compare on: never merged away.
+            None => slots.push((k, i)),
+        }
+    }
+    let winners: Vec<usize> = slots.into_iter().map(|(_, i)| i).collect();
+    let mut out = Vec::with_capacity(winners.len());
+    for i in winners {
+        out.push(std::mem::replace(
+            &mut rows[i],
+            Row {
+                name: String::new(),
+                ident: String::new(),
+                tools: String::new(),
+                active: false,
+                warn: None,
+                disabled: false,
+                needs_login: false,
+            },
+        ));
+    }
+    out
+}
+
 /// Sort accounts by tool group (canonical order), keeping the original order
 /// inside a group, so accounts of one tool sit together under one heading.
 pub fn group_sorted(mut rows: Vec<Row>) -> Vec<Row> {
@@ -1783,6 +1845,52 @@ mod tests {
     // centred, the fill splits it, and a countdown joins only when it fits.
     // Accounts group by tool, in canonical order, with a heading on the first row
     // of each group - so Claude accounts and Codex accounts read as two sections.
+    // The same login held two ways is one account, not two: the row that can
+    // actually serve survives, and rows with no identity are never merged away.
+    #[test]
+    fn duplicate_identities_collapse_to_the_row_that_can_serve() {
+        let row = |name: &str, ident: &str, needs_login: bool, active: bool| Row {
+            name: name.into(),
+            ident: ident.into(),
+            tools: "claude-code".into(),
+            active,
+            warn: None,
+            disabled: false,
+            needs_login,
+        };
+        // A snapshot and a slot for the same login: the slot with a login wins.
+        let out = dedupe_by_identity(vec![
+            row("rnd", "rnd@x.co [team]", true, false),
+            row("rnd-slot", "rnd@x.co", false, true),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "rnd-slot");
+        // Different logins are left alone.
+        let out = dedupe_by_identity(vec![
+            row("a", "a@x.co", false, false),
+            row("b", "b@x.co", false, false),
+        ]);
+        assert_eq!(out.len(), 2);
+        // No identity yet: cannot be proven a duplicate, so it stays.
+        let out = dedupe_by_identity(vec![
+            row("fresh", "", true, false),
+            row("also", "", true, false),
+            row("known", "k@x.co", false, false),
+        ]);
+        assert_eq!(out.len(), 3);
+        // The FIRST position is kept when a later row wins, so the list does not
+        // jump around as logins come and go.
+        let out = dedupe_by_identity(vec![
+            row("first", "same@x.co", true, false),
+            row("other", "b@x.co", false, false),
+            row("better", "same@x.co", false, false),
+        ]);
+        assert_eq!(
+            out.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["better", "other"]
+        );
+    }
+
     #[test]
     fn accounts_group_by_tool_with_one_heading_each() {
         let row = |name: &str, tools: &str| Row {

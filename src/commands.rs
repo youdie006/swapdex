@@ -2247,9 +2247,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     warn: None,
                 });
             }
-            // Group the list by tool so the Claude accounts and the Codex
-            // accounts read as two sections rather than one mixed list.
-            crate::tui::group_sorted(list)
+            // One row per account (a snapshot and a slot for the same login are
+            // one account), then grouped by tool so Claude and Codex read as two
+            // sections rather than one mixed list.
+            crate::tui::group_sorted(crate::tui::dedupe_by_identity(list))
         }
         fn switch(&mut self, name: &str) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
