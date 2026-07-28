@@ -3871,13 +3871,18 @@ pub fn whereis(paths: &Paths, project: Option<&str>) -> Result<i32> {
         return Ok(0);
     }
     println!("conversations, newest first - the account column is whose store holds it\n");
-    let now = now_secs();
+    let width = found
+        .iter()
+        .map(|f| f.account.chars().count())
+        .max()
+        .unwrap_or(8);
     for f in &found {
         println!(
-            "  {:<16} {:>8}  {}",
-            fit(&f.account, 16),
-            age_line((now.saturating_sub(f.modified) as u128) * 1_000_000_000),
-            fit(&f.project, 52),
+            "  {:<width$} {:>8}  {}",
+            f.account,
+            // age_line takes the moment itself, not how long ago it was.
+            age_line(f.modified as u128 * 1_000_000_000),
+            f.project,
         );
         println!("    {}", f.resume_command());
     }
