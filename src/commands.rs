@@ -2215,6 +2215,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         _ => None,
                     };
                     crate::tui::Row {
+                        is_slot: slot_dir_of(&p.name).is_some(),
                         disabled: cfg.is_disabled(&p.name),
                         // A slot with no readable token cannot serve a turn; say so
                         // rather than letting it look ready and fail later.
@@ -2251,6 +2252,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     continue;
                 }
                 list.push(crate::tui::Row {
+                    is_slot: true,
                     disabled: cfg.is_disabled(name),
                     needs_login: crate::proxy::creds::slot_token(dir).is_none(),
                     name: name.clone(),

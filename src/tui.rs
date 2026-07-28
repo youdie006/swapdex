@@ -139,12 +139,18 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
             .filter(|e| e.contains('@'))
             .map(|e| format!("{}\u{0}{}", group_of(&r.tools), e))
     };
-    // Prefer, in order: signed in and active, then signed in, then the rest - so
-    // the surviving row is the one that would actually take a turn.
-    let rank = |r: &Row| match (r.needs_login, r.active) {
-        (false, true) => 0,
-        (false, false) => 1,
-        (true, _) => 2,
+    // The surviving row has to be the one a switch would actually move. A slot
+    // switches by pointer - which the proxy and the active marker both follow -
+    // while a snapshot copies credentials and moves no pointer, so keeping the
+    // snapshot row made Enter appear to do nothing.
+    let rank = |r: &Row| {
+        let usable = match (r.needs_login, r.active) {
+            (false, true) => 0,
+            (false, false) => 1,
+            (true, _) => 2,
+        };
+        // Slots first within the same usability.
+        (usable, u8::from(!r.is_slot))
     };
     // (identity, index of the current winner). The winner takes the FIRST-seen
     // position, so an account does not jump down the list when its slot logs in.
@@ -179,6 +185,7 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
                 warn: None,
                 disabled: false,
                 needs_login: false,
+                is_slot: false,
             },
         ));
     }
@@ -354,6 +361,10 @@ pub struct Row {
     /// A slot account with no readable login yet - it cannot serve a turn until
     /// its tool signs in there.
     pub needs_login: bool,
+    /// Backed by a permanent slot. Switching one moves the default pointer, which
+    /// is what the proxy and the active marker follow; switching a snapshot copies
+    /// credentials and moves no pointer at all.
+    pub is_slot: bool,
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -1859,6 +1870,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login,
+            is_slot: false,
         };
         // A snapshot and a slot for the same login: the slot with a login wins.
         let out = dedupe_by_identity(vec![
@@ -1867,6 +1879,16 @@ mod tests {
         ]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "rnd-slot");
+        // Equally usable: the SLOT still wins, because switching one moves the
+        // pointer the proxy and the marker follow, while switching a snapshot
+        // moves nothing they can see - Enter would look like it did nothing.
+        let mut snap = row("rnd", "rnd@x.co [team]", false, false);
+        let mut slot = row("rnd-slot", "rnd@x.co", false, false);
+        snap.is_slot = false;
+        slot.is_slot = true;
+        let out = dedupe_by_identity(vec![snap, slot]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "rnd-slot", "the switchable row survives");
         // Different logins are left alone.
         let out = dedupe_by_identity(vec![
             row("a", "a@x.co", false, false),
@@ -1916,6 +1938,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: false,
+            is_slot: false,
         };
         let sorted = group_sorted(vec![
             row("codex", "codex*"),
@@ -1977,6 +2000,7 @@ mod tests {
             warn,
             disabled,
             needs_login: false,
+            is_slot: false,
         };
         let spent = Usage {
             five_h: Some(100.0),
@@ -2020,6 +2044,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: true,
+            is_slot: false,
         };
         assert_eq!(account_status(&needs, Some(&fresh)).0, "no login");
         // No quota data is not "spent".
@@ -2106,6 +2131,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: false,
+            is_slot: false,
         };
         // " N " + dot(2) + name + 2 + ident + 2 + status(8) + 2, using the WIDEST
         // name and identity so every bar starts at the same column.
