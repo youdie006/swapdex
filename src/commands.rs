@@ -2340,7 +2340,23 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         }
         fn switch(&mut self, name: &str) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
-            run_self(&["use", name])
+            // Switch only the tool this account belongs to. A bare `use` moves
+            // every tool the profile covers, so switching a Codex-only account
+            // reported "profile has no claude-code login" - true, irrelevant, and
+            // indistinguishable from something being wrong.
+            let tool = Store::open(self.paths)
+                .ok()
+                .and_then(|st| st.list().into_iter().find(|p| p.name == name))
+                .and_then(|p| {
+                    ["claude-code", "codex", "gemini", "antigravity"]
+                        .into_iter()
+                        .find(|t| p.tools.iter().any(|pt| pt == t))
+                });
+            match tool {
+                Some(t) => run_self(&["use", name, "--tool", t]),
+                // A slot account has no store profile; it is Claude by definition.
+                None => run_self(&["use", name, "--tool", "claude-code"]),
+            }
         }
         fn toggle_rotation(&mut self, name: &str) -> String {
             let mut cfg = crate::settings::load(self.paths);
@@ -4542,7 +4558,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 ),
             )),
             Some(t) => {
-                let f = q::fetch(t);
+                let f = q::fetch_with_retry(t);
                 let reached = results.iter().any(|(_, x)| !matches!(x, Fetch::Offline(_)));
                 if !reached {
                     if let Fetch::Offline(msg) = &f {
@@ -4627,6 +4643,11 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 );
             }
             Fetch::Offline(msg) => println!("  {msg}"),
+            // The ENDPOINT was busy, not this account - saying "no data" here
+            // would read as a problem with the account itself.
+            Fetch::Throttled => println!(
+                "  usage endpoint busy just now - the account is fine, try again in a moment"
+            ),
         }
         println!();
     }
@@ -4706,6 +4727,13 @@ fn quota_json(label: &str, email: Option<&str>, active: bool, f: &crate::quota::
             m.insert("status".into(), Value::String("unexpected".into()));
             m.insert("http".into(), Value::from(*code));
             m.insert("raw".into(), Value::String(body.clone()));
+        }
+        Fetch::Throttled => {
+            m.insert("status".into(), Value::String("throttled".into()));
+            m.insert(
+                "note".into(),
+                Value::String("the usage endpoint is rate-limited, not this account".into()),
+            );
         }
         Fetch::Offline(msg) => {
             m.insert("status".into(), Value::String("offline".into()));

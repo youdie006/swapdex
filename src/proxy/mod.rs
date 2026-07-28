@@ -181,7 +181,7 @@ fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         if !crate::quota::token_usable(&token) {
             continue;
         }
-        if let crate::quota::Fetch::Ok(q) = crate::quota::fetch(&token) {
+        if let crate::quota::Fetch::Ok(q) = crate::quota::fetch_with_retry(&token) {
             out.insert(
                 r.name.clone(),
                 (

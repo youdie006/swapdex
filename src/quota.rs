@@ -56,6 +56,10 @@ pub enum Fetch {
     Unexpected(u32, String),
     /// curl could not run or the network was unreachable.
     Offline(String),
+    /// 429: the usage endpoint itself is rate-limited. Reading several accounts
+    /// in a row trips this, and it says nothing about the account's own quota -
+    /// so it must not be shown as "no data" next to accounts that answered.
+    Throttled,
 }
 
 /// Pull the OAuth access token out of a Claude credentials blob
@@ -183,6 +187,7 @@ pub fn parse(body: &str) -> Option<Quota> {
 pub fn classify(code: u32, body: String) -> Fetch {
     match code {
         401 | 403 => Fetch::Unauthorized,
+        429 => Fetch::Throttled,
         200..=299 => match parse(&body) {
             Some(q) => Fetch::Ok(q),
             None => Fetch::Unexpected(code, body),
@@ -202,6 +207,19 @@ pub fn token_usable(token: &str) -> bool {
 
 /// The live, opt-in network call. curl reads its config (including the bearer
 /// token) from stdin so the token never appears in argv.
+/// Read an account's usage, retrying once when the ENDPOINT (not the account) is
+/// rate-limited. Asking for several accounts in a row trips that regularly, and a
+/// single short pause is enough to get an answer rather than a blank.
+pub fn fetch_with_retry(token: &str) -> Fetch {
+    match fetch(token) {
+        Fetch::Throttled => {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            fetch(token)
+        }
+        other => other,
+    }
+}
+
 pub fn fetch(token: &str) -> Fetch {
     if !token_usable(token) {
         return Fetch::Offline("no usable access token for this account".into());
@@ -379,6 +397,16 @@ mod tests {
             Fetch::Unexpected(500, _)
         ));
         assert!(matches!(classify(0, String::new()), Fetch::Offline(_)));
+    }
+
+    // A 429 from the usage endpoint says the ENDPOINT is busy, not that the
+    // account has no quota - reading several accounts in a row trips it, and
+    // conflating the two blanked out accounts that were perfectly fine.
+    #[test]
+    fn a_429_is_endpoint_throttling_not_an_account_verdict() {
+        assert!(matches!(classify(429, String::new()), Fetch::Throttled));
+        assert!(matches!(classify(401, String::new()), Fetch::Unauthorized));
+        assert!(matches!(classify(403, String::new()), Fetch::Unauthorized));
     }
 
     #[test]
