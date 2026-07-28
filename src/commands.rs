@@ -2520,13 +2520,50 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             five_h_reset,
                             seven_d,
                             seven_d_reset,
-                            // Claude's figures come from a live read, so there is
-                            // no snapshot age to disclose.
+                            // A live read has no age to disclose.
                             observed_at: None,
                         },
                     ))
                 })
                 .collect();
+            // Keep what was read, and fill the gaps from what was read before.
+            // The usage endpoint rate-limits when several accounts are asked in a
+            // row, and an account that could not be read this minute is not an
+            // account with no quota - blanking it looks exactly like a broken one.
+            let now = now_secs() as i64;
+            let fresh: Vec<(String, crate::quota_cache::Entry)> = claude
+                .iter()
+                .map(|(n, u)| {
+                    (
+                        n.clone(),
+                        crate::quota_cache::Entry {
+                            five_h: u.five_h,
+                            five_h_reset: u.five_h_reset,
+                            seven_d: u.seven_d,
+                            seven_d_reset: u.seven_d_reset,
+                            at: now,
+                        },
+                    )
+                })
+                .collect();
+            crate::quota_cache::update(self.paths, &fresh);
+            for (name, e) in crate::quota_cache::load(self.paths) {
+                if claude.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
+                claude.push((
+                    name,
+                    crate::tui::Usage {
+                        five_h: e.five_h,
+                        five_h_reset: e.five_h_reset,
+                        seven_d: e.seven_d,
+                        seven_d_reset: e.seven_d_reset,
+                        // Shown with its age, so a remembered number is never
+                        // mistaken for a live one.
+                        observed_at: Some(e.at),
+                    },
+                ));
+            }
             // Codex reports its own windows into its session transcripts, so its
             // usage costs a local file read - no network, unlike Claude's. The
             // transcript does not name the account, so it belongs to whichever
