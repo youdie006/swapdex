@@ -3087,6 +3087,34 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     "no default account set - `swapdex use <name>`".into(),
                 ),
             }
+            // Conversations live inside the store they were started in, so
+            // pointing `claude` at an account also decides which conversations
+            // `-c` and `-r` can offer. When the default store holds work and is
+            // not a registered account, that work becomes unreachable from a
+            // plain `claude` with nothing to explain it - and swapdex is what
+            // redirected it, so swapdex is what has to say so.
+            {
+                let bare = paths.claude_dir().to_path_buf();
+                let registered = crate::slots::Slots::open_for(paths, "claude-code")
+                    .map(|s| s.list().iter().any(|r| r.config_dir == bare))
+                    .unwrap_or(false);
+                let held = std::fs::read_dir(bare.join("projects"))
+                    .map(|rd| rd.flatten().count())
+                    .unwrap_or(0);
+                if !registered && held > 0 {
+                    report(
+                        "default store",
+                        false,
+                        format!(
+                            "~/.claude holds {held} project(s) of conversations but is not a \
+                             swapdex account, so a plain `claude -r` cannot reach them while \
+                             another account is active - register it to switch back: \
+                             `swapdex adopt personal {}`",
+                            crate::util::redact_path(&bare.display().to_string())
+                        ),
+                    );
+                }
+            }
             // Shim ENGAGEMENT, not mere existence: an installed shim that PATH
             // never reaches looks set up while a plain `claude` still runs
             // bare - `swapdex use` flips the pointer and nothing reads it.

@@ -32,9 +32,13 @@ impl Found {
     /// Spelling out the config dir is what makes it work: the shim only fills
     /// that variable in when it is unset, so an explicit one always wins.
     pub fn resume_command(&self) -> String {
+        // The REAL path, not the `~`-shortened one used for display: this line is
+        // meant to be run, and a tilde inside quotes is not expanded - it becomes
+        // a directory that does not exist, and Claude then reports no session,
+        // which is the exact confusion this command exists to end.
         format!(
             "CLAUDE_CONFIG_DIR={} claude -r {}",
-            crate::util::redact_path(&self.config_dir.display().to_string()),
+            self.config_dir.display(),
             self.session_id
         )
     }
@@ -162,6 +166,14 @@ mod tests {
         // in when it is unset - an explicit one always wins.
         let cmd = ros[0].resume_command();
         assert!(cmd.contains("CLAUDE_CONFIG_DIR="), "{cmd}");
+        assert!(
+            !cmd.contains('~'),
+            "a path meant to be RUN cannot be tilde-shortened: {cmd}"
+        );
+        assert!(
+            cmd.contains(&paths.claude_dir().display().to_string()),
+            "it names the store in full: {cmd}"
+        );
         assert!(cmd.ends_with("claude -r sess-ros"), "{cmd}");
 
         // A slot's own conversation is attributed to that account by name.

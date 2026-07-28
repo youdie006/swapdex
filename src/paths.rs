@@ -102,6 +102,13 @@ impl Paths {
             }
         }
         out.sort();
+        // The bare `~/.claude` LAST, and only when it exists. Leaving it out made
+        // the account everyone starts from the one account swapdex could not
+        // switch back to - and every conversation begun before the first switch
+        // lives in it, so they became unreachable by a plain `claude -r`.
+        if self.claude_dir.is_dir() {
+            out.push(self.claude_dir.clone());
+        }
         out
     }
     /// Claude Code's session transcripts (for local, no-network usage reads).
