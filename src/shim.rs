@@ -362,7 +362,10 @@ mod tests {
         }
         // A profile that does NOT add it is left alone, and a commented-out line
         // is not an active entry.
-        assert!(!profile_already_adds("export PATH=\"/usr/local/bin:$PATH\"\n", &shim_dir));
+        assert!(!profile_already_adds(
+            "export PATH=\"/usr/local/bin:$PATH\"\n",
+            &shim_dir
+        ));
         assert!(!profile_already_adds(
             &format!("# export PATH=\"{full}:$PATH\"\n"),
             &shim_dir

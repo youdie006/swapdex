@@ -1404,10 +1404,7 @@ fn serve_moves_who_pays_without_moving_where_sessions_live() {
 
     assert_eq!(
         auths(&sink),
-        vec![
-            "Bearer AT-HOME".to_string(),
-            "Bearer AT-PAYER".to_string()
-        ],
+        vec!["Bearer AT-HOME".to_string(), "Bearer AT-PAYER".to_string()],
         "the running conversation changed account mid-flight"
     );
     // And where sessions start never moved: that pointer is what decides which
