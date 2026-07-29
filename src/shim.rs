@@ -179,6 +179,30 @@ fn find_real(shim_dir: &Path, bin: &str) -> Option<PathBuf> {
     None
 }
 
+/// Does this profile already put the shim dir on PATH?
+///
+/// Compared by MEANING, not by exact text: the same directory can be written as
+/// `$HOME/...`, `~/...`, or in full, and matching only the spelling this version
+/// happens to emit appended the line again on every install. A real profile ended
+/// up with three copies of it.
+fn profile_already_adds(profile_text: &str, shim_dir: &Path) -> bool {
+    let full = shim_dir.to_string_lossy().to_string();
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().to_string());
+    // The same dir with the home prefix written the other two ways.
+    let alts: Vec<String> = home
+        .iter()
+        .filter_map(|h| full.strip_prefix(h.as_str()))
+        .flat_map(|rest| [format!("$HOME{rest}"), format!("~{rest}")])
+        .collect();
+    profile_text.lines().any(|l| {
+        let l = l.trim();
+        if !l.contains("PATH") || l.starts_with('#') {
+            return false;
+        }
+        l.contains(&full) || alts.iter().any(|a| l.contains(a))
+    })
+}
+
 /// The line a shell profile needs so the shim is found first.
 fn path_line(shim_dir: &Path) -> String {
     format!("export PATH=\"{}:$PATH\"", shim_dir.display())
@@ -241,7 +265,7 @@ pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
     };
     let existing = std::fs::read_to_string(&profile).unwrap_or_default();
     let line = path_line(shim_dir);
-    if existing.contains(PROFILE_MARKER) || existing.contains(&line) {
+    if existing.contains(PROFILE_MARKER) || profile_already_adds(&existing, shim_dir) {
         // Written before but not active yet: the user has not started a new shell.
         return Ok(PathSetup::Added(profile));
     }
@@ -318,6 +342,35 @@ mod tests {
     // OAuth to a provider that declares no api key, so the block names a base
     // url and a wire protocol and nothing else - adding an env_key would make it
     // send an API key instead and the whole mechanism would fall over.
+    // The same directory can be spelled three ways, and matching only the one
+    // this version emits appended the line again on every install - a real
+    // profile ended up with three copies.
+    #[test]
+    fn an_existing_path_line_is_recognised_however_it_is_spelled() {
+        let home = dirs::home_dir().expect("a home dir");
+        let shim_dir = home.join("Library/Application Support/swapdex/bin");
+        let full = shim_dir.display().to_string();
+        for spelling in [
+            format!("export PATH=\"{full}:$PATH\""),
+            "export PATH=\"$HOME/Library/Application Support/swapdex/bin:$PATH\"".to_string(),
+            "export PATH=\"~/Library/Application Support/swapdex/bin:$PATH\"".to_string(),
+        ] {
+            assert!(
+                profile_already_adds(&format!("# something\n{spelling}\n"), &shim_dir),
+                "not recognised: {spelling}"
+            );
+        }
+        // A profile that does NOT add it is left alone, and a commented-out line
+        // is not an active entry.
+        assert!(!profile_already_adds("export PATH=\"/usr/local/bin:$PATH\"\n", &shim_dir));
+        assert!(!profile_already_adds(
+            &format!("# export PATH=\"{full}:$PATH\"\n"),
+            &shim_dir
+        ));
+        // A line merely MENTIONING the dir without touching PATH is not one.
+        assert!(!profile_already_adds(&format!("echo {full}\n"), &shim_dir));
+    }
+
     #[test]
     fn the_codex_shim_routes_through_a_running_proxy() {
         let s = codex_shim_script(
