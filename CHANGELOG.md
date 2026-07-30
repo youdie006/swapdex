@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.33.0] - 2026-07-31
+
+### Fixed
+- **Every Claude account displayed as spent no matter how little had been used.** The usage endpoint reports `utilization` as a PERCENTAGE, and it was read as a 0..1 fraction and multiplied by 100 - so anything above 1% clamped to "100% used". A session 4% in showed as exhausted, and the proxy's threshold stepped off accounts that had almost everything left. A week of recorded readings held only 0.0 and 100.0 and nothing in between, which is what the clamp looks like from outside; the endpoint itself answers `"utilization": 4.0` beside `"limits":[{"kind":"session","percent":4}]`. Two tests asserted the fraction, so the bug was pinned rather than caught - they were assumptions about the endpoint written as if they were observations. Readings already recorded under the misread are dropped when the cache is read, since they are all exactly 100 and would otherwise keep showing accounts as spent after the fix.
+- **Signing in works from the dashboard, and no longer goes through the proxy.** Three separate faults, each fixed where it lived. The shim set `ANTHROPIC_BASE_URL` unconditionally, so `claude /login` did its OAuth exchange against swapdex; it now recognises login, logout, and setup-token and asks for no proxy on those runs, and `swapdex run` clears an inherited address. That guard can only see a launch's arguments, so the proxy itself now passes oauth, login, logout, authorize, and auth paths straight through with the credential the client sent - which is what `/login` typed inside a running session needs. And the sign-in key tore the dashboard down: it is a child process now, with the terminal handed back for its duration and taken again after, so several accounts can be added in one sitting. Mouse capture is released for that duration too - it is not part of ratatui's restore, and while it is on a mouse paste never arrives as text, which is what a code prompt asks for.
+- **The dashboard opens for a slot-only install.** The check counted store profiles and live logins and not slots, so with nothing signed in yet it reported no accounts - and signing in is what the dashboard is for.
+- **Renaming from the dashboard works on the accounts it lists.** It only ever touched the store, and every account it lists is a slot.
+
 ## [0.32.0] - 2026-07-29
 
 ### Added
