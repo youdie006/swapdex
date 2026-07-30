@@ -3889,10 +3889,18 @@ pub fn run_account(
         eprintln!("swapdex: `{bin}` isn't on your PATH. Install it, then retry.");
         return Ok(3);
     }
-    let err = std::process::Command::new(bin)
-        .args(args)
-        .env(home_var, &rec.config_dir)
-        .exec();
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args).env(home_var, &rec.config_dir);
+    // This is the path a sign-in takes, and signing in must reach the vendor
+    // directly. An inherited proxy address both breaks the OAuth code exchange
+    // and answers with whichever account the proxy already holds - so a fresh
+    // slot appears to be signed in as somebody else, or its prompt takes no
+    // input at all. A slot launched here serves itself, so the proxy has nothing
+    // to add either way.
+    for var in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"] {
+        cmd.env_remove(var);
+    }
+    let err = cmd.exec();
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
 }
 

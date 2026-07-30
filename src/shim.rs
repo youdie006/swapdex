@@ -43,12 +43,23 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
         "#!/bin/sh\n\
          # swapdex claude shim - launch claude in the default account's slot.\n\
          # Managed by swapdex; re-created by `swapdex shim`.\n\
+         # Signing in must reach Anthropic directly. The OAuth exchange is between\n\
+         # the browser and the real API, and a proxy in the middle both breaks the\n\
+         # code exchange and answers with whichever account it already has - so a\n\
+         # fresh slot looks signed in as somebody else, or the prompt takes no\n\
+         # input at all.\n\
+         sx_login=no\n\
+         for a in \"$@\"; do\n\
+         \tcase \"$a\" in login|/login|logout|/logout|setup-token) sx_login=yes ;; esac\n\
+         done\n\
          # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
          # port); silence and a non-zero status mean \"run without one\".\n\
-         port=$({sx} proxy --ensure 2>/dev/null)\n\
-         if [ -n \"$port\" ]; then\n\
-         \tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
-         \texport ANTHROPIC_BASE_URL\n\
+         if [ \"$sx_login\" = no ]; then\n\
+         \tport=$({sx} proxy --ensure 2>/dev/null)\n\
+         \tif [ -n \"$port\" ]; then\n\
+         \t\tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
+         \t\texport ANTHROPIC_BASE_URL\n\
+         \tfi\n\
          fi\n\
          if [ -z \"$CLAUDE_CONFIG_DIR\" ]; then\n\
          \tdir=$(cat {ptr} 2>/dev/null)\n\
@@ -77,9 +88,18 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> S
         "#!/bin/sh\n\
          # swapdex codex shim - launch codex in the default account's slot.\n\
          # Managed by swapdex; re-created by `swapdex shim`.\n\
+         # A sign-in must reach ChatGPT directly: the OAuth exchange is between the\n\
+         # browser and the real backend, and a proxy in the middle answers with\n\
+         # whichever account it already holds.\n\
+         sx_login=no\n\
+         for a in \"$@\"; do\n\
+         \tcase \"$a\" in login|/login|logout|/logout) sx_login=yes ;; esac\n\
+         done\n\
          # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
          # port); silence means \"run without one\", exactly as before.\n\
-         port=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
+         if [ \"$sx_login\" = no ]; then\n\
+         \tport=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
+         fi\n\
          if [ -n \"$port\" ]; then\n\
          \tset -- -c model_provider=swapdex \\\n\
          \t\t-c model_providers.swapdex.name=swapdex \\\n\
@@ -372,6 +392,34 @@ mod tests {
         ));
         // A line merely MENTIONING the dir without touching PATH is not one.
         assert!(!profile_already_adds(&format!("echo {full}\n"), &shim_dir));
+    }
+
+    // Signing in must reach the vendor directly: the OAuth exchange is between
+    // the browser and the real API, and a proxy in the middle both breaks the code
+    // exchange and answers with whichever account it already holds - so a fresh
+    // slot looks signed in as someone else, or its prompt takes no input at all.
+    #[test]
+    fn the_shim_does_not_proxy_a_sign_in() {
+        let s = shim_script(
+            Path::new("/store/active-claude"),
+            Path::new("/usr/bin/claude"),
+            Path::new("/bin/swapdex"),
+        );
+        // The proxy is asked for only when this is not a sign-in.
+        assert!(
+            s.contains("sx_login=no"),
+            "it decides whether this is a sign-in: {s}"
+        );
+        for verb in ["login", "/login", "logout", "setup-token"] {
+            assert!(s.contains(verb), "recognised: {verb}");
+        }
+        // And the base-url export sits INSIDE that condition, not before it.
+        let guard = s.find("if [ \"$sx_login\" = no ]").expect("the guard");
+        let export = s.find("ANTHROPIC_BASE_URL").expect("the export");
+        assert!(
+            guard < export,
+            "the proxy address is only set when not signing in"
+        );
     }
 
     #[test]
