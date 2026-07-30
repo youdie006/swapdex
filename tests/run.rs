@@ -849,3 +849,23 @@ fn run_launches_codex_in_the_accounts_own_home() {
     // other tool anywhere.
     assert!(!out.contains("CLAUDE_CONFIG_DIR"), "{out}");
 }
+
+// Every account is a slot now, and the UI's rename only ever touched the store -
+// so renaming from the dashboard failed with "no profile named X" on exactly the
+// accounts the dashboard is made of.
+#[test]
+fn rename_works_on_a_slot_account() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "work", "--no-launch"], &path);
+    let out = run_in(root.path(), &["rename", "work", "acme"], &path);
+    assert!(out.contains("acme"), "the rename reported success: {out}");
+    let listed = run_in(root.path(), &["slots"], &path);
+    assert!(listed.contains("acme"), "the new name is listed: {listed}");
+    assert!(!listed.contains("work"), "the old one is gone: {listed}");
+}
