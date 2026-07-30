@@ -1415,3 +1415,44 @@ fn serve_moves_who_pays_without_moving_where_sessions_live() {
         "the conversation store is untouched: {launch}"
     );
 }
+
+// An authentication exchange is between the user and the vendor. swapdex has no
+// business rewriting it - and it did: the client's own Authorization was replaced
+// with a slot's token, so a sign-in typed INSIDE a running session (where the
+// proxy address is already in the environment and no shim guard can see it) came
+// back "successful" as whichever account the proxy happened to hold.
+#[test]
+fn an_authentication_request_passes_through_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "home", "aaaa1111", "AT-HOME", true);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    for path in ["/v1/oauth/token", "/oauth/authorize", "/v1/oauth/revoke"] {
+        let _ = agent
+            .post(format!("http://127.0.0.1:{port}{path}"))
+            .header("authorization", "Bearer CLIENT-OWN")
+            .header("content-type", "application/json")
+            .send(b"{\"code\":\"abc\"}".as_slice());
+    }
+    // A normal turn still gets the slot's token - the exemption is narrow.
+    post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = auths(&sink);
+    assert_eq!(seen.len(), 4, "all four reached upstream: {seen:?}");
+    assert!(
+        seen[..3].iter().all(|a| a == "Bearer CLIENT-OWN"),
+        "an auth exchange carries the user's own credential, not a slot's: {seen:?}"
+    );
+    assert_eq!(
+        seen[3], "Bearer AT-HOME",
+        "and ordinary traffic is still served by the account: {seen:?}"
+    );
+}

@@ -61,6 +61,22 @@ pub struct Opts {
     pub threshold: Option<f64>,
 }
 
+/// Is this an authentication exchange rather than a turn?
+///
+/// An OAuth flow is between the user and the vendor: the code, the token
+/// exchange, the revoke. swapdex must not touch it. Rewriting the Authorization
+/// header on one means a sign-in is answered as whichever account the proxy
+/// already holds - so signing in reported success and produced the wrong account,
+/// and that happens when `/login` is typed INSIDE a running session, where the
+/// proxy address is already in the environment and no launcher guard can see it.
+fn is_auth_exchange(path: &str) -> bool {
+    // Compare on segments so a path merely CONTAINING the word cannot match: the
+    // exemption skips token injection, so it must stay narrow.
+    let p = path.split('?').next().unwrap_or(path).to_ascii_lowercase();
+    p.split('/')
+        .any(|seg| matches!(seg, "oauth" | "login" | "logout" | "authorize" | "auth"))
+}
+
 /// Headers that must not be forwarded: hop-by-hop, or ones the HTTP client sets
 /// itself from the body and connection.
 fn skip_header(name: &str) -> bool {
@@ -596,6 +612,20 @@ fn forward_turn(
         })
         .unwrap_or_default();
 
+    // Authentication is the user's own business with the vendor. Pass it straight
+    // through with the credential the client sent - no account chosen, no token
+    // injected, no identity rewritten - and say so, since a silent exemption in
+    // the log would be indistinguishable from a turn nobody served.
+    if is_auth_exchange(&path) {
+        println!("  {method} {path} -> signing in, passed through untouched");
+        std::io::stdout().flush().ok();
+        let mut headers = client_headers.clone();
+        if let Some(auth) = client_auth.clone() {
+            headers.push(("authorization".into(), auth));
+        }
+        return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+    }
+
     let mut slot = pick_slot(paths, opts, sh)?;
     note_serving(paths, &slot.name);
     let mut tried: Vec<String> = Vec::new();
@@ -881,4 +911,38 @@ pub fn running_proxy_for(paths: &Paths, tool: &str) -> Option<(i32, u16, String)
     let build = it.next().unwrap_or("").to_string();
     // Signal 0 tests for existence without touching the process.
     (unsafe { libc::kill(pid, 0) } == 0).then_some((pid, port, build))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_auth_exchange;
+
+    // The exemption skips token injection, so it must match an authentication
+    // path and nothing else - ordinary traffic that slipped through it would be
+    // served by whatever credential the client happened to send.
+    #[test]
+    fn only_authentication_paths_are_exempt() {
+        for p in [
+            "/v1/oauth/token",
+            "/oauth/authorize",
+            "/v1/oauth/revoke?x=1",
+            "/v1/OAuth/token",
+            "/login",
+            "/api/auth/callback",
+        ] {
+            assert!(is_auth_exchange(p), "should be exempt: {p}");
+        }
+        for p in [
+            "/v1/messages",
+            "/v1/messages?beta=true",
+            "/api/hello",
+            "/v1/responses",
+            // A segment merely CONTAINING the word is not an auth path: matching
+            // on substrings would exempt real traffic.
+            "/v1/authors",
+            "/v1/oauthorization-notes",
+        ] {
+            assert!(!is_auth_exchange(p), "must NOT be exempt: {p}");
+        }
+    }
 }
