@@ -2783,7 +2783,17 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         // An empty store is fine now: the TUI draws an onboarding welcome
         // (offers to save the accounts you're already logged into). Only fall
         // back to text if there is truly nothing to do AND nothing to save.
+        // Slots count as accounts. Checking only the store and the live logins
+        // meant a slot-only install - which is every install now - could not open
+        // its own dashboard until something happened to be signed in, and the
+        // dashboard is where you go to sign in.
+        let has_slots = ["claude-code", "codex"].iter().any(|t| {
+            crate::slots::Slots::open_for(paths, t)
+                .map(|s| !s.list().is_empty())
+                .unwrap_or(false)
+        });
         if Store::open(paths)?.list().is_empty()
+            && !has_slots
             && adapters::all().iter().all(|a| !a.present(paths))
         {
             println!("No accounts saved yet, and you're not logged into any tool.");

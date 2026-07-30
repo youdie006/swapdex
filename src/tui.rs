@@ -348,11 +348,24 @@ const SELECT_BG: Color = Color::Rgb(48, 42, 78);
 /// back or its output lands in a buffer nobody sees and its keystrokes never
 /// arrive.
 fn suspended<T>(terminal: &mut ratatui::DefaultTerminal, f: impl FnOnce() -> T) -> T {
+    // Mouse capture has to go too, and it is NOT part of restore(): while it is on
+    // the terminal reports clicks and selections as escape sequences instead of
+    // acting on them, so a mouse paste into the child never arrives as text. A
+    // sign-in prompt asks for a pasted code, which made this the difference
+    // between "the prompt takes no input" and a working sign-in.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableMouseCapture
+    );
     ratatui::restore();
     let out = f();
     if let Ok(t) = ratatui::try_init() {
         *terminal = t;
     }
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableMouseCapture
+    );
     let _ = terminal.clear();
     out
 }
