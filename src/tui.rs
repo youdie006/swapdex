@@ -341,6 +341,22 @@ fn mark_selected(mut spans: Vec<Span<'static>>, upto: usize, selected: bool) -> 
 /// text and the status colours all stay legible on it.
 const SELECT_BG: Color = Color::Rgb(48, 42, 78);
 
+/// Give the terminal back for the duration of `f`, then take it again.
+///
+/// A child process that draws its own interface - a sign-in prompt - cannot share
+/// a screen with a live TUI: the alternate screen and raw mode have to be handed
+/// back or its output lands in a buffer nobody sees and its keystrokes never
+/// arrive.
+fn suspended<T>(terminal: &mut ratatui::DefaultTerminal, f: impl FnOnce() -> T) -> T {
+    ratatui::restore();
+    let out = f();
+    if let Ok(t) = ratatui::try_init() {
+        *terminal = t;
+    }
+    let _ = terminal.clear();
+    out
+}
+
 /// A note for figures that are a snapshot: "as of 2h ago", so a stale number is
 /// never mistaken for a live one. Empty when the data IS live, or fresh enough
 /// that the distinction does not matter.
@@ -458,6 +474,10 @@ pub trait TuiCtx {
     fn sessions(&mut self, name: &str) -> (String, Vec<SessionEntry>, Vec<&'static str>);
     /// Rename a profile (subprocess). Returns (ok, message).
     fn rename(&mut self, old: &str, new: &str) -> (bool, String);
+    /// Sign this account in and RETURN. Adding several accounts is what the
+    /// dashboard is for, and handing the sign-in back to the shell tore the
+    /// dashboard down after each one.
+    fn sign_in(&mut self, name: &str) -> (bool, String);
     /// Save the accounts you're currently logged into as a new profile
     /// (subprocess `add <name>` - captures live logins, no sign-out). This is
     /// the onboarding action: a fresh machine is usually already logged in.
@@ -503,9 +523,6 @@ pub enum Outcome {
     },
     /// Run the add-a-new-account login flow (needs the real terminal).
     AddAccount(&'static str),
-    /// Sign this account in by launching its own slot: the tool's own login runs
-    /// there, which is the only thing that can create a slot's credential.
-    SignIn(String),
 }
 
 const NEW_CONV: [(&str, &str); 4] = [
@@ -1630,7 +1647,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .and_then(|i| rows.get(i))
                             .map(|r| r.name.clone())
                         {
-                            break 'ui Outcome::SignIn(name);
+                            // Hand the terminal to the tool's own login, then
+                            // come back and redraw - the account list is where
+                            // the result belongs.
+                            let (_ok, msg) = suspended(&mut terminal, || ctx.sign_in(&name));
+                            status = msg;
+                            rows = ctx.rows();
+                            clamp_selection(&mut state, rows.len());
                         }
                     }
                     KeyCode::Char('e') if !rows.is_empty() => {
@@ -2285,6 +2308,68 @@ mod tests {
     // Starting a new conversation is the point of the screen, so it must be
     // reachable: at the TOP, and offered even for an account with no saved
     // profile - every slot account is exactly that, and they had no entry at all.
+    // Adding several accounts is what the dashboard is for. Signing one in used to
+    // hand the terminal to the tool and never come back, so each account meant
+    // relaunching the dashboard - the list is exactly where the result belongs.
+    #[test]
+    fn signing_in_keeps_the_dashboard_alive() {
+        // The trait's method returns a result rather than an Outcome, which is
+        // what makes staying possible: an Outcome ends the loop by construction.
+        fn asserts_it_returns<C: TuiCtx>(ctx: &mut C, name: &str) -> (bool, String) {
+            ctx.sign_in(name)
+        }
+        struct Fake {
+            called: Vec<String>,
+        }
+        impl TuiCtx for Fake {
+            fn rows(&mut self) -> Vec<Row> {
+                Vec::new()
+            }
+            fn switch(&mut self, _: &str) -> (bool, String) {
+                (true, String::new())
+            }
+            fn delete(&mut self, _: &str) -> String {
+                String::new()
+            }
+            fn sessions(&mut self, _: &str) -> (String, Vec<SessionEntry>, Vec<&'static str>) {
+                (String::new(), Vec::new(), Vec::new())
+            }
+            fn rename(&mut self, _: &str, _: &str) -> (bool, String) {
+                (true, String::new())
+            }
+            fn sign_in(&mut self, name: &str) -> (bool, String) {
+                self.called.push(name.to_string());
+                (true, format!("'{name}' is signed in"))
+            }
+            fn save_current(&mut self, _: &str) -> (bool, String) {
+                (true, String::new())
+            }
+            fn doctor(&mut self) -> Vec<String> {
+                Vec::new()
+            }
+            fn usage(&mut self) -> Vec<String> {
+                Vec::new()
+            }
+            fn quota(&mut self) -> Vec<String> {
+                Vec::new()
+            }
+            fn sessionwiki_present(&mut self) -> bool {
+                false
+            }
+            fn live_tools(&mut self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+        let mut f = Fake { called: Vec::new() };
+        let (ok, msg) = asserts_it_returns(&mut f, "work");
+        assert!(ok);
+        assert_eq!(f.called, vec!["work".to_string()], "it reached the account");
+        assert!(msg.contains("signed in"), "and reports back: {msg}");
+        // A second one needs no relaunch - that is the whole point.
+        asserts_it_returns(&mut f, "home");
+        assert_eq!(f.called.len(), 2);
+    }
+
     #[test]
     fn the_new_conversation_entries_lead_and_never_vanish() {
         assert_eq!(

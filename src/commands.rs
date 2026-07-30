@@ -2488,6 +2488,19 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // exactly the accounts the dashboard is made of.
             run_self(&["rename", old, new])
         }
+        fn sign_in(&mut self, name: &str) -> (bool, String) {
+            // The account list holds both tools, so the registry that has this
+            // name decides which login to open.
+            let tool = ["claude-code", "codex"]
+                .into_iter()
+                .find(|t| {
+                    crate::slots::Slots::open_for(self.paths, t)
+                        .map(|s| s.get(name).is_some())
+                        .unwrap_or(false)
+                })
+                .unwrap_or("claude-code");
+            sign_in_child(self.paths, name, tool)
+        }
         fn save_current(&mut self, name: &str) -> (bool, String) {
             // `add <name>` captures the CURRENT live logins (all tools) - no
             // sign-out, no interactive spawn - so it is safe to run in-loop.
@@ -2791,25 +2804,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 println!("opening {}...", pretty_tool(tool));
                 return Err(exec_tool(tool, dir.as_deref()));
             }
-            crate::tui::Outcome::SignIn(name) => {
-                // `run` launches the account's own slot, where the tool's own login
-                // runs - that is what creates the credential swapdex will not write.
-                // For a snapshot profile this also MOVES it onto a slot, which is
-                // the actual fix: a snapshot keeps expiring, a slot does not.
-                let is_slot = crate::slots::Slots::open(paths)
-                    .map(|s| s.get(&name).is_some())
-                    .unwrap_or(false);
-                if is_slot {
-                    println!("signing in '{name}' - its own login will open");
-                } else {
-                    println!(
-                        "moving '{name}' onto its own space and signing in there - \
-                         a saved snapshot keeps expiring, this will not"
-                    );
-                }
-                let code = run_account(paths, &name, None, false, &[])?;
-                return Ok(code);
-            }
+
             crate::tui::Outcome::AddAccount(tool) => {
                 let sel = match tool {
                     "claude-code" => Some(ToolSel::Claude),
@@ -3881,6 +3876,67 @@ pub fn run_account(
     }
     let err = cmd.exec();
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
+}
+
+/// Sign an account in and come BACK.
+///
+/// `run_account` replaces this process, which is right for `swapdex run` from a
+/// shell and wrong for the dashboard: signing in one account tore the dashboard
+/// down, so adding several meant relaunching it between each. Here the tool is a
+/// child process that owns the terminal while it runs, and when it exits the
+/// caller is still alive to redraw.
+pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, String) {
+    let Some(home_var) = crate::slots::home_var(tool) else {
+        return (
+            false,
+            format!("{tool} has no per-account home to sign into"),
+        );
+    };
+    let mut slots = match crate::slots::Slots::open_for(paths, tool) {
+        Ok(s) => s,
+        Err(e) => return (false, format!("cannot open the account list: {e}")),
+    };
+    let rec = match slots.get(name) {
+        Some(r) => r,
+        None => match slots.create(name) {
+            Ok(r) => {
+                crate::slots::link_shared_config(&r.config_dir, &shared_source(paths, tool), tool);
+                r
+            }
+            Err(e) => return (false, format!("could not make a space for '{name}': {e}")),
+        },
+    };
+    let bin = tool_binary(tool);
+    if !command_exists(bin) {
+        return (false, format!("`{bin}` isn't on your PATH"));
+    }
+    // Signing in must reach the vendor directly - an inherited proxy address both
+    // breaks the OAuth exchange and answers with whichever account the proxy
+    // already holds, so a fresh space would look signed in as someone else.
+    let mut cmd = Command::new(bin);
+    cmd.env(home_var, &rec.config_dir);
+    for var in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"] {
+        cmd.env_remove(var);
+    }
+    match cmd.status() {
+        Ok(_) => {
+            // Whether the sign-in succeeded is the credential's story, not the
+            // exit code's: the tool exits 0 when the user simply quits it.
+            let signed_in = match tool {
+                "codex" => crate::proxy::codex::slot_auth(&rec.config_dir).is_some(),
+                _ => crate::proxy::creds::slot_token(&rec.config_dir).is_some(),
+            };
+            if signed_in {
+                (true, format!("'{name}' is signed in"))
+            } else {
+                (
+                    false,
+                    format!("'{name}' still has no login - run it again and complete the sign-in"),
+                )
+            }
+        }
+        Err(e) => (false, format!("could not start {bin}: {e}")),
+    }
 }
 
 /// The tool a slot command means. Slots exist for the two tools that can be
