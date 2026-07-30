@@ -616,9 +616,9 @@ fn fake_curl(root: &std::path::Path, full_token: &str) -> std::path::PathBuf {
         &f,
         format!(
             "#!/bin/sh\ncfg=$(cat)\nif echo \"$cfg\" | grep -q '{full_token}'; then\n\
-             printf '{{\"five_hour\":{{\"utilization\":0.99}}}}\\n200'\n\
+             printf '{{\"five_hour\":{{\"utilization\":99.0}}}}\\n200'\n\
              else\n\
-             printf '{{\"five_hour\":{{\"utilization\":0.04}}}}\\n200'\n\
+             printf '{{\"five_hour\":{{\"utilization\":4.0}}}}\\n200'\n\
              fi\n"
         ),
     )
@@ -840,7 +840,7 @@ fn a_preemptive_move_does_not_flap_between_two_full_accounts() {
     let curl = dir.join("curl");
     std::fs::write(
         &curl,
-        "#!/bin/sh\ncat >/dev/null\nprintf '{\"five_hour\":{\"utilization\":0.99}}\\n200'\n",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"five_hour\":{\"utilization\":99.0}}\\n200'\n",
     )
     .unwrap();
     std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();

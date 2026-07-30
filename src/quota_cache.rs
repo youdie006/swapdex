@@ -34,10 +34,23 @@ fn file(paths: &Paths) -> std::path::PathBuf {
 /// Read the cache. Anything unreadable yields an empty one: a stale-value cache
 /// is a convenience, never a reason to fail a command.
 pub fn load(paths: &Paths) -> Cache {
-    std::fs::read(file(paths))
+    let mut c: Cache = std::fs::read(file(paths))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Readings taken while `utilization` was misread as a fraction are all
+    // exactly 100 - every account above 1% clamped there - and remembering them
+    // would keep showing accounts as spent long after the reading was fixed.
+    // A genuine 100 is re-read within minutes, so dropping it costs nothing.
+    c.retain(|_, e| !was_clamped(e));
+    c
+}
+
+/// A reading that carries only the clamp value in both windows: not a
+/// measurement, an artefact of the misread.
+fn was_clamped(e: &Entry) -> bool {
+    let at_ceiling = |v: Option<f64>| v.is_none_or(|p| p >= 100.0);
+    at_ceiling(e.five_h) && at_ceiling(e.seven_d) && (e.five_h.is_some() || e.seven_d.is_some())
 }
 
 /// Merge fresh readings in and save. Only accounts that were actually read are
@@ -91,6 +104,46 @@ mod tests {
         assert_eq!(c["a"].five_h, Some(55.0));
         assert_eq!(c["b"].five_h, Some(20.0), "b is untouched");
         assert_eq!(age_secs(&c["b"], 260), 60);
+    }
+
+    // Every reading taken while utilization was misread is exactly 100, and
+    // keeping them would show accounts as spent long after the reading was fixed.
+    #[test]
+    fn readings_pinned_at_the_clamp_are_not_remembered() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let full = Entry {
+            five_h: Some(100.0),
+            seven_d: Some(100.0),
+            at: 1,
+            ..Default::default()
+        };
+        let real = Entry {
+            five_h: Some(4.0),
+            seven_d: Some(59.0),
+            at: 2,
+            ..Default::default()
+        };
+        // A real 100% in ONE window beside a measured other window is a genuine
+        // reading and must survive - only the all-at-the-ceiling shape is dropped.
+        let one_full = Entry {
+            five_h: Some(100.0),
+            seven_d: Some(59.0),
+            at: 3,
+            ..Default::default()
+        };
+        update(
+            &paths,
+            &[
+                ("clamped".into(), full),
+                ("measured".into(), real),
+                ("half".into(), one_full),
+            ],
+        );
+        let c = load(&paths);
+        assert!(!c.contains_key("clamped"), "the artefact is dropped");
+        assert_eq!(c["measured"].five_h, Some(4.0));
+        assert_eq!(c["half"].five_h, Some(100.0), "a real 100 survives");
     }
 
     #[test]

@@ -3045,7 +3045,7 @@ fn write_fake_curl(dir: &Path) -> std::path::PathBuf {
 cfg=$(cat)
 tok=$(printf '%s' "$cfg" | sed -n 's/.*Authorization: Bearer \([^"]*\)".*/\1/p')
 case "$tok" in
-  AT) printf '{"five_hour":{"utilization":0.25,"resets_at":1893456000},"seven_day":{"utilization":0.5}}\n200' ;;
+  AT) printf '{"five_hour":{"utilization":25.0,"resets_at":1893456000},"seven_day":{"utilization":50.0}}\n200' ;;
   *)  printf '{"type":"error","error":{"type":"authentication_error"}}\n401' ;;
 esac
 "#,

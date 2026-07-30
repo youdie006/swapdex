@@ -94,14 +94,13 @@ fn window_from(v: &Value) -> Option<Window> {
 }
 
 fn pct_used(v: &Value) -> Option<f64> {
-    // A 0..1 fraction (utilization).
-    for k in ["utilization", "used_fraction", "fraction_used"] {
-        if let Some(f) = v.get(k).and_then(Value::as_f64) {
-            return Some((f * 100.0).clamp(0.0, 100.0));
-        }
-    }
-    // An explicit 0..100 percentage.
+    // `utilization` is a PERCENTAGE. It was read as a 0..1 fraction and multiplied
+    // by 100, which clamped every account above 1% to "100% used" - so a session
+    // 4% in displayed as spent, and a week of recorded readings held only 0.0 and
+    // 100.0 with nothing in between. Confirmed against the endpoint: it answers
+    // `"utilization": 4.0` beside `"limits":[{"kind":"session","percent":4}]`.
     for k in [
+        "utilization",
         "used_percentage",
         "used_pct",
         "utilization_percentage",
@@ -110,6 +109,12 @@ fn pct_used(v: &Value) -> Option<f64> {
     ] {
         if let Some(f) = v.get(k).and_then(Value::as_f64) {
             return Some(f.clamp(0.0, 100.0));
+        }
+    }
+    // Fields that name themselves a fraction still mean one.
+    for k in ["used_fraction", "fraction_used"] {
+        if let Some(f) = v.get(k).and_then(Value::as_f64) {
+            return Some((f * 100.0).clamp(0.0, 100.0));
         }
     }
     None
@@ -358,11 +363,13 @@ mod tests {
         );
     }
 
+    // These asserted a 0..1 fraction, which was an assumption about the endpoint
+    // rather than an observation of it - and it was wrong, so the test held the
+    // bug in place. The numbers here are the endpoint's own.
     #[test]
-    fn parses_fraction_windows_with_reset() {
-        // utilization as a 0..1 fraction, reset as unix seconds.
-        let body = r#"{"five_hour":{"utilization":0.61,"resets_at":1700000000},
-                       "seven_day":{"utilization":0.22,"resets_at":1700500000}}"#;
+    fn parses_percentage_windows_with_reset() {
+        let body = r#"{"five_hour":{"utilization":61.0,"resets_at":1700000000},
+                       "seven_day":{"utilization":22.0,"resets_at":1700500000}}"#;
         let q = parse(body).unwrap();
         let f = q.five_hour.unwrap();
         assert!((f.used_pct - 61.0).abs() < 1e-6);
@@ -386,8 +393,8 @@ mod tests {
 
     #[test]
     fn parses_scoped_weekly_limits_array() {
-        let body = r#"{"seven_day":{"utilization":0.5},
-                       "limits":[{"scope":{"model":{"display_name":"Opus"}},"utilization":0.8}]}"#;
+        let body = r#"{"seven_day":{"utilization":50.0},
+                       "limits":[{"scope":{"model":{"display_name":"Opus"}},"utilization":80.0}]}"#;
         let q = parse(body).unwrap();
         assert_eq!(q.scoped.len(), 1);
         assert_eq!(q.scoped[0].0, "Opus");
@@ -417,6 +424,29 @@ mod tests {
             Fetch::Unexpected(500, _)
         ));
         assert!(matches!(classify(0, String::new()), Fetch::Offline(_)));
+    }
+
+    // The endpoint reports `utilization` as a PERCENTAGE. Reading it as a 0..1
+    // fraction and multiplying by 100 clamped everything above 1% to 100, so every
+    // account displayed as spent no matter how little had been used - a week of
+    // recorded readings held only 0.0 and 100.0, never a value between.
+    #[test]
+    fn utilization_is_a_percentage_not_a_fraction() {
+        // The real shape, as the endpoint returns it.
+        let body = r#"{"five_hour":{"utilization":4.0,"resets_at":"2026-07-31T04:19:59+00:00"},
+                       "seven_day":{"utilization":59.0,"resets_at":"2026-08-03T06:59:59+00:00"},
+                       "limits":[{"kind":"session","percent":4},{"kind":"weekly_all","percent":59}]}"#;
+        let q = parse(body).expect("parsed");
+        assert_eq!(q.five_hour.unwrap().used_pct, 4.0, "4% is four percent");
+        assert_eq!(q.seven_day.unwrap().used_pct, 59.0);
+        assert_eq!(q.five_hour.unwrap().remaining_pct(), 96.0);
+
+        // A genuinely spent window still reads as spent, and an untouched one as
+        // zero - the fix must not trade one wrong answer for another.
+        let spent = parse(r#"{"five_hour":{"utilization":100.0}}"#).expect("parsed");
+        assert_eq!(spent.five_hour.unwrap().used_pct, 100.0);
+        let fresh = parse(r#"{"five_hour":{"utilization":0.0}}"#).expect("parsed");
+        assert_eq!(fresh.five_hour.unwrap().used_pct, 0.0);
     }
 
     // A saved snapshot's token dies when the refresh token rotates, and the
