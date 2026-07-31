@@ -286,43 +286,63 @@ pub fn tool_running(tool: &str, comms: &[String]) -> bool {
 /// credential each one holds, so that is what is read.
 pub fn config_dir_in_use(dir: &std::path::Path) -> bool {
     let want = dir.to_string_lossy();
-    let Ok(rd) = std::fs::read_dir("/proc") else {
-        // Not Linux: fall back to whether the tool is running at all. Refusing
-        // more often than strictly needed is the safe direction here.
-        return crate::proc::any_claude_running();
-    };
-    for e in rd.flatten() {
-        let p = e.path().join("environ");
-        let Ok(bytes) = std::fs::read(&p) else {
-            continue;
-        };
-        for var in String::from_utf8_lossy(&bytes).split('\0') {
-            if let Some(v) = var.strip_prefix("CLAUDE_CONFIG_DIR=") {
-                if v == want {
-                    return true;
-                }
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        for e in rd.flatten() {
+            let Ok(bytes) = std::fs::read(e.path().join("environ")) else {
+                continue;
+            };
+            if homes_in(&String::from_utf8_lossy(&bytes), '\0')
+                .iter()
+                .any(|v| *v == want)
+            {
+                return true;
             }
         }
+        return false;
     }
-    false
+    // macOS: `ps -E` prints each process's environment after its command, so the
+    // home a process actually holds is readable there too. An earlier version
+    // fell back to "is any claude running at all", which refused to renew EVERY
+    // account whenever one session was open - on the machine this is used from
+    // that is always, so the whole feature was dead on arrival.
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-E", "-ww", "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    homes_in(&String::from_utf8_lossy(&out.stdout), ' ')
+        .iter()
+        .any(|v| *v == want)
 }
 
-/// Is any `claude` running? Used where a per-process home cannot be read.
-pub fn any_claude_running() -> bool {
-    let out = std::process::Command::new("ps")
-        .args(["-eo", "comm"])
-        .output()
-        .ok();
-    out.is_some_and(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .any(|l| l.trim().rsplit('/').next() == Some("claude"))
-    })
+/// Every `CLAUDE_CONFIG_DIR=` value in a blob of environment text.
+fn homes_in(text: &str, sep: char) -> Vec<String> {
+    text.split([sep, '\n'])
+        .filter_map(|f| f.strip_prefix("CLAUDE_CONFIG_DIR="))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The home a process holds is what decides whose credential a renewal would
+    // pull out from under it. Reading "is the tool running at all" instead
+    // refused every account whenever one session was open.
+    #[test]
+    fn a_home_is_found_per_process_not_per_tool() {
+        // macOS `ps -E`: command, then environment, space separated.
+        let ps = "/usr/bin/claude PATH=/usr/bin CLAUDE_CONFIG_DIR=/home/me/.claude-work TERM=xterm\n/usr/bin/other SHELL=/bin/zsh\n";
+        assert_eq!(homes_in(ps, ' '), vec!["/home/me/.claude-work"]);
+        // Linux `/proc/<pid>/environ`: NUL separated.
+        let environ = "PATH=/usr/bin\0CLAUDE_CONFIG_DIR=/home/me/.claude\0TERM=xterm\0";
+        assert_eq!(homes_in(environ, '\0'), vec!["/home/me/.claude"]);
+        // A process with no home set names none: it is on the default, and
+        // claiming it holds a particular slot would be a guess.
+        assert!(homes_in("/usr/bin/claude TERM=xterm", ' ').is_empty());
+    }
 
     #[test]
     fn matches_exact_binary_name_only() {
