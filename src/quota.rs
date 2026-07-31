@@ -242,7 +242,31 @@ pub fn fetch_with_retry(token: &str) -> Fetch {
 /// Space out reads of several accounts. The throttling is per burst, so a small
 /// gap between accounts is what keeps the LAST account from always losing.
 pub fn pace_between_accounts() {
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    std::thread::sleep(std::time::Duration::from_millis(PACE_MS));
+}
+
+/// How long to wait between accounts. Small enough that a handful of accounts
+/// does not add a second of its own, large enough to stay under the burst the
+/// endpoint objects to - the backoff inside each read covers the rest.
+const PACE_MS: u64 = 120;
+
+/// Read several accounts at once, keeping each result with its caller's index.
+///
+/// Serially this cost the pacing gap plus a full round trip PER ACCOUNT, which
+/// on four accounts was most of six seconds. The requests overlap now, staggered
+/// by the same small gap so they do not arrive as one burst, and each still backs
+/// off on its own if the endpoint objects.
+pub fn fetch_many(tokens: Vec<(usize, String)>) -> Vec<(usize, Fetch)> {
+    let mut handles = Vec::with_capacity(tokens.len());
+    for (n, (idx, token)) in tokens.into_iter().enumerate() {
+        handles.push(std::thread::spawn(move || {
+            // Stagger the starts rather than the finishes: arriving together is
+            // what the endpoint objects to, not being in flight together.
+            std::thread::sleep(std::time::Duration::from_millis(PACE_MS * n as u64));
+            (idx, fetch_with_retry(&token))
+        }));
+    }
+    handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
 pub fn fetch(token: &str) -> Fetch {

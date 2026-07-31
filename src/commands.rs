@@ -2721,6 +2721,26 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("quota failed: {e}")],
             }
         }
+        fn cached_quota(&mut self) -> Vec<(String, crate::tui::Usage)> {
+            crate::quota_cache::load(self.paths)
+                .into_iter()
+                .map(|(name, e)| {
+                    (
+                        name,
+                        crate::tui::Usage {
+                            five_h: e.five_h,
+                            five_h_reset: e.five_h_reset,
+                            seven_d: e.seven_d,
+                            seven_d_reset: e.seven_d_reset,
+                            // Shown with its age: a remembered number that looked
+                            // live would be worse than no number at all.
+                            observed_at: Some(e.at),
+                            note: None,
+                        },
+                    )
+                })
+                .collect()
+        }
         fn quota_pct(&mut self) -> Vec<(String, crate::tui::Usage)> {
             read_quota_usage(self.paths)
         }
@@ -5210,6 +5230,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     // fails at the transport layer, we are almost certainly offline - stop
     // rather than fire every account's token at an unreachable endpoint.
     let mut results: Vec<(usize, Fetch)> = Vec::new();
+    let mut to_fetch: Vec<(usize, String)> = Vec::new();
     let mut offline: Option<String> = None;
     for (i, r) in rows.iter().enumerate() {
         match &r.token {
@@ -5238,20 +5259,25 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                         .into(),
                 ),
             )),
-            Some(t) => {
-                let f = q::fetch_with_retry(t);
-                q::pace_between_accounts();
-                let reached = results.iter().any(|(_, x)| !matches!(x, Fetch::Offline(_)));
-                if !reached {
-                    if let Fetch::Offline(msg) = &f {
-                        offline = Some(msg.clone());
-                        break;
-                    }
-                }
-                results.push((i, f));
-            }
+            // Collected and read together below: one round trip per account in
+            // sequence was most of the wait.
+            Some(t) => to_fetch.push((i, t.clone())),
         }
     }
+    if !to_fetch.is_empty() {
+        let got = q::fetch_many(to_fetch);
+        // If NOTHING reached the endpoint, this is the machine being offline
+        // rather than a per-account problem, and saying so once beats saying it
+        // per account.
+        let any_reached = got.iter().any(|(_, f)| !matches!(f, Fetch::Offline(_)));
+        if !any_reached {
+            if let Some((_, Fetch::Offline(msg))) = got.first() {
+                offline = Some(msg.clone());
+            }
+        }
+        results.extend(got);
+    }
+    results.sort_by_key(|(i, _)| *i);
 
     // Remember what came back, here where the reading is actually taken - every
     // caller of this command then benefits, including the dashboard, which cannot

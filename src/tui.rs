@@ -530,6 +530,12 @@ pub trait TuiCtx {
     fn quota_pct(&mut self) -> Vec<(String, Usage)> {
         Vec::new()
     }
+    /// What was read last time, from disk. Drawn immediately so the bars are
+    /// there on the first frame instead of six seconds later; each carries its
+    /// own age, so a remembered number is never passed off as current.
+    fn cached_quota(&mut self) -> Vec<(String, Usage)> {
+        Vec::new()
+    }
     /// Start a reading and hand back the channel it will arrive on. The default
     /// answers immediately from `quota_pct`, so a context that has nothing to
     /// fetch needs no threads.
@@ -828,7 +834,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // Per-account 5h utilization percent for the inline right-aligned bars.
     // Network, so fetched once lazily after the first frame (the UI opens
     // instantly; bars fill in). None = not fetched yet.
-    let mut quota_pct: Option<std::collections::HashMap<String, Usage>> = None;
+    // Start from what was read last time: the live read takes seconds, and an
+    // empty gauge for that long says "no quota" when the truth is "not asked yet".
+    let cached = ctx.cached_quota();
+    let mut quota_pct: Option<std::collections::HashMap<String, Usage>> =
+        (!cached.is_empty()).then(|| cached.into_iter().collect());
     // A reading in flight, if one is.
     let mut quota_rx: Option<std::sync::mpsc::Receiver<Vec<(String, Usage)>>> = None;
     // When the bars were last refreshed, so they can be kept current.
