@@ -210,10 +210,21 @@ fn write_credential(dir: &Path, blob: &[u8]) -> anyhow::Result<()> {
 /// POST the exchange with the token on stdin, never in argv.
 fn post(refresh_token: &str) -> Result<(String, u32), RefreshError> {
     let body = request_body(refresh_token);
+    // The same config shape `quota` uses, including how the status is reported:
+    // run_curl reads the LAST line as the code, so decorating it broke the parse
+    // and every renewal came back as HTTP 0.
     let cfg = format!(
-        "url = \"{}\"\nrequest = POST\nheader = \"content-type: application/json\"\n\
-         header = \"User-Agent: swapdex\"\ndata = \"{}\"\nsilent\nshow-error\n\
-         write-out = \"\\n<<%{{http_code}}>>\"\n",
+        "url = \"{}\"\n\
+         request = POST\n\
+         header = \"content-type: application/json\"\n\
+         header = \"Accept: application/json\"\n\
+         header = \"User-Agent: swapdex\"\n\
+         data = \"{}\"\n\
+         silent\n\
+         show-error\n\
+         connect-timeout = 6\n\
+         max-time = 15\n\
+         write-out = \"\\n%{{http_code}}\"\n",
         token_url(),
         body.replace('\\', "\\\\").replace('"', "\\\"")
     );
