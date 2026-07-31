@@ -51,6 +51,8 @@ pub enum RefreshError {
     InUse,
     /// The refresh token itself has expired - only a fresh sign-in fixes that.
     Expired,
+    /// The login server is rate-limiting; the account itself is fine.
+    Busy,
     /// The server refused the exchange.
     Refused(String),
     /// The request could not be made at all.
@@ -70,6 +72,9 @@ impl RefreshError {
             ),
             Self::Expired => format!(
                 "'{name}' has been idle too long to renew - `swapdex run {name}` signs it in again"
+            ),
+            Self::Busy => format!(
+                "the login server is busy - '{name}' is fine, renewing again shortly will work"
             ),
             Self::Refused(why) => format!("'{name}' could not be renewed: {why}"),
             Self::Offline(why) => format!("could not reach the login server: {why}"),
@@ -152,6 +157,11 @@ pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
         .ok_or(RefreshError::NoCredential)?;
 
     let (body, status) = post(&token)?;
+    // 429 is the login server asking for quiet, not a verdict on this account.
+    // Reporting it as a refusal reads as "sign in again" - a login nobody needed.
+    if status == 429 {
+        return Err(RefreshError::Busy);
+    }
     if status == 401 || status == 400 {
         return Err(RefreshError::Refused(short_reason(&body)));
     }
