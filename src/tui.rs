@@ -347,6 +347,18 @@ fn mark_selected(mut spans: Vec<Span<'static>>, upto: usize, selected: bool) -> 
 /// text and the status colours all stay legible on it.
 const SELECT_BG: Color = Color::Rgb(48, 42, 78);
 
+/// A box of `w` x `h` in the middle of `area`, clamped to fit.
+fn centered(area: ratatui::layout::Rect, w: u16, h: u16) -> ratatui::layout::Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    ratatui::layout::Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
 /// Give the terminal back for the duration of `f`, then take it again.
 ///
 /// A child process that draws its own interface - a sign-in prompt - cannot share
@@ -1215,20 +1227,29 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 Screen::Input { kind, value } => {
                     let (title, prompt) = match kind {
                         InputKind::Rename(old) => (
-                            " rename profile ".to_string(),
-                            format!("new name for '{old}'"),
+                            format!(" rename {old} "),
+                            "type a new name, then press Enter".to_string(),
                         ),
                         InputKind::SaveCurrent => (
-                            " save current logins ".to_string(),
-                            "name for this profile".to_string(),
+                            " save the accounts you are signed into ".to_string(),
+                            "name them, then press Enter".to_string(),
                         ),
                     };
+                    // A small dialog, not a full-screen box. It used to draw one
+                    // dim line inside thirty empty rows, which does not read as
+                    // "type here" at all - so people pressed Enter to get out of
+                    // it and reported that nothing happened.
+                    let dialog = centered(main, 60.min(main.width.saturating_sub(4)), 5);
+                    f.render_widget(ratatui::widgets::Clear, dialog);
                     f.render_widget(
                         Paragraph::new(vec![
+                            Line::from(vec![Span::styled(
+                                format!("  {prompt}"),
+                                Style::default().fg(Color::White),
+                            )]),
                             Line::from(""),
                             Line::from(vec![
-                                Span::styled(format!("  {prompt}"), Style::default().fg(MUTED)),
-                                Span::raw(": "),
+                                Span::raw("  "),
                                 Span::styled(
                                     format!("{value}\u{2588}"),
                                     Style::default().fg(VIOLET).add_modifier(Modifier::BOLD),
@@ -1236,7 +1257,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             ]),
                         ])
                         .block(list_block_titled(&title)),
-                        main,
+                        dialog,
                     );
                     f.render_widget(
                         Paragraph::new(Line::from(Span::styled(
