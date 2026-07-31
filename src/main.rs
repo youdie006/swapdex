@@ -77,6 +77,11 @@ enum Cmd {
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
     },
+    /// Renew accounts whose access token has lapsed (they stay usable)
+    Refresh {
+        /// One account, or every Claude account when omitted
+        name: Option<String>,
+    },
     /// List the permanent account slots
     Slots,
     /// Install the `claude` shim so a plain `claude` follows `swapdex use`
@@ -319,6 +324,7 @@ fn main() {
         } => commands::run_account(&paths, name, *tool, *no_launch, args),
         Cmd::Whereis { project } => commands::whereis(&paths, project.as_deref()),
         Cmd::Serve { name, off, tool } => commands::serve(&paths, name.as_deref(), *off, *tool),
+        Cmd::Refresh { name } => commands::refresh(&paths, name.as_deref()),
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),

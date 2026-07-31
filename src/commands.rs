@@ -4127,6 +4127,48 @@ pub fn serve(paths: &Paths, name: Option<&str>, off: bool, sel: Option<ToolSel>)
     Ok(0)
 }
 
+/// `swapdex refresh [name]` - renew a lapsed access token so the account stays
+/// usable without signing in again.
+///
+/// An access token lives about an hour; an account idle longer than that is not
+/// broken, it just needs renewing, and only its own refresh token can do it.
+pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
+    let slots = crate::slots::Slots::open_for(paths, "claude-code")?;
+    let list: Vec<_> = match name {
+        Some(n) => match slots.get(n) {
+            Some(r) => vec![r],
+            None => {
+                eprintln!("swapdex: no account named '{n}' - `swapdex slots` lists them");
+                return Ok(5);
+            }
+        },
+        None => slots.list(),
+    };
+    if list.is_empty() {
+        println!("No Claude accounts to renew.");
+        return Ok(0);
+    }
+    let now = now_ms();
+    let mut renewed = 0;
+    for r in &list {
+        if !crate::proxy::creds::slot_token_expired(&r.config_dir, now) {
+            println!("  {} is already current", r.name);
+            continue;
+        }
+        match crate::refresh::refresh_slot(&r.config_dir, now) {
+            Ok(()) => {
+                println!("  {} renewed", r.name);
+                renewed += 1;
+            }
+            Err(why) => println!("  {}", why.remedy(&r.name)),
+        }
+    }
+    if renewed > 0 {
+        println!("\n{renewed} account(s) renewed - no sign-in needed.");
+    }
+    Ok(0)
+}
+
 /// List the permanent slots (name + the config dir each launches into).
 pub fn list_slots(paths: &Paths) -> Result<i32> {
     // Both tools, each under its own heading. Listing only Claude's hid half the
