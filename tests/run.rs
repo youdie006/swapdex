@@ -103,10 +103,13 @@ fn slots_empty_state_is_friendly() {
         .output()
         .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
+    // "Slot" is the internal name for an account's own space; a person reading
+    // the screen should only ever see "account".
     assert!(
-        o.to_lowercase().contains("no slots"),
+        o.to_lowercase().contains("no accounts yet"),
         "empty-state hint: {o}"
     );
+    assert!(!o.to_lowercase().contains("slot"), "no jargon: {o}");
 }
 
 fn run_in(root: &Path, args: &[&str], path_env: &str) -> String {
@@ -306,7 +309,7 @@ fn doctor_reports_slots_default_and_shim() {
         .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
     assert!(
-        o.contains("slots") && o.contains("account slot"),
+        o.contains("slots") && o.contains("account(s)"),
         "slots line: {o}"
     );
     assert!(

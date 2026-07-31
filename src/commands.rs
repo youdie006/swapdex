@@ -3059,7 +3059,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     if let Ok(slots) = crate::slots::Slots::open(paths) {
         let list = slots.list();
         if !list.is_empty() {
-            report("slots", true, format!("{} account slot(s)", list.len()));
+            report("slots", true, format!("{} account(s)", list.len()));
             match slots.default_dir() {
                 Some(dir) => {
                     let name = list
@@ -3688,7 +3688,7 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
                 "You have {legacy} saved Claude profile(s) on the old copy-switch model \
                  (the one that could log you out)."
             );
-            if ask_yes("Give each its own slot now?") {
+            if ask_yes("Give each its own space now?") {
                 migrate(paths)?;
                 println!();
             }
@@ -3711,7 +3711,7 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
     if crate::slots::Slots::open(paths)?.list().is_empty() {
         println!("No accounts yet. Log into Claude, then run: swapdex run <name>");
     } else {
-        println!("You're set. `swapdex slots` lists accounts; `swapdex use <name>` switches.");
+        println!("You're set. `swapdex ui` shows your accounts and switches between them.");
     }
     Ok(0)
 }
@@ -3738,7 +3738,7 @@ pub fn migrate(paths: &Paths) -> Result<i32> {
         let name = if crate::slots::name_reads_as_a_tool_home(&p.name) {
             let safe = crate::slots::suggest_non_colliding(&p.name, &taken);
             println!(
-                "  '{}' would read as the tool's own home, so its slot is named '{safe}'",
+                "  '{}' would read as the tool's own home, so the account is named '{safe}'",
                 p.name
             );
             safe
@@ -3751,7 +3751,7 @@ pub fn migrate(paths: &Paths) -> Result<i32> {
         }
     }
     if created.is_empty() {
-        println!("Nothing to migrate - every Claude profile already has a slot.");
+        println!("Nothing to migrate - every Claude account already has its own space.");
         return Ok(0);
     }
     println!(
@@ -3809,10 +3809,10 @@ pub fn sync_mcp(paths: &Paths) -> Result<i32> {
         crate::atomic::write_secret(&target, &serde_json::to_vec(&cfg)?)?;
         synced += 1;
     }
-    println!("shared {n} MCP server(s) into {synced} slot(s).");
+    println!("shared {n} MCP server(s) into {synced} account(s).");
     if pending > 0 {
         println!(
-            "  {pending} slot(s) have no login yet - `swapdex run <name>` to sign in, then re-run."
+            "  {pending} account(s) have no login yet - sign them in from `swapdex ui` (the `l` key)."
         );
     }
     Ok(0)
@@ -4111,7 +4111,7 @@ pub fn serve(paths: &Paths, name: Option<&str>, off: bool, sel: Option<ToolSel>)
         return Ok(0);
     };
     if slots.get(name).is_none() {
-        eprintln!("swapdex: no account named '{name}' - `swapdex slots` lists them");
+        eprintln!("swapdex: no account named '{name}' - `swapdex ui` lists them");
         return Ok(5);
     }
     slots.set_serving(name)?;
@@ -4142,7 +4142,7 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
         Some(n) => match slots.get(n) {
             Some(r) => vec![r],
             None => {
-                eprintln!("swapdex: no account named '{n}' - `swapdex slots` lists them");
+                eprintln!("swapdex: no account named '{n}' - `swapdex ui` lists them");
                 return Ok(5);
             }
         },
@@ -4198,7 +4198,7 @@ pub fn list_slots(paths: &Paths) -> Result<i32> {
         any = true;
     }
     if !any {
-        println!("No slots yet. Run `swapdex onboard` to set up your accounts,");
+        println!("No accounts yet. Run `swapdex onboard` to set them up,");
         println!("  or launch one directly: swapdex run <name>");
         return Ok(0);
     }
