@@ -505,6 +505,11 @@ fn next_account_in(
 
 /// Can this slot serve a turn for `tool` right now?
 fn has_usable_login(tool: &str, dir: &std::path::Path) -> bool {
+    // A lapsed Claude token is renewable, so try before ruling the account out:
+    // the accounts idle long enough to lapse are the ones with quota left.
+    if tool != "codex" && creds::slot_token_expired(dir, now_ms()) {
+        let _ = crate::refresh::refresh_slot(dir, now_ms());
+    }
     match tool {
         // Codex refreshes its own token inside its home and records no expiry
         // swapdex can read, so the question is only whether a login is there.
@@ -633,6 +638,17 @@ fn forward_turn(
         // An already-lapsed token earns a 401 and cannot be refreshed from here,
         // so treat it exactly like having no login: step aside rather than spend
         // the turn proving it.
+        // An expired access token is renewable, and until now it was simply
+        // stepped over - which retired the accounts with the most quota left.
+        // Renewing is skipped when the tool is running in that slot: see
+        // refresh's module note.
+        if creds::slot_token_expired(&slot.config_dir, now_ms()) {
+            match crate::refresh::refresh_slot(&slot.config_dir, now_ms()) {
+                Ok(()) => println!("  {}: renewed its login", slot.name),
+                Err(why) => println!("  {}", why.remedy(&slot.name)),
+            }
+            std::io::stdout().flush().ok();
+        }
         if creds::slot_token_expired(&slot.config_dir, now_ms()) {
             println!(
                 "{}: its login has expired - passing your own login through \

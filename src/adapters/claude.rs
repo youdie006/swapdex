@@ -278,6 +278,20 @@ pub(crate) enum KeychainReadError {
     Missing,
 }
 
+/// Write a credential to the Keychain item belonging to `dir` - the same item
+/// `slot_keychain_read_detail` reads, derived the same way, so a renewal lands
+/// where the tool will look for it rather than beside it.
+pub fn slot_keychain_write(dir: &std::path::Path, value: &[u8]) -> Result<()> {
+    if !keychain_enabled() {
+        anyhow::bail!("no Keychain in this environment");
+    }
+    let service = format!(
+        "{KEYCHAIN_PREFIX}-{}",
+        &sha256_hex(dir.to_string_lossy().as_bytes())[..8]
+    );
+    keychain_write_service(&service, value)
+}
+
 pub(crate) fn slot_keychain_read_detail(
     dir: &std::path::Path,
 ) -> std::result::Result<Vec<u8>, KeychainReadError> {

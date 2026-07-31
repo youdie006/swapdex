@@ -5099,8 +5099,15 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 email: crate::proxy::creds::slot_email(&r.config_dir),
                 token,
                 active,
-                // A slot's token is refreshed in place by the tool that owns it.
-                expired: crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms()),
+                // A slot's token is renewable, so renew it rather than report it
+                // dead - an account idle for an hour is not an account with a
+                // problem, and it is usually the one with quota left.
+                expired: {
+                    if crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms()) {
+                        let _ = crate::refresh::refresh_slot(&r.config_dir, now_ms());
+                    }
+                    crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms())
+                },
             });
         }
     }

@@ -286,6 +286,12 @@ fn curl_bin() -> String {
     }
 }
 
+/// The same, for callers outside this module: one place owns talking to the
+/// network, and it is the place that keeps the token off argv.
+pub fn run_curl_cfg(cfg: &str) -> std::result::Result<(String, u32), String> {
+    run_curl(cfg)
+}
+
 /// Run `curl --config -`, feeding the config on stdin. Returns (body, status).
 fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
     use std::io::Write;

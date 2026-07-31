@@ -278,6 +278,48 @@ pub fn tool_running(tool: &str, comms: &[String]) -> bool {
     comms.iter().any(|c| c == want)
 }
 
+/// Is a tool running right now with `dir` as its home?
+///
+/// Renewing a credential retires the refresh token the running process holds in
+/// memory, and its next renewal would then fail - the logout this project exists
+/// to prevent. The environment of the live processes is what decides which
+/// credential each one holds, so that is what is read.
+pub fn config_dir_in_use(dir: &std::path::Path) -> bool {
+    let want = dir.to_string_lossy();
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        // Not Linux: fall back to whether the tool is running at all. Refusing
+        // more often than strictly needed is the safe direction here.
+        return crate::proc::any_claude_running();
+    };
+    for e in rd.flatten() {
+        let p = e.path().join("environ");
+        let Ok(bytes) = std::fs::read(&p) else {
+            continue;
+        };
+        for var in String::from_utf8_lossy(&bytes).split('\0') {
+            if let Some(v) = var.strip_prefix("CLAUDE_CONFIG_DIR=") {
+                if v == want {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Is any `claude` running? Used where a per-process home cannot be read.
+pub fn any_claude_running() -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-eo", "comm"])
+        .output()
+        .ok();
+    out.is_some_and(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.trim().rsplit('/').next() == Some("claude"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
