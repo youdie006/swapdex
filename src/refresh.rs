@@ -330,6 +330,11 @@ mod tests {
             short_reason("<html>502</html>"),
             "the login server refused it"
         );
+        // Rate limiting is a wait, not a verdict: telling someone to sign in
+        // again over it would cost them a login they did not need.
+        let busy = RefreshError::Busy.remedy("work");
+        assert!(busy.contains("is fine"), "{busy}");
+        assert!(!busy.contains("swapdex run"), "not a sign-in: {busy}");
         let msg = RefreshError::InUse.remedy("work");
         assert!(
             msg.contains("its own session will renew it"),
