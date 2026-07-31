@@ -803,8 +803,38 @@ fn fmt_reset(resets_at_secs: i64) -> String {
 
 /// The persistent loop. Enters the alternate screen once and stays there
 /// until an [`Outcome`] leaves it.
+/// Milestone timing, printed only when `SWAPDEX_TIMING` is set.
+///
+/// A startup delay someone reports and nobody can reproduce is a delay in THEIR
+/// environment, and no amount of measuring elsewhere will find it. This makes the
+/// program say where its own time went, on the machine that is slow.
+struct Timing {
+    start: std::time::Instant,
+    on: bool,
+}
+
+impl Timing {
+    fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            on: std::env::var_os("SWAPDEX_TIMING").is_some(),
+        }
+    }
+    fn mark(&self, what: &str) {
+        if self.on {
+            eprintln!(
+                "[timing] {:>6} ms  {what}",
+                self.start.elapsed().as_millis()
+            );
+        }
+    }
+}
+
 pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
+    let timing = Timing::new();
+    timing.mark("start");
     let mut terminal = ratatui::try_init()?;
+    timing.mark("terminal ready");
     // Mouse: scroll to move, click to select/switch - the "manage by clicking"
     // the picker was asked for. Best-effort; key control is unaffected if the
     // terminal refuses.
@@ -813,6 +843,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         ratatui::crossterm::event::EnableMouseCapture
     );
     let mut rows = ctx.rows();
+    timing.mark("accounts read");
     let mut state = ListState::default();
     state.select(Some(rows.iter().position(|r| r.active).unwrap_or(0)));
     let mut open_state = ListState::default();
@@ -837,8 +868,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // Start from what was read last time: the live read takes seconds, and an
     // empty gauge for that long says "no quota" when the truth is "not asked yet".
     let cached = ctx.cached_quota();
+    timing.mark("remembered usage read");
     let mut quota_pct: Option<std::collections::HashMap<String, Usage>> =
         (!cached.is_empty()).then(|| cached.into_iter().collect());
+    let mut first_frame = true;
     // A reading in flight, if one is.
     let mut quota_rx: Option<std::sync::mpsc::Receiver<Vec<(String, Usage)>>> = None;
     // When the bars were last refreshed, so they can be kept current.
@@ -1438,6 +1471,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         // when you opened it is misleading the longer you leave it up. The read is
         // the same zero-spend usage endpoint `swapdex quota` uses, once per
         // account, so it is refreshed on a slow cadence rather than every frame.
+        if first_frame {
+            timing.mark("first frame drawn");
+            first_frame = false;
+        }
         // Collect a finished reading without waiting for one.
         if let Some(rx) = quota_rx.as_ref() {
             if let Ok(got) = rx.try_recv() {
