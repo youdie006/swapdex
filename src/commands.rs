@@ -2257,6 +2257,156 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             Err(e) => (false, format!("failed: {e}")),
         }
     }
+    /// Read every account's usage. A free function so the dashboard can run it
+    /// on a thread: doing it on the loop froze the screen for seconds.
+    fn read_quota_usage(paths: &Paths) -> Vec<(String, crate::tui::Usage)> {
+        let Ok(exe) = std::env::current_exe() else {
+            return Vec::new();
+        };
+        let Ok(out) = Command::new(exe)
+            .arg("quota")
+            .arg("--json")
+            .stdin(std::process::Stdio::null())
+            .output()
+        else {
+            return Vec::new();
+        };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+            return Vec::new();
+        };
+        // Accept an array of account objects or {"accounts": [...]}.
+        let arr = v
+            .as_array()
+            .cloned()
+            .or_else(|| v.get("accounts").and_then(|a| a.as_array()).cloned())
+            .unwrap_or_default();
+        let mut claude: Vec<(String, crate::tui::Usage)> = arr
+            .iter()
+            .filter_map(|acc| {
+                // `name` may carry an " (active)" marker; strip it to match Row.name.
+                let name = acc
+                    .get("name")?
+                    .as_str()?
+                    .trim_end_matches(" (active)")
+                    .to_string();
+                let win = |key: &str| -> (Option<f64>, Option<i64>) {
+                    let w = acc.get(key);
+                    (
+                        w.and_then(|w| w.get("used_pct")).and_then(|v| v.as_f64()),
+                        w.and_then(|w| w.get("resets_at")).and_then(|v| v.as_i64()),
+                    )
+                };
+                let (five_h, five_h_reset) = win("five_hour");
+                let (seven_d, seven_d_reset) = win("seven_day");
+                // No numbers is still worth a row: empty tracks alone cannot
+                // say whether the account was never asked, could not answer,
+                // or has nothing left, and that ambiguity is exactly what
+                // makes a healthy account look broken. Carry the reason.
+                let note = match acc.get("status").and_then(|s| s.as_str()) {
+                    Some("ok") | None => None,
+                    Some("throttled") => Some("endpoint busy - retrying".to_string()),
+                    Some("expired") => Some("login expired".to_string()),
+                    Some("offline") => acc
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        // The long-form fix belongs in `swapdex quota`; the
+                        // row has one column, so keep the first clause.
+                        .map(|d| d.split(" - ").next().unwrap_or(d).to_string()),
+                    Some(other) => Some(other.to_string()),
+                };
+                if five_h.is_none() && seven_d.is_none() && note.is_none() {
+                    return None;
+                }
+                Some((
+                    name,
+                    crate::tui::Usage {
+                        five_h,
+                        five_h_reset,
+                        seven_d,
+                        seven_d_reset,
+                        // A live read has no age to disclose.
+                        observed_at: None,
+                        note,
+                    },
+                ))
+            })
+            .collect();
+        // Fill the gaps from what was read before. The usage endpoint
+        // rate-limits when several accounts are asked in a row, and an account
+        // that could not be read this minute is not an account with no quota -
+        // blanking it looks exactly like a broken one. The reading is recorded
+        // by `quota` itself, where it is taken; a run that got nothing has
+        // nothing to record and must not overwrite what it failed to refresh.
+        for (name, e) in crate::quota_cache::load(paths) {
+            // An account read THIS refresh keeps its live numbers. One that
+            // only carries a reason - busy, expired - takes the remembered
+            // numbers instead: an old figure beats an empty track, as long as
+            // it is shown with its age.
+            if let Some((_, u)) = claude
+                .iter_mut()
+                .find(|(n, u)| *n == name && u.five_h.is_none() && u.seven_d.is_none())
+            {
+                u.five_h = e.five_h;
+                u.five_h_reset = e.five_h_reset;
+                u.seven_d = e.seven_d;
+                u.seven_d_reset = e.seven_d_reset;
+                u.observed_at = Some(e.at);
+                // The age now carries the caveat. Keeping "endpoint busy"
+                // beside numbers that are right there reads as a complaint
+                // about figures the user can already see.
+                u.note = None;
+                continue;
+            }
+            if claude.iter().any(|(n, _)| *n == name) {
+                continue;
+            }
+            claude.push((
+                name,
+                crate::tui::Usage {
+                    five_h: e.five_h,
+                    five_h_reset: e.five_h_reset,
+                    seven_d: e.seven_d,
+                    seven_d_reset: e.seven_d_reset,
+                    // Shown with its age, so a remembered number is never
+                    // mistaken for a live one.
+                    observed_at: Some(e.at),
+                    note: None,
+                },
+            ));
+        }
+        // Codex reports its own windows into its session transcripts, so its
+        // usage costs a local file read - no network, unlike Claude's. The
+        // transcript does not name the account, so it belongs to whichever
+        // Codex account is active; the others get no bar rather than a guess.
+        if let Ok(store) = Store::open(paths) {
+            let active = active_by_tool(&store, paths)
+                .into_iter()
+                .find(|(tool, _)| *tool == "codex")
+                .map(|(_, name)| name);
+            if let Some(name) = active {
+                if let Some(l) = crate::codex_limits::latest(paths, now_secs(), 7 * 86_400) {
+                    let mut u = crate::tui::Usage {
+                        observed_at: l.observed_at,
+                        ..Default::default()
+                    };
+                    // Place each window by its LENGTH, not by the API's
+                    // primary/secondary labels: a ~5h window is the session
+                    // one, anything longer is the weekly column.
+                    for w in [l.short, l.long].into_iter().flatten() {
+                        if w.window_minutes <= 600 {
+                            u.five_h = Some(w.used_pct);
+                            u.five_h_reset = w.resets_at;
+                        } else {
+                            u.seven_d = Some(w.used_pct);
+                            u.seven_d_reset = w.resets_at;
+                        }
+                    }
+                    claude.push((name, u));
+                }
+            }
+        }
+        claude
+    }
     impl crate::tui::TuiCtx for Ctx<'_> {
         fn rows(&mut self) -> Vec<crate::tui::Row> {
             let Ok(store) = Store::open(self.paths) else {
@@ -2572,153 +2722,20 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn quota_pct(&mut self) -> Vec<(String, crate::tui::Usage)> {
-            let Ok(exe) = std::env::current_exe() else {
-                return Vec::new();
-            };
-            let Ok(out) = Command::new(exe)
-                .arg("quota")
-                .arg("--json")
-                .stdin(std::process::Stdio::null())
-                .output()
-            else {
-                return Vec::new();
-            };
-            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-                return Vec::new();
-            };
-            // Accept an array of account objects or {"accounts": [...]}.
-            let arr = v
-                .as_array()
-                .cloned()
-                .or_else(|| v.get("accounts").and_then(|a| a.as_array()).cloned())
-                .unwrap_or_default();
-            let mut claude: Vec<(String, crate::tui::Usage)> = arr
-                .iter()
-                .filter_map(|acc| {
-                    // `name` may carry an " (active)" marker; strip it to match Row.name.
-                    let name = acc
-                        .get("name")?
-                        .as_str()?
-                        .trim_end_matches(" (active)")
-                        .to_string();
-                    let win = |key: &str| -> (Option<f64>, Option<i64>) {
-                        let w = acc.get(key);
-                        (
-                            w.and_then(|w| w.get("used_pct")).and_then(|v| v.as_f64()),
-                            w.and_then(|w| w.get("resets_at")).and_then(|v| v.as_i64()),
-                        )
-                    };
-                    let (five_h, five_h_reset) = win("five_hour");
-                    let (seven_d, seven_d_reset) = win("seven_day");
-                    // No numbers is still worth a row: empty tracks alone cannot
-                    // say whether the account was never asked, could not answer,
-                    // or has nothing left, and that ambiguity is exactly what
-                    // makes a healthy account look broken. Carry the reason.
-                    let note = match acc.get("status").and_then(|s| s.as_str()) {
-                        Some("ok") | None => None,
-                        Some("throttled") => Some("endpoint busy - retrying".to_string()),
-                        Some("expired") => Some("login expired".to_string()),
-                        Some("offline") => acc
-                            .get("detail")
-                            .and_then(|d| d.as_str())
-                            // The long-form fix belongs in `swapdex quota`; the
-                            // row has one column, so keep the first clause.
-                            .map(|d| d.split(" - ").next().unwrap_or(d).to_string()),
-                        Some(other) => Some(other.to_string()),
-                    };
-                    if five_h.is_none() && seven_d.is_none() && note.is_none() {
-                        return None;
-                    }
-                    Some((
-                        name,
-                        crate::tui::Usage {
-                            five_h,
-                            five_h_reset,
-                            seven_d,
-                            seven_d_reset,
-                            // A live read has no age to disclose.
-                            observed_at: None,
-                            note,
-                        },
-                    ))
-                })
-                .collect();
-            // Fill the gaps from what was read before. The usage endpoint
-            // rate-limits when several accounts are asked in a row, and an account
-            // that could not be read this minute is not an account with no quota -
-            // blanking it looks exactly like a broken one. The reading is recorded
-            // by `quota` itself, where it is taken; a run that got nothing has
-            // nothing to record and must not overwrite what it failed to refresh.
-            for (name, e) in crate::quota_cache::load(self.paths) {
-                // An account read THIS refresh keeps its live numbers. One that
-                // only carries a reason - busy, expired - takes the remembered
-                // numbers instead: an old figure beats an empty track, as long as
-                // it is shown with its age.
-                if let Some((_, u)) = claude
-                    .iter_mut()
-                    .find(|(n, u)| *n == name && u.five_h.is_none() && u.seven_d.is_none())
-                {
-                    u.five_h = e.five_h;
-                    u.five_h_reset = e.five_h_reset;
-                    u.seven_d = e.seven_d;
-                    u.seven_d_reset = e.seven_d_reset;
-                    u.observed_at = Some(e.at);
-                    // The age now carries the caveat. Keeping "endpoint busy"
-                    // beside numbers that are right there reads as a complaint
-                    // about figures the user can already see.
-                    u.note = None;
-                    continue;
-                }
-                if claude.iter().any(|(n, _)| *n == name) {
-                    continue;
-                }
-                claude.push((
-                    name,
-                    crate::tui::Usage {
-                        five_h: e.five_h,
-                        five_h_reset: e.five_h_reset,
-                        seven_d: e.seven_d,
-                        seven_d_reset: e.seven_d_reset,
-                        // Shown with its age, so a remembered number is never
-                        // mistaken for a live one.
-                        observed_at: Some(e.at),
-                        note: None,
-                    },
-                ));
-            }
-            // Codex reports its own windows into its session transcripts, so its
-            // usage costs a local file read - no network, unlike Claude's. The
-            // transcript does not name the account, so it belongs to whichever
-            // Codex account is active; the others get no bar rather than a guess.
-            if let Ok(store) = Store::open(self.paths) {
-                let active = active_by_tool(&store, self.paths)
-                    .into_iter()
-                    .find(|(tool, _)| *tool == "codex")
-                    .map(|(_, name)| name);
-                if let Some(name) = active {
-                    if let Some(l) = crate::codex_limits::latest(self.paths, now_secs(), 7 * 86_400)
-                    {
-                        let mut u = crate::tui::Usage {
-                            observed_at: l.observed_at,
-                            ..Default::default()
-                        };
-                        // Place each window by its LENGTH, not by the API's
-                        // primary/secondary labels: a ~5h window is the session
-                        // one, anything longer is the weekly column.
-                        for w in [l.short, l.long].into_iter().flatten() {
-                            if w.window_minutes <= 600 {
-                                u.five_h = Some(w.used_pct);
-                                u.five_h_reset = w.resets_at;
-                            } else {
-                                u.seven_d = Some(w.used_pct);
-                                u.seven_d_reset = w.resets_at;
-                            }
-                        }
-                        claude.push((name, u));
-                    }
-                }
-            }
-            claude
+            read_quota_usage(self.paths)
+        }
+        /// Start a reading and hand back the channel it arrives on. The read is
+        /// several network round trips with backoff; on the loop it froze the
+        /// dashboard with no keys and no cursor, which reads as a broken tool.
+        fn quota_pct_async(
+            &mut self,
+        ) -> std::sync::mpsc::Receiver<Vec<(String, crate::tui::Usage)>> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let paths = self.paths.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(read_quota_usage(&paths));
+            });
+            rx
         }
         fn proxy_running(&mut self) -> bool {
             crate::proxy::running_port(self.paths).is_some()

@@ -518,6 +518,14 @@ pub trait TuiCtx {
     fn quota_pct(&mut self) -> Vec<(String, Usage)> {
         Vec::new()
     }
+    /// Start a reading and hand back the channel it will arrive on. The default
+    /// answers immediately from `quota_pct`, so a context that has nothing to
+    /// fetch needs no threads.
+    fn quota_pct_async(&mut self) -> std::sync::mpsc::Receiver<Vec<(String, Usage)>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(self.quota_pct());
+        rx
+    }
     /// Is a `swapdex proxy` running right now? When it is, a switch takes effect
     /// in the session that is ALREADY open, so Enter has no reason to leave the
     /// screen to start a new conversation. Default false so test contexts need
@@ -809,6 +817,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // Network, so fetched once lazily after the first frame (the UI opens
     // instantly; bars fill in). None = not fetched yet.
     let mut quota_pct: Option<std::collections::HashMap<String, Usage>> = None;
+    // A reading in flight, if one is.
+    let mut quota_rx: Option<std::sync::mpsc::Receiver<Vec<(String, Usage)>>> = None;
     // When the bars were last refreshed, so they can be kept current.
     let mut quota_fetched: Option<std::time::Instant> = None;
 
@@ -1397,14 +1407,23 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         // when you opened it is misleading the longer you leave it up. The read is
         // the same zero-spend usage endpoint `swapdex quota` uses, once per
         // account, so it is refreshed on a slow cadence rather than every frame.
-        let stale_quota = quota_pct.is_none()
-            || quota_fetched.is_some_and(|t: std::time::Instant| {
-                t.elapsed() >= std::time::Duration::from_secs(QUOTA_REFRESH_SECS)
-            });
-        if matches!(screen, Screen::Main) && stale_quota && !rows.is_empty() {
-            quota_pct = Some(ctx.quota_pct().into_iter().collect());
-            quota_fetched = Some(std::time::Instant::now());
-            continue;
+        // Collect a finished reading without waiting for one.
+        if let Some(rx) = quota_rx.as_ref() {
+            if let Ok(got) = rx.try_recv() {
+                quota_pct = Some(got.into_iter().collect());
+                quota_fetched = Some(std::time::Instant::now());
+                quota_rx = None;
+            }
+        }
+        let stale_quota = quota_fetched.is_none_or(|t: std::time::Instant| {
+            t.elapsed() >= std::time::Duration::from_secs(QUOTA_REFRESH_SECS)
+        });
+        if matches!(screen, Screen::Main) && stale_quota && quota_rx.is_none() && !rows.is_empty() {
+            // OFF the loop. Reading every account's usage is several network
+            // round trips with backoff, and doing it here froze the dashboard
+            // for seconds on open - no keys, no cursor - which reads as the tool
+            // being broken. The bars fill in when the answer arrives.
+            quota_rx = Some(ctx.quota_pct_async());
         }
         // A left click on a menu item both selects AND activates it; treat
         // that as a synthesized Enter so the key handler below does the work.
