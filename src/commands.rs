@@ -2371,6 +2371,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         active: by_pointer.unwrap_or(!at.is_empty()),
                         warn: marker,
                         also: Vec::new(),
+                        stale: slot_dir_of(&p.name)
+                            .is_some_and(|d| crate::proxy::creds::slot_token_expired(&d, now_ms())),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -2405,6 +2407,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     active: codex_pointer.as_deref() == Some(r.config_dir.as_path()),
                     warn: None,
                     also: Vec::new(),
+                    stale: false,
                 });
             }
             for (name, dir) in &slot_dirs {
@@ -2424,6 +2427,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     },
                     warn: None,
                     also: Vec::new(),
+                    stale: crate::proxy::creds::slot_token_expired(dir, now_ms()),
                 });
             }
             // One row per account (a snapshot and a slot for the same login are

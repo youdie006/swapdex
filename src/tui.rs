@@ -192,6 +192,7 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
                 warn: None,
                 disabled: false,
                 needs_login: false,
+                stale: false,
                 is_slot: false,
                 also: Vec::new(),
             },
@@ -303,6 +304,11 @@ fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
     if r.needs_login {
         // Nothing else matters until it can authenticate.
         return ("no login", Color::Rgb(200, 150, 90));
+    }
+    if r.stale {
+        // An account that cannot serve this turn is not ready, whatever its
+        // quota says - and the row's own note explains which kind of stale.
+        return ("expired", Color::Rgb(200, 150, 90));
     }
     if let Some(w) = r.warn {
         // A snapshot problem outranks quota: the account cannot serve at all.
@@ -435,6 +441,10 @@ pub struct Row {
     /// A slot account with no readable login yet - it cannot serve a turn until
     /// its tool signs in there.
     pub needs_login: bool,
+    /// Signed in, but the access token has lapsed. It may renew itself on the
+    /// next turn and it may need a fresh sign-in; either way it cannot serve
+    /// right now, so saying "ready" would be a promise the row cannot keep.
+    pub stale: bool,
     /// Backed by a permanent slot. Switching one moves the default pointer, which
     /// is what the proxy and the active marker follow; switching a snapshot copies
     /// credentials and moves no pointer at all.
@@ -2006,6 +2016,7 @@ mod tests {
             disabled: false,
             needs_login,
             is_slot: false,
+            stale: false,
             also: Vec::new(),
         };
         // A snapshot and a slot for the same login: the slot with a login wins.
@@ -2078,6 +2089,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: false,
+            stale: false,
             is_slot,
             also: Vec::new(),
         };
@@ -2134,6 +2146,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: false,
+            stale: false,
             is_slot: false,
             also: Vec::new(),
         };
@@ -2197,6 +2210,7 @@ mod tests {
             warn,
             disabled,
             needs_login: false,
+            stale: false,
             is_slot: false,
             also: Vec::new(),
         };
@@ -2242,6 +2256,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: true,
+            stale: false,
             is_slot: false,
             also: Vec::new(),
         };
@@ -2441,6 +2456,43 @@ mod tests {
         assert!(plain.iter().all(|s| s.style.bg != Some(SELECT_BG)));
     }
 
+    // A row that said "ready" beside a note saying its token had expired was
+    // promising something it could not keep - and for someone working from the
+    // dashboard, that status IS the answer to "can I use this now".
+    #[test]
+    fn an_account_that_cannot_serve_is_not_called_ready() {
+        let base = Row {
+            name: "work".into(),
+            ident: "w@x.co".into(),
+            tools: "claude-code".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            is_slot: true,
+            also: Vec::new(),
+            stale: false,
+        };
+        assert_eq!(account_status(&base, None).0, "ready");
+
+        let stale = Row {
+            stale: true,
+            ..Row {
+                name: base.name.clone(),
+                ident: base.ident.clone(),
+                tools: base.tools.clone(),
+                ..base
+            }
+        };
+        assert_eq!(account_status(&stale, None).0, "expired");
+        // Never signed in outranks it: there is nothing to renew.
+        let fresh = Row {
+            needs_login: true,
+            ..stale
+        };
+        assert_eq!(account_status(&fresh, None).0, "no login");
+    }
+
     #[test]
     fn a_row_with_no_numbers_says_why() {
         let now = std::time::SystemTime::now()
@@ -2487,6 +2539,7 @@ mod tests {
             warn: None,
             disabled: false,
             needs_login: false,
+            stale: false,
             is_slot: false,
             also: Vec::new(),
         };
