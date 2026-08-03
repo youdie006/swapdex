@@ -297,15 +297,6 @@ pub fn slot_keychain_write(dir: &std::path::Path, value: &[u8]) -> Result<()> {
 /// one directory, and a dashboard reporting the usage of an account the user was
 /// not talking to.
 pub(crate) fn slot_service(dir: &std::path::Path) -> String {
-    let default = dirs::home_dir().map(|h| h.join(".claude"));
-    slot_service_against(dir, default.as_deref())
-}
-
-/// The same, with the default directory given - so a test can name it.
-fn slot_service_against(dir: &std::path::Path, default: Option<&std::path::Path>) -> String {
-    if default.is_some_and(|d| d == dir) {
-        return KEYCHAIN_PREFIX.to_string();
-    }
     format!(
         "{KEYCHAIN_PREFIX}-{}",
         &sha256_hex(dir.to_string_lossy().as_bytes())[..8]
@@ -936,34 +927,27 @@ impl AuthTool for Claude {
 
 #[cfg(test)]
 mod tests {
-    use super::slot_service_against;
+    use super::slot_service;
 
-    // Claude names the default directory's item with no suffix, because it
-    // derives the name from CLAUDE_CONFIG_DIR and that is unset for the default.
-    // Deriving a suffix anyway meant swapdex read a different login than the one
-    // the tool writes - one directory, two credentials, and usage reported for
-    // whichever swapdex happened to find.
+    // Every slot's item is named from its directory, including `~/.claude` when
+    // that directory is a registered account - which is what a slot IS, and how
+    // Claude names it when launched with CLAUDE_CONFIG_DIR set to it.
+    //
+    // An unsuffixed item can also exist for `~/.claude`, left by a launch with
+    // no CLAUDE_CONFIG_DIR at all. It is a DIFFERENT login, and on the machine
+    // this was checked on it was a dead one from a previous account - so reading
+    // it in preference would have replaced a live credential with a corpse.
     #[test]
-    fn the_default_directory_has_no_suffix() {
+    fn a_slot_is_named_from_its_own_directory() {
         let home = std::path::Path::new("/Users/me/.claude");
-        assert_eq!(
-            slot_service_against(home, Some(home)),
-            "Claude Code-credentials"
-        );
-        // Any other directory keeps the derived suffix, which is what Claude
-        // itself computes when CLAUDE_CONFIG_DIR names it.
-        let other = std::path::Path::new("/Users/me/.claude-work");
-        let got = slot_service_against(other, Some(home));
+        let got = slot_service(home);
         assert!(got.starts_with("Claude Code-credentials-"), "{got}");
         assert_eq!(got.len(), "Claude Code-credentials-".len() + 8);
         // Two directories never collide.
         assert_ne!(
             got,
-            slot_service_against(std::path::Path::new("/Users/me/.claude-x"), Some(home))
+            slot_service(std::path::Path::new("/Users/me/.claude-work"))
         );
-        // With no home to compare against, every directory keeps its suffix -
-        // guessing that one of them is "the default" would be worse than not.
-        assert!(slot_service_against(home, None).starts_with("Claude Code-credentials-"));
     }
 
     use super::*;
