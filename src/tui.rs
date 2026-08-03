@@ -20,7 +20,11 @@ use std::path::PathBuf;
 /// How often the quota bars re-read the usage endpoint while the UI is open. Slow
 /// enough that watching the dashboard is not a stream of requests, often enough
 /// that the numbers are not from when you opened it.
-const QUOTA_REFRESH_SECS: u64 = 90;
+/// How long a reading stands before the dashboard asks again. Short enough that
+/// a number does not sit still while the account is being spent, long enough
+/// that leaving the screen open is not a stream of requests - and the read is
+/// off the loop, so a refresh costs the user nothing.
+const QUOTA_REFRESH_SECS: u64 = 45;
 
 const VIOLET: Color = Color::Rgb(157, 107, 255); // the brand accent (#9d6bff)
 const DEXGRAY: Color = Color::Rgb(150, 150, 160); // the dimmed "dex" half
@@ -435,10 +439,23 @@ pub struct Usage {
 
 /// The trailing column for a row's figures: the reason there are none if there
 /// is one, else how old they are.
-fn trailing_note(u: &Usage) -> String {
+///
+/// `checking` says a live read is in flight and these numbers came from the last
+/// one. Remembered numbers are drawn immediately so the gauges are never blank,
+/// but under fifteen minutes old they carry no age - which made a number from
+/// before the last hour of work look exactly like a current one. Whatever was
+/// spent since is missing from it, and nothing on screen said so.
+fn trailing_note(u: &Usage, checking: bool) -> String {
     match &u.note {
         Some(n) if !n.is_empty() => n.clone(),
-        _ => observed_note(u.observed_at),
+        _ => {
+            let age = observed_note(u.observed_at);
+            match (checking, u.observed_at.is_some()) {
+                (true, true) if age.is_empty() => "checking\u{2026}".to_string(),
+                (true, true) => format!("{age}, checking\u{2026}"),
+                _ => age,
+            }
+        }
     }
 }
 
@@ -1008,7 +1025,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
                                 // Snapshot figures say when they were taken, so an
                                 // old number is never read as a current one.
-                                let note = trailing_note(&u);
+                                let note = trailing_note(&u, quota_rx.is_some());
                                 if !note.is_empty() {
                                     top.push(Span::styled(
                                         format!("  {note}"),
@@ -2595,16 +2612,33 @@ mod tests {
             note: note.map(str::to_string),
         };
         assert_eq!(
-            trailing_note(&u(Some("token expired"), None)),
+            trailing_note(&u(Some("token expired"), None), false),
             "token expired"
         );
         assert_eq!(
-            trailing_note(&u(Some("endpoint busy"), Some(now - 3 * 3600))),
+            trailing_note(&u(Some("endpoint busy"), Some(now - 3 * 3600)), false),
             "endpoint busy",
             "the reason outranks the age"
         );
-        assert_eq!(trailing_note(&u(None, Some(now - 2 * 3600))), "as of 2h");
-        assert_eq!(trailing_note(&u(None, None)), "");
+        assert_eq!(
+            trailing_note(&u(None, Some(now - 2 * 3600)), false),
+            "as of 2h"
+        );
+        assert_eq!(trailing_note(&u(None, None), false), "");
+
+        // A remembered number under fifteen minutes old carries no age, so while
+        // a live read is in flight it would look exactly like a current one -
+        // and everything spent since is missing from it.
+        assert_eq!(
+            trailing_note(&u(None, Some(now - 60)), true),
+            "checking\u{2026}"
+        );
+        assert_eq!(
+            trailing_note(&u(None, Some(now - 2 * 3600)), true),
+            "as of 2h, checking\u{2026}"
+        );
+        // A live number has nothing to disclose, in flight or not.
+        assert_eq!(trailing_note(&u(None, None), true), "");
     }
 
     #[test]
