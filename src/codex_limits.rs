@@ -155,16 +155,34 @@ fn collect_jsonl(dir: &Path, now: u64, max_age: u64, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
 
+    /// Two fixed moments for the fixtures: a window that has NOT reset and one
+    /// that has. They were literal timestamps once, which passed until the day
+    /// they went by in the real world and the test failed for the calendar
+    /// rather than for the code.
+    const LIVE_RESET: i64 = 4_102_444_800; // 2100-01-01
+    const PAST_RESET: i64 = 1_000_000_000; // 2001-09-09
+
     /// The real transcript shape: `payload.rate_limits`, no account identity.
     fn write_transcript(dir: &Path, name: &str, primary: f64, secondary: Option<f64>) {
+        write_transcript_resetting(dir, name, primary, secondary, LIVE_RESET)
+    }
+
+    /// The same, with the reset moment chosen by the caller.
+    fn write_transcript_resetting(
+        dir: &Path,
+        name: &str,
+        primary: f64,
+        secondary: Option<f64>,
+        reset: i64,
+    ) {
         let sec = match secondary {
             Some(p) => {
-                format!(r#"{{"used_percent":{p},"window_minutes":300,"resets_at":1785600000}}"#)
+                format!(r#"{{"used_percent":{p},"window_minutes":300,"resets_at":{reset}}}"#)
             }
             None => "null".into(),
         };
         let body = format!(
-            "{{\"payload\":{{\"type\":\"other\"}}}}\n{{\"payload\":{{\"rate_limits\":{{\"primary\":{{\"used_percent\":{primary},\"window_minutes\":10080,\"resets_at\":1785611966}},\"secondary\":{sec}}}}}}}\n"
+            "{{\"payload\":{{\"type\":\"other\"}}}}\n{{\"payload\":{{\"rate_limits\":{{\"primary\":{{\"used_percent\":{primary},\"window_minutes\":10080,\"resets_at\":{reset}}},\"secondary\":{sec}}}}}}}\n"
         );
         std::fs::write(dir.join(name), body).unwrap();
     }
@@ -180,7 +198,7 @@ mod tests {
         assert_eq!(limits.short.unwrap().window_minutes, 300);
         assert_eq!(limits.long.unwrap().used_pct, 16.0);
         assert_eq!(limits.long.unwrap().window_minutes, 10080);
-        assert_eq!(limits.long.unwrap().resets_at, Some(1785611966));
+        assert_eq!(limits.long.unwrap().resets_at, Some(LIVE_RESET));
     }
 
     #[test]
@@ -216,17 +234,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let sessions = d.path().join(".codex/sessions/2026/07/27");
         std::fs::create_dir_all(&sessions).unwrap();
-        // Both windows reset at 1785611966 / 1785600000 (fixed in the fixture).
-        write_transcript(&sessions, "a.jsonl", 16.0, Some(42.0));
+        write_transcript_resetting(&sessions, "a.jsonl", 16.0, Some(42.0), PAST_RESET);
         let paths = Paths::rooted(d.path());
-        // "Now" before either reset: both windows stand.
-        let before = 1_785_000_000u64;
-        let l = latest(&paths, before, 10 * 86400).expect("both windows live");
+        // "Now" before the reset: both windows stand.
+        let l = latest(&paths, PAST_RESET as u64 - 1, 10 * 86400).expect("both windows live");
         assert!(l.short.is_some() && l.long.is_some());
-        // "Now" after both resets: nothing to report rather than stale numbers.
-        let after = 1_785_700_000u64;
+        // "Now" after it: nothing to report rather than numbers describing a
+        // window that no longer exists.
         assert!(
-            latest(&paths, after, 10 * 86400).is_none(),
+            latest(&paths, PAST_RESET as u64 + 1, 10 * 86400).is_none(),
             "a reset window is not reported as used"
         );
     }
