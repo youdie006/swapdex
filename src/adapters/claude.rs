@@ -285,11 +285,31 @@ pub fn slot_keychain_write(dir: &std::path::Path, value: &[u8]) -> Result<()> {
     if !keychain_enabled() {
         anyhow::bail!("no Keychain in this environment");
     }
-    let service = format!(
+    keychain_write_service(&slot_service(dir), value)
+}
+
+/// The Keychain service belonging to `dir`, by Claude Code's own rule.
+///
+/// Claude derives the name from `CLAUDE_CONFIG_DIR`, and when that is unset -
+/// which is what running plain `claude` on the default directory means - it uses
+/// the bare prefix with no suffix. swapdex derived a suffix unconditionally, so
+/// for `~/.claude` it read a DIFFERENT item than the tool writes: two logins for
+/// one directory, and a dashboard reporting the usage of an account the user was
+/// not talking to.
+pub(crate) fn slot_service(dir: &std::path::Path) -> String {
+    let default = dirs::home_dir().map(|h| h.join(".claude"));
+    slot_service_against(dir, default.as_deref())
+}
+
+/// The same, with the default directory given - so a test can name it.
+fn slot_service_against(dir: &std::path::Path, default: Option<&std::path::Path>) -> String {
+    if default.is_some_and(|d| d == dir) {
+        return KEYCHAIN_PREFIX.to_string();
+    }
+    format!(
         "{KEYCHAIN_PREFIX}-{}",
         &sha256_hex(dir.to_string_lossy().as_bytes())[..8]
-    );
-    keychain_write_service(&service, value)
+    )
 }
 
 pub(crate) fn slot_keychain_read_detail(
@@ -298,10 +318,7 @@ pub(crate) fn slot_keychain_read_detail(
     if !keychain_enabled() {
         return Err(KeychainReadError::NotApplicable);
     }
-    let service = format!(
-        "{KEYCHAIN_PREFIX}-{}",
-        &sha256_hex(dir.to_string_lossy().as_bytes())[..8]
-    );
+    let service = slot_service(dir);
     let out = std::process::Command::new(SECURITY)
         .args([
             "find-generic-password",
@@ -919,6 +936,36 @@ impl AuthTool for Claude {
 
 #[cfg(test)]
 mod tests {
+    use super::slot_service_against;
+
+    // Claude names the default directory's item with no suffix, because it
+    // derives the name from CLAUDE_CONFIG_DIR and that is unset for the default.
+    // Deriving a suffix anyway meant swapdex read a different login than the one
+    // the tool writes - one directory, two credentials, and usage reported for
+    // whichever swapdex happened to find.
+    #[test]
+    fn the_default_directory_has_no_suffix() {
+        let home = std::path::Path::new("/Users/me/.claude");
+        assert_eq!(
+            slot_service_against(home, Some(home)),
+            "Claude Code-credentials"
+        );
+        // Any other directory keeps the derived suffix, which is what Claude
+        // itself computes when CLAUDE_CONFIG_DIR names it.
+        let other = std::path::Path::new("/Users/me/.claude-work");
+        let got = slot_service_against(other, Some(home));
+        assert!(got.starts_with("Claude Code-credentials-"), "{got}");
+        assert_eq!(got.len(), "Claude Code-credentials-".len() + 8);
+        // Two directories never collide.
+        assert_ne!(
+            got,
+            slot_service_against(std::path::Path::new("/Users/me/.claude-x"), Some(home))
+        );
+        // With no home to compare against, every directory keeps its suffix -
+        // guessing that one of them is "the default" would be worse than not.
+        assert!(slot_service_against(home, None).starts_with("Claude Code-credentials-"));
+    }
+
     use super::*;
     use crate::paths::Paths;
     use serde_json::json;
