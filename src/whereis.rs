@@ -81,36 +81,26 @@ pub fn codex_stores(paths: &Paths) -> Vec<(String, PathBuf)> {
 /// lines, and these files run to megabytes.
 fn codex_cwd(path: &Path) -> Option<String> {
     use std::io::Read;
-    let mut head = vec![0u8; 8192];
+    // The opening line is the session header and carries `cwd` about 150 bytes
+    // in - but the whole line runs to 15KB, so parsing it as JSON needs all of
+    // it. Reading a fixed head and parsing lines meant every transcript was cut
+    // mid-line and silently skipped: the search found nothing, everywhere.
+    let mut head = vec![0u8; 4096];
     let mut f = std::fs::File::open(path).ok()?;
     let n = f.read(&mut head).ok()?;
-    let text = String::from_utf8_lossy(&head[..n]);
-    for line in text.lines() {
-        if !line.contains("\"cwd\"") {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(c) = find_cwd(&v) {
-                return Some(c);
-            }
-        }
-    }
-    None
+    cwd_in(&String::from_utf8_lossy(&head[..n]))
 }
 
-fn find_cwd(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::Object(m) => {
-            if let Some(serde_json::Value::String(s)) = m.get("cwd") {
-                if !s.is_empty() {
-                    return Some(s.clone());
-                }
-            }
-            m.values().find_map(find_cwd)
-        }
-        serde_json::Value::Array(a) => a.iter().find_map(find_cwd),
-        _ => None,
-    }
+/// The `cwd` value out of a fragment of transcript, by scanning for the field
+/// rather than parsing - the line it sits on is far longer than the fragment.
+fn cwd_in(text: &str) -> Option<String> {
+    let at = text.find("\"cwd\"")?;
+    let rest = &text[at + 5..];
+    let open = rest.find('"')?;
+    let after = &rest[open + 1..];
+    let close = after.find('"')?;
+    let v = &after[..close];
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 /// Codex conversations across every account, newest first.
@@ -267,6 +257,32 @@ fn mtime_secs(p: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A Codex transcript's opening line is the session header, and it runs to
+    // kilobytes - so the `cwd` has to be read out of a fragment rather than by
+    // parsing the line. Parsing meant every transcript was cut mid-line and
+    // skipped, and the search found nothing at all.
+    #[test]
+    fn a_codex_working_directory_is_read_from_a_fragment() {
+        let head = r#"{"timestamp":"2026-03-10T11:53:39Z","type":"session_meta","payload":{"id":"019cd798","cwd":"/Users/me/Project/ROS","originator":"codex_cli","#;
+        assert_eq!(cwd_in(head).as_deref(), Some("/Users/me/Project/ROS"));
+        // Truncated right after the field name, or before it: nothing claimed.
+        assert!(cwd_in(r#"{"payload":{"id":"x","cwd""#).is_none());
+        assert!(cwd_in(r#"{"payload":{"id":"x""#).is_none());
+        // An empty value is not a directory.
+        assert!(cwd_in(r#"{"cwd":""}"#).is_none());
+    }
+
+    // The id Codex resumes by is the uuid at the end of the file name, not the
+    // timestamp in the middle of it.
+    #[test]
+    fn a_codex_session_id_is_the_uuid_in_its_name() {
+        let p = Path::new("rollout-2026-03-10T20-53-35-019cd798-673e-7c31-bc00-6b91428a80c6.jsonl");
+        assert_eq!(
+            session_id_of(p).as_deref(),
+            Some("019cd798-673e-7c31-bc00-6b91428a80c6")
+        );
+    }
 
     fn write_session(dir: &Path, project: &str, id: &str) {
         let d = dir.join("projects").join(project);
