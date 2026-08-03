@@ -363,7 +363,10 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         // too - otherwise the shim would keep pointing at a dead port until the
         // pid check catches it.
         let m = marker.clone();
-        let serving = serving_file(paths);
+        // This tool's marker only: removing the shared one on exit also erased
+        // the other proxy's, so the surviving proxy stopped being reported as
+        // serving anything.
+        let serving = serving_file_for(paths, &opts.tool);
         let _ = ctrl_c_cleanup(move || {
             let _ = std::fs::remove_file(&m);
             let _ = std::fs::remove_file(&serving);
@@ -632,7 +635,7 @@ fn forward_turn(
     }
 
     let mut slot = pick_slot(paths, opts, sh)?;
-    note_serving(paths, &slot.name);
+    note_serving_for(paths, &opts.tool, &slot.name);
     let mut tried: Vec<String> = Vec::new();
     let up = loop {
         // An already-lapsed token earns a 401 and cannot be refreshed from here,
@@ -703,7 +706,7 @@ fn forward_turn(
                     println!("  {} is out - continuing on {}", slot.name, next.name);
                     std::io::stdout().flush().ok();
                     *sh.rotated.lock().unwrap() = Some(next.name.clone());
-                    note_serving(paths, &next.name);
+                    note_serving_for(paths, &opts.tool, &next.name);
                     slot = next;
                     continue;
                 }
@@ -882,22 +885,36 @@ pub fn build_id() -> String {
 /// pointer says which account was CHOSEN; after a rotation the proxy may be
 /// serving a different one, and a marker that shows the choice rather than the
 /// reality reads as "active" next to an account that cannot serve at all.
-pub fn serving_file(paths: &Paths) -> std::path::PathBuf {
-    paths.store_dir().join("proxy-serving")
+///
+/// One file per tool. A single shared one meant the Codex proxy's choice
+/// overwrote the Claude proxy's, so the Claude dashboard read a Codex account as
+/// the one serving its turns - and no Claude row matched it.
+fn serving_file_for(paths: &Paths, tool: &str) -> std::path::PathBuf {
+    match tool {
+        "codex" => paths.store_dir().join("proxy-serving-codex"),
+        // Claude's keeps the name it has always had, so a proxy already running
+        // is not orphaned by an upgrade.
+        _ => paths.store_dir().join("proxy-serving"),
+    }
 }
 
 /// The account a running proxy is serving turns from, if one is running.
 pub fn serving_account(paths: &Paths) -> Option<String> {
-    running_port(paths)?;
-    std::fs::read_to_string(serving_file(paths))
+    serving_account_for(paths, "claude-code")
+}
+
+/// The same, for one tool's proxy.
+pub fn serving_account_for(paths: &Paths, tool: &str) -> Option<String> {
+    running_proxy_for(paths, tool)?;
+    std::fs::read_to_string(serving_file_for(paths, tool))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
 /// Record who is serving, but only on a change - this runs per request.
-fn note_serving(paths: &Paths, name: &str) {
-    let f = serving_file(paths);
+fn note_serving_for(paths: &Paths, tool: &str, name: &str) {
+    let f = serving_file_for(paths, tool);
     if std::fs::read_to_string(&f).is_ok_and(|c| c.trim() == name) {
         return;
     }

@@ -1456,3 +1456,37 @@ fn an_authentication_request_passes_through_untouched() {
         "and ordinary traffic is still served by the account: {seen:?}"
     );
 }
+
+// Two proxies, two markers. They shared one file, so whichever answered a turn
+// last decided what BOTH dashboards read - a Codex account appeared as the one
+// serving Claude's turns, and no Claude row matched it.
+#[test]
+fn each_tools_proxy_records_its_own_serving_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "home", "aaaa1111", "AT-HOME", true);
+    seed_codex_slot(root.path(), "work", "cccc1111", "AT-WORK", "acct-work", true);
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut claude, cport) = start_proxy(root.path(), &upstream, &[]);
+
+    let csink: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let cupstream = fake_codex_upstream(csink.clone());
+    let (mut codex, xport) = start_codex_proxy(root.path(), &cupstream, &[]);
+
+    post_through(cport, "{\"turn\":1}");
+    post_codex_turn(xport);
+    // Claude again, last: with one shared file the Codex name would have stuck.
+    post_through(cport, "{\"turn\":2}");
+
+    let store = root.path().join(".local/share/swapdex");
+    let claude_says = std::fs::read_to_string(store.join("proxy-serving")).unwrap();
+    let codex_says = std::fs::read_to_string(store.join("proxy-serving-codex")).unwrap();
+    claude.kill().ok();
+    claude.wait().ok();
+    codex.kill().ok();
+    codex.wait().ok();
+
+    assert_eq!(claude_says.trim(), "home", "claude's own account");
+    assert_eq!(codex_says.trim(), "work", "codex's own, kept apart");
+}
