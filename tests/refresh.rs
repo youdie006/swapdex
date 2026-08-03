@@ -7,7 +7,6 @@
 //! of our own: the request swapdex builds, the answer it merges, and the
 //! credential it writes back.
 
-use std::io::Read;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +21,7 @@ fn fake_oauth(sink: Arc<Mutex<Vec<String>>>, response: &'static str) -> String {
     std::thread::spawn(move || {
         for mut rq in server.incoming_requests() {
             let mut body = String::new();
-            rq.as_reader().read_to_string(&mut body).ok();
+            std::io::Read::read_to_string(rq.as_reader(), &mut body).ok();
             sink.lock().unwrap().push(body);
             let _ = rq.respond(tiny_http::Response::from_string(response));
         }
