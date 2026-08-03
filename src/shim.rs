@@ -88,16 +88,19 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> S
         "#!/bin/sh\n\
          # swapdex codex shim - launch codex in the default account's slot.\n\
          # Managed by swapdex; re-created by `swapdex shim`.\n\
-         # A sign-in must reach ChatGPT directly: the OAuth exchange is between the\n\
-         # browser and the real backend, and a proxy in the middle answers with\n\
-         # whichever account it already holds.\n\
-         sx_login=no\n\
+         # The provider overrides belong on a run that TALKS to the model. On\n\
+         # `resume` they emptied the session picker: Codex lists the sessions that\n\
+         # match the configured provider, and a conversation held long before\n\
+         # swapdex existed matches none. A sign-in is excluded for its own reason -\n\
+         # the OAuth exchange is between the browser and the real backend, and a\n\
+         # proxy in the middle answers with whichever account it already holds.\n\
+         sx_plain=no\n\
          for a in \"$@\"; do\n\
-         \tcase \"$a\" in login|/login|logout|/logout) sx_login=yes ;; esac\n\
+         \tcase \"$a\" in login|/login|logout|/logout|resume|/resume|history|sessions) sx_plain=yes ;; esac\n\
          done\n\
          # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
          # port); silence means \"run without one\", exactly as before.\n\
-         if [ \"$sx_login\" = no ]; then\n\
+         if [ \"$sx_plain\" = no ]; then\n\
          \tport=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
          fi\n\
          if [ -n \"$port\" ]; then\n\
@@ -451,6 +454,30 @@ mod tests {
             s.contains("if [ -n \"$port\" ]"),
             "the overrides are conditional: {s}"
         );
+    }
+
+    // Codex lists the sessions matching its configured provider, so the provider
+    // overrides emptied the resume picker - a machine with 158 conversations for
+    // the current directory showed "No sessions yet", which reads as the history
+    // being gone.
+    #[test]
+    fn the_codex_shim_leaves_reading_commands_alone() {
+        let s = codex_shim_script(
+            Path::new("/store/active-codex"),
+            Path::new("/usr/bin/codex"),
+            Path::new("/bin/swapdex"),
+        );
+        for verb in ["resume", "history", "sessions"] {
+            assert!(s.contains(verb), "recognised as a plain run: {verb}");
+        }
+        // Those runs ask for no proxy, so no provider is set on them.
+        let guard = s.find("if [ \"$sx_plain\" = no ]").expect("the guard");
+        let ask = s.find("proxy --ensure").expect("the ask");
+        assert!(guard < ask, "the proxy is only asked for on a talking run");
+        // The home still comes from the pointer, whatever the command is: that is
+        // what decides which conversations exist at all.
+        let home = s.find("CODEX_HOME=").expect("home");
+        assert!(home > guard, "the home is set outside the guard: {s}");
     }
 
     #[test]
