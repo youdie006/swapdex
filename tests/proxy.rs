@@ -1464,7 +1464,14 @@ fn an_authentication_request_passes_through_untouched() {
 fn each_tools_proxy_records_its_own_serving_account() {
     let root = tempfile::tempdir().unwrap();
     seed_slot(root.path(), "home", "aaaa1111", "AT-HOME", true);
-    seed_codex_slot(root.path(), "work", "cccc1111", "AT-WORK", "acct-work", true);
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
 
     let sink = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_upstream(sink.clone());
@@ -1489,4 +1496,49 @@ fn each_tools_proxy_records_its_own_serving_account() {
 
     assert_eq!(claude_says.trim(), "home", "claude's own account");
     assert_eq!(codex_says.trim(), "work", "codex's own, kept apart");
+}
+
+// The same arrangement for Codex: conversations stay in one home, accounts swap
+// underneath. Without this, changing accounts meant changing CODEX_HOME, which
+// is where Codex keeps its transcripts - so every switch split the history, and
+// a machine ended up with 256 conversations in one account and 2 in the other.
+#[test]
+fn serve_moves_who_pays_for_codex_without_moving_its_transcripts() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "home", "aaaa1111", "AT-HOME", "acct-home", true);
+    seed_codex_slot(root.path(), "payer", "bbbb2222", "AT-PAYER", "acct-payer", false);
+    let sink: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+    let (mut child, port) = start_codex_proxy(root.path(), &upstream, &[]);
+
+    post_codex_turn(port);
+    // Hand turns to the other account, the way `swapdex serve payer --tool codex`
+    // does - without touching where sessions start.
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::write(
+        store.join("serving-codex"),
+        store
+            .join("slots")
+            .join("bbbb2222")
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    post_codex_turn(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(
+        (seen[0].1.as_str(), seen[1].1.as_str()),
+        ("acct-home", "acct-payer"),
+        "the running conversation changed account: {seen:?}"
+    );
+    // And the home new sessions start in - which is where the transcripts go -
+    // never moved.
+    let launch = std::fs::read_to_string(store.join("active-codex")).unwrap();
+    assert!(
+        launch.trim().ends_with("aaaa1111"),
+        "the transcript store is untouched: {launch}"
+    );
 }
