@@ -97,6 +97,42 @@ pub fn slot_email(dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Does the identity recorded for this slot disagree with the login it holds?
+///
+/// The name beside an account comes from `.claude.json`, the numbers come from
+/// the credential, and nothing keeps them in step - so a config whose identity
+/// was overwritten shows one person's name above another person's usage. Only a
+/// contradiction is reported, never a guess: an identity that names an
+/// organisation beside a personal subscription cannot both be true.
+pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
+    let id = std::fs::read(dir.join(".claude.json")).ok()?;
+    let id: serde_json::Value = serde_json::from_slice(&id).ok()?;
+    let org = id["oauthAccount"]["organizationName"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let email = id["oauthAccount"]["emailAddress"].as_str().unwrap_or("?");
+    let blob = slot_token_blob(dir)?;
+    let cred: serde_json::Value = serde_json::from_slice(&blob).ok()?;
+    let sub = cred["claudeAiOauth"]["subscriptionType"].as_str()?;
+    // A personal plan cannot be the login of an organisation account.
+    if matches!(sub, "max" | "pro") {
+        return Some(format!(
+            "recorded as {email} ({org}) but signed in on a '{sub}' plan -              the name and the login belong to different accounts"
+        ));
+    }
+    None
+}
+
+/// The credential blob for this slot, wherever it lives.
+fn slot_token_blob(dir: &Path) -> Option<Vec<u8>> {
+    if let Ok(b) = std::fs::read(dir.join(".credentials.json")) {
+        if !b.is_empty() {
+            return Some(b);
+        }
+    }
+    crate::adapters::claude::slot_keychain_read_detail(dir).ok()
+}
+
 /// Pull `claudeAiOauth.accessToken` out of a Claude credential blob.
 fn access_token(bytes: &[u8]) -> Option<Secret> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -163,6 +199,49 @@ mod tests {
             slot_token_expired(dir.path(), now),
             "about to lapse mid-flight counts as expired"
         );
+    }
+
+    // The name comes from one file and the numbers from another, and nothing
+    // keeps them in step - so a config whose identity was overwritten shows one
+    // person's name above another person's usage.
+    #[test]
+    fn an_identity_that_cannot_match_its_login_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = |email: &str, org: &str| {
+            std::fs::write(
+                dir.path().join(".claude.json"),
+                format!(
+                    r#"{{"oauthAccount":{{"emailAddress":"{email}","organizationName":"{org}"}}}}"#
+                ),
+            )
+            .unwrap()
+        };
+        let cred = |sub: &str| {
+            std::fs::write(
+                dir.path().join(".credentials.json"),
+                format!(r#"{{"claudeAiOauth":{{"accessToken":"A","subscriptionType":"{sub}"}}}}"#),
+            )
+            .unwrap()
+        };
+        // An organisation account signed in on a personal plan cannot be one
+        // account: say so, and name both halves.
+        id("a@company.com", "Acme RnD");
+        cred("max");
+        let msg = identity_contradicts_login(dir.path()).expect("contradiction");
+        assert!(msg.contains("a@company.com"), "{msg}");
+        assert!(msg.contains("Acme RnD"), "{msg}");
+        assert!(msg.contains("max"), "{msg}");
+
+        // The same account consistently: nothing to report.
+        cred("team");
+        assert!(identity_contradicts_login(dir.path()).is_none());
+        // A personal identity on a personal plan is not a contradiction either.
+        id("me@gmail.com", "");
+        cred("max");
+        assert!(identity_contradicts_login(dir.path()).is_none());
+        // And nothing is claimed when either half is missing.
+        std::fs::remove_file(dir.path().join(".credentials.json")).unwrap();
+        assert!(identity_contradicts_login(dir.path()).is_none());
     }
 
     #[test]

@@ -3140,6 +3140,27 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     );
                 }
             }
+            // A name above another account's numbers is worse than no name: it
+            // is not "missing information", it is wrong information, and every
+            // figure on that row belongs to somebody else.
+            {
+                let mixed: Vec<String> = crate::slots::Slots::open_for(paths, "claude-code")
+                    .map(|s| s.list())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|r| {
+                        crate::proxy::creds::identity_contradicts_login(&r.config_dir)
+                            .map(|why| format!("'{}' is {why}", r.name))
+                    })
+                    .collect();
+                for line in &mixed {
+                    report(
+                        "account identity",
+                        false,
+                        format!("{line} - sign in again to make them agree"),
+                    );
+                }
+            }
             // A slot named after a tool cannot be refused after the fact, but it
             // can be named: it reads as that tool's home and points elsewhere.
             {
