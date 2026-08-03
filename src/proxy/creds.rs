@@ -107,10 +107,18 @@ pub fn slot_email(dir: &Path) -> Option<String> {
 pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
     let id = std::fs::read(dir.join(".claude.json")).ok()?;
     let id: serde_json::Value = serde_json::from_slice(&id).ok()?;
+    let email = id["oauthAccount"]["emailAddress"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
     let org = id["oauthAccount"]["organizationName"]
         .as_str()
         .filter(|s| !s.is_empty())?;
-    let email = id["oauthAccount"]["emailAddress"].as_str().unwrap_or("?");
+    // A personal account still carries an organisation - Anthropic names one
+    // after the address itself. Treating any organisation as proof of a team
+    // account made every personal login look like a contradiction.
+    if org.contains(email) {
+        return None;
+    }
     let blob = slot_token_blob(dir)?;
     let cred: serde_json::Value = serde_json::from_slice(&blob).ok()?;
     let sub = cred["claudeAiOauth"]["subscriptionType"].as_str()?;
@@ -235,10 +243,17 @@ mod tests {
         // The same account consistently: nothing to report.
         cred("team");
         assert!(identity_contradicts_login(dir.path()).is_none());
-        // A personal identity on a personal plan is not a contradiction either.
-        id("me@gmail.com", "");
+        // A personal identity on a personal plan is not a contradiction either -
+        // including the organisation Anthropic names after the address itself,
+        // which every personal account has and which is not a team.
         cred("max");
+        id("me@gmail.com", "");
         assert!(identity_contradicts_login(dir.path()).is_none());
+        id("me@gmail.com", "me@gmail.com's Organization");
+        assert!(
+            identity_contradicts_login(dir.path()).is_none(),
+            "an account named after its own address is not an organisation"
+        );
         // And nothing is claimed when either half is missing.
         std::fs::remove_file(dir.path().join(".credentials.json")).unwrap();
         assert!(identity_contradicts_login(dir.path()).is_none());
