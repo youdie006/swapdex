@@ -2637,11 +2637,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn delete(&mut self, name: &str) -> String {
-            match Store::open(self.paths).and_then(|s| s.remove(name)) {
-                Ok(true) => format!("removed profile '{name}' (the live login stays)"),
-                Ok(false) => format!("no profile named '{name}'"),
-                Err(e) => format!("delete failed: {e}"),
-            }
+            // Delegate to the command every other caller uses. Deleting here only
+            // ever touched the STORE, and every account in this list is a slot -
+            // so it answered "no profile named X" for exactly the accounts the
+            // dashboard is made of. Renaming had the same fault and was fixed
+            // without me looking at its neighbour.
+            run_self(&["rm", name, "--yes"]).1
         }
         fn rename(&mut self, old: &str, new: &str) -> (bool, String) {
             // Delegate to the command every other caller uses. Renaming here only
@@ -3408,9 +3409,15 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
     // A slot account is not a saved snapshot: removing it means "stop managing
     // this account", and the directory holding its login is left untouched, so
     // the account itself is never lost.
-    let is_slot = crate::slots::Slots::open(paths)
-        .map(|s| s.get(name).is_some())
-        .unwrap_or(false);
+    // Both tools keep accounts here. Looking only in Claude's registry meant a
+    // Codex account could not be removed at all, and the dashboard - which lists
+    // both - reported "no account named X" for something it was showing.
+    let slot_tool = ["claude-code", "codex"].into_iter().find(|t| {
+        crate::slots::Slots::open_for(paths, t)
+            .map(|s| s.get(name).is_some())
+            .unwrap_or(false)
+    });
+    let is_slot = slot_tool.is_some();
     let is_profile = store.list().iter().any(|p| p.name == name);
     if !is_slot && !is_profile {
         eprintln!("swapdex: no account named '{name}'");
@@ -3439,7 +3446,7 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
                 return Ok(0);
             }
         }
-        let mut slots = crate::slots::Slots::open(paths)?;
+        let mut slots = crate::slots::Slots::open_for(paths, slot_tool.unwrap_or("claude-code"))?;
         let dir = slots.get(name).map(|r| r.config_dir);
         slots.remove(name)?;
         println!("stopped managing '{name}'.");

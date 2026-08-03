@@ -1153,9 +1153,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         f.render_stateful_widget(list, body, &mut state);
                     }
                     let foot_line = if let Some(i) = confirm_delete {
+                        // Say what this actually does. "Delete" over an account
+                        // whose folder and login both survive invites someone to
+                        // decline a harmless action - or to expect a folder gone
+                        // that is still there.
                         Line::from(Span::styled(
                             format!(
-                                "  delete saved profile '{}'? the live login stays.  y / N",
+                                "  stop managing '{}'? its login and folder stay.  y / N",
                                 rows[i].name
                             ),
                             Style::default().fg(Color::Rgb(200, 150, 90)),

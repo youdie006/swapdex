@@ -872,3 +872,38 @@ fn rename_works_on_a_slot_account() {
     assert!(listed.contains("acme"), "the new name is listed: {listed}");
     assert!(!listed.contains("work"), "the old one is gone: {listed}");
 }
+
+// Every account in the dashboard is a slot, and both tools put them there. `rm`
+// looked only in Claude's registry, so a Codex account could not be removed at
+// all - and the dashboard's delete key reported "no profile named X" for the
+// accounts it was showing.
+#[test]
+fn removing_an_account_works_for_either_tool() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "onclaude", "--no-launch"], &path);
+    run_in(
+        root.path(),
+        &["run", "oncodex", "--tool", "codex", "--no-launch"],
+        &path,
+    );
+
+    let out = run_in(root.path(), &["rm", "oncodex", "--yes"], &path);
+    assert!(
+        out.contains("oncodex"),
+        "a Codex account can be removed: {out}"
+    );
+    let listed = run_in(root.path(), &["slots"], &path);
+    assert!(!listed.contains("oncodex"), "it is gone: {listed}");
+    assert!(listed.contains("onclaude"), "the other is untouched: {listed}");
+
+    // And Claude's still work.
+    run_in(root.path(), &["rm", "onclaude", "--yes"], &path);
+    let listed = run_in(root.path(), &["slots"], &path);
+    assert!(!listed.contains("onclaude"), "{listed}");
+}
