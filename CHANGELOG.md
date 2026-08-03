@@ -4,6 +4,25 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.34.0] - 2026-08-03
+
+### Changed
+- **Changing accounts keeps the conversation, by default.** The point of the tool is one place where every conversation lives with accounts swapped underneath, but the most natural action - Enter in the dashboard - ran `use`, which moves the store those conversations live in. So the ordinary way to change accounts was also the way to split a history in two: one machine ended up with 256 Codex conversations under one account and 2 under the other. Enter and the `/swap` command now **serve**: the account pays for the turns and the conversation stays put. `swapdex use` remains for actually changing where new sessions start. `swapdex serve` also starts the proxy it needs - directing turns with nothing to carry them was a setting that quietly did nothing.
+
+### Added
+- **`swapdex refresh`: renew a lapsed access token without signing in again.** An access token lives about an hour and only the account's own refresh token can renew it, which swapdex would not do - so any account idle for an hour looked expired, the proxy stepped over it, and `quota` reported it dead. Those are exactly the accounts with quota left. A slot is never renewed while its tool is running there: a refresh token rotates, the running process holds the old one, and renewing it out from under that process is how an account gets logged out. The proxy and `quota` renew before writing an account off.
+- **`swapdex whereis` finds Codex conversations too.** Codex has the same property Claude does - a conversation lives inside the home the tool was launched with - and it files transcripts by date with the working directory inside each, so they are found by reading rather than by listing. The line printed reopens one with `CODEX_HOME` named in full.
+- **`SWAPDEX_TIMING=1` reports where startup time went**, for a delay that only happens on one machine.
+
+### Fixed
+- **The codex shim no longer empties the session picker.** Codex lists the sessions matching its configured provider, and the shim set a swapdex provider on every run including `resume` - so a directory holding 158 conversations showed "No sessions yet". The provider overrides now go only on runs that talk to the model.
+- **The dashboard counts down, like everything else that reports quota.** The gauges printed how much had been SPENT with no word to say so, while Claude's own status and `swapdex quota` both count what is LEFT - so a window that had just reset showed "2%" and read as almost nothing left when it meant almost nothing used.
+- **Opening the dashboard no longer freezes it.** Reading every account's usage ran on the event loop, so with several accounts it took the keyboard and the cursor away for seconds on every launch. It runs on a thread, the last reading is drawn immediately (marked "checking..." while a live one is in flight), and the accounts are read at once rather than one after another: six seconds became one.
+- **Signing in works from the dashboard.** Three separate faults: the shim set a proxy address on `/login`, the proxy rewrote the OAuth exchange for a `/login` typed inside a running session, and the sign-in key tore the dashboard down instead of returning to it. Mouse capture is also released while the sign-in runs - with it on, a mouse paste never arrives as text, which is what a code prompt asks for.
+- **Each tool's proxy records its own serving account.** Both wrote one file, so whichever answered last decided what BOTH dashboards read, and stopping one erased the other's.
+- **An account that cannot serve is not called "ready"**, renaming from the dashboard works on the accounts it lists, the dashboard opens for a slot-only install, the rename prompt looks like something you type into, and the word "slot" no longer appears in anything a person reads.
+- **A test that failed for the calendar rather than for the code**: fixtures carried literal timestamps from the week they were written and started failing when those moments went by.
+
 ## [0.33.0] - 2026-07-31
 
 ### Fixed

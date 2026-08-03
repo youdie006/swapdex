@@ -1505,8 +1505,22 @@ fn each_tools_proxy_records_its_own_serving_account() {
 #[test]
 fn serve_moves_who_pays_for_codex_without_moving_its_transcripts() {
     let root = tempfile::tempdir().unwrap();
-    seed_codex_slot(root.path(), "home", "aaaa1111", "AT-HOME", "acct-home", true);
-    seed_codex_slot(root.path(), "payer", "bbbb2222", "AT-PAYER", "acct-payer", false);
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "aaaa1111",
+        "AT-HOME",
+        "acct-home",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "payer",
+        "bbbb2222",
+        "AT-PAYER",
+        "acct-payer",
+        false,
+    );
     let sink: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_codex_upstream(sink.clone());
     let (mut child, port) = start_codex_proxy(root.path(), &upstream, &[]);
