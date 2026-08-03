@@ -1728,8 +1728,11 @@ fn slash_body(tool: &str, host: &str) -> String {
          email and current state as the description. Put the active one first and say it is \
          active. If there are more accounts than the tool allows, offer the ones not \
          currently active and let the rest come from free text.\n\
-         3. Run `swapdex use <the account they chose> --tool {tool}` and report the result in \
-         one line.\n\
+         3. Run `swapdex serve <the account they chose> --tool {tool}` and report the \
+         result in one line. `serve` is the right verb here: it changes which account \
+         pays for the turns and leaves this conversation exactly where it is. `use` \
+         would move the store the conversation lives in, which is never what someone \
+         asking mid-conversation means.\n\
          \n\
          Report what swapdex printed and nothing beyond it. Its last line says whether \
          anything running actually moved: with a proxy the next turn of THIS session is \
@@ -2600,7 +2603,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .find(|t| p.tools.iter().any(|pt| pt == t))
                 });
             match tool {
-                Some(t) => run_self(&["use", name, "--tool", t]),
+                // Enter means "let this account serve me" - not "move where my
+                // conversations live". Moving the store is what `use` does, and
+                // having the most natural key do it split a history in two every
+                // time somebody changed accounts, which is the opposite of the
+                // point of the tool.
+                Some(t) => run_self(&["serve", name, "--tool", t]),
                 // A slot account has no store profile, so the registry that holds
                 // it says which tool it is. Guessing Claude here switched nothing
                 // when the row was a Codex account.
@@ -2613,7 +2621,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                                 .unwrap_or(false)
                         })
                         .unwrap_or("claude-code");
-                    run_self(&["use", name, "--tool", t])
+                    run_self(&["serve", name, "--tool", t])
                 }
             }
         }
@@ -4178,13 +4186,19 @@ pub fn serve(paths: &Paths, name: Option<&str>, off: bool, sel: Option<ToolSel>)
         return Ok(5);
     }
     slots.set_serving(name)?;
+    // Start the proxy this needs. Directing turns with nothing to carry them is
+    // a setting that quietly does nothing, and telling someone to run a second
+    // command to make the first one take effect is the same as not doing it.
+    if crate::proxy::running_proxy_for(paths, tool).is_none() {
+        let _ = proxy_ensure(paths, DEFAULT_PROXY_PORT, tool);
+    }
     let live = crate::proxy::running_proxy_for(paths, tool).is_some();
     println!("turns -> {name}");
     if live {
         println!("  the session you have open moves from its next turn");
     } else {
         println!(
-            "  takes effect once proxy mode is running: swapdex proxy{}",
+            "  but nothing is carrying them yet - `swapdex proxy{}` in another terminal",
             if tool == "codex" { " --tool codex" } else { "" }
         );
     }
