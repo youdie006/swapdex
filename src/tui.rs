@@ -734,14 +734,32 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
         )];
     };
     let pct = pct.clamp(0.0, 100.0);
-    // "62%", plus the reset countdown when the width can carry it.
-    let short = format!("{pct:.0}%");
-    let label = match reset_secs.map(fmt_reset) {
-        Some(r) if !r.is_empty() && short.chars().count() + 1 + r.chars().count() <= width => {
-            format!("{short} {r}")
+    // "62% left", plus the reset countdown when the width can carry it.
+    //
+    // The bar shows how much is SPENT and the number says how much is LEFT, and
+    // for a while the number carried no word at all - so "2%" on a window that
+    // had just reset read as "almost nothing left" when it meant the opposite.
+    // Claude's own status counts down, and so does `swapdex quota`; a dashboard
+    // that counted up without saying so was the only thing speaking the other
+    // language.
+    let left = 100.0 - pct;
+    // Most to least, first that fits: the countdown is the first thing to go,
+    // then the word. Truncating instead produced "98% l", and a bar too narrow
+    // for the word is too narrow for anything but the number anyway.
+    let reset = reset_secs.map(fmt_reset).filter(|r| !r.is_empty());
+    let mut label = format!("{left:.0}%");
+    for candidate in [
+        reset.as_ref().map(|r| format!("{left:.0}% left {r}")),
+        Some(format!("{left:.0}% left")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate.chars().count() <= width {
+            label = candidate;
+            break;
         }
-        _ => short,
-    };
+    }
     let lw = label.chars().count().min(width);
     let left_pad = (width - lw) / 2;
     let text: String = " ".repeat(left_pad)
@@ -2369,40 +2387,53 @@ mod tests {
         assert_eq!(account_status(&mk(false, None, false), None).0, "ready");
     }
 
+    // The number counts what is LEFT, the way Claude's own status does and the
+    // way `swapdex quota` does. It used to count what was spent, with no word to
+    // say which - so a window that had just reset showed "2%" and read as almost
+    // nothing left when it meant almost nothing used.
     #[test]
-    fn quota_bar_writes_the_number_inside_the_bar() {
-        let spans = quota_bar(Some(62.0), None, 11);
+    fn quota_bar_writes_what_is_left_inside_the_bar() {
+        let spans = quota_bar(Some(62.0), None, 14);
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(text.chars().count(), 11, "the bar is exactly its width");
-        assert!(
-            text.contains("62%"),
-            "the number is inside the bar: {text:?}"
-        );
-        // 62% of 11 -> 7 filled cells: the fill is the SPAN split, so the label
-        // never leaves a gap in it.
-        assert_eq!(spans[0].content.chars().count(), 7);
-        assert_eq!(spans[1].content.chars().count(), 4);
-        // A full window is filled edge to edge even though the label spans it.
-        let full = quota_bar(Some(100.0), Some(3600), 11);
-        assert_eq!(
-            full[1].content.chars().count(),
-            0,
-            "nothing unfilled at 100%: {:?}",
-            full[0].content
-        );
-        assert!(full[0].content.contains("100%"));
-        // The countdown joins when it fits, and is dropped when it does not.
-        let wide: String = quota_bar(Some(10.0), Some(3600), 14)
+        assert_eq!(text.chars().count(), 14, "the bar is exactly its width");
+        assert!(text.contains("38% left"), "62% spent is 38% left: {text:?}");
+        // A window barely touched reads as nearly full, not nearly empty.
+        let fresh: String = quota_bar(Some(2.0), None, 14)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert!(wide.contains("10%") && wide.contains("1h"), "{wide:?}");
+        assert!(fresh.contains("98% left"), "{fresh:?}");
+        // The fill still tracks what is SPENT: 62% of 14 -> 9 cells. The bar
+        // filling as an account is used is the picture people expect; only the
+        // number changed sides.
+        assert_eq!(spans[0].content.chars().count(), 9);
+        assert_eq!(spans[1].content.chars().count(), 5);
+        // A spent window is filled edge to edge even though the label spans it.
+        let full = quota_bar(Some(100.0), Some(3600), 14);
+        assert_eq!(
+            full[1].content.chars().count(),
+            0,
+            "nothing unfilled once it is all spent: {:?}",
+            full[0].content
+        );
+        assert!(
+            full[0].content.contains("0% left"),
+            "a spent window says so plainly: {:?}",
+            full[0].content
+        );
+        // The countdown joins when it fits, and is dropped when it does not.
+        let wide: String = quota_bar(Some(10.0), Some(3600), 17)
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(wide.contains("90% left") && wide.contains("1h"), "{wide:?}");
         let narrow: String = quota_bar(Some(10.0), Some(3600), 5)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
+        // Too narrow for the word: the number alone, not a cut-off word.
         assert!(
-            narrow.contains("10%") && !narrow.contains("1h"),
+            narrow.contains("90%") && !narrow.contains("1h") && !narrow.contains("l"),
             "{narrow:?}"
         );
         // No data: an empty track of the right width, no number invented.
