@@ -25,6 +25,8 @@ pub struct Found {
     pub modified: u64,
     /// The store it lives in, for the exact command that reopens it.
     pub config_dir: PathBuf,
+    /// Which tool's conversation this is - they are reopened differently.
+    pub tool: &'static str,
 }
 
 impl Found {
@@ -34,14 +36,153 @@ impl Found {
     pub fn resume_command(&self) -> String {
         // The REAL path, not the `~`-shortened one used for display: this line is
         // meant to be run, and a tilde inside quotes is not expanded - it becomes
-        // a directory that does not exist, and Claude then reports no session,
+        // a directory that does not exist, and the tool then reports no session,
         // which is the exact confusion this command exists to end.
-        format!(
-            "CLAUDE_CONFIG_DIR={} claude -r {}",
-            self.config_dir.display(),
-            self.session_id
-        )
+        match self.tool {
+            "codex" => format!(
+                "CODEX_HOME={} codex resume {}",
+                self.config_dir.display(),
+                self.session_id
+            ),
+            _ => format!(
+                "CLAUDE_CONFIG_DIR={} claude -r {}",
+                self.config_dir.display(),
+                self.session_id
+            ),
+        }
     }
+}
+
+/// One tool's stores and how its conversations are laid out.
+///
+/// Codex has the same problem Claude does - a conversation lives inside the home
+/// the tool was launched with, so switching accounts changes which ones `resume`
+/// can offer - but it files them by DATE rather than by project, with the working
+/// directory recorded inside each transcript. So they are found by reading, not
+/// by listing directories.
+pub fn codex_stores(paths: &Paths) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = crate::slots::Slots::open_for(paths, "codex")
+        .map(|s| {
+            s.list()
+                .into_iter()
+                .map(|r| (r.name, r.config_dir))
+                .collect()
+        })
+        .unwrap_or_default();
+    let bare = paths.codex_dir().to_path_buf();
+    if !out.iter().any(|(_, d)| d == &bare) {
+        out.push(("(default ~/.codex)".to_string(), bare));
+    }
+    out
+}
+
+/// The working directory a Codex transcript belongs to, from the transcript
+/// itself. Only the head is read: `cwd` is recorded in the session's opening
+/// lines, and these files run to megabytes.
+fn codex_cwd(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = vec![0u8; 8192];
+    let mut f = std::fs::File::open(path).ok()?;
+    let n = f.read(&mut head).ok()?;
+    let text = String::from_utf8_lossy(&head[..n]);
+    for line in text.lines() {
+        if !line.contains("\"cwd\"") {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(c) = find_cwd(&v) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+fn find_cwd(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let Some(serde_json::Value::String(s)) = m.get("cwd") {
+                if !s.is_empty() {
+                    return Some(s.clone());
+                }
+            }
+            m.values().find_map(find_cwd)
+        }
+        serde_json::Value::Array(a) => a.iter().find_map(find_cwd),
+        _ => None,
+    }
+}
+
+/// Codex conversations across every account, newest first.
+pub fn find_codex(paths: &Paths, project_filter: Option<&str>, limit: usize) -> Vec<Found> {
+    let mut out = Vec::new();
+    for (account, dir) in codex_stores(paths) {
+        let mut files = Vec::new();
+        collect_rollouts(&dir.join("sessions"), &mut files);
+        // Newest first, so a filter that matches many still answers quickly.
+        files.sort_by_key(|p| std::cmp::Reverse(mtime_secs(p)));
+        for path in files.into_iter().take(400) {
+            let Some(cwd) = codex_cwd(&path) else {
+                continue;
+            };
+            if project_filter.is_some_and(|f| !matches_path(&cwd, f)) {
+                continue;
+            }
+            let Some(id) = session_id_of(&path) else {
+                continue;
+            };
+            out.push(Found {
+                account: account.clone(),
+                session_id: id,
+                project: cwd,
+                modified: mtime_secs(&path),
+                config_dir: dir.clone(),
+                tool: "codex",
+            });
+        }
+    }
+    out.sort_by_key(|f| std::cmp::Reverse(f.modified));
+    out.truncate(limit);
+    out
+}
+
+/// Codex names a transcript `rollout-<timestamp>-<uuid>.jsonl`; the id it
+/// resumes by is the uuid at the end.
+fn session_id_of(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy();
+    stem.rsplit('-').next().filter(|s| s.len() >= 8).map(|s| {
+        // The uuid is the last five dash-separated groups.
+        let parts: Vec<&str> = stem.split('-').collect();
+        if parts.len() >= 5 {
+            parts[parts.len() - 5..].join("-")
+        } else {
+            s.to_string()
+        }
+    })
+}
+
+fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_rollouts(&p, out);
+        } else if p.extension().is_some_and(|x| x == "jsonl")
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("rollout-"))
+        {
+            out.push(p);
+        }
+    }
+}
+
+/// A real filesystem path against what the user typed, both ways round.
+fn matches_path(haystack: &str, needle: &str) -> bool {
+    let h = haystack.to_ascii_lowercase();
+    let n = needle.to_ascii_lowercase();
+    h.contains(&n) || h.contains(&n.replace('/', "-"))
 }
 
 /// Every store swapdex knows about: the registered Claude slots, plus the bare
@@ -100,6 +241,7 @@ fn collect_store(account: &str, dir: &Path, filter: Option<&str>, out: &mut Vec<
                 project: project.clone(),
                 modified: mtime_secs(&path),
                 config_dir: dir.to_path_buf(),
+                tool: "claude-code",
             });
         }
     }

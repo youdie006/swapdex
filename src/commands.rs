@@ -4048,7 +4048,12 @@ fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
 /// like it was, so this says where the conversation actually is and how to
 /// reopen it from any account.
 pub fn whereis(paths: &Paths, project: Option<&str>) -> Result<i32> {
-    let found = crate::whereis::find(paths, project, 15);
+    // Both tools: a conversation is lost the same way in either, and someone
+    // looking for theirs does not know which store to ask about.
+    let mut found = crate::whereis::find(paths, project, 15);
+    found.extend(crate::whereis::find_codex(paths, project, 15));
+    found.sort_by_key(|f| std::cmp::Reverse(f.modified));
+    found.truncate(15);
     if found.is_empty() {
         match project {
             Some(p) => println!("No conversation under a path matching '{p}', in any account."),
