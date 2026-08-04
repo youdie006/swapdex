@@ -4166,13 +4166,13 @@ pub fn serve(
     let bin = tool_binary(tool);
     let slots = crate::slots::Slots::open_for(paths, tool)?;
     // The bare answer, for a caller that puts it somewhere else - the codex shim
-    // labels its provider with it. Silence means nobody, which is a real answer
-    // and not a failure, so it still exits 0.
+    // labels its provider with it. The question there is "who pays", so it takes
+    // the default when nobody is directing turns; naming only the explicit case
+    // would leave the common one anonymous. Silence means there is no account at
+    // all, which is a real answer and not a failure, so it still exits 0.
     if quiet {
-        if let Some(dir) = slots.serving_dir() {
-            if let Some(r) = slots.list().into_iter().find(|r| r.config_dir == dir) {
-                print!("{}", r.name);
-            }
+        if let Some(who) = slots.payer() {
+            print!("{who}");
         }
         return Ok(0);
     }

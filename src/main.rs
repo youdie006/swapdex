@@ -76,7 +76,7 @@ enum Cmd {
         /// Which tool (default: claude)
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
-        /// Print just the serving account's name (nothing when none)
+        /// Print just the name of the account that pays the next turn
         #[arg(long)]
         quiet: bool,
     },

@@ -346,6 +346,18 @@ impl Slots {
             .then_some(dir)
     }
 
+    /// The account that pays the next turn through the proxy: the one directing
+    /// turns, or the default it falls back to when none does. This is the same
+    /// resolution the proxy performs, kept in one place so what a screen claims
+    /// and what the proxy does cannot drift apart.
+    pub fn payer(&self) -> Option<String> {
+        let dir = self.serving_dir().or_else(|| self.default_dir())?;
+        self.list()
+            .into_iter()
+            .find(|r| r.config_dir == dir)
+            .map(|r| r.name)
+    }
+
     /// Point the default account at `name`'s slot. A plain `claude` (via the
     /// shim) then launches in this slot. No credential is moved.
     pub fn set_default(&self, name: &str) -> Result<()> {
@@ -472,6 +484,41 @@ mod tests {
             Slots::open_for(&paths, "codex").unwrap().serving_dir(),
             None,
             "adopting the same directory back does not make it serve again"
+        );
+    }
+
+    /// What the shim writes on Codex's status screen has to be the account the
+    /// proxy will actually bill, which is the one directing turns OR - far more
+    /// often, because nobody has run `serve` - the default it falls back to.
+    /// Naming only the explicit case leaves the common case anonymous, which is
+    /// the complaint that started this.
+    #[test]
+    fn the_payer_is_the_server_or_the_default_behind_it() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.create("main").unwrap();
+            s.create("company").unwrap();
+            s.set_default("main").unwrap();
+        }
+        let open = || Slots::open_for(&paths, "codex").unwrap();
+        assert_eq!(
+            open().payer().as_deref(),
+            Some("main"),
+            "with nobody serving, the default pays"
+        );
+        open().set_serving("company").unwrap();
+        assert_eq!(
+            open().payer().as_deref(),
+            Some("company"),
+            "and the account directing turns takes over"
+        );
+        open().remove("company").unwrap();
+        assert_eq!(
+            open().payer().as_deref(),
+            Some("main"),
+            "and it hands back when that account is gone"
         );
     }
 
