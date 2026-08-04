@@ -207,6 +207,14 @@ impl Slots {
         if self.default_dir().as_deref() == Some(gone.config_dir.as_path()) {
             let _ = std::fs::remove_file(self.pointer_file());
         }
+        // Same for the serving pointer, and read from the file rather than
+        // through serving_dir(): the record is already out of the list, so the
+        // accessor answers None here by design. Leaving the file would have a
+        // later `adopt` of the same directory silently resume paying.
+        let served = std::fs::read_to_string(self.serving_file()).unwrap_or_default();
+        if served.trim() == gone.config_dir.to_string_lossy() {
+            let _ = std::fs::remove_file(self.serving_file());
+        }
         self.persist()?;
         Ok(true)
     }
@@ -318,11 +326,24 @@ impl Slots {
         }
     }
 
-    /// The slot dir of the account serving turns, if one was named.
+    /// The slot dir of the account serving turns, if one was named AND that
+    /// account is still registered.
+    ///
+    /// The pointer holds a path, and a path outlives the account that owned it.
+    /// Removing the serving account left the file behind, so turns stayed
+    /// nominally directed at a home no account owns - and the one this was found
+    /// on had no login in it. An answer here is a claim about who pays, so it is
+    /// only given for an account that still exists.
     pub fn serving_dir(&self) -> Option<PathBuf> {
         let s = std::fs::read_to_string(self.serving_file()).ok()?;
-        let s = s.trim();
-        (!s.is_empty()).then(|| PathBuf::from(s))
+        let dir = PathBuf::from(s.trim());
+        if dir.as_os_str().is_empty() {
+            return None;
+        }
+        self.list()
+            .into_iter()
+            .any(|r| r.config_dir == dir)
+            .then_some(dir)
     }
 
     /// Point the default account at `name`'s slot. A plain `claude` (via the
@@ -399,6 +420,60 @@ pub fn link_shared_config(
 mod tests {
     use super::*;
     use crate::paths::Paths;
+
+    /// A serving pointer outlives the account it named: remove that account and
+    /// the file still holds its directory. Answering with it means turns are
+    /// nominally directed at a home nobody owns - on the machine this was found,
+    /// at one with no login in it at all. Whoever is paying must be an account
+    /// that still exists, or nobody.
+    #[test]
+    fn a_serving_pointer_to_a_removed_account_names_nobody() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.create("company").unwrap();
+            s.set_serving("company").unwrap();
+        }
+        assert!(
+            Slots::open_for(&paths, "codex")
+                .unwrap()
+                .serving_dir()
+                .is_some(),
+            "the pointer answers while the account is there"
+        );
+        {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.remove("company").unwrap();
+        }
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().serving_dir(),
+            None,
+            "and stops the moment the account it named is gone"
+        );
+    }
+
+    /// The removal also takes the file with it, so re-adopting the same
+    /// directory later does not silently resume paying for turns.
+    #[test]
+    fn removing_the_serving_account_takes_the_pointer_too() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let dir = {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let rec = s.create("company").unwrap();
+            s.set_serving("company").unwrap();
+            s.remove("company").unwrap();
+            rec.config_dir
+        };
+        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        s.adopt("company", &dir).unwrap();
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().serving_dir(),
+            None,
+            "adopting the same directory back does not make it serve again"
+        );
+    }
 
     #[test]
     fn create_persists_and_reloads() {
