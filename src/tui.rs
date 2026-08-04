@@ -840,6 +840,9 @@ fn fmt_reset(resets_at_secs: i64) -> String {
 /// until an [`Outcome`] leaves it.
 /// Milestone timing, printed only when `SWAPDEX_TIMING` is set.
 ///
+/// Marks are cheap and the variable is off by default, so they can sit on the
+/// path a complaint is about - which is the only place they are any use.
+///
 /// A startup delay someone reports and nobody can reproduce is a delay in THEIR
 /// environment, and no amount of measuring elsewhere will find it. This makes the
 /// program say where its own time went, on the machine that is slow.
@@ -907,6 +910,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     let mut quota_pct: Option<std::collections::HashMap<String, Usage>> =
         (!cached.is_empty()).then(|| cached.into_iter().collect());
     let mut first_frame = true;
+    let mut fetch_marked = false;
+    let mut first_key_marked = false;
     // A reading in flight, if one is.
     let mut quota_rx: Option<std::sync::mpsc::Receiver<Vec<(String, Usage)>>> = None;
     // When the bars were last refreshed, so they can be kept current.
@@ -1514,6 +1519,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             timing.mark("first frame drawn");
             first_frame = false;
         }
+        if quota_rx.is_some() && !fetch_marked {
+            timing.mark("usage read started (off the loop)");
+            fetch_marked = true;
+        }
         // Collect a finished reading without waiting for one.
         if let Some(rx) = quota_rx.as_ref() {
             if let Ok(got) = rx.try_recv() {
@@ -1539,6 +1548,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         // a keypress, so a dashboard left alone would never refresh its numbers.
         if !event::poll(std::time::Duration::from_millis(500))? {
             continue;
+        }
+        if !first_key_marked {
+            timing.mark("first input event received");
+            first_key_marked = true;
         }
         let key = match event::read()? {
             Event::Key(k) if k.kind == KeyEventKind::Press => k,
