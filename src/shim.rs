@@ -80,6 +80,11 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
 /// Codex's own variable and pointer. It never mentions Claude's: one tool's shim
 /// moving the other tool's account is exactly what the per-tool split prevents.
 pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> String {
+    // The provider name is the one identity Codex prints on /status, and with the
+    // proxy rewriting the bearer, the login inside CODEX_HOME is not the account
+    // being charged. Naming the payer there is the difference between a screen
+    // that says who pays and a screen that says nothing.
+    //
     // The provider block deliberately carries no `env_key`: that omission is what
     // makes Codex attach its OWN ChatGPT OAuth bearer and account-id, which is
     // the pair the proxy rewrites. Naming a key instead would have it send an API
@@ -102,10 +107,17 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> S
          # port); silence means \"run without one\", exactly as before.\n\
          if [ \"$sx_plain\" = no ]; then\n\
          \tport=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
+         \t# Who pays. Codex prints the provider name on /status and nothing\n\
+         \t# else about identity, so the account goes in the one field it shows.\n\
+         \tsx_who=$({sx} serve --tool codex --quiet 2>/dev/null)\n\
          fi\n\
          if [ -n \"$port\" ]; then\n\
+         \tsx_name=swapdex\n\
+         \tif [ -n \"$sx_who\" ]; then\n\
+         \t\tsx_name=\"swapdex: $sx_who\"\n\
+         \tfi\n\
          \tset -- -c model_provider=swapdex \\\n\
-         \t\t-c model_providers.swapdex.name=swapdex \\\n\
+         \t\t-c model_providers.swapdex.name=\"$sx_name\" \\\n\
          \t\t-c model_providers.swapdex.base_url=\"http://127.0.0.1:$port/v1\" \\\n\
          \t\t-c model_providers.swapdex.wire_api=responses \"$@\"\n\
          fi\n\

@@ -4155,10 +4155,27 @@ pub fn resume(paths: &Paths, project: Option<&str>) -> Result<i32> {
 /// what a credential-copying switcher gets for free by only ever having one
 /// store - and what swapdex had to separate deliberately, because isolating
 /// accounts is also what isolates their conversations.
-pub fn serve(paths: &Paths, name: Option<&str>, off: bool, sel: Option<ToolSel>) -> Result<i32> {
+pub fn serve(
+    paths: &Paths,
+    name: Option<&str>,
+    off: bool,
+    sel: Option<ToolSel>,
+    quiet: bool,
+) -> Result<i32> {
     let tool = slot_tool(sel);
     let bin = tool_binary(tool);
     let slots = crate::slots::Slots::open_for(paths, tool)?;
+    // The bare answer, for a caller that puts it somewhere else - the codex shim
+    // labels its provider with it. Silence means nobody, which is a real answer
+    // and not a failure, so it still exits 0.
+    if quiet {
+        if let Some(dir) = slots.serving_dir() {
+            if let Some(r) = slots.list().into_iter().find(|r| r.config_dir == dir) {
+                print!("{}", r.name);
+            }
+        }
+        return Ok(0);
+    }
     if off {
         slots.clear_serving()?;
         println!("each session pays for itself again ({bin})");
@@ -4196,6 +4213,13 @@ pub fn serve(paths: &Paths, name: Option<&str>, off: bool, sel: Option<ToolSel>)
     println!("turns -> {name}");
     if live {
         println!("  the session you have open moves from its next turn");
+        // Codex reads its provider label once, at launch. The turn is billed to
+        // the new account immediately, but a window already open keeps printing
+        // the old name on /status - say so rather than let the screen argue with
+        // the truth.
+        if tool == "codex" {
+            println!("  a codex window already open still shows the old name on /status");
+        }
     } else {
         println!(
             "  but nothing is carrying them yet - `swapdex proxy{}` in another terminal",

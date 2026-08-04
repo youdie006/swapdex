@@ -849,6 +849,12 @@ fn fmt_reset(resets_at_secs: i64) -> String {
 struct Timing {
     start: std::time::Instant,
     on: bool,
+    /// Marks are held until the screen is handed back. Printing them as they
+    /// happen wrote them ONTO the dashboard - by the second mark the terminal is
+    /// in the alternate screen, so a line lands beside an account and the marks
+    /// before it are wiped by the screen switch. The instrument was destroying
+    /// the reading it was taking.
+    marks: std::cell::RefCell<Vec<String>>,
 }
 
 impl Timing {
@@ -856,14 +862,21 @@ impl Timing {
         Self {
             start: std::time::Instant::now(),
             on: std::env::var_os("SWAPDEX_TIMING").is_some(),
+            marks: std::cell::RefCell::new(Vec::new()),
         }
     }
     fn mark(&self, what: &str) {
         if self.on {
-            eprintln!(
+            self.marks.borrow_mut().push(format!(
                 "[timing] {:>6} ms  {what}",
                 self.start.elapsed().as_millis()
-            );
+            ));
+        }
+    }
+    /// Print what was collected, once the terminal is a terminal again.
+    fn report(&self) {
+        for line in self.marks.borrow().iter() {
+            eprintln!("{line}");
         }
     }
 }
@@ -2056,6 +2069,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         ratatui::crossterm::event::DisableMouseCapture
     );
     ratatui::restore();
+    timing.report();
     Ok(outcome)
 }
 

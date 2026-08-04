@@ -76,6 +76,9 @@ enum Cmd {
         /// Which tool (default: claude)
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
+        /// Print just the serving account's name (nothing when none)
+        #[arg(long)]
+        quiet: bool,
     },
     /// Renew accounts whose access token has lapsed (they stay usable)
     Refresh {
@@ -323,7 +326,12 @@ fn main() {
             args,
         } => commands::run_account(&paths, name, *tool, *no_launch, args),
         Cmd::Whereis { project } => commands::whereis(&paths, project.as_deref()),
-        Cmd::Serve { name, off, tool } => commands::serve(&paths, name.as_deref(), *off, *tool),
+        Cmd::Serve {
+            name,
+            off,
+            tool,
+            quiet,
+        } => commands::serve(&paths, name.as_deref(), *off, *tool, *quiet),
         Cmd::Refresh { name } => commands::refresh(&paths, name.as_deref()),
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),

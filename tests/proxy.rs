@@ -1556,3 +1556,90 @@ fn serve_moves_who_pays_for_codex_without_moving_its_transcripts() {
         "the transcript store is untouched: {launch}"
     );
 }
+
+/// Codex renders `model_providers.<id>.name` on its /status screen. With the
+/// proxy in the middle, the auth.json inside CODEX_HOME is NOT the account that
+/// pays for the turn - the proxy replaces its bearer on the way out. So the one
+/// place Codex shows an identity shows the wrong one, and the account actually
+/// being charged appears nowhere on the screen. The provider name is the only
+/// field we control that Codex prints, so the paying account goes there.
+mod codex_status_names_the_payer {
+    use std::path::Path;
+    use swapdex::shim::codex_shim_script;
+
+    /// Run the generated shim with stubs standing in for swapdex and codex, and
+    /// return the argument line codex was handed.
+    fn args_codex_receives(serving: &str, port: &str) -> String {
+        let tmp = std::env::temp_dir().join(format!(
+            "sx-shim-{}-{}",
+            std::process::id(),
+            serving.len() * 7 + port.len()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let sx = tmp.join("swapdex");
+        // The stub answers both questions the shim asks: the proxy port, and
+        // who is serving. An empty answer is how "nobody" arrives.
+        std::fs::write(
+            &sx,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do\n\tcase \"$a\" in\n\t--ensure) echo '{port}'; exit 0 ;;\n\tserve) shift; printf '%s' '{serving}'; exit 0 ;;\n\tesac\ndone\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        let codex = tmp.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        let shim = tmp.join("shim");
+        std::fs::write(&shim, codex_shim_script(&tmp.join("ptr"), &codex, &sx)).unwrap();
+        for f in [&sx, &codex, &shim] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = std::process::Command::new("sh")
+            .arg(&shim)
+            .arg("hello")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn the_provider_name_carries_the_account_that_pays() {
+        let got = args_codex_receives("work", "8788");
+        assert!(
+            got.lines()
+                .any(|l| l == "model_providers.swapdex.name=swapdex: work"),
+            "the /status provider names the payer, got:\n{got}"
+        );
+    }
+
+    #[test]
+    fn with_nobody_serving_the_name_claims_no_account() {
+        let got = args_codex_receives("", "8788");
+        assert!(
+            got.lines()
+                .any(|l| l == "model_providers.swapdex.name=swapdex"),
+            "a bare name when no account directs turns, got:\n{got}"
+        );
+        assert!(
+            !got.contains("name=swapdex: "),
+            "and never a dangling label, got:\n{got}"
+        );
+    }
+
+    /// A reading command takes no provider override at all, so it must also not
+    /// pay the cost of asking who serves.
+    #[test]
+    fn a_reading_command_asks_nothing() {
+        let s = codex_shim_script(
+            Path::new("/store/active-codex"),
+            Path::new("/usr/bin/codex"),
+            Path::new("/usr/bin/swapdex"),
+        );
+        let guard = s.find("sx_plain=no").unwrap();
+        let ask = s.find("serve --tool codex").expect("asks who serves");
+        let name = s.find("model_providers.swapdex.name").unwrap();
+        assert!(guard < ask && ask < name, "asked inside the talking branch");
+    }
+}
