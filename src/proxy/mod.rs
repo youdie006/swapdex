@@ -517,8 +517,19 @@ fn next_account_in(
 pub fn has_login(tool: &str, dir: &std::path::Path) -> bool {
     match tool {
         "codex" => codex::slot_auth(dir).is_some(),
-        _ => creds::slot_token(dir).is_some(),
+        _ => login_present(creds::slot_token_detail(dir)),
     }
+}
+
+/// Does this reading mean the account is signed in?
+///
+/// A locked Keychain is not a missing login. On macOS the Claude credential
+/// lives in the Keychain, and a shell that cannot open it - a remote one, a
+/// non-interactive one - fails to read a token that is perfectly well there.
+/// Reading that as "never signed in" refuses a working account and sends the
+/// user to fix something that is not broken.
+pub fn login_present(read: Result<crate::secret::Secret, creds::TokenUnavailable>) -> bool {
+    !matches!(read, Err(creds::TokenUnavailable::NoLogin))
 }
 
 /// Can this slot serve a turn for `tool` right now?

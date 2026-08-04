@@ -257,6 +257,10 @@ impl Slots {
         if !config_dir.is_dir() {
             bail!("config dir does not exist: {}", config_dir.display());
         }
+        // Before this directory is registered, drop a serving pointer that names
+        // nothing. Registering is what would turn such a pointer from inert back
+        // into a live instruction to pay, and nobody asked for that.
+        self.prune_serving();
         let rec = SlotRecord {
             name: name.to_string(),
             id: new_id(name),
@@ -314,6 +318,25 @@ impl Slots {
         }
         std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
             .with_context(|| format!("write {} serving pointer", self.tool))
+    }
+
+    /// Delete a serving pointer that names no registered account.
+    ///
+    /// `serving_dir` already refuses to answer with one, so this is not about
+    /// the answer - it is about the trap. A path outlives the account that owned
+    /// it, and registering that same directory again would make a dead pointer
+    /// live, silently paying for turns nobody assigned to it.
+    pub fn prune_serving(&self) {
+        let Ok(s) = std::fs::read_to_string(self.serving_file()) else {
+            return;
+        };
+        let dir = PathBuf::from(s.trim());
+        if dir.as_os_str().is_empty() {
+            return;
+        }
+        if !self.list().iter().any(|r| r.config_dir == dir) {
+            let _ = std::fs::remove_file(self.serving_file());
+        }
     }
 
     /// Stop directing turns anywhere in particular: the account a session was
@@ -519,6 +542,30 @@ mod tests {
             open().payer().as_deref(),
             Some("main"),
             "and it hands back when that account is gone"
+        );
+    }
+
+    /// A pointer written before the account was removed - or before removal
+    /// learned to take it along - sits on disk naming a directory nobody holds.
+    /// serving_dir() refuses to answer with it, so it is inert; adopt that same
+    /// directory back and it is a live pointer again, silently paying.
+    #[test]
+    fn adopting_a_directory_a_dead_pointer_names_does_not_resume_paying() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let orphan = root.path().join("codex-company");
+        std::fs::create_dir_all(&orphan).unwrap();
+        let s = Slots::open_for(&paths, "codex").unwrap();
+        std::fs::create_dir_all(paths.store_dir()).unwrap();
+        std::fs::write(s.serving_file(), orphan.to_string_lossy().as_bytes()).unwrap();
+        drop(s);
+
+        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        s.adopt("company", &orphan).unwrap();
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().serving_dir(),
+            None,
+            "the directory is registered again, but nobody asked it to pay"
         );
     }
 

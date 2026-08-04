@@ -4191,6 +4191,10 @@ pub fn serve(
     let tool = slot_tool(sel);
     let bin = tool_binary(tool);
     let slots = crate::slots::Slots::open_for(paths, tool)?;
+    // A pointer naming an account that is gone is inert but not harmless: adopt
+    // its directory back and it would start paying again. This is the command
+    // that owns the pointer, so it is the one that clears it.
+    slots.prune_serving();
     // The bare answer, for a caller that puts it somewhere else - the codex shim
     // labels its provider with it. The question there is "who pays", so it takes
     // the default when nobody is directing turns; naming only the explicit case

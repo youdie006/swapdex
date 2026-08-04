@@ -1712,3 +1712,23 @@ mod an_account_that_cannot_pay {
         );
     }
 }
+
+/// On macOS a Claude login lives in the Keychain, not in a file, and a Keychain
+/// that will not open reads exactly like an account that was never signed into.
+/// The difference matters: one is "sign in", the other is "you are signed in,
+/// this shell just cannot see it". A guard that confuses them refuses a working
+/// account and sends the user to fix something that is not broken.
+mod a_locked_keychain_is_not_a_missing_login {
+    use swapdex::proxy::creds::TokenUnavailable;
+    use swapdex::proxy::login_present;
+
+    #[test]
+    fn locked_still_counts_as_signed_in() {
+        assert!(login_present(Err(TokenUnavailable::KeychainLocked)));
+    }
+
+    #[test]
+    fn only_a_missing_one_counts_as_absent() {
+        assert!(!login_present(Err(TokenUnavailable::NoLogin)));
+    }
+}
