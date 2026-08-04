@@ -4,6 +4,33 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.0] - 2026-08-04
+
+The account a screen names is now the account that is charged. Every fix below
+came out of one question asked repeatedly against the real machine and a second
+independent audit: where can what swapdex SAYS and what it DOES come apart?
+
+### Fixed
+- **A screen no longer names an account that paid nothing.** The proxy wrote down who was serving the moment it CHOSE a slot - before finding out whether that slot could pay. When it cannot, the proxy steps aside and forwards the client's own credential, so the mark sat on an account that was charged nothing, and stayed there for as long as that account kept being chosen. It goes down where a credential is actually committed to now, inside the retry loop so a same-turn rotation carries it with the token, and the fallback erases it: nobody is the true answer, and every screen already renders that.
+- **Handing turns to an account with no login is refused.** That state failed quietly rather than loudly - the turn worked, the dashboard and the status line both named the account, and the user's own account paid. Where it is still reachable, a default pointer naming a slot that was created and never signed into, the label says `work (no login)` instead of claiming it pays.
+- **A locked Keychain is not a missing login.** On macOS the Claude credential lives in the Keychain, and a shell that cannot open it - remote, non-interactive - fails to read a token that is perfectly well there. Read as "never signed in", it refused a working account and marked every Claude row "needs login", sending the user to fix something that is not broken.
+- **A removed account can no longer be the one paying.** The serving pointer holds a path, and a path outlives the account that owned it: one machine had turns nominally directed at a home with no login in it at all, months after that account was deleted, while `serve` reported the payer as "(unknown)". The pointer now answers only for a directory some registered account still holds, removal takes it along, and adopting that directory back does not silently resume paying.
+- **A 401 no longer sidelines an account for the life of the proxy.** It was recorded in two places and cleared in none. The remedy the proxy itself prints is "sign it in again" - and after doing exactly that, the account was still skipped, silently, until the user found and killed a background process nobody had told them about. The exclusion expires.
+- **A rate limit is a window, not a verdict.** "Spent" was written and never unset, so a single 429 benched an account for as long as the proxy ran. The response says when the window resets; past that the account is usable and holding it out only strands it. A refusal that names no reset lapses on a fixed window instead.
+- **Codex reads a 429 the way Claude does.** It knew only one meaning: every 429 marked the account spent and moved the turn elsewhere, so "slow down for a second" - which the response says explicitly, and which Claude's path has read correctly since 2026-07-27 - cost the user an account. Both share the classifier and one retry counter now.
+- **`--account` is honoured on a Codex retry.** It pins a run to one account: every turn is that account's and a refusal is its own answer to give. Claude's path checked the pin before rotating and Codex's did not, so a pinned run quietly billed a different account the moment the pinned one was refused.
+- **The dashboard's active mark follows who pays, on Codex too.** Claude's rows asked the running proxy who was serving and fell back to the pointers; Codex's rows asked only the pointer. So pressing Enter, which hands turns to that account, moved who pays and left the mark where it was - the change read as nothing having happened. One resolver answers for both tools.
+- **Codex usage belongs to whoever paid for it.** The numbers come back on the token that SERVED the turns and are written into the transcript of the home Codex RAN in, and under `serve` those are different accounts - so one account's usage appeared under another's name, the same mistake this project had already fixed once on the Claude side. Each home is read separately now and captioned with whoever was paying when the record was written. An account that is only a slot - which is what `run`, `adopt` and `onboard` create - also got no usage bar at all, because only the bare `~/.codex` was ever looked at.
+- **A Codex reading is as old as the record, not the file.** The observation time came from the transcript's mtime, which moves every time Codex writes anything at all, so a conversation that kept running without the API restating its windows made an hours-old snapshot look freshly taken. With no endpoint to ask, that age is the entire caveat.
+- **The sign-in key opens the login for the account's own tool.** Which tool an account belonged to was worked out separately in five places and the versions disagreed; one fell back to Claude whenever the slot registry did not know the name, so pressing it on a Codex account opened Claude's login.
+- **A bare `swapdex` opens the dashboard for a slot-only install.** It counted saved profiles and live logins and never slots - which is what `run`, `adopt` and `onboard` create - so the model swapdex steers people into did not count as having accounts.
+- **`serve` starts no detached daemon under a sandboxed root**, and `SWAPDEX_TIMING` marks no longer print onto the dashboard they are measuring.
+
+### Added
+- **Codex `/status` names the account paying for the turn.** It prints the provider name and nothing else about identity, and with the proxy rewriting the bearer, the login inside `CODEX_HOME` is not who is charged - so the one identity on that screen was the wrong one. It now reads `swapdex: work`. The label is read once at launch, and `serve` says so rather than let a window already open argue with the truth.
+- **`swapdex serve --quiet`** prints just the name of the account that pays the next turn, for a shell prompt or a status line.
+- **Who paid is recorded.** `serve` wrote nothing to the timeline, so the action that changes the payer left no history at all. It does now, and the two questions stay apart: where a conversation lives is still answered by `use`, never by `serve`.
+
 ## [0.34.1] - 2026-08-04
 
 ### Fixed
