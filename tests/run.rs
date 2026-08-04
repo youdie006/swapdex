@@ -930,6 +930,34 @@ fn an_accounts_tool_is_read_the_same_way_everywhere() {
         &path,
     );
     run_in(root.path(), &["run", "onclaude", "--no-launch"], &path);
+    // Both slots are signed in: `serve` refuses an account that has no login,
+    // because the proxy would forward the user's OWN credential and every screen
+    // would still name this one. That guard is not what this test is about.
+    let slot_of = |name: &str| -> std::path::PathBuf {
+        let raw = std::fs::read_to_string(root.path().join(".local/share/swapdex/slots.json"))
+            .expect("slots.json");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let dir = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["config_dir"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        std::path::PathBuf::from(dir)
+    };
+    std::fs::write(
+        slot_of("oncodex").join("auth.json"),
+        br#"{"tokens":{"access_token":"a","account_id":"acc"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        slot_of("onclaude").join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"a","expiresAt":32503680000000}}"#,
+    )
+    .unwrap();
 
     // `serve` is what the dashboard's Enter runs, and it is told the tool the
     // dashboard resolved - so a wrong answer here sends a Codex account down

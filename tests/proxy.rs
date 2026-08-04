@@ -1643,3 +1643,72 @@ mod codex_status_names_the_payer {
         assert!(guard < ask && ask < name, "asked inside the talking branch");
     }
 }
+
+/// The proxy, handed an account with no login, gets out of the way: it forwards
+/// the CLIENT's own credential so the turn still works. That is right for a turn
+/// and wrong for everything around it - the dashboard, `serve`, and the Codex
+/// status line all go on naming an account that is not paying, while the user's
+/// own account quietly is. swapdex exists to make the account you think is
+/// paying be the one paying, so this state must not be reachable, and where it
+/// is reachable anyway it must not be reported as if it were fine.
+mod an_account_that_cannot_pay {
+    use swapdex::commands::{self, ToolSel};
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    #[test]
+    fn cannot_be_handed_the_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.create("work").unwrap();
+        }
+        let code = commands::serve(&paths, Some("work"), false, Some(ToolSel::Codex), false)
+            .expect("serve returns a code rather than failing");
+        assert_eq!(code, 6, "refused");
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().serving_dir(),
+            None,
+            "and nothing was pointed at it"
+        );
+    }
+
+    /// Reachable anyway: a default pointer can name a slot that was created and
+    /// never signed into. The label then has to say so rather than claim it pays.
+    #[test]
+    fn is_labelled_as_one_when_it_is_the_default() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.create("work").unwrap();
+            s.set_default("work").unwrap();
+        }
+        assert_eq!(
+            commands::payer_label(&paths, "codex").as_deref(),
+            Some("work (no login)")
+        );
+    }
+
+    #[test]
+    fn and_plainly_when_the_login_is_there() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let dir = {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let rec = s.create("work").unwrap();
+            s.set_default("work").unwrap();
+            rec.config_dir
+        };
+        std::fs::write(
+            dir.join("auth.json"),
+            br#"{"tokens":{"access_token":"a","account_id":"acc"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            commands::payer_label(&paths, "codex").as_deref(),
+            Some("work")
+        );
+    }
+}

@@ -506,6 +506,21 @@ fn next_account_in(
     })
 }
 
+/// Is there a login in this slot at all - asked WITHOUT touching it?
+///
+/// Separate from `has_usable_login` on purpose: that one renews a lapsed Claude
+/// token as a side effect, which is right when a turn is about to be served and
+/// wrong for anything merely asking a question. A label or a guard that renewed
+/// tokens would rotate a refresh token behind the user's back, which is the
+/// logout this project exists to prevent. A lapsed token still counts as a
+/// login here, because it is renewable.
+pub fn has_login(tool: &str, dir: &std::path::Path) -> bool {
+    match tool {
+        "codex" => codex::slot_auth(dir).is_some(),
+        _ => creds::slot_token(dir).is_some(),
+    }
+}
+
 /// Can this slot serve a turn for `tool` right now?
 fn has_usable_login(tool: &str, dir: &std::path::Path) -> bool {
     // A lapsed Claude token is renewable, so try before ruling the account out:

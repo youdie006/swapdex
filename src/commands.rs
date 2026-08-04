@@ -4155,6 +4155,32 @@ pub fn resume(paths: &Paths, project: Option<&str>) -> Result<i32> {
 /// what a credential-copying switcher gets for free by only ever having one
 /// store - and what swapdex had to separate deliberately, because isolating
 /// accounts is also what isolates their conversations.
+/// What a screen should call the account paying the next turn.
+///
+/// Codex prints this on /status, and it is the only identity it prints. A name
+/// alone would claim an account is paying even when it has no login to pay
+/// with, which is the case the proxy handles by quietly forwarding the client's
+/// own credential instead. So the reason travels with the name.
+pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
+    let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+    let who = slots.payer()?;
+    let rec = slots.get(&who)?;
+    Some(if crate::proxy::has_login(tool, &rec.config_dir) {
+        who
+    } else {
+        format!("{who} (no login)")
+    })
+}
+
+/// `--tool codex` where it is needed, nothing where it is not.
+fn tool_flag(tool: &str) -> &'static str {
+    if tool == "codex" {
+        " --tool codex"
+    } else {
+        ""
+    }
+}
+
 pub fn serve(
     paths: &Paths,
     name: Option<&str>,
@@ -4171,8 +4197,8 @@ pub fn serve(
     // would leave the common one anonymous. Silence means there is no account at
     // all, which is a real answer and not a failure, so it still exits 0.
     if quiet {
-        if let Some(who) = slots.payer() {
-            print!("{who}");
+        if let Some(label) = payer_label(paths, tool) {
+            print!("{label}");
         }
         return Ok(0);
     }
@@ -4198,9 +4224,23 @@ pub fn serve(
         }
         return Ok(0);
     };
-    if slots.get(name).is_none() {
+    let Some(rec) = slots.get(name) else {
         eprintln!("swapdex: no account named '{name}' - `swapdex ui` lists them");
         return Ok(5);
+    };
+    // Handing turns to an account with no login does not fail loudly: the proxy
+    // steps aside and forwards the client's OWN credential, so the turn works
+    // and somebody else pays for it while every screen names this account. Refuse
+    // the state rather than report it after the fact.
+    if !crate::proxy::has_login(tool, &rec.config_dir) {
+        eprintln!(
+            "swapdex: '{name}' has no {bin} login, so it cannot pay for turns -              your own account would, while every screen said '{name}'"
+        );
+        eprintln!(
+            "  sign it in first: `swapdex run {name}{}`",
+            tool_flag(tool)
+        );
+        return Ok(6);
     }
     slots.set_serving(name)?;
     // Start the proxy this needs. Directing turns with nothing to carry them is
