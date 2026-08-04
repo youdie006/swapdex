@@ -13,7 +13,23 @@ pub struct Event {
     pub ts: i64,
     pub tool: String,
     pub account: String,
+    /// What was done: `use` / `restore` move where sessions live, `serve` moves
+    /// who pays for them. The reader used to drop this, so every event answered
+    /// both questions - and once `serve` started writing here, a change of payer
+    /// would have been read as a change of where the conversation lives.
+    pub action: String,
 }
+
+/// Actions that move where new sessions start (and so which account holds a
+/// conversation). An entry written before actions were read carries none, and
+/// those were all switches, so a missing action counts as one.
+fn is_switch(action: &str) -> bool {
+    action != SERVE
+}
+
+/// The action `serve` writes: turns handed to an account without moving the
+/// conversations.
+pub const SERVE: &str = "serve";
 
 pub fn read_timeline(paths: &Paths) -> Vec<Event> {
     let path = paths.store_dir().join("timeline.jsonl");
@@ -28,6 +44,7 @@ pub fn read_timeline(paths: &Paths) -> Vec<Event> {
                         ts,
                         tool: tool.to_string(),
                         account: account.to_string(),
+                        action: v["action"].as_str().unwrap_or_default().to_string(),
                     });
                 }
             }
@@ -41,9 +58,25 @@ pub fn read_timeline(paths: &Paths) -> Vec<Event> {
 pub fn attribute(events: &[Event], tool: &str, started_secs: i64) -> Option<String> {
     events
         .iter()
-        .filter(|e| e.tool == tool && e.ts <= started_secs)
+        .filter(|e| e.tool == tool && is_switch(&e.action) && e.ts <= started_secs)
         .max_by_key(|e| e.ts)
         .map(|e| e.account.clone())
+}
+
+/// The account PAYING for `tool` at `at_secs`: the last `serve` event at or
+/// before it, and otherwise the account whose home the session ran in - with
+/// nobody handed the turns, that account pays for itself.
+///
+/// A Codex transcript's rate limits come from the token that served those turns,
+/// so this is the account they describe. Reading them off the home the file sits
+/// in reports one account's usage under another's name.
+pub fn payer_at(events: &[Event], tool: &str, at_secs: i64) -> Option<String> {
+    events
+        .iter()
+        .filter(|e| e.tool == tool && e.action == SERVE && e.ts <= at_secs)
+        .max_by_key(|e| e.ts)
+        .map(|e| e.account.clone())
+        .or_else(|| attribute(events, tool, at_secs))
 }
 
 /// Session counts per account, best-effort from `sessionwiki list --json`. None
@@ -246,7 +279,36 @@ mod tests {
             ts,
             tool: tool.into(),
             account: acct.into(),
+            action: "use".into(),
         }
+    }
+
+    /// A `serve` event: who pays, not where the conversation lives.
+    fn served(ts: i64, tool: &str, acct: &str) -> Event {
+        Event {
+            action: SERVE.into(),
+            ..ev(ts, tool, acct)
+        }
+    }
+
+    #[test]
+    fn a_serve_event_never_moves_where_a_session_is_attributed() {
+        let events = vec![ev(100, "codex", "home"), served(200, "codex", "payer")];
+        assert_eq!(
+            attribute(&events, "codex", 300).as_deref(),
+            Some("home"),
+            "the conversation stayed where `use` put it"
+        );
+        assert_eq!(
+            payer_at(&events, "codex", 300).as_deref(),
+            Some("payer"),
+            "and the turns were paid for elsewhere"
+        );
+        assert_eq!(
+            payer_at(&events, "codex", 150).as_deref(),
+            Some("home"),
+            "before anyone was handed the turns, the home account paid"
+        );
     }
 
     #[test]

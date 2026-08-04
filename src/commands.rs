@@ -1633,6 +1633,12 @@ pub const DEFAULT_PROXY_PORT: u16 = 8787;
 /// non-zero and prints nothing when a proxy cannot be had, so the shim simply
 /// runs Claude directly.
 fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
+    // A hermetic root is a sandbox, and the proxy is deliberately DETACHED so it
+    // outlives the shell that asked for it. Under a temporary store that is wrong
+    // twice: the daemon outlives the store it was pointed at, and it keeps the
+    // port - so a run leaves a listener on 127.0.0.1 answering for a directory
+    // that no longer exists. One was found still bound hours after its store had
+    // been deleted.
     // Two proxies cannot share a port. Codex takes the next one, so the shim for
     // either tool can start its own without asking the user to pick.
     let mut port = if tool == "codex" && port == DEFAULT_PROXY_PORT {
@@ -2378,16 +2384,35 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             ));
         }
         // Codex reports its own windows into its session transcripts, so its
-        // usage costs a local file read - no network, unlike Claude's. The
-        // transcript does not name the account, so it belongs to whichever
-        // Codex account is active; the others get no bar rather than a guess.
-        if let Ok(store) = Store::open(paths) {
-            let active = active_by_tool(&store, paths)
-                .into_iter()
-                .find(|(tool, _)| *tool == "codex")
-                .map(|(_, name)| name);
-            if let Some(name) = active {
-                if let Some(l) = crate::codex_limits::latest(paths, now_secs(), 7 * 86_400) {
+        // usage costs a local file read - no network, unlike Claude's.
+        //
+        // The transcript does not name an account, and two different ones are
+        // involved: it sits in the home Codex RAN in, while the numbers came back
+        // on the token of the account that SERVED those turns. Under `serve` those
+        // differ, so reading a home and captioning it with that home's owner put
+        // one account's usage under another's name - the same mistake this project
+        // has already had to fix once on the Claude side. Each home is read
+        // separately and captioned with whoever was paying when it was written.
+        let timeline = crate::session_link::read_timeline(paths);
+        let codex_homes: Vec<(String, std::path::PathBuf)> =
+            crate::slots::Slots::open_for(paths, "codex")
+                .map(|s| {
+                    s.list()
+                        .into_iter()
+                        .map(|r| (r.name, r.config_dir))
+                        .collect()
+                })
+                .unwrap_or_default();
+        for (name, dir) in &codex_homes {
+            let Some(l) = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400) else {
+                continue;
+            };
+            let payer = l
+                .observed_at
+                .and_then(|at| crate::session_link::payer_at(&timeline, "codex", at))
+                .unwrap_or_else(|| name.clone());
+            {
+                {
                     let mut u = crate::tui::Usage {
                         observed_at: l.observed_at,
                         ..Default::default()
@@ -2404,7 +2429,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             u.seven_d_reset = w.resets_at;
                         }
                     }
-                    claude.push((name, u));
+                    claude.push((payer, u));
                 }
             }
         }
@@ -4284,10 +4309,22 @@ pub fn serve(
         return Ok(6);
     }
     slots.set_serving(name)?;
+    // Record WHO PAYS from here on. Only `use` and `restore` were written, so the
+    // action that changes the payer left no trace - and Codex usage, which comes
+    // out of a transcript written in whichever home was running, has no other way
+    // to know whose token produced those numbers.
+    if let Ok(store) = Store::open(paths) {
+        let _ = store.append_timeline(tool, name, crate::session_link::SERVE);
+    }
     // Start the proxy this needs. Directing turns with nothing to carry them is
     // a setting that quietly does nothing, and telling someone to run a second
     // command to make the first one take effect is the same as not doing it.
-    if crate::proxy::running_proxy_for(paths, tool).is_none() {
+    // Starting one is a convenience, and the proxy is DETACHED so it outlives
+    // the shell that asked. Under a sandboxed root that daemon outlives the
+    // temporary store itself and keeps the port, answering for a directory that
+    // is deleted moments later - one was found still bound hours after. An
+    // explicit `swapdex proxy` there is still honoured; this implicit one is not.
+    if !paths.sandboxed() && crate::proxy::running_proxy_for(paths, tool).is_none() {
         let _ = proxy_ensure(paths, DEFAULT_PROXY_PORT, tool);
     }
     let live = crate::proxy::running_proxy_for(paths, tool).is_some();

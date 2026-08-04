@@ -36,7 +36,10 @@ struct Shared {
     rotated: Mutex<Option<String>>,
     /// Accounts the upstream refused outright (401): not a quota problem, so kept
     /// apart from quota state, but equally out of rotation for this run.
-    unusable: Mutex<std::collections::HashSet<String>>,
+    /// Accounts a refusal put out of the rotation, and when. NOT permanent: the
+    /// remedy the proxy prints is "sign it in again", and a set with no removal
+    /// went on skipping the account after the user had done exactly that.
+    unusable: Mutex<pick::Sidelined>,
     /// Measured utilization per account (5h, 7d percentages) from the zero-spend
     /// usage endpoint, with when it was read. Only used when a threshold is set.
     measured: Mutex<Measured>,
@@ -167,7 +170,11 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             .unwrap()
             .get(&chosen.name)
             .is_some_and(|q| q.rejected)
-            || sh.unusable.lock().unwrap().contains(&chosen.name)
+            || sh
+                .unusable
+                .lock()
+                .unwrap()
+                .contains(&chosen.name, std::time::Instant::now())
             // A lapsed token cannot serve and cannot be refreshed from here, so
             // treat it the same as spent when choosing where to start.
             || creds::slot_token_expired(&chosen.config_dir, now_ms());
@@ -282,6 +289,7 @@ fn usable_under_threshold(
     let measured = sh.measured.lock().unwrap();
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
+    let now = std::time::Instant::now();
     // Most room first, so the session lands somewhere it can stay - picking the
     // first eligible account tends to land on one that is nearly full too.
     pick::by_headroom(
@@ -297,7 +305,7 @@ fn usable_under_threshold(
     slots.into_iter().find(|r| {
         r.name != current
             && !cfg.is_disabled(&r.name)
-            && !unusable.contains(&r.name)
+            && !unusable.contains(&r.name, now)
             && !spent.get(&r.name).is_some_and(|q| q.rejected)
             && !measured
                 .1
@@ -415,7 +423,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         quota: Mutex::new(HashMap::new()),
         chooser: Mutex::new(pick::Chooser::default()),
         rotated: Mutex::new(None),
-        unusable: Mutex::new(std::collections::HashSet::new()),
+        unusable: Mutex::new(pick::Sidelined::default()),
         measured: Mutex::new((None, HashMap::new())),
         last_preempt: Mutex::new(None),
     });
@@ -489,9 +497,10 @@ fn next_account_in(
     }
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
+    let now = std::time::Instant::now();
     slots.into_iter().find(|r| {
         !tried.contains(&r.name)
-            && !unusable.contains(&r.name)
+            && !unusable.contains(&r.name, now)
             && !spent.get(&r.name).is_some_and(|q| q.rejected)
             // "Disabled" means do not pick this one FOR me; switching to it by
             // hand still works, which is why the check lives here and not in
@@ -661,7 +670,11 @@ fn forward_turn(
     }
 
     let mut slot = pick_slot(paths, opts, sh)?;
-    note_serving_for(paths, &opts.tool, &slot.name);
+    // The mark is NOT written here. Choosing a slot is not the same as paying
+    // with it: when the chosen one has no usable login the proxy forwards the
+    // CLIENT's own credential, and a mark written at the moment of choosing then
+    // named an account that paid for nothing - for as long as it kept being
+    // chosen. It is written where a credential is actually committed to.
     let mut tried: Vec<String> = Vec::new();
     let up = loop {
         // An already-lapsed token earns a 401 and cannot be refreshed from here,
@@ -702,6 +715,7 @@ fn forward_turn(
                     slot.name, slot.name
                 );
                 std::io::stdout().flush().ok();
+                note_client_serving(paths, &opts.tool);
                 let mut headers = client_headers.clone();
                 if let Some(a) = client_auth.clone() {
                     headers.push(("authorization".into(), a));
@@ -710,6 +724,7 @@ fn forward_turn(
             };
             let mut headers = client_headers.clone();
             codex::apply_auth(&mut headers, &auth);
+            note_serving_for(paths, &opts.tool, &slot.name);
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
             println!("  {} {} -> {} [{}]", method, path, up.status, slot.name);
             std::io::stdout().flush().ok();
@@ -719,7 +734,10 @@ fn forward_turn(
             if (up.status == 429 || up.status == 401) && opts.auto {
                 tried.push(slot.name.clone());
                 if up.status == 401 {
-                    sh.unusable.lock().unwrap().insert(slot.name.clone());
+                    sh.unusable
+                        .lock()
+                        .unwrap()
+                        .mark(&slot.name, std::time::Instant::now());
                 } else {
                     sh.quota
                         .lock()
@@ -751,6 +769,7 @@ fn forward_turn(
                     why.remedy(&slot.name)
                 );
                 std::io::stdout().flush().ok();
+                note_client_serving(paths, &opts.tool);
                 let mut headers = client_headers.clone();
                 if let Some(auth) = client_auth.clone() {
                     headers.push(("authorization".into(), auth));
@@ -771,6 +790,8 @@ fn forward_turn(
                 body = aligned;
             }
         }
+
+        note_serving_for(paths, &opts.tool, &slot.name);
 
         // A 429 wears two meanings. A THROTTLE ("slow down", x-should-retry) is
         // fixed by waiting and retrying this same account.
@@ -819,7 +840,10 @@ fn forward_turn(
                 "{}: login no longer accepted - run `swapdex run {}` once to sign it in again",
                 slot.name, slot.name
             );
-            sh.unusable.lock().unwrap().insert(slot.name.clone());
+            sh.unusable
+                .lock()
+                .unwrap()
+                .mark(&slot.name, std::time::Instant::now());
         }
         if up.status != 429 && up.status != 401 {
             break up;
@@ -874,8 +898,12 @@ fn forward_turn(
                 let names: Vec<String> = crate::slots::Slots::open(paths)
                     .map(|s| s.list().into_iter().map(|r| r.name).collect())
                     .unwrap_or_default();
-                let unusable = sh.unusable.lock().unwrap().clone();
-                if !unusable.is_empty() && unusable.len() >= names.len().max(1) {
+                let held_out = sh
+                    .unusable
+                    .lock()
+                    .unwrap()
+                    .active(std::time::Instant::now());
+                if held_out > 0 && held_out >= names.len().max(1) {
                     let first = names.first().cloned().unwrap_or_else(|| "<name>".into());
                     return Err(anyhow!(
                         "every account's login has expired. Run `swapdex run {first}` once \
@@ -936,6 +964,13 @@ pub fn serving_account_for(paths: &Paths, tool: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// The client's own credential paid for this turn, not any account swapdex
+/// holds. Erase the mark rather than leave the last name standing: "nobody"
+/// is the true answer and every screen already renders it as no payer.
+fn note_client_serving(paths: &Paths, tool: &str) {
+    let _ = std::fs::remove_file(serving_file_for(paths, tool));
 }
 
 /// Record who is serving, but only on a change - this runs per request.

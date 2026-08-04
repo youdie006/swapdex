@@ -1805,3 +1805,228 @@ mod accounts_worth_opening_the_dashboard_for {
         assert!(has_any_account(&paths));
     }
 }
+
+/// `serve` is the action that changes who PAYS, and it left no record at all -
+/// only `use` and `restore` were written to the timeline. So there was no way to
+/// answer "who was paying when this ran", which is what Codex usage attribution
+/// needs: the numbers in a Codex transcript come from the token that served
+/// those turns, not from the account whose home the file sits in.
+///
+/// Adding the event is only half of it. The timeline reader dropped the `action`
+/// field entirely, so a serve event would have been read as a switch and started
+/// answering "which account holds this conversation" - a different question with
+/// a different answer.
+mod who_was_paying_is_its_own_history {
+    use swapdex::commands::{self, ToolSel};
+    use swapdex::paths::Paths;
+    use swapdex::session_link::{attribute, payer_at, read_timeline};
+    use swapdex::slots::Slots;
+    use swapdex::store::Store;
+
+    /// Far enough ahead that a real clock reading is behind it. `serve` stamps
+    /// its event with the wall clock, so a synthetic query time in the past would
+    /// filter out the very event under test.
+    const LATER: i64 = 4_000_000_000;
+
+    fn store_with_two_codex_accounts(root: &std::path::Path) -> Paths {
+        let paths = Paths::rooted(root);
+        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        for name in ["home", "payer"] {
+            let rec = s.create(name).unwrap();
+            std::fs::write(
+                rec.config_dir.join("auth.json"),
+                br#"{"tokens":{"access_token":"a","account_id":"acc"}}"#,
+            )
+            .unwrap();
+        }
+        paths
+    }
+
+    #[test]
+    fn serving_records_the_payer_without_moving_the_session_attribution() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = store_with_two_codex_accounts(root.path());
+        let store = Store::open(&paths).unwrap();
+        store
+            .append_timeline_at("codex", "home", "use", 100)
+            .unwrap();
+
+        commands::serve(&paths, Some("payer"), false, Some(ToolSel::Codex), false).unwrap();
+
+        let events = read_timeline(&paths);
+        assert_eq!(
+            attribute(&events, "codex", LATER).as_deref(),
+            Some("home"),
+            "the conversation still lives where `use` put it"
+        );
+        assert_eq!(
+            payer_at(&events, "codex", LATER).as_deref(),
+            Some("payer"),
+            "and the turns are paid for by the account handed them"
+        );
+    }
+
+    /// With nobody ever handed the turns, the account whose home the session runs
+    /// in is the one paying - which is exactly what no proxy means.
+    #[test]
+    fn with_nobody_served_the_home_account_pays() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = store_with_two_codex_accounts(root.path());
+        let store = Store::open(&paths).unwrap();
+        store
+            .append_timeline_at("codex", "home", "use", 100)
+            .unwrap();
+        let events = read_timeline(&paths);
+        assert_eq!(payer_at(&events, "codex", LATER).as_deref(), Some("home"));
+    }
+}
+
+/// A hermetic store means a hermetic run. `serve` starts the proxy its setting
+/// needs, and that proxy is deliberately detached - it has to outlive the shell
+/// that asked for it. Under SWAPDEX_ROOT that is wrong twice over: the daemon
+/// outlives the temporary store it was pointed at, and it keeps the port, so a
+/// test run leaves a listener bound to 127.0.0.1 answering for a directory that
+/// no longer exists. One was found still running hours after its store was gone.
+mod a_sandboxed_run_starts_no_daemon {
+    use swapdex::commands::{self, ToolSel};
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    #[test]
+    fn serve_under_a_test_root_leaves_nothing_running() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let rec = Slots::open_for(&paths, "codex")
+            .unwrap()
+            .create("work")
+            .unwrap();
+        std::fs::write(
+            rec.config_dir.join("auth.json"),
+            br#"{"tokens":{"access_token":"a","account_id":"acc"}}"#,
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        commands::serve(&paths, Some("work"), false, Some(ToolSel::Codex), false).unwrap();
+        assert!(
+            swapdex::proxy::running_proxy_for(&paths, "codex").is_none(),
+            "no daemon was left behind"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "and no time was spent waiting for one to announce itself"
+        );
+    }
+}
+
+/// The proxy writes down which account is serving, and every screen reads it -
+/// the dashboard's active mark, and the name Codex prints on /status. It wrote
+/// that mark as soon as it CHOSE a slot, before finding out whether that slot
+/// could pay. When it cannot, the proxy forwards the client's own credential
+/// instead, and the mark stays on an account that paid for nothing - not for one
+/// turn, but for as long as that account is chosen.
+#[test]
+fn the_serving_mark_names_who_actually_paid() {
+    let root = tempfile::tempdir().unwrap();
+    // Registered, pointed at, and never signed into.
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots").join("cccc3333");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "name": "nologin", "id": "cccc3333", "config_dir": slot, "adopted": false
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("active-claude"),
+        slot.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    post_through(port, "{\"t\":1}");
+    let mark = std::fs::read_to_string(store.join("proxy-serving")).unwrap_or_default();
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_ne!(
+        mark.trim(),
+        "nologin",
+        "the client's own login paid for that turn, so nothing may claim 'nologin' did"
+    );
+}
+
+/// Codex records its rate limits into the session transcript of whichever HOME
+/// it is running in - but under the proxy those numbers came back on the token
+/// of the account SERVING the turns. So a conversation living in A while B pays
+/// writes B's usage into A's transcript, and the dashboard showed it on A.
+///
+/// It also read one fixed directory and required a matching legacy profile, so
+/// an account that is only a slot - which is what run, adopt and onboard create -
+/// got no usage bar at all.
+mod codex_usage_belongs_to_whoever_paid {
+    use swapdex::codex_limits;
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    fn transcript(dir: &std::path::Path, used_pct: f64) {
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout.jsonl"),
+            format!(
+                r#"{{"payload":{{"rate_limits":{{"primary":{{"used_percent":{used_pct},"window_minutes":300,"resets_at":4000000000}}}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_slot_only_account_still_gets_its_numbers() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let rec = Slots::open_for(&paths, "codex")
+            .unwrap()
+            .create("work")
+            .unwrap();
+        transcript(&rec.config_dir, 42.0);
+
+        let got = codex_limits::for_slot(&rec.config_dir, 0, u64::MAX)
+            .expect("the slot's own sessions dir is read");
+        assert_eq!(got.short.unwrap().used_pct, 42.0);
+    }
+
+    /// And the fixed home is no longer the only place looked at: two accounts,
+    /// two homes, two different readings.
+    #[test]
+    fn each_home_reports_its_own() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        let a = s.create("a").unwrap();
+        let b = s.create("b").unwrap();
+        transcript(&a.config_dir, 10.0);
+        transcript(&b.config_dir, 90.0);
+        assert_eq!(
+            codex_limits::for_slot(&a.config_dir, 0, u64::MAX)
+                .unwrap()
+                .short
+                .unwrap()
+                .used_pct,
+            10.0
+        );
+        assert_eq!(
+            codex_limits::for_slot(&b.config_dir, 0, u64::MAX)
+                .unwrap()
+                .short
+                .unwrap()
+                .used_pct,
+            90.0
+        );
+    }
+}

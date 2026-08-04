@@ -109,8 +109,22 @@ fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::V
 /// window that no longer exists, and reporting 6% of a window that reset is worse
 /// than reporting nothing.
 pub fn latest(paths: &Paths, now: u64, max_age_secs: u64) -> Option<Limits> {
+    from_sessions_dir(&paths.codex_sessions(), now, max_age_secs)
+}
+
+/// The same reading, for ONE account's home.
+///
+/// Only the bare `~/.codex` was ever read, so an account that is a slot - which
+/// is what `run`, `adopt` and `onboard` create - had its transcripts sitting in
+/// a directory nothing looked at, and got no usage at all while another home's
+/// numbers were displayed beside it.
+pub fn for_slot(config_dir: &Path, now: u64, max_age_secs: u64) -> Option<Limits> {
+    from_sessions_dir(&config_dir.join("sessions"), now, max_age_secs)
+}
+
+fn from_sessions_dir(dir: &Path, now: u64, max_age_secs: u64) -> Option<Limits> {
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_jsonl(&paths.codex_sessions(), now, max_age_secs, &mut files);
+    collect_jsonl(dir, now, max_age_secs, &mut files);
     // Newest first, and stop at the first transcript that actually has limits.
     files.sort_by_key(|p| std::cmp::Reverse(mtime_secs(p)));
     let (path, raw) = files

@@ -515,6 +515,7 @@ mod tests {
             ts,
             tool: "claude-code".into(),
             account: account.into(),
+            action: "use".into(),
         };
         let events = vec![mk(0, "work"), mk(t10, "personal")];
         let m = |ts: &str, tok: u64| {

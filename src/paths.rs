@@ -11,6 +11,11 @@ pub struct Paths {
     codex_dir: PathBuf,  // ~/.codex or $CODEX_HOME
     gemini_dir: PathBuf, // ~/.gemini
     data: PathBuf,       // ~/.local/share/swapdex
+    /// These paths are a sandbox, not the machine's real ones. Anything with an
+    /// effect that OUTLIVES the process has to ask: a detached proxy started for
+    /// a temporary store keeps its port and answers for a directory that is
+    /// deleted moments later.
+    sandboxed: bool,
 }
 
 impl Paths {
@@ -24,7 +29,14 @@ impl Paths {
             codex_dir: root.join(".codex"),
             gemini_dir: root.join(".gemini"),
             data: root.join(".local/share/swapdex"),
+            sandboxed: true,
         }
+    }
+
+    /// Are these a redirected (test or SWAPDEX_ROOT) tree rather than the real
+    /// one? Checked before starting anything that outlives this process.
+    pub fn sandboxed(&self) -> bool {
+        self.sandboxed
     }
 
     /// The real resolver: honors CLAUDE_CONFIG_DIR / CODEX_HOME, else home dir.
@@ -51,6 +63,7 @@ impl Paths {
             codex_dir,
             gemini_dir,
             data,
+            sandboxed: false,
         })
     }
 

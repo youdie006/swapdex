@@ -257,3 +257,81 @@ mod tests {
         );
     }
 }
+
+/// Accounts held out of the rotation after a refusal, and for how long.
+///
+/// A 401 used to sideline an account for the life of the proxy: two inserts, no
+/// removal anywhere. The remedy the proxy itself prints is "sign it in again" -
+/// and after doing exactly that the account was still skipped, silently, until
+/// the user found and killed a background process they were never told about.
+///
+/// So the exclusion expires. A dead login costs one failed request per window to
+/// re-confirm, which is the price of not stranding an account that has been
+/// fixed. An explicit `clear` re-admits one immediately, for when the user says
+/// which account they want.
+#[derive(Default)]
+pub struct Sidelined {
+    marks: std::collections::HashMap<String, std::time::Instant>,
+}
+
+/// How long a refusal keeps an account out. Long enough that a genuinely dead
+/// login is not retried on every turn, short enough that a sign-in taken in the
+/// meantime is noticed without anyone restarting anything.
+pub const SIDELINE_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl Sidelined {
+    pub fn mark(&mut self, name: &str, now: std::time::Instant) {
+        self.marks.insert(name.to_string(), now);
+    }
+
+    pub fn contains(&self, name: &str, now: std::time::Instant) -> bool {
+        self.marks
+            .get(name)
+            .is_some_and(|at| now.duration_since(*at) < SIDELINE_FOR)
+    }
+
+    /// Put one back in the rotation now - the user named it.
+    pub fn clear(&mut self, name: &str) {
+        self.marks.remove(name);
+    }
+
+    /// How many are currently held out, for "everything is sidelined" checks.
+    pub fn active(&self, now: std::time::Instant) -> usize {
+        self.marks
+            .values()
+            .filter(|at| now.duration_since(**at) < SIDELINE_FOR)
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod sidelined_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_refusal_holds_an_account_out_then_lets_it_back() {
+        let mut s = Sidelined::default();
+        let t0 = Instant::now();
+        s.mark("rnd", t0);
+        assert!(s.contains("rnd", t0), "held out right after the refusal");
+        assert!(
+            s.contains("rnd", t0 + SIDELINE_FOR - std::time::Duration::from_secs(1)),
+            "still held out inside the window"
+        );
+        assert!(
+            !s.contains("rnd", t0 + SIDELINE_FOR),
+            "and offered again once it lapses - a login fixed meanwhile must be usable"
+        );
+        assert_eq!(s.active(t0 + SIDELINE_FOR), 0);
+    }
+
+    #[test]
+    fn naming_an_account_puts_it_back_at_once() {
+        let mut s = Sidelined::default();
+        let t0 = Instant::now();
+        s.mark("rnd", t0);
+        s.clear("rnd");
+        assert!(!s.contains("rnd", t0));
+    }
+}
