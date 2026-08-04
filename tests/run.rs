@@ -900,7 +900,10 @@ fn removing_an_account_works_for_either_tool() {
     );
     let listed = run_in(root.path(), &["slots"], &path);
     assert!(!listed.contains("oncodex"), "it is gone: {listed}");
-    assert!(listed.contains("onclaude"), "the other is untouched: {listed}");
+    assert!(
+        listed.contains("onclaude"),
+        "the other is untouched: {listed}"
+    );
 
     // And Claude's still work.
     run_in(root.path(), &["rm", "onclaude", "--yes"], &path);
