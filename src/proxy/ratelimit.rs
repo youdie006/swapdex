@@ -16,7 +16,30 @@ pub struct Quota {
     pub reset_secs: Option<i64>,
 }
 
+/// How long a refusal holds an account out when the response named no reset.
+/// A rate limit is a window, not a verdict, so something has to end it.
+pub const SPENT_FOR_SECS: i64 = 900;
+
 impl Quota {
+    /// Is this account still out of the rotation at `now` (epoch seconds)?
+    ///
+    /// `rejected` used to mean "forever": it is set in two places and cleared in
+    /// none, so one 429 benched an account for the life of the proxy. The
+    /// response says when the window resets; past that, the account is usable
+    /// again and holding it out only strands it.
+    pub fn still_spent(&self, now: i64) -> bool {
+        self.rejected && self.reset_secs.is_none_or(|r| now < r)
+    }
+
+    /// The same for a refusal that named no reset: it lapses on a fixed window
+    /// measured from when it was recorded.
+    pub fn still_spent_since(&self, marked_at: i64, now: i64) -> bool {
+        match self.reset_secs {
+            Some(_) => self.still_spent(now),
+            None => self.rejected && now < marked_at + SPENT_FOR_SECS,
+        }
+    }
+
     /// Which windows reported `rejected` (e.g. `5h-status`, `7d-status`). Named in
     /// the log so "SPENT" on a successful response is explainable rather than
     /// mysterious.
@@ -197,5 +220,49 @@ mod tests {
         let q = from_headers(&h(&[("Anthropic-RateLimit-Unified-Status", "REJECTED")]))
             .expect("quota seen");
         assert!(q.rejected);
+    }
+}
+
+#[cfg(test)]
+mod spent_expiry_tests {
+    use super::*;
+
+    /// A 429 benched an account for the life of the proxy: `rejected` is set in
+    /// two places and cleared in none. But a rate limit is a WINDOW - the account
+    /// is spent until it resets, and the response says when. Holding it out past
+    /// that leaves a usable account sitting idle until someone restarts a
+    /// background process they were never told about.
+    #[test]
+    fn a_spent_account_comes_back_when_its_window_resets() {
+        let q = Quota {
+            rejected: true,
+            statuses: Vec::new(),
+            reset_secs: Some(1_000),
+        };
+        assert!(q.still_spent(999), "before the reset it is out");
+        assert!(!q.still_spent(1_000), "at the reset it is back");
+        assert!(!q.still_spent(5_000), "and stays back");
+    }
+
+    /// With no reset reported there is nothing to wait for, so it lapses on a
+    /// fixed window instead - long enough not to walk into the same wall, short
+    /// enough that the account is not stranded.
+    #[test]
+    fn with_no_reset_reported_it_lapses_on_a_window() {
+        let q = Quota {
+            rejected: true,
+            statuses: Vec::new(),
+            reset_secs: None,
+        };
+        assert!(q.still_spent_since(100, 100), "just now");
+        assert!(q.still_spent_since(100, 100 + SPENT_FOR_SECS - 1));
+        assert!(!q.still_spent_since(100, 100 + SPENT_FOR_SECS));
+    }
+
+    #[test]
+    fn an_account_that_was_never_refused_is_never_held_out() {
+        let q = Quota::default();
+        assert!(!q.still_spent(0));
+        assert!(!q.still_spent_since(0, 0));
     }
 }

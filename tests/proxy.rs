@@ -2030,3 +2030,167 @@ mod codex_usage_belongs_to_whoever_paid {
         );
     }
 }
+
+/// A Codex upstream that refuses the first turn with 429 and the header that
+/// says the refusal is temporary, then serves.
+fn fake_codex_throttle_once(sink: Arc<Mutex<Vec<(String, String, String)>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let head = |name: &'static str| {
+                rq.headers()
+                    .iter()
+                    .find(|h| h.field.equiv(name))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default()
+            };
+            let auth = head("authorization");
+            let acct = head("chatgpt-account-id");
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            sink.lock().unwrap().push((auth, acct, String::new()));
+            let throttled = first;
+            first = false;
+            let resp = if throttled {
+                tiny_http::Response::from_string("{\"error\":\"slow down\"}")
+                    .with_status_code(429)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"x-should-retry"[..], &b"true"[..])
+                            .unwrap(),
+                    )
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"retry-after"[..], &b"1"[..]).unwrap(),
+                    )
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}").with_status_code(200)
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+fn post_codex(port: u16) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let _ = agent
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("authorization", "Bearer CLIENT-OWN")
+        .header("chatgpt-account-id", "acct-client")
+        .send("{\"t\":1}");
+}
+
+/// `--account` pins the proxy to one account: every turn is that account's, and
+/// a refusal is that account's answer to give. Claude's retry path checks the
+/// pin before rotating; Codex's did not, so a pinned run quietly billed a
+/// different account the moment the pinned one was refused.
+#[test]
+fn a_pinned_codex_account_is_never_rotated_away_from() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "dddd2222",
+        "AT-HOME",
+        "acct-home",
+        false,
+    );
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_throttle_once(sink.clone());
+    let (mut child, port) =
+        start_codex_proxy(root.path(), &upstream, &["--auto", "--account", "work"]);
+
+    post_codex(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .all(|(auth, acct, _)| auth.contains("AT-WORK") && acct == "acct-work"),
+        "the pinned account served every attempt, saw: {seen:?}"
+    );
+}
+
+/// A 429 wears two meanings, and Codex's path only knew one. Every 429 marked
+/// the account spent and moved the turn elsewhere - so "slow down for a second",
+/// which the response says explicitly, cost the user their account for the life
+/// of the proxy.
+#[test]
+fn a_throttled_codex_turn_stays_on_the_same_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "home",
+        "dddd2222",
+        "AT-HOME",
+        "acct-home",
+        false,
+    );
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_throttle_once(sink.clone());
+    let (mut child, port) = start_codex_proxy(root.path(), &upstream, &["--auto"]);
+
+    post_codex(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert!(seen.len() >= 2, "the throttled turn was retried: {seen:?}");
+    assert!(
+        seen.iter().all(|(auth, _, _)| auth.contains("AT-WORK")),
+        "and on the same account, not by giving it away: {seen:?}"
+    );
+}
+
+/// `observed_at` is what the dashboard uses to say how old a Codex reading is -
+/// there is no endpoint to ask, so the age IS the caveat. It was taken from the
+/// transcript's mtime, which moves every time Codex writes anything at all. A
+/// conversation that keeps running without the API restating the windows made an
+/// hours-old snapshot look like it had just been taken.
+#[test]
+fn a_codex_reading_is_as_old_as_the_record_not_the_file() {
+    let root = tempfile::tempdir().unwrap();
+    let sessions = root.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // One record carrying limits, stamped long ago; then later chatter with no
+    // limits at all, which is what keeps moving the file's mtime.
+    std::fs::write(
+        sessions.join("rollout.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-03-10T11:53:41.974Z","type":"event_msg","payload":{"info":{"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":4000000000}}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-03-10T23:00:00.000Z","type":"event_msg","payload":{"type":"agent_message"}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let got = swapdex::codex_limits::for_slot(root.path(), 0, u64::MAX).expect("limits found");
+    let stamped = swapdex::session_link::rfc3339_to_secs("2026-03-10T11:53:41.974Z").unwrap();
+    assert_eq!(
+        got.observed_at,
+        Some(stamped),
+        "the reading is as old as the moment the API stated it"
+    );
+}

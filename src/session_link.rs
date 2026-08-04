@@ -232,7 +232,7 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
     v.as_array().cloned()
 }
 
-pub(crate) fn rfc3339_to_secs(s: &str) -> Option<i64> {
+pub fn rfc3339_to_secs(s: &str) -> Option<i64> {
     // Minimal parse: "YYYY-MM-DDTHH:MM:SS...": compute epoch seconds. Avoid a
     // chrono dep; only the ordering vs timeline ts matters, so a coarse but
     // monotonic value is fine. Fall back on any deviation.

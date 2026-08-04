@@ -30,7 +30,10 @@ struct Shared {
     agent: ureq::Agent,
     base: String,
     /// Last seen quota state per account name.
-    quota: Mutex<HashMap<String, ratelimit::Quota>>,
+    /// What each account's last response said about its windows, and when that
+    /// was recorded. The timestamp is what lets a refusal that named no reset
+    /// lapse: without it, `rejected` meant "for the life of this proxy".
+    quota: Mutex<HashMap<String, (ratelimit::Quota, i64)>>,
     chooser: Mutex<pick::Chooser>,
     /// The proxy's own current account after a rotation, if any.
     rotated: Mutex<Option<String>>,
@@ -169,7 +172,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             .lock()
             .unwrap()
             .get(&chosen.name)
-            .is_some_and(|q| q.rejected)
+            .is_some_and(|(q, at)| q.still_spent_since(*at, now_secs()))
             || sh
                 .unusable
                 .lock()
@@ -290,6 +293,7 @@ fn usable_under_threshold(
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
     let now = std::time::Instant::now();
+    let now_s = now_secs();
     // Most room first, so the session lands somewhere it can stay - picking the
     // first eligible account tends to land on one that is nearly full too.
     pick::by_headroom(
@@ -306,7 +310,9 @@ fn usable_under_threshold(
         r.name != current
             && !cfg.is_disabled(&r.name)
             && !unusable.contains(&r.name, now)
-            && !spent.get(&r.name).is_some_and(|q| q.rejected)
+            && !spent
+                .get(&r.name)
+                .is_some_and(|(q, at)| q.still_spent_since(*at, now_s))
             && !measured
                 .1
                 .get(&r.name)
@@ -498,10 +504,13 @@ fn next_account_in(
     let spent = sh.quota.lock().unwrap();
     let unusable = sh.unusable.lock().unwrap();
     let now = std::time::Instant::now();
+    let now_s = now_secs();
     slots.into_iter().find(|r| {
         !tried.contains(&r.name)
             && !unusable.contains(&r.name, now)
-            && !spent.get(&r.name).is_some_and(|q| q.rejected)
+            && !spent
+                .get(&r.name)
+                .is_some_and(|(q, at)| q.still_spent_since(*at, now_s))
             // "Disabled" means do not pick this one FOR me; switching to it by
             // hand still works, which is why the check lives here and not in
             // pick_slot.
@@ -554,6 +563,11 @@ fn has_usable_login(tool: &str, dir: &std::path::Path) -> bool {
         "codex" => codex::slot_auth(dir).is_some(),
         _ => creds::slot_token(dir).is_some() && !creds::slot_token_expired(dir, now_ms()),
     }
+}
+
+/// Unix seconds, for the rate-limit resets the API reports in that unit.
+fn now_secs() -> i64 {
+    now_ms() / 1000
 }
 
 /// Unix milliseconds, for expiry comparisons.
@@ -676,6 +690,9 @@ fn forward_turn(
     // named an account that paid for nothing - for as long as it kept being
     // chosen. It is written where a credential is actually committed to.
     let mut tried: Vec<String> = Vec::new();
+    // Retries of the CURRENT account after a throttle, counted so a wall is never
+    // mistaken for a pause and retried forever.
+    let mut attempt = 0u32;
     let up = loop {
         // An already-lapsed token earns a 401 and cannot be refreshed from here,
         // so treat it exactly like having no login: step aside rather than spend
@@ -725,13 +742,35 @@ fn forward_turn(
             let mut headers = client_headers.clone();
             codex::apply_auth(&mut headers, &auth);
             note_serving_for(paths, &opts.tool, &slot.name);
+            // Retries of THIS account for a throttle, counted so a wall is not
+            // mistaken for a pause and retried forever.
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
             println!("  {} {} -> {} [{}]", method, path, up.status, slot.name);
             std::io::stdout().flush().ok();
+            // A 429 wears two meanings, exactly as it does on the Claude side. A
+            // THROTTLE ("slow down", x-should-retry) is fixed by waiting and
+            // retrying THIS account; treating it as exhaustion gave the account
+            // away over a pause of one second.
+            if up.status == 429 {
+                if let ratelimit::Throttle::RetryAfter(wait) =
+                    ratelimit::classify_429(&up.headers, attempt)
+                {
+                    attempt += 1;
+                    println!("  {} throttled - retrying in {:?}", slot.name, wait);
+                    std::io::stdout().flush().ok();
+                    std::thread::sleep(wait);
+                    continue;
+                }
+            }
             // A refusal means this account cannot serve the turn. With --auto,
             // hand the SAME turn to another account rather than returning the
             // failure - that is the whole point of continuing a session.
-            if (up.status == 429 || up.status == 401) && opts.auto {
+            //
+            // `--account` pins the run to one account: every turn is that
+            // account's and a refusal is its own answer to give. Claude's path
+            // checked the pin before rotating and this one did not, so a pinned
+            // run quietly billed a different account the moment it was refused.
+            if (up.status == 429 || up.status == 401) && opts.auto && opts.account.is_none() {
                 tried.push(slot.name.clone());
                 if up.status == 401 {
                     sh.unusable
@@ -739,12 +778,10 @@ fn forward_turn(
                         .unwrap()
                         .mark(&slot.name, std::time::Instant::now());
                 } else {
-                    sh.quota
-                        .lock()
-                        .unwrap()
-                        .entry(slot.name.clone())
-                        .or_default()
-                        .rejected = true;
+                    let mut spent = sh.quota.lock().unwrap();
+                    let e = spent.entry(slot.name.clone()).or_default();
+                    e.0.rejected = true;
+                    e.1 = now_secs();
                 }
                 if let Some(next) = next_account_for(paths, opts, sh, &tried) {
                     println!("  {} is out - continuing on {}", slot.name, next.name);
@@ -795,7 +832,6 @@ fn forward_turn(
 
         // A 429 wears two meanings. A THROTTLE ("slow down", x-should-retry) is
         // fixed by waiting and retrying this same account.
-        let mut attempt = 0u32;
         let up = loop {
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
             if up.status != 429 {
@@ -833,7 +869,10 @@ fn forward_turn(
         }
         std::io::stdout().flush().ok();
         if let Some(q) = quota {
-            sh.quota.lock().unwrap().insert(slot.name.clone(), q);
+            sh.quota
+                .lock()
+                .unwrap()
+                .insert(slot.name.clone(), (q, now_secs()));
         }
         if up.status == 401 {
             println!(
@@ -854,12 +893,10 @@ fn forward_turn(
         // elsewhere" has to mean. Without --auto, or with nothing left to try,
         // the client gets the real response.
         if up.status == 429 {
-            sh.quota
-                .lock()
-                .unwrap()
-                .entry(slot.name.clone())
-                .or_default()
-                .rejected = true;
+            let mut spent = sh.quota.lock().unwrap();
+            let e = spent.entry(slot.name.clone()).or_default();
+            e.0.rejected = true;
+            e.1 = now_secs();
         }
         if !opts.auto || opts.account.is_some() {
             break up;

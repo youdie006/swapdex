@@ -29,9 +29,13 @@ pub struct Window {
 pub struct Limits {
     pub short: Option<Window>,
     pub long: Option<Window>,
-    /// Unix seconds when Codex recorded this. There is no endpoint to ask, so
-    /// these numbers are as old as Codex's last run and the caller should be able
-    /// to say so rather than presenting them as current.
+    /// Unix seconds when the API stated these windows, taken from the record
+    /// that carried them.
+    ///
+    /// It used to be the transcript's mtime, which moves every time Codex writes
+    /// anything at all. A conversation that kept running without the API
+    /// restating the windows made an hours-old snapshot look freshly taken - and
+    /// the age IS the caveat here, since there is no endpoint to ask.
     pub observed_at: Option<i64>,
 }
 
@@ -74,7 +78,11 @@ fn from_transcript(path: &Path) -> Option<Limits> {
                 limits = Some(Limits {
                     short,
                     long,
-                    observed_at: None,
+                    // The record's own stamp, when it carries one.
+                    observed_at: v
+                        .get("timestamp")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(crate::session_link::rfc3339_to_secs),
                 });
             }
         }
@@ -134,7 +142,8 @@ fn from_sessions_dir(dir: &Path, now: u64, max_age_secs: u64) -> Option<Limits> 
     let l = Limits {
         short: still_valid(raw.short),
         long: still_valid(raw.long),
-        observed_at: Some(mtime_secs(path) as i64),
+        // The file's mtime only stands in when the record carried no stamp.
+        observed_at: raw.observed_at.or(Some(mtime_secs(path) as i64)),
     };
     (l.short.is_some() || l.long.is_some()).then_some(l)
 }
