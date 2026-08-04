@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.34.1] - 2026-08-04
+
+### Fixed
+- **Removing an account works on the accounts the dashboard lists.** The delete key only touched the store, and every account the dashboard lists is a slot - so it answered "no profile named X" for exactly what it was showing. `rm` itself searched only Claude's registry, so a Codex account could not be removed at all, from the dashboard or the command line. The confirmation also says what happens now: an account's folder and login both survive, so calling it "delete" invited declining a harmless action, or expecting a folder gone that is still there.
+
+### Changed
+- clap moves to 4.6.5, and the token renewal added in 0.34.0 now has the test it was missing. Its success path had never been executed - verifying it needs an account that is idle AND holds a refresh token the server still honours, and there was not one to spare - so it runs against a token endpoint of our own: the request built, the answer merged, the credential written back, and the account reading as current afterwards.
+
 ## [0.34.0] - 2026-08-03
 
 ### Changed
