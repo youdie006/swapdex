@@ -240,10 +240,10 @@ fn main() {
             && std::env::var("TERM")
                 .map(|t| !t.is_empty() && t != "dumb")
                 .unwrap_or(false);
-        let has_profiles = paths.store_dir().exists()
-            && swapdex::store::Store::open(&paths)
-                .map(|st| !st.list().is_empty())
-                .unwrap_or(false);
+        // Slots count too: they are what `run`, `adopt`, and `onboard` create,
+        // so counting only saved profiles showed a banner to a user whose
+        // accounts were all slots - the model swapdex itself steers people into.
+        let has_profiles = paths.store_dir().exists() && commands::has_any_account(&paths);
         // Also open the UI for a fresh-but-logged-in user: the onboarding
         // screen offers to save the accounts they're already signed into.
         let logged_in = swapdex::adapters::all().iter().any(|a| a.present(&paths));

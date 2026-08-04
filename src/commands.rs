@@ -2438,6 +2438,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .ok()
                 .and_then(|s| s.default_dir());
             let serving = crate::proxy::serving_account(self.paths);
+            let active_claude = active_slot_name(self.paths, "claude-code");
+            let active_codex = active_slot_name(self.paths, "codex");
             let slot_dir_of = |name: &str| {
                 slot_dirs
                     .iter()
@@ -2557,7 +2559,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // distinguishes two rows when both are signed in.
                     ident: identity_column(codex_slot_email(&r.config_dir), None),
                     tools: "codex".into(),
-                    active: codex_pointer.as_deref() == Some(r.config_dir.as_path()),
+                    active: active_codex.as_deref() == Some(r.name.as_str()),
                     warn: None,
                     also: Vec::new(),
                     stale: false,
@@ -2570,14 +2572,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 list.push(crate::tui::Row {
                     is_slot: true,
                     disabled: cfg.is_disabled(name),
-                    needs_login: crate::proxy::creds::slot_token(dir).is_none(),
+                    // A Keychain that will not open is not an account that was
+                    // never signed in; telling the user to log in again would
+                    // send them to fix something that is not broken.
+                    needs_login: !crate::proxy::has_login("claude-code", dir),
                     name: name.clone(),
                     ident: identity_column(crate::proxy::creds::slot_email(dir), None),
                     tools: "claude-code".into(),
-                    active: match &serving {
-                        Some(s) => s == name,
-                        None => pointer.as_deref() == Some(dir.as_path()),
-                    },
+                    active: active_claude.as_deref() == Some(name.as_str()),
                     warn: None,
                     also: Vec::new(),
                     stale: crate::proxy::creds::slot_token_expired(dir, now_ms()),
@@ -4155,6 +4157,41 @@ pub fn resume(paths: &Paths, project: Option<&str>) -> Result<i32> {
 /// what a credential-copying switcher gets for free by only ever having one
 /// store - and what swapdex had to separate deliberately, because isolating
 /// accounts is also what isolates their conversations.
+/// Is there anything for the dashboard to show?
+///
+/// A bare `swapdex` opens the picker when the answer is yes. It used to ask only
+/// about saved profiles and live logins, never about slots - which is what
+/// `run`, `adopt`, and `onboard` create. So the model swapdex steers people into
+/// did not count as having accounts, and a user whose accounts were all slots
+/// got a banner where the picker should have been.
+pub fn has_any_account(paths: &Paths) -> bool {
+    if Store::open(paths)
+        .map(|st| !st.list().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    ["claude-code", "codex"].into_iter().any(|t| {
+        crate::slots::Slots::open_for(paths, t)
+            .map(|s| !s.list().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Which account a dashboard row should be marked active for.
+///
+/// A running proxy's own record wins, because after a rotation it may be
+/// serving someone other than the one chosen; otherwise the pointers decide.
+/// Claude's rows already asked this way and Codex's asked only its pointer, so
+/// handing turns to a Codex account left the mark where it was and the change
+/// read as nothing having happened. One resolution for both tools.
+pub fn active_slot_name(paths: &Paths, tool: &str) -> Option<String> {
+    if let Some(serving) = crate::proxy::serving_account_for(paths, tool) {
+        return Some(serving);
+    }
+    crate::slots::Slots::open_for(paths, tool).ok()?.payer()
+}
+
 /// What a screen should call the account paying the next turn.
 ///
 /// Codex prints this on /status, and it is the only identity it prints. A name
@@ -4238,7 +4275,7 @@ pub fn serve(
     // the state rather than report it after the fact.
     if !crate::proxy::has_login(tool, &rec.config_dir) {
         eprintln!(
-            "swapdex: '{name}' has no {bin} login, so it cannot pay for turns -              your own account would, while every screen said '{name}'"
+            "swapdex: '{name}' has no {bin} login, so it cannot pay for turns - your own account would, while every screen named '{name}'"
         );
         eprintln!(
             "  sign it in first: `swapdex run {name}{}`",

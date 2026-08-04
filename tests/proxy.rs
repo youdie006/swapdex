@@ -1732,3 +1732,76 @@ mod a_locked_keychain_is_not_a_missing_login {
         assert!(!login_present(Err(TokenUnavailable::NoLogin)));
     }
 }
+
+/// The dashboard marks one row per tool as the active one. Claude's rows asked
+/// the proxy who was serving and fell back to the pointer; Codex's rows asked
+/// only the pointer. So on the Codex side, pressing Enter - which hands turns to
+/// that account - moved who pays and left the mark exactly where it was, and the
+/// change read as nothing having happened.
+mod the_active_mark_follows_who_pays {
+    use swapdex::commands::active_slot_name;
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    #[test]
+    fn on_codex_as_much_as_on_claude() {
+        for tool in ["codex", "claude-code"] {
+            let root = tempfile::tempdir().unwrap();
+            let paths = Paths::rooted(root.path());
+            {
+                let mut s = Slots::open_for(&paths, tool).unwrap();
+                s.create("first").unwrap();
+                s.create("second").unwrap();
+                s.set_default("first").unwrap();
+            }
+            assert_eq!(
+                active_slot_name(&paths, tool).as_deref(),
+                Some("first"),
+                "{tool}: with nobody serving, the pointer decides"
+            );
+            Slots::open_for(&paths, tool)
+                .unwrap()
+                .set_serving("second")
+                .unwrap();
+            assert_eq!(
+                active_slot_name(&paths, tool).as_deref(),
+                Some("second"),
+                "{tool}: and handing turns over moves the mark"
+            );
+        }
+    }
+}
+
+/// A bare `swapdex` opens the dashboard when there are accounts to show. It
+/// decided that by counting saved PROFILES and live logins - and never the
+/// slots, which is what `run`, `adopt`, and `onboard` all create. So the model
+/// swapdex steers people into did not count as having accounts, and a user whose
+/// accounts are all slots got a banner where the picker should have been.
+mod accounts_worth_opening_the_dashboard_for {
+    use swapdex::commands::has_any_account;
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    #[test]
+    fn a_slot_is_an_account() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        assert!(!has_any_account(&paths), "nothing yet");
+        Slots::open_for(&paths, "codex")
+            .unwrap()
+            .create("work")
+            .unwrap();
+        assert!(has_any_account(&paths), "a slot counts");
+    }
+
+    #[test]
+    fn and_so_is_a_claude_one() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        Slots::open_for(&paths, "claude-code")
+            .unwrap()
+            .create("work")
+            .unwrap();
+        assert!(has_any_account(&paths));
+    }
+}
