@@ -2590,40 +2590,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         }
         fn switch(&mut self, name: &str) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
-            // Switch only the tool this account belongs to. A bare `use` moves
-            // every tool the profile covers, so switching a Codex-only account
-            // reported "profile has no claude-code login" - true, irrelevant, and
-            // indistinguishable from something being wrong.
-            let tool = Store::open(self.paths)
-                .ok()
-                .and_then(|st| st.list().into_iter().find(|p| p.name == name))
-                .and_then(|p| {
-                    ["claude-code", "codex", "gemini", "antigravity"]
-                        .into_iter()
-                        .find(|t| p.tools.iter().any(|pt| pt == t))
-                });
-            match tool {
-                // Enter means "let this account serve me" - not "move where my
-                // conversations live". Moving the store is what `use` does, and
-                // having the most natural key do it split a history in two every
-                // time somebody changed accounts, which is the opposite of the
-                // point of the tool.
-                Some(t) => run_self(&["serve", name, "--tool", t]),
-                // A slot account has no store profile, so the registry that holds
-                // it says which tool it is. Guessing Claude here switched nothing
-                // when the row was a Codex account.
-                None => {
-                    let t = ["claude-code", "codex"]
-                        .into_iter()
-                        .find(|t| {
-                            crate::slots::Slots::open_for(self.paths, t)
-                                .map(|s| s.get(name).is_some())
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or("claude-code");
-                    run_self(&["serve", name, "--tool", t])
-                }
-            }
+            // Enter means "let this account serve me" - not "move where my
+            // conversations live". Moving the store is what `use` does, and having
+            // the most natural key do it split a history in two every time
+            // somebody changed accounts, which is the opposite of the point.
+            let tool = tool_of_account(self.paths, name);
+            run_self(&["serve", name, "--tool", tool])
         }
         fn toggle_rotation(&mut self, name: &str) -> String {
             let mut cfg = crate::settings::load(self.paths);
@@ -2652,17 +2624,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             run_self(&["rename", old, new])
         }
         fn sign_in(&mut self, name: &str) -> (bool, String) {
-            // The account list holds both tools, so the registry that has this
-            // name decides which login to open.
-            let tool = ["claude-code", "codex"]
-                .into_iter()
-                .find(|t| {
-                    crate::slots::Slots::open_for(self.paths, t)
-                        .map(|s| s.get(name).is_some())
-                        .unwrap_or(false)
-                })
-                .unwrap_or("claude-code");
-            sign_in_child(self.paths, name, tool)
+            sign_in_child(self.paths, name, tool_of_account(self.paths, name))
         }
         fn save_current(&mut self, name: &str) -> (bool, String) {
             // `add <name>` captures the CURRENT live logins (all tools) - no
@@ -4024,6 +3986,37 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
         }
         Err(e) => (false, format!("could not start {bin}: {e}")),
     }
+}
+
+/// Which tool an account belongs to.
+///
+/// This was worked out separately at every place that needed it - signing in,
+/// switching, renaming, removing - and the versions disagreed. One of them fell
+/// back to Claude whenever the slot registry did not know the name, so opening
+/// the login for a Codex account launched Claude's.
+///
+/// A saved profile states its tool outright, so it is asked first; a slot is
+/// registered under the tool it was made for; and only with neither is Claude
+/// assumed, because that is what an unqualified account was before Codex had
+/// accounts at all.
+pub(crate) fn tool_of_account(paths: &Paths, name: &str) -> &'static str {
+    const TOOLS: [&str; 2] = ["claude-code", "codex"];
+    if let Some(t) = Store::open(paths).ok().and_then(|st| {
+        st.list()
+            .into_iter()
+            .find(|p| p.name == name)
+            .and_then(|p| TOOLS.into_iter().find(|t| p.tools.iter().any(|x| x == t)))
+    }) {
+        return t;
+    }
+    TOOLS
+        .into_iter()
+        .find(|t| {
+            crate::slots::Slots::open_for(paths, t)
+                .map(|s| s.get(name).is_some())
+                .unwrap_or(false)
+        })
+        .unwrap_or("claude-code")
 }
 
 /// The tool a slot command means. Slots exist for the two tools that can be

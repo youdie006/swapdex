@@ -910,3 +910,43 @@ fn removing_an_account_works_for_either_tool() {
     let listed = run_in(root.path(), &["slots"], &path);
     assert!(!listed.contains("onclaude"), "{listed}");
 }
+
+// Which tool an account belongs to was worked out separately everywhere it was
+// needed, and the versions disagreed: one fell back to Claude whenever the slot
+// registry did not know the name, so pressing the sign-in key on a Codex account
+// opened Claude's login.
+#[test]
+fn an_accounts_tool_is_read_the_same_way_everywhere() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(
+        root.path(),
+        &["run", "oncodex", "--tool", "codex", "--no-launch"],
+        &path,
+    );
+    run_in(root.path(), &["run", "onclaude", "--no-launch"], &path);
+
+    // `serve` is what the dashboard's Enter runs, and it is told the tool the
+    // dashboard resolved - so a wrong answer here sends a Codex account down
+    // Claude's path and silently does nothing.
+    let out = run_in(root.path(), &["serve", "oncodex", "--tool", "codex"], &path);
+    assert!(out.contains("oncodex"), "{out}");
+    let store = root.path().join(".local/share/swapdex");
+    assert!(
+        store.join("serving-codex").exists(),
+        "a Codex account is served through Codex's own pointer"
+    );
+    assert!(
+        !store.join("serving-claude").exists(),
+        "and never through Claude's"
+    );
+
+    let out = run_in(root.path(), &["serve", "onclaude"], &path);
+    assert!(out.contains("onclaude"), "{out}");
+    assert!(store.join("serving-claude").exists());
+}
