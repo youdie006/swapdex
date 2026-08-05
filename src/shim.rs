@@ -725,7 +725,14 @@ mod copies_tests {
         }
         let found = swapdex_copies_on(&format!("{}:{}", a.display(), b.display()));
         assert_eq!(found.len(), 2, "both are real, and one shadows the other");
-        assert!(found[0].starts_with(&a), "the one that wins comes first");
+        // Compare against the RESOLVED path: macOS canonicalizes a temp dir from
+        // /var/... to /private/var/..., so the raw path is not a prefix of the
+        // answer even when it is the same file.
+        let a_real = std::fs::canonicalize(&a).unwrap();
+        assert!(
+            found[0].starts_with(&a_real),
+            "the one that wins comes first"
+        );
     }
 
     #[test]

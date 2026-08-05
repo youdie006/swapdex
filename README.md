@@ -63,18 +63,23 @@ those profiles onto their own slots.</sub>
 ## Install
 
 ```sh
-# crates.io (Rust)
-cargo install swapdex
+# npm - you already have it, since Claude Code and Codex ship this way
+npm install -g @youdie006/swapdex
 
 # Homebrew (macOS / Linux)
 brew install youdie006/tap/swapdex
 
-# npm (downloads the prebuilt binary)
-npm install -g @youdie006/swapdex
+# crates.io (needs a Rust toolchain)
+cargo install swapdex
 
 # or the one-liner (prebuilt binary -> ~/.local/bin)
 curl -fsSL https://raw.githubusercontent.com/youdie006/swapdex/main/install.sh | sh
 ```
+
+Pick one and stay with it. Each installer wants the same name on `PATH`, and
+with two of them the shims keep calling whichever copy wrote them - so updating
+the other one changes nothing, silently. `swapdex doctor` reports this, along
+with whether the version you are running is the one that is published.
 
 Linux, WSL, and macOS (Claude's macOS login lives in the Keychain; swapdex
 swaps it there, via `/usr/bin/security`). Requires at least one supported CLI
