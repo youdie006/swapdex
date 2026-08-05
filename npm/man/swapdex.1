@@ -1,0 +1,115 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH swapdex 1  "swapdex 0.35.1" 
+.SH NAME
+swapdex \- Switch Claude Code / Codex / Gemini / Antigravity login accounts, locally and safely.
+.SH SYNOPSIS
+\fBswapdex\fR [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+Switch Claude Code / Codex / Gemini / Antigravity login accounts, locally and safely.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+swapdex\-add(1)
+Save the current live login as a named profile
+.TP
+swapdex\-use(1)
+Switch the active login to a saved profile
+.TP
+swapdex\-run(1)
+Launch Claude in an account\*(Aqs own permanent slot (concurrent\-safe)
+.TP
+swapdex\-whereis(1)
+Find which account holds a conversation (searches every account\*(Aqs store)
+.TP
+swapdex\-serve(1)
+Hand turns to an account without moving where new sessions start
+.TP
+swapdex\-refresh(1)
+Renew accounts whose access token has lapsed (they stay usable)
+.TP
+swapdex\-slots(1)
+List the permanent account slots
+.TP
+swapdex\-shim(1)
+Install the `claude` shim so a plain `claude` follows `swapdex use`
+.TP
+swapdex\-adopt(1)
+Register an existing CLAUDE_CONFIG_DIR directory as a slot (in place)
+.TP
+swapdex\-migrate(1)
+Give each legacy Claude profile its own permanent slot
+.TP
+swapdex\-onboard(1)
+Guided setup: register/migrate your accounts into permanent slots
+.TP
+swapdex\-sync\-mcp(1)
+Share MCP servers (from ~/.claude.json) into every account slot
+.TP
+swapdex\-ls(1)
+List saved profiles (active marked from the live login)
+.TP
+swapdex\-status(1)
+Show the active account per tool
+.TP
+swapdex\-rm(1)
+Remove a saved profile (never touches a live login)
+.TP
+swapdex\-setup(1)
+Guided first\-time setup: save your logins, add more, learn to switch
+.TP
+swapdex\-login(1)
+Log in to a tool and save the result as a profile in one step
+.TP
+swapdex\-rename(1)
+Rename a saved profile
+.TP
+swapdex\-restore(1)
+Put back the login that was live before the last switch
+.TP
+swapdex\-sessions(1)
+Sessions grouped by the account that was active when they ran
+.TP
+swapdex\-ui(1)
+Full\-screen picker: switch, open a conversation, add accounts
+.TP
+swapdex\-proxy(1)
+Run a local proxy so a RUNNING Claude session can change accounts
+.TP
+swapdex\-slash(1)
+Install a `/sx` slash command for Claude Code (switch without leaving the chat)
+.TP
+swapdex\-threshold(1)
+Step off an account at this much used (e.g. 0.9 or 90%), or `off`
+.TP
+swapdex\-auto(1)
+Turn auto\-continue (proxy hands a spent session to another account) on/off
+.TP
+swapdex\-doctor(1)
+Local health check: store, snapshots, live logins \- with a fix per finding
+.TP
+swapdex\-usage(1)
+Recent local token usage per tool (5h/7d), read from session logs
+.TP
+swapdex\-quota(1)
+Remaining Claude quota per account (opt\-in live read from Anthropic)
+.TP
+swapdex\-mcp(1)
+Run as a read\-only MCP server over stdio
+.TP
+swapdex\-completions(1)
+Print a shell completion script (bash, zsh, fish, ...)
+.TP
+swapdex\-manpage(1)
+Print the man page (roff) to stdout
+.TP
+swapdex\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH VERSION
+v0.35.1

@@ -1033,3 +1033,85 @@ fn doctor_reports_which_swapdex_is_actually_in_use() {
         "no network from a sandboxed run: {o}"
     );
 }
+
+/// A sign-in must ask the tool to SIGN IN, and must not be routed through the
+/// proxy on the way. The dashboard's key used to run a bare `codex` off PATH -
+/// which is our own shim, and the shim puts the proxy in front of any Codex run
+/// it does not recognise as plain. A bare launch is not recognised, so the
+/// sign-in talked to the proxy, which answered with the account it was already
+/// serving: an account with no login of its own came up looking signed in.
+///
+/// Both entry points now share one runner, and this exercises it through the
+/// command line - the dashboard's key reaches the same function, with the
+/// account's home added.
+#[test]
+fn signing_in_asks_the_tool_to_sign_in_and_bypasses_the_proxy() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+
+    // A recognisable real `codex`, plus our shim ahead of it on PATH.
+    std::fs::write(
+        bin_dir.join("codex"),
+        b"#!/bin/sh\necho \"REAL-CODEX args=$*\" >> \"$SX_PROBE\"\nexit 0\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            bin_dir.join("codex"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(
+        root.path(),
+        &["run", "work", "--tool", "codex", "--no-launch"],
+        &path,
+    );
+    run_in(root.path(), &["shim"], &path);
+
+    // The shim dir goes FIRST, which is what `swapdex shim` arranges on a real
+    // machine. Without it a bare `codex` finds the real one anyway and the test
+    // proves nothing - it passed against the very bug it was written for.
+    let shim_dir = root.path().join(".local/share/swapdex/bin");
+    assert!(
+        shim_dir.join("codex").is_file(),
+        "the codex shim was written"
+    );
+    let path = format!("{}:{}", shim_dir.display(), path);
+
+    let probe = root.path().join("probe.log");
+    let out = Command::new(bin())
+        .args(["login", "work", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .env("SX_PROBE", &probe)
+        .output()
+        .unwrap();
+    let seen = std::fs::read_to_string(&probe).unwrap_or_default();
+    let o = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        seen.contains("REAL-CODEX"),
+        "codex was reached at all: probe={seen:?} out={o}"
+    );
+    // The one that matters. A bare launch is not a "plain" run to the shim, so it
+    // gets the provider overrides - and then the sign-in talks to the proxy,
+    // which answers with the account it is already serving.
+    assert!(
+        !seen.contains("model_provider=swapdex"),
+        "the sign-in must not go through the proxy: probe={seen:?}"
+    );
+    assert!(
+        seen.contains("args=login"),
+        "and asks to sign in rather than opening a session: probe={seen:?}"
+    );
+}

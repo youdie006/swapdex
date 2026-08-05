@@ -14,6 +14,12 @@ pub fn shim_path(paths: &Paths) -> PathBuf {
 }
 
 /// Where a given tool's shim lives: `<store_dir>/bin/<binary>`.
+/// The directory holding the generated shims - the one that must be stepped over
+/// when looking for the real tool.
+pub fn shim_bin_dir(paths: &Paths) -> PathBuf {
+    paths.store_dir().join("bin")
+}
+
 pub fn shim_path_for(paths: &Paths, tool: &str) -> PathBuf {
     let bin = match tool {
         "codex" => "codex",
@@ -738,5 +744,45 @@ mod copies_tests {
     #[test]
     fn nothing_installed_is_not_a_problem() {
         assert!(swapdex_copies_on("/nonexistent-a:/nonexistent-b").is_empty());
+    }
+}
+
+/// A line that marks a file as one of our shims, for tests.
+#[cfg(test)]
+fn shim_marker_line() -> String {
+    format!("#!/bin/sh\n# {SHIM_MARKER_CODEX}\n")
+}
+
+/// The real tool binary for `tool`, skipping our own shim wherever it sits.
+///
+/// Signing in must not go through the shim. For Codex the shim adds the proxy
+/// provider on any run it does not recognise as a plain one, and a bare launch
+/// is not recognised - so the sign-in went through the proxy, which answered
+/// with the account it was already serving. An account with no login of its own
+/// came up looking signed in, and every turn in it was billed elsewhere.
+pub fn real_tool(paths: &Paths, tool: &str) -> Option<PathBuf> {
+    find_real(&shim_bin_dir(paths), crate::commands::tool_binary(tool))
+}
+
+#[cfg(test)]
+mod real_tool_tests {
+    use super::*;
+
+    /// Whatever else changes, a sign-in must never run the shim: that is the
+    /// path that puts the proxy in front of it.
+    #[test]
+    fn the_shim_dir_is_stepped_over() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let dir = shim_bin_dir(&paths);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codex"), shim_marker_line()).unwrap();
+        if let Some(found) = real_tool(&paths, "codex") {
+            assert!(
+                !found.starts_with(&dir),
+                "resolved {} inside the shim dir",
+                found.display()
+            );
+        }
     }
 }

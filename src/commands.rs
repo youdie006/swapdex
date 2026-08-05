@@ -4068,15 +4068,16 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
     if !command_exists(bin) {
         return (false, format!("`{bin}` isn't on your PATH"));
     }
-    // Signing in must reach the vendor directly - an inherited proxy address both
-    // breaks the OAuth exchange and answers with whichever account the proxy
-    // already holds, so a fresh space would look signed in as someone else.
-    let mut cmd = Command::new(bin);
-    cmd.env(home_var, &rec.config_dir);
-    for var in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"] {
-        cmd.env_remove(var);
-    }
-    match cmd.status() {
+    // Signing in must reach the vendor directly, and there are two ways it did
+    // not. An inherited proxy ADDRESS answers with whichever account the proxy
+    // already holds - that one is cleared below. And the shim itself puts the
+    // proxy in front of any Codex run it does not recognise as plain: a bare
+    // launch is not recognised, so pressing the sign-in key opened a session
+    // served by the account that was already paying. An account with no login
+    // came up looking signed in, and nothing about it was true. So: the REAL
+    // binary, never the shim, and the subcommand that actually signs in.
+    let exe = crate::shim::real_tool(paths, tool).unwrap_or_else(|| std::path::PathBuf::from(bin));
+    match spawn_tool_login_in(&exe, tool, Some((home_var, rec.config_dir.as_path()))) {
         Ok(_) => {
             // Whether the sign-in succeeded is the credential's story, not the
             // exit code's: the tool exits 0 when the user simply quits it.
@@ -4141,7 +4142,7 @@ pub(crate) fn slot_tool(sel: Option<ToolSel>) -> &'static str {
     }
 }
 
-fn tool_binary(tool: &str) -> &'static str {
+pub(crate) fn tool_binary(tool: &str) -> &'static str {
     match tool {
         "codex" => "codex",
         _ => "claude",
@@ -4889,6 +4890,23 @@ fn codex_login_opts_out_of_device() -> bool {
 }
 
 fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
+    spawn_tool_login_in(std::path::Path::new(bin), tool, None)
+}
+
+/// The same sign-in, optionally in one account's own home.
+///
+/// The dashboard used to build its own invocation here: a BARE launch of
+/// whatever `codex` PATH resolved to. That is our shim, and the shim puts the
+/// proxy in front of any Codex run it does not recognise as plain - a bare
+/// launch is not recognised. So the sign-in talked to the proxy, which answered
+/// with the account it was already serving, and an account with no login of its
+/// own came up looking signed in. Two ways to build one command is how that
+/// happened, so now there is one.
+fn spawn_tool_login_in(
+    bin: &std::path::Path,
+    tool: &str,
+    home: Option<(&str, &std::path::Path)>,
+) -> Result<std::process::ExitStatus> {
     // A shell Ctrl+C during the interactive sign-in hits the whole foreground
     // process group. With the default disposition it would kill swapdex before
     // the restore-stash branch runs - leaving the user locally signed out of
@@ -4901,6 +4919,14 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
     #[allow(function_casts_as_integer)]
     let prev_quit = unsafe { libc::signal(libc::SIGQUIT, ride_out as libc::sighandler_t) };
     let mut cmd = Command::new(bin);
+    if let Some((var, dir)) = home {
+        cmd.env(var, dir);
+    }
+    // A sign-in must reach the vendor directly: an inherited proxy address
+    // answers with whichever account the proxy already holds.
+    for var in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"] {
+        cmd.env_remove(var);
+    }
     match tool {
         // Codex has a `login` subcommand; Claude Code a proper `auth login`
         // that does JUST the OAuth sign-in (no workspace-trust / session
@@ -4924,7 +4950,7 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
         libc::signal(libc::SIGINT, prev_int);
         libc::signal(libc::SIGQUIT, prev_quit);
     }
-    status.map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))
+    status.map_err(|e| anyhow::anyhow!("could not run {}: {e}", bin.display()))
 }
 
 /// Remove the live credential files so the tool's next run prompts a fresh
