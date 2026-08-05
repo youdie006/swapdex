@@ -3093,6 +3093,87 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     // claude shim follows, and whether the shim is installed.
     if let Ok(slots) = crate::slots::Slots::open(paths) {
         let list = slots.list();
+        // Which swapdex the shims actually call. A shim embeds an ABSOLUTE
+        // path to whichever swapdex wrote it, so with two copies installed -
+        // npm and brew, say - updating one leaves the shims calling the
+        // other. Nothing on screen says so: a fix ships, the user updates,
+        // and the tool goes on running the old binary. That went unnoticed
+        // for a full day here, and the check exists because of it.
+        if let Ok(me) = std::env::current_exe() {
+            let me = std::fs::canonicalize(&me).unwrap_or(me);
+            let mut stale: Vec<(String, std::path::PathBuf)> = Vec::new();
+            for tool in ["claude-code", "codex"] {
+                let f = crate::shim::shim_path_for(paths, tool);
+                let Ok(text) = std::fs::read_to_string(&f) else {
+                    continue;
+                };
+                let Some(called) = crate::shim::swapdex_path_in(&text) else {
+                    continue;
+                };
+                let called = std::fs::canonicalize(&called).unwrap_or(called);
+                if called != me {
+                    stale.push((tool_binary(tool).to_string(), called));
+                }
+            }
+            report(
+                "shim target",
+                stale.is_empty(),
+                if stale.is_empty() {
+                    format!("the shims call this swapdex ({})", me.display())
+                } else {
+                    format!(
+                        "the {} shim calls a DIFFERENT swapdex ({}) - updating this one changes nothing it does; re-run `swapdex shim`",
+                        stale[0].0,
+                        stale[0].1.display()
+                    )
+                },
+            );
+        }
+
+        // More than one real copy on PATH: one shadows the other, and
+        // updating the shadowed one changes nothing anybody can see.
+        let copies = crate::shim::swapdex_copies_on(&std::env::var("PATH").unwrap_or_default());
+        report(
+            "install",
+            copies.len() < 2,
+            match copies.len() {
+                0 => "swapdex is not on PATH (running it by full path)".to_string(),
+                1 => format!("one copy on PATH ({})", copies[0].display()),
+                _ => format!(
+                    "{} copies on PATH - `{}` wins and the rest are shadowed; keep one installer and remove the others",
+                    copies.len(),
+                    copies[0].display()
+                ),
+            },
+        );
+        // Whether this copy is the current one. The version check is the
+        // only thing here that touches the network, and it is confined to
+        // `doctor`: a check that ran on every command would be a request
+        // nobody asked for. It exists because an install that silently did
+        // NOTHING - a scope typo, a 404, no error the user kept - looks
+        // exactly like an install that worked.
+        let running = env!("CARGO_PKG_VERSION");
+        match if paths.sandboxed() {
+            None
+        } else {
+            crate::quota::latest_published()
+        } {
+            Some(latest) if crate::quota::is_behind(running, &latest) => report(
+                "version",
+                false,
+                format!(
+                    "running {running}, but {latest} is published - update, then check                          `swapdex --version` actually changed"
+                ),
+            ),
+            Some(latest) => report("version", true, format!("{running} (latest is {latest})")),
+            // Offline is not a fault: say what is known and move on.
+            None => report(
+                "version",
+                true,
+                format!("{running} - could not reach the registry to compare"),
+            ),
+        }
+
         if !list.is_empty() {
             report("slots", true, format!("{} account(s)", list.len()));
             match slots.default_dir() {
@@ -3225,6 +3306,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 }
             };
             report("shim", shim_ok, shim_msg);
+
             // Per-slot login health (read-only). Flag only a slot with NO
             // login yet, or one whose token sat unrefreshed past STALE_DAYS
             // (by then the refresh token itself may be revoked). Routine

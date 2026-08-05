@@ -607,3 +607,129 @@ mod tests {
         assert!(!is_our_shim(&real), "a real claude is not flagged");
     }
 }
+
+/// The swapdex binary a generated shim calls, recovered from the shim itself.
+///
+/// A shim embeds an ABSOLUTE path to whichever swapdex wrote it. With two copies
+/// installed - npm and brew, say - updating one leaves the shims calling the
+/// other, and nothing on screen says so: a fix ships, the user updates, and the
+/// tool goes on running the old binary. That went unnoticed for a full day once.
+pub fn swapdex_path_in(text: &str) -> Option<PathBuf> {
+    // `sh_quote` wraps the path in single quotes, doubling any quote inside. Match
+    // the CALL, not the word: the script's own comments mention a proxy before it
+    // ever asks for one, and anchoring on " proxy" alone read one of those.
+    let at = text.find(" proxy --ensure")?;
+    // The call is `port=$('<path>' proxy --ensure ...)`, so the token starts right
+    // after the substitution opens. Scanning back for a quote instead lands INSIDE
+    // the `'\''` escape that a path containing a quote is written with.
+    let start = text[..at].rfind("$(")? + 2;
+    let token = text[start..at].trim();
+    let inner = token.strip_prefix('\'')?.strip_suffix('\'')?;
+    let path = inner.replace("'\\''", "'");
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+#[cfg(test)]
+mod embedded_path_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn the_path_comes_back_out_of_a_shim_we_wrote() {
+        for shim in [
+            shim_script(
+                Path::new("/store/active-claude"),
+                Path::new("/usr/bin/claude"),
+                Path::new("/opt/homebrew/bin/swapdex"),
+            ),
+            codex_shim_script(
+                Path::new("/store/active-codex"),
+                Path::new("/usr/bin/codex"),
+                Path::new("/opt/homebrew/bin/swapdex"),
+            ),
+        ] {
+            assert_eq!(
+                swapdex_path_in(&shim).as_deref(),
+                Some(Path::new("/opt/homebrew/bin/swapdex"))
+            );
+        }
+    }
+
+    /// A home directory with a quote in it is rare and still has to round-trip -
+    /// getting it wrong would report a mismatch that is not there.
+    #[test]
+    fn a_quoted_path_survives_the_round_trip() {
+        let odd = Path::new("/Users/o'brien/.local/bin/swapdex");
+        let shim = codex_shim_script(Path::new("/p"), Path::new("/usr/bin/codex"), odd);
+        assert_eq!(swapdex_path_in(&shim).as_deref(), Some(odd));
+    }
+
+    #[test]
+    fn something_that_is_not_our_shim_yields_nothing() {
+        assert_eq!(
+            swapdex_path_in("#!/bin/sh\nexec /usr/bin/claude \"$@\"\n"),
+            None
+        );
+    }
+}
+
+/// Every distinct `swapdex` executable reachable on `path_var`, in PATH order and
+/// with symlinks resolved, so two entries pointing at one file count once.
+///
+/// Two real copies - npm and brew, say - means one of them is shadowed, and
+/// updating the shadowed one changes nothing anybody can see.
+pub fn swapdex_copies_on(path_var: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in path_var.split(':').filter(|d| !d.is_empty()) {
+        let cand = Path::new(dir).join("swapdex");
+        if !cand.is_file() {
+            continue;
+        }
+        let real = std::fs::canonicalize(&cand).unwrap_or(cand);
+        if !out.contains(&real) {
+            out.push(real);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod copies_tests {
+    use super::*;
+
+    #[test]
+    fn two_entries_for_one_file_are_one_install() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("cellar");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("swapdex"), b"#!/bin/sh\n").unwrap();
+        let linked = root.path().join("bin");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(real.join("swapdex"), linked.join("swapdex")).unwrap();
+
+        let path = format!("{}:{}", linked.display(), real.display());
+        assert_eq!(
+            swapdex_copies_on(&path).len(),
+            1,
+            "a symlink is not a second install"
+        );
+    }
+
+    #[test]
+    fn two_real_files_are_two_installs_in_path_order() {
+        let root = tempfile::tempdir().unwrap();
+        let (a, b) = (root.path().join("npm"), root.path().join("brew"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("swapdex"), b"#!/bin/sh\n").unwrap();
+        }
+        let found = swapdex_copies_on(&format!("{}:{}", a.display(), b.display()));
+        assert_eq!(found.len(), 2, "both are real, and one shadows the other");
+        assert!(found[0].starts_with(&a), "the one that wins comes first");
+    }
+
+    #[test]
+    fn nothing_installed_is_not_a_problem() {
+        assert!(swapdex_copies_on("/nonexistent-a:/nonexistent-b").is_empty());
+    }
+}

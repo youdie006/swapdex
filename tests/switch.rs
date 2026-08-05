@@ -738,7 +738,11 @@ fn doctor_healthy_exits_zero() {
     let root = tempfile::tempdir().unwrap();
     seed_codex(root.path(), "acct-A");
     run(root.path(), &["add", "work", "--tool", "codex"]);
-    let (o, e, c) = run(root.path(), &["doctor"]);
+    // An empty PATH, deliberately: doctor now counts how many swapdex copies are
+    // reachable, and a developer machine with a cargo install AND target/debug is
+    // genuinely two - a real finding that has nothing to do with this setup being
+    // healthy, and one that would make the answer depend on whose machine it is.
+    let (o, e, c) = run_env(root.path(), &["doctor"], &[("PATH", "")]);
     assert_eq!(c, 0, "healthy doctor must exit 0: {o}{e}");
     assert!(o.contains("ok"), "reports ok sections: {o}");
     assert!(

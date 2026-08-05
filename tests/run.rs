@@ -526,10 +526,13 @@ fn doctor_flags_slots_without_login_and_stale_logins() {
     .unwrap();
     // 'corrupt': a login artifact EXISTS but is unparseable - not "no login".
     std::fs::write(dir_of("corrupt").join(".credentials.json"), b"not json").unwrap();
+    // PATH holds ONLY the fake tool dir. doctor now reports how many swapdex
+    // copies are reachable, and inheriting the developer's PATH would make that
+    // answer - and this test - depend on whose machine it runs on.
     let out = Command::new(bin())
         .args(["doctor"])
         .env("SWAPDEX_ROOT", root.path())
-        .env("PATH", &path)
+        .env("PATH", bin_dir.display().to_string())
         .output()
         .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
@@ -977,4 +980,56 @@ fn an_accounts_tool_is_read_the_same_way_everywhere() {
     let out = run_in(root.path(), &["serve", "onclaude"], &path);
     assert!(out.contains("onclaude"), "{out}");
     assert!(store.join("serving-claude").exists());
+}
+
+/// An install that silently did NOTHING looks exactly like one that worked. Two
+/// copies on PATH, or shims still calling the copy you replaced, produce a tool
+/// that keeps running the old binary while every update reports success. That
+/// went unnoticed here for a full day, and once more when a scope typo made
+/// every `npm i -g` a 404 nobody read. doctor answers the question directly.
+#[test]
+fn doctor_reports_which_swapdex_is_actually_in_use() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+
+    // A second, decoy swapdex on PATH - a stale install from another installer.
+    let decoy_dir = root.path().join("other-installer");
+    std::fs::create_dir_all(&decoy_dir).unwrap();
+    std::fs::write(decoy_dir.join("swapdex"), b"#!/bin/sh\nexit 0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            decoy_dir.join("swapdex"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let real_dir = std::path::Path::new(bin()).parent().unwrap().to_path_buf();
+    let path = format!(
+        "{}:{}:{}",
+        bin_dir.display(),
+        decoy_dir.display(),
+        real_dir.display()
+    );
+
+    let out = Command::new(bin())
+        .args(["doctor"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        o.contains("2 copies on PATH"),
+        "the shadowed install is named: {o}"
+    );
+    assert!(
+        o.contains("keep one installer"),
+        "and the fix comes with it: {o}"
+    );
+    // The version check reaches a registry, which a test must never do.
+    assert!(
+        !o.contains("latest is"),
+        "no network from a sandboxed run: {o}"
+    );
 }

@@ -516,3 +516,84 @@ mod tests {
         assert!(matches!(fetch(""), Fetch::Offline(_)));
     }
 }
+
+/// The newest version published to crates.io, or `None` when the answer cannot
+/// be had (offline, rate-limited, anything).
+///
+/// Diagnostics only. `swapdex doctor` asks; nothing else does, because a version
+/// check that runs on every command is a network call the user did not ask for.
+pub fn latest_published() -> Option<String> {
+    let url = std::env::var("SWAPDEX_INDEX_URL")
+        .unwrap_or_else(|_| "https://index.crates.io/sw/ap/swapdex".to_string());
+    // `write-out` is not optional here: run_curl reads the LAST line as the
+    // status code, so a config without it reports 0 and every answer is thrown
+    // away as a failure.
+    let (body, status) = run_curl_cfg(&format!(
+        "url = \"{url}\"\nmax-time = 8\nsilent\nwrite-out = \"\\n%{{http_code}}\"\n"
+    ))
+    .ok()?;
+    if status != 200 {
+        return None;
+    }
+    // The sparse index is one JSON object per version, oldest first, with yanked
+    // ones marked. The newest usable one is the last that is not yanked.
+    body.lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| !v["yanked"].as_bool().unwrap_or(false))
+        .and_then(|v| v["vers"].as_str().map(str::to_string))
+}
+
+/// Is `running` behind `latest`? Compares dotted numbers, so 0.9.0 is not read as
+/// newer than 0.35.0 the way a string comparison would have it.
+pub fn is_behind(running: &str, latest: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .map_while(|p| p.parse::<u64>().ok())
+            .collect()
+    }
+    let (a, b) = (parts(running), parts(latest));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn a_lower_version_is_behind_and_an_equal_one_is_not() {
+        assert!(is_behind("0.34.1", "0.35.0"));
+        assert!(is_behind("0.35.0", "0.35.1"));
+        assert!(!is_behind("0.35.0", "0.35.0"));
+        assert!(
+            !is_behind("0.36.0", "0.35.0"),
+            "ahead of the registry is fine"
+        );
+    }
+
+    /// String comparison would call 0.9.0 newer than 0.35.0, which is exactly the
+    /// kind of wrong that tells someone they are up to date when they are not.
+    #[test]
+    fn numbers_are_compared_as_numbers() {
+        assert!(is_behind("0.9.0", "0.35.0"));
+        assert!(!is_behind("0.35.0", "0.9.0"));
+    }
+
+    #[test]
+    fn an_unreadable_version_is_never_reported_as_behind() {
+        assert!(!is_behind("", "0.35.0"));
+        assert!(!is_behind("0.35.0", "unknown"));
+    }
+}
