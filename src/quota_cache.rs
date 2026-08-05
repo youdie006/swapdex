@@ -21,6 +21,11 @@ pub struct Entry {
     pub seven_d_reset: Option<i64>,
     /// Unix seconds when this reading was taken.
     pub at: i64,
+    /// The account keeps serving past a full window, billed to extra usage.
+    /// Remembered with the numbers: without it a cached full window flips the
+    /// row back to "spent" between live reads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_credits: bool,
 }
 
 /// A BTreeMap so the file is stable across writes - a cache that reorders itself
@@ -213,6 +218,7 @@ mod expiry_tests {
             seven_d: Some(41.0),
             seven_d_reset: Some(9_000),
             at: 900,
+            ..Default::default()
         };
         let before = expire_windows(e, 999);
         assert_eq!(before.five_h, Some(100.0), "inside the window it stands");
@@ -237,6 +243,7 @@ mod expiry_tests {
             seven_d: None,
             seven_d_reset: None,
             at: 900,
+            ..Default::default()
         };
         assert_eq!(expire_windows(e, 9_999_999), e);
     }

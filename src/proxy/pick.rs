@@ -50,6 +50,25 @@ impl Chooser {
 /// `None` for either window means "not measured", never "empty" - an unmeasured
 /// account must not be skipped on a guess.
 pub fn over_threshold(five_h: Option<f64>, seven_d: Option<f64>, threshold: f64) -> bool {
+    over_threshold_with(five_h, seven_d, threshold, false)
+}
+
+/// The same, told whether the account can keep serving past its windows.
+///
+/// It can when extra usage is enabled and its spend cap is not reached:
+/// Anthropic goes on answering and bills credits. Stepping off then moves a
+/// conversation onto an account nobody chose, to avoid a wall that is not
+/// there. That is what a machine reading "0% left" while working all afternoon
+/// looked like.
+pub fn over_threshold_with(
+    five_h: Option<f64>,
+    seven_d: Option<f64>,
+    threshold: f64,
+    credits_available: bool,
+) -> bool {
+    if credits_available {
+        return false;
+    }
     let limit = (threshold * 100.0).clamp(0.0, 100.0);
     [five_h, seven_d].into_iter().flatten().any(|p| p >= limit)
 }
@@ -333,5 +352,35 @@ mod sidelined_tests {
         s.mark("rnd", t0);
         s.clear("rnd");
         assert!(!s.contains("rnd", t0));
+    }
+}
+
+#[cfg(test)]
+mod extra_usage_tests {
+    use super::*;
+
+    /// Stepping off a full window is right only when the wall is real. With
+    /// extra usage available Anthropic keeps serving past the cap and bills
+    /// credits, so the account is not out - and rotating away from it moves a
+    /// conversation for no reason, onto an account the user did not choose.
+    #[test]
+    fn a_full_window_backed_by_credits_is_not_a_wall() {
+        assert!(
+            over_threshold_with(Some(100.0), Some(55.0), 0.98, false),
+            "no credits: the wall is real"
+        );
+        assert!(
+            !over_threshold_with(Some(100.0), Some(55.0), 0.98, true),
+            "credits available: the account can still take the turn"
+        );
+    }
+
+    /// Credits do not make a fresh account any less fresh, and they are not a
+    /// reason to reconsider an account that was never near its limit.
+    #[test]
+    fn credits_change_nothing_below_the_threshold() {
+        for credits in [false, true] {
+            assert!(!over_threshold_with(Some(10.0), Some(20.0), 0.98, credits));
+        }
     }
 }

@@ -19,9 +19,12 @@ use std::sync::{Arc, Mutex};
 /// Everything the request threads share: the upstream client, where upstream is,
 /// the per-account quota state, and the account-choice state. One struct so a
 /// request handler keeps a small signature as the proxy grows.
-/// One account's measured utilization: the 5h and 7d percentages, either of which
-/// may be unmeasured.
-type Utilization = (Option<f64>, Option<f64>);
+/// One account's measured utilization: the 5h and 7d percentages (either may be
+/// unmeasured), and whether it can keep serving once those are full - which it
+/// can when extra usage is enabled and its spend cap is not reached. Without
+/// that last part a full window read as a wall, and the proxy stepped off an
+/// account that was answering turns perfectly well.
+type Utilization = (Option<f64>, Option<f64>, bool);
 
 /// Measured utilization per account, with when the reading was taken.
 type Measured = (Option<std::time::Instant>, HashMap<String, Utilization>);
@@ -133,7 +136,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                 .unwrap()
                 .1
                 .get(&chosen.name)
-                .is_some_and(|(a, b)| pick::over_threshold(*a, *b, t));
+                .is_some_and(|(a, b, c)| pick::over_threshold_with(*a, *b, t, *c));
             // A move made moments ago stands: without this, two accounts either
             // side of the line trade the session back and forth.
             let cooling = sh
@@ -251,6 +254,7 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                 (
                     q.five_hour.map(|w| w.used_pct),
                     q.seven_day.map(|w| w.used_pct),
+                    q.can_serve_past_windows(),
                 ),
             );
         }
@@ -263,10 +267,11 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
     } else {
         let mut parts: Vec<String> = out
             .iter()
-            .map(|(n, (a, b))| {
+            .map(|(n, (a, b, credits))| {
                 let worst = [*a, *b].into_iter().flatten().fold(f64::NAN, f64::max);
+                let via = if *credits { " (on credits)" } else { "" };
                 if worst.is_finite() {
-                    format!("{n} {worst:.0}%")
+                    format!("{n} {worst:.0}%{via}")
                 } else {
                     format!("{n} ?")
                 }
@@ -303,7 +308,7 @@ fn usable_under_threshold(
             measured
                 .1
                 .get(&r.name)
-                .and_then(|(a, b)| pick::headroom(*a, *b))
+                .and_then(|(a, b, _)| pick::headroom(*a, *b))
         },
     );
     slots.into_iter().find(|r| {
@@ -316,7 +321,7 @@ fn usable_under_threshold(
             && !measured
                 .1
                 .get(&r.name)
-                .is_some_and(|(a, b)| pick::over_threshold(*a, *b, threshold))
+                .is_some_and(|(a, b, c)| pick::over_threshold_with(*a, *b, threshold, *c))
             && creds::slot_token(&r.config_dir).is_some()
     })
 }
@@ -497,7 +502,7 @@ fn next_account_in(
                 measured
                     .1
                     .get(&r.name)
-                    .and_then(|(a, b)| pick::headroom(*a, *b))
+                    .and_then(|(a, b, _)| pick::headroom(*a, *b))
             },
         );
     }

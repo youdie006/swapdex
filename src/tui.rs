@@ -160,22 +160,34 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
     // takes the FIRST-seen position, so an account does not jump down the list
     // when its slot logs in; the members are kept because the losing rows' names
     // are still how their usage readings are filed.
+    // The NAME is also an identity. Every command resolves an account by it, so a
+    // snapshot and a slot carrying the same name on the same tool are the same
+    // account by construction - and the half that is not signed in yet has no
+    // email to be merged on. A real machine listed `work` twice because of it.
+    let by_name = |r: &Row| format!("{}\u{0}name\u{0}{}", group_of(&r.tools), r.name);
+    let matches = |row: &Row, k: &Option<String>, members: &[usize], rows: &[Row]| -> bool {
+        if let (Some(a), Some(b)) = (key(row), k.as_ref()) {
+            if a == *b {
+                return true;
+            }
+        }
+        members.iter().any(|i| by_name(&rows[*i]) == by_name(row))
+    };
     let mut slots: Vec<(Option<String>, usize, Vec<usize>)> = Vec::new();
     let mut rows = rows;
     for i in 0..rows.len() {
         let k = key(&rows[i]);
-        match k.as_ref().and_then(|k| {
-            slots
-                .iter()
-                .position(|(s, _, _)| s.as_deref() == Some(k.as_str()))
-        }) {
+        match slots
+            .iter()
+            .position(|(s, _, members)| matches(&rows[i], s, members, &rows))
+        {
             Some(pos) => {
                 if rank(&rows[i]) < rank(&rows[slots[pos].1]) {
                     slots[pos].1 = i;
                 }
                 slots[pos].2.push(i);
             }
-            // No identity to compare on: never merged away.
+            // Nothing it belongs with: its own group.
             None => slots.push((k, i, vec![i])),
         }
     }
@@ -319,8 +331,19 @@ fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
         return (w, Color::Rgb(200, 150, 90));
     }
     let spent = u.is_some_and(|u| {
-        u.five_h.is_some_and(|p| p >= SPENT) || u.seven_d.is_some_and(|p| p >= SPENT)
+        !u.on_credits
+            && (u.five_h.is_some_and(|p| p >= SPENT) || u.seven_d.is_some_and(|p| p >= SPENT))
     });
+    // Full windows, but extra usage is carrying it: the account works, and
+    // saying "spent" beside one that is answering turns is simply false.
+    if !spent
+        && u.is_some_and(|u| {
+            u.on_credits
+                && (u.five_h.is_some_and(|p| p >= SPENT) || u.seven_d.is_some_and(|p| p >= SPENT))
+        })
+    {
+        return (ON_CREDITS, Color::Rgb(200, 150, 90));
+    }
     match (spent, r.active) {
         (true, _) => ("spent", Color::Rgb(196, 92, 96)),
         (false, true) => ("active", VIOLET),
@@ -435,7 +458,14 @@ pub struct Usage {
     /// Why there are no numbers, when there are none. Empty tracks alone cannot
     /// distinguish "never read" from "could not be read" from "nothing left".
     pub note: Option<String>,
+    /// The account keeps serving past a full window, billed to extra usage. A
+    /// window at 100% is then not the end of it: the account was answering turns
+    /// all afternoon while the row called it spent.
+    pub on_credits: bool,
 }
+
+/// The word for an account whose windows are full but whose credits are not.
+pub const ON_CREDITS: &str = "credits";
 
 /// The trailing column for a row's figures: the reason there are none if there
 /// is one, else how old they are.
@@ -2357,6 +2387,80 @@ mod tests {
         assert_eq!(click_item_index(0, 200, 5, &heights), 2);
     }
 
+    /// One account, one row. A saved snapshot and a slot can carry the same
+    /// name - that name IS the account, since every command resolves by it - and
+    /// the merge keyed only on the email, which the not-yet-signed-in half does
+    /// not have. So a real machine listed `work` twice: once with its ChatGPT
+    /// address, once as "no login", and nothing said they were the same thing.
+    #[test]
+    fn one_name_on_one_tool_is_one_row() {
+        let row = |name: &str, ident: &str, is_slot: bool, needs_login: bool| Row {
+            name: name.into(),
+            ident: ident.into(),
+            tools: "codex".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login,
+            stale: false,
+            is_slot,
+            also: Vec::new(),
+        };
+        let out = dedupe_by_identity(vec![
+            row("work", "polarisairnd@gmail.com [chatgpt]", false, false),
+            row("work", "", true, true),
+        ]);
+        let names: Vec<&str> = out.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(out.len(), 1, "one account, one row: {names:?}");
+        assert!(
+            out[0].ident.contains("polarisairnd@gmail.com"),
+            "the half that knows who it is wins the label: {:?}",
+            out[0].ident
+        );
+
+        // Same name on DIFFERENT tools is two accounts, and stays two rows.
+        let mut a = row("work", "same@x.com", true, false);
+        a.tools = "claude-code".into();
+        let b = row("work", "same@x.com", true, false);
+        assert_eq!(dedupe_by_identity(vec![a, b]).len(), 2);
+    }
+
+    /// A window at 100% is not the end of an account that can bill credits -
+    /// Anthropic keeps serving past the cap. Calling it "spent" beside an account
+    /// answering turns all afternoon is simply false, and the same verdict was
+    /// steering the proxy away from it.
+    #[test]
+    fn a_full_window_carried_by_credits_is_not_called_spent() {
+        let row = Row {
+            name: "bsgong".into(),
+            ident: "e@x".into(),
+            tools: "claude-code".into(),
+            active: true,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        };
+        let full = |on_credits| Usage {
+            five_h: Some(100.0),
+            seven_d: Some(55.0),
+            on_credits,
+            ..Default::default()
+        };
+        assert_eq!(account_status(&row, Some(&full(false))).0, "spent");
+        assert_eq!(account_status(&row, Some(&full(true))).0, ON_CREDITS);
+        // And an account nowhere near its cap is unaffected either way.
+        let fresh = Usage {
+            five_h: Some(10.0),
+            seven_d: Some(20.0),
+            on_credits: true,
+            ..Default::default()
+        };
+        assert_eq!(account_status(&row, Some(&fresh)).0, "active");
+    }
+
     // The status word answers "can this account serve me?" before the bars do.
     #[test]
     fn status_says_what_the_account_can_do() {
@@ -2712,6 +2816,7 @@ mod tests {
             seven_d_reset: None,
             observed_at: observed,
             note: note.map(str::to_string),
+            on_credits: false,
         };
         assert_eq!(
             trailing_note(&u(Some("token expired"), None), false),

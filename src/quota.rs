@@ -36,6 +36,21 @@ impl Window {
     }
 }
 
+/// Pay-as-you-go usage past the plan's windows, as the endpoint reports it.
+///
+/// This is why a window at 100% is not the end of an account: with it enabled,
+/// Anthropic keeps serving and bills credits. Missing it read a working account
+/// as spent - on screen, and worse, in the proxy, which rotated away from one
+/// that could serve perfectly well.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Extra {
+    pub enabled: bool,
+    /// The spend cap has been hit: enabled, but no longer a way through.
+    pub limit_reached: bool,
+    /// How much of the cap is used, 0..100, when the response says.
+    pub used_pct: Option<f64>,
+}
+
 /// Parsed usage across the windows Anthropic reports.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Quota {
@@ -43,6 +58,19 @@ pub struct Quota {
     pub seven_day: Option<Window>,
     /// Per-model weekly windows (e.g. Opus), label -> window.
     pub scoped: Vec<(String, Window)>,
+    /// Extra usage, when the response describes it. `None` means the response
+    /// said nothing - which is not permission to assume there is any.
+    pub extra: Option<Extra>,
+}
+
+impl Quota {
+    /// Can this account still take a turn once its windows are full?
+    ///
+    /// Only when the response actually says so: extra usage enabled and its
+    /// spend cap not yet reached. Silence is not permission.
+    pub fn can_serve_past_windows(&self) -> bool {
+        self.extra.is_some_and(|x| x.enabled && !x.limit_reached)
+    }
 }
 
 /// The outcome of one account's quota fetch.
@@ -190,6 +218,21 @@ pub fn parse(body: &str) -> Option<Quota> {
             }
         }
     }
+    // Extra usage sits beside the windows, not inside them.
+    let extra = v.get("extra_usage").and_then(|x| {
+        let enabled = x.get("is_enabled").and_then(Value::as_bool)?;
+        Some(Extra {
+            enabled,
+            limit_reached: x
+                .get("spend_limit_reached")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            used_pct: x
+                .get("utilization")
+                .and_then(Value::as_f64)
+                .map(|p| p.clamp(0.0, 100.0)),
+        })
+    });
     if five_hour.is_none() && seven_day.is_none() && scoped.is_empty() {
         return None;
     }
@@ -197,6 +240,7 @@ pub fn parse(body: &str) -> Option<Quota> {
         five_hour,
         seven_day,
         scoped,
+        extra,
     })
 }
 
@@ -595,5 +639,60 @@ mod version_tests {
     fn an_unreadable_version_is_never_reported_as_behind() {
         assert!(!is_behind("", "0.35.0"));
         assert!(!is_behind("0.35.0", "unknown"));
+    }
+}
+
+#[cfg(test)]
+mod extra_usage_tests {
+    use super::*;
+
+    /// A spent window does not mean a spent account. With extra usage enabled,
+    /// Anthropic keeps serving past the session cap and bills credits - which is
+    /// why an account reading "0% left" was answering turns all afternoon. Read
+    /// as spent, swapdex marked it so on screen AND rotated the proxy away from a
+    /// perfectly usable account.
+    const REAL: &str = r#"{
+        "five_hour": {"utilization": 100.0, "resets_at": 1785900000},
+        "seven_day": {"utilization": 55.0, "resets_at": 1786300000},
+        "extra_usage": {"is_enabled": true, "used_credits": 1121.0,
+                        "monthly_limit": 50000, "utilization": 2.242,
+                        "spend_limit_reached": false}
+    }"#;
+
+    #[test]
+    fn a_capped_window_with_credits_left_can_still_serve() {
+        let q = parse(REAL).expect("parsed");
+        let x = q.extra.expect("extra usage read");
+        assert!(x.enabled);
+        assert!(!x.limit_reached);
+        assert!(
+            q.can_serve_past_windows(),
+            "credits are available, so the account is not out"
+        );
+    }
+
+    #[test]
+    fn without_extra_usage_a_capped_window_really_is_the_end() {
+        let body = r#"{"five_hour": {"utilization": 100.0},
+                       "extra_usage": {"is_enabled": false}}"#;
+        let q = parse(body).expect("parsed");
+        assert!(!q.can_serve_past_windows());
+    }
+
+    /// Enabled but already at the spend cap is the same as not having it.
+    #[test]
+    fn a_reached_spend_limit_is_not_a_way_through() {
+        let body = r#"{"five_hour": {"utilization": 100.0},
+                       "extra_usage": {"is_enabled": true, "spend_limit_reached": true}}"#;
+        let q = parse(body).expect("parsed");
+        assert!(!q.can_serve_past_windows());
+    }
+
+    /// A response that says nothing about extra usage claims nothing about it.
+    #[test]
+    fn silence_is_not_permission() {
+        let q = parse(r#"{"five_hour": {"utilization": 100.0}}"#).expect("parsed");
+        assert!(q.extra.is_none());
+        assert!(!q.can_serve_past_windows());
     }
 }

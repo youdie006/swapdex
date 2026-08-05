@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.4] - 2026-08-05
+
+### Fixed
+- **A full window is not the end of an account that can bill credits.** Anthropic keeps serving past the session cap when extra usage is enabled, which is why an account reading "0% left" was answering turns all afternoon. swapdex never read that part of the response, so it called the account spent - on screen, and, worse, in the proxy, which rotated the conversation onto an account nobody had chosen to avoid a wall that was not there. It now reads `extra_usage`, keeps such an account in the rotation, and says `credits` rather than `spent`. Only what the response actually states counts: enabled, and the spend cap not reached. Silence is not permission.
+- **One account, one row.** A saved snapshot and a slot can carry the same name - that name IS the account, since every command resolves by it - but rows merged on the email alone, which the not-yet-signed-in half does not have. So `work` appeared twice: once with its ChatGPT address, once as "no login", with nothing to say they were the same thing. The same name on different tools is still two accounts and still two rows.
+
 ## [0.35.3] - 2026-08-05
 
 ### Fixed

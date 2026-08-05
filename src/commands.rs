@@ -2336,6 +2336,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         // A live read has no age to disclose.
                         observed_at: None,
                         note,
+                        on_credits: acc
+                            .get("on_credits")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                     },
                 ))
             })
@@ -2380,6 +2384,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // mistaken for a live one.
                     observed_at: Some(e.at),
                     note: None,
+                    on_credits: e.on_credits,
                 },
             ));
         }
@@ -2734,6 +2739,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             // live would be worse than no number at all.
                             observed_at: Some(e.at),
                             note: None,
+                            on_credits: e.on_credits,
                         },
                     )
                 })
@@ -5583,6 +5589,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     seven_d: qd.seven_day.map(|w| w.used_pct),
                     seven_d_reset: qd.seven_day.and_then(|w| w.resets_at),
                     at: now,
+                    on_credits: qd.can_serve_past_windows(),
                 },
             )),
             _ => None,
@@ -5718,6 +5725,8 @@ fn quota_json(label: &str, email: Option<&str>, active: bool, f: &crate::quota::
     match f {
         Fetch::Ok(q) => {
             m.insert("status".into(), Value::String("ok".into()));
+            // Full windows are not the end of an account that can bill credits.
+            m.insert("on_credits".into(), Value::Bool(q.can_serve_past_windows()));
             m.insert(
                 "five_hour".into(),
                 q.five_hour.as_ref().map(win).unwrap_or(Value::Null),
