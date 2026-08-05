@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.2] - 2026-08-05
+
+Both of these were found by using the thing: a sign-in that opened an account
+already signed in, and a gauge reading empty on an account that was not.
+
+### Fixed
+- **The dashboard's sign-in key signs in.** It ran a BARE `codex` off PATH - which is swapdex's own shim, and the shim puts the proxy in front of any Codex run it does not recognise as plain. A bare launch is not recognised, so the sign-in talked to the proxy, which answered with the account it was already serving: an account with no login of its own came up looking signed in, and anything done in it was billed elsewhere. The command line had this right all along (`codex login --device-auth`, with the signal handling that keeps a Ctrl+C from taking swapdex down with it) - two ways to build one invocation is how they drifted apart, so now there is one, taking the account's home as a parameter. It also resolves the REAL binary rather than whatever PATH answers, so nothing swapdex installs can sit in front of a sign-in.
+- **A usage reading is dropped when the window it describes ends.** Readings are remembered so a rate-limited endpoint cannot blank the display, but the remembered number is about a WINDOW, and a window ends. Past its reset it is not stale, it is wrong: the account has a fresh allowance while the gauge goes on drawing the spent one. Found on a machine reading "0% left" ten minutes after the 5-hour window had turned over. The two windows lapse separately, so each is judged on its own - the weekly reading beside it was still good and stays.
+
 ## [0.35.1] - 2026-08-05
 
 An update that silently does nothing looks exactly like one that worked. Both

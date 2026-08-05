@@ -34,10 +34,48 @@ fn file(paths: &Paths) -> std::path::PathBuf {
 /// Read the cache. Anything unreadable yields an empty one: a stale-value cache
 /// is a convenience, never a reason to fail a command.
 pub fn load(paths: &Paths) -> Cache {
+    load_at(paths, now_secs())
+}
+
+/// Unix seconds, taken once per load so every window is judged against the same
+/// instant.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Drop the windows a remembered reading no longer describes.
+///
+/// A reading is about a WINDOW, and a window ends. Past its reset the number is
+/// not merely stale, it is wrong: the account has a fresh allowance while the
+/// bar goes on drawing the spent one. Found on a real machine showing "0% left"
+/// ten minutes after the window had turned over. The two windows lapse
+/// separately, so each is judged on its own.
+fn expire_windows(mut e: Entry, now: i64) -> Entry {
+    if e.five_h_reset.is_some_and(|r| now >= r) {
+        e.five_h = None;
+        e.five_h_reset = None;
+    }
+    if e.seven_d_reset.is_some_and(|r| now >= r) {
+        e.seven_d = None;
+        e.seven_d_reset = None;
+    }
+    e
+}
+
+/// `load`, against a given instant, so the expiry is testable.
+fn load_at(paths: &Paths, now: i64) -> Cache {
     let mut c: Cache = std::fs::read(file(paths))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
+    for e in c.values_mut() {
+        *e = expire_windows(*e, now);
+    }
+    // An entry with nothing left to say is not an entry.
+    c.retain(|_, e| e.five_h.is_some() || e.seven_d.is_some());
     // Readings taken while `utilization` was misread as a fraction are all
     // exactly 100 - every account above 1% clamped there - and remembering them
     // would keep showing accounts as spent long after the reading was fixed.
@@ -156,5 +194,79 @@ mod tests {
         // And it can be written over.
         update(&paths, &[("a".into(), entry(1.0, 1))]);
         assert_eq!(load(&paths).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    /// A remembered reading describes a WINDOW, and a window ends. Once its reset
+    /// has passed the number is not stale, it is wrong: the account has a fresh
+    /// allowance and the bar was still drawing the spent one. Found on a real
+    /// machine reading "0% left" ten minutes after the window had turned over.
+    #[test]
+    fn a_window_whose_reset_has_passed_is_dropped_not_shown() {
+        let e = Entry {
+            five_h: Some(100.0),
+            five_h_reset: Some(1_000),
+            seven_d: Some(41.0),
+            seven_d_reset: Some(9_000),
+            at: 900,
+        };
+        let before = expire_windows(e, 999);
+        assert_eq!(before.five_h, Some(100.0), "inside the window it stands");
+
+        let after = expire_windows(e, 1_001);
+        assert_eq!(after.five_h, None, "past the reset it is gone");
+        assert_eq!(after.five_h_reset, None, "and so is the reset it described");
+        assert_eq!(
+            after.seven_d,
+            Some(41.0),
+            "the other window is untouched - they turn over separately"
+        );
+    }
+
+    /// A reading with no reset time says nothing about when it lapses, so it is
+    /// left alone; its age is already shown beside it.
+    #[test]
+    fn a_reading_with_no_reset_is_left_alone() {
+        let e = Entry {
+            five_h: Some(30.0),
+            five_h_reset: None,
+            seven_d: None,
+            seven_d_reset: None,
+            at: 900,
+        };
+        assert_eq!(expire_windows(e, 9_999_999), e);
+    }
+
+    #[test]
+    fn an_entry_left_with_nothing_is_not_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        update(
+            &paths,
+            &[(
+                "spent".to_string(),
+                // Not 100: a reading pinned at the ceiling in every window is
+                // dropped as an artefact of the old misread, which would hide
+                // the behaviour under test.
+                Entry {
+                    five_h: Some(80.0),
+                    five_h_reset: Some(1_000),
+                    at: 900,
+                    ..Default::default()
+                },
+            )],
+        );
+        assert!(
+            !load_at(&paths, 2_000).contains_key("spent"),
+            "nothing left to say about it"
+        );
+        assert!(
+            load_at(&paths, 999).contains_key("spent"),
+            "and it was there while the window ran"
+        );
     }
 }
