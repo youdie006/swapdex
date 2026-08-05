@@ -767,7 +767,12 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
         + &" ".repeat(width - left_pad - lw);
     // Split where the fill ends: the label reads on both grounds because each
     // half carries its own foreground colour.
-    let filled = ((pct / 100.0) * width as f64)
+    //
+    // The fill measures what is LEFT, the same thing the number says. It used to
+    // measure what was SPENT, so the two halves of one gauge said opposite
+    // things: an untouched account read "100% left" across an empty bar. A fuel
+    // gauge that empties as you fill the tank is not a gauge.
+    let filled = ((left / 100.0) * width as f64)
         .round()
         .clamp(0.0, width as f64) as usize;
     let head: String = text.chars().take(filled).collect();
@@ -2422,6 +2427,39 @@ mod tests {
     // way `swapdex quota` does. It used to count what was spent, with no word to
     // say which - so a window that had just reset showed "2%" and read as almost
     // nothing left when it meant almost nothing used.
+    /// The number and the fill must move together. The bar filled by what was
+    /// SPENT while the number said what was LEFT, so an untouched account read
+    /// "100% left" across an empty bar and a spent one read "0% left" across a
+    /// full one - every gauge saying the opposite of its own caption.
+    #[test]
+    fn the_fill_matches_the_number_beside_it() {
+        let filled_cells = |used: f64| -> usize {
+            quota_bar(Some(used), None, 20)
+                .first()
+                .map(|s| s.content.chars().count())
+                .unwrap_or(0)
+        };
+        assert_eq!(filled_cells(0.0), 20, "nothing used -> the bar is full");
+        assert_eq!(filled_cells(100.0), 0, "all used -> the bar is empty");
+        assert_eq!(filled_cells(50.0), 10, "half used -> half full");
+        assert!(
+            filled_cells(10.0) > filled_cells(90.0),
+            "spending more leaves less showing"
+        );
+    }
+
+    /// And the warning tone belongs to the account that is nearly OUT, not the
+    /// one that has barely started.
+    #[test]
+    fn the_alarming_colour_marks_a_nearly_empty_window() {
+        assert_eq!(quota_fill(95.0), quota_fill(100.0), "both nearly spent");
+        assert_ne!(
+            quota_fill(95.0),
+            quota_fill(5.0),
+            "a fresh window is not drawn like a spent one"
+        );
+    }
+
     #[test]
     fn quota_bar_writes_what_is_left_inside_the_bar() {
         let spans = quota_bar(Some(62.0), None, 14);
@@ -2434,23 +2472,25 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(fresh.contains("98% left"), "{fresh:?}");
-        // The fill still tracks what is SPENT: 62% of 14 -> 9 cells. The bar
-        // filling as an account is used is the picture people expect; only the
-        // number changed sides.
-        assert_eq!(spans[0].content.chars().count(), 9);
-        assert_eq!(spans[1].content.chars().count(), 5);
-        // A spent window is filled edge to edge even though the label spans it.
+        // The fill tracks what is LEFT, like the number: 38% of 14 -> 5 cells.
+        // This assertion used to pin the opposite, on the reasoning that a bar
+        // filling as an account is used is the picture people expect - but the
+        // number beside it counts DOWN, so the two halves of one gauge said
+        // opposite things and an untouched account showed an empty bar.
+        assert_eq!(spans[0].content.chars().count(), 5);
+        assert_eq!(spans[1].content.chars().count(), 9);
+        // A spent window has nothing filled, and still says so in words.
         let full = quota_bar(Some(100.0), Some(3600), 14);
         assert_eq!(
-            full[1].content.chars().count(),
+            full[0].content.chars().count(),
             0,
-            "nothing unfilled once it is all spent: {:?}",
-            full[0].content
+            "nothing left, nothing filled: {:?}",
+            full[1].content
         );
         assert!(
-            full[0].content.contains("0% left"),
+            full[1].content.contains("0% left"),
             "a spent window says so plainly: {:?}",
-            full[0].content
+            full[1].content
         );
         // The countdown joins when it fits, and is dropped when it does not.
         let wide: String = quota_bar(Some(10.0), Some(3600), 17)

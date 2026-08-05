@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.3] - 2026-08-05
+
+### Fixed
+- **A usage gauge no longer contradicts its own caption.** The number counted what was LEFT and the bar filled with what had been SPENT, so an account nobody had touched read "100% left" across an empty bar, and a spent one read "0% left" across a full one. The fill now measures the same thing the number says: full when the window is fresh, empty when it is gone. The warning tone needed no change and reads better for it - a nearly-spent account is now a small red remainder rather than a wall of red. A test had pinned the old behaviour deliberately, on the reasoning that a bar filling as an account is used is the picture people expect; seeing it on a real screen settled that it is not.
+
 ## [0.35.2] - 2026-08-05
 
 Both of these were found by using the thing: a sign-in that opened an account
