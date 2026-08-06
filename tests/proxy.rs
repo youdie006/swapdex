@@ -2194,3 +2194,41 @@ fn a_codex_reading_is_as_old_as_the_record_not_the_file() {
         "the reading is as old as the moment the API stated it"
     );
 }
+
+/// Enter hands turns to an account, and the mark has to follow - that is the
+/// only thing on screen saying it worked. Slot rows were taught the full order
+/// of authority (a running proxy's own record, else the serving pointer, else
+/// the default); PROFILE rows were not, and still asked only "is this the
+/// DEFAULT account?". An account that is both - a saved profile and a slot -
+/// draws as one row, and when the profile half won that merge, pressing Enter
+/// moved who pays and left the row reading "ready".
+mod the_mark_follows_serve_on_every_kind_of_row {
+    use swapdex::commands::active_slot_name;
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    #[test]
+    fn one_resolver_answers_for_slots_and_profiles_alike() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut s = Slots::open_for(&paths, "claude-code").unwrap();
+            s.create("bsgong").unwrap();
+            s.create("rnd").unwrap();
+            s.set_default("bsgong").unwrap();
+        }
+        assert_eq!(
+            active_slot_name(&paths, "claude-code").as_deref(),
+            Some("bsgong")
+        );
+        Slots::open_for(&paths, "claude-code")
+            .unwrap()
+            .set_serving("rnd")
+            .unwrap();
+        assert_eq!(
+            active_slot_name(&paths, "claude-code").as_deref(),
+            Some("rnd"),
+            "serve moved the payer, so the mark moves - with no proxy running too"
+        );
+    }
+}

@@ -2464,10 +2464,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // the account SERVING them, not the one the pointer names: after a
             // rotation those differ, and marking a spent account "active" next to
             // the word "spent" is a contradiction the user has to decode.
-            let pointer = crate::slots::Slots::open(self.paths)
-                .ok()
-                .and_then(|s| s.default_dir());
-            let serving = crate::proxy::serving_account(self.paths);
+
             let active_claude = active_slot_name(self.paths, "claude-code");
             let active_codex = active_slot_name(self.paths, "codex");
             let slot_dir_of = |name: &str| {
@@ -2489,15 +2486,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .collect()
                     })
                     .unwrap_or_default();
-            let codex_pointer = crate::slots::Slots::open_for(self.paths, "codex")
-                .ok()
-                .and_then(|s| s.default_dir());
-            let codex_dir_of = |name: &str| {
-                codex_slots
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, d)| d.clone())
-            };
+
             let list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
@@ -2520,17 +2509,21 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // Codex is a different tool and keeps its own answer.
                     let is_claude = p.tools.iter().any(|t| t == "claude-code");
                     let is_codex = p.tools.iter().any(|t| t == "codex");
-                    let by_pointer = match (&serving, &pointer, is_claude) {
-                        (Some(s), _, true) => Some(s == &p.name),
-                        (None, Some(ptr), true) => {
-                            Some(slot_dir_of(&p.name).as_deref() == Some(ptr.as_path()))
-                        }
-                        _ => match (&codex_pointer, is_codex) {
-                            (Some(ptr), true) => {
-                                Some(codex_dir_of(&p.name).as_deref() == Some(ptr.as_path()))
-                            }
-                            _ => None,
-                        },
+                    // One resolver for every kind of row. This branch used to ask
+                    // its own question - "is this the DEFAULT account?" - and so
+                    // ignored the serving pointer entirely. An account that is
+                    // both a saved profile and a slot draws as ONE row, and when
+                    // the profile half won that merge, pressing Enter moved who
+                    // pays and left the row reading "ready".
+                    //
+                    // `None` still means "nothing points anywhere", which is when
+                    // the live login is the only answer there is.
+                    let by_pointer = if is_claude {
+                        active_claude.as_ref().map(|a| a == &p.name)
+                    } else if is_codex {
+                        active_codex.as_ref().map(|a| a == &p.name)
+                    } else {
+                        None
                     };
                     crate::tui::Row {
                         is_slot: slot_dir_of(&p.name).is_some(),

@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.5] - 2026-08-06
+
+### Fixed
+- **Pressing Enter moves the mark, whatever kind of row it is.** The active mark was given one resolver - a running proxy's own record, else the account handed the turns, else the default - but only the SLOT rows were wired to it. Profile rows went on asking their own question, "is this the default account?", and so never saw the serving pointer at all. An account that is both a saved profile and a slot draws as one row, and when the profile half won that merge, Enter moved who pays and left the row reading "ready". The switch had worked the whole time; only the screen disagreed.
+
 ## [0.35.4] - 2026-08-05
 
 ### Fixed
