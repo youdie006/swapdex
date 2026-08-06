@@ -2232,3 +2232,61 @@ mod the_mark_follows_serve_on_every_kind_of_row {
         );
     }
 }
+
+/// The order of authority had the past outranking the instruction. `serve` is
+/// what the user just asked for; `proxy-serving` is what the proxy last actually
+/// did - and until the next turn goes out, that is the OLD account. So pressing
+/// Enter changed who pays and the row went on naming the previous one, with
+/// nothing to say the key had worked.
+///
+/// A rotation still shows: it happens when nobody asked for anything, which is
+/// exactly when the proxy's own record is the only answer there is.
+mod an_instruction_outranks_what_already_happened {
+    use swapdex::commands::active_slot_name;
+    use swapdex::paths::Paths;
+    use swapdex::slots::Slots;
+
+    #[test]
+    fn serve_shows_at_once_even_before_a_turn_goes_out() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut s = Slots::open_for(&paths, "claude-code").unwrap();
+            s.create("bsgong").unwrap();
+            s.create("rnd").unwrap();
+            s.set_default("bsgong").unwrap();
+            s.set_serving("rnd").unwrap();
+        }
+        // What the proxy last did, which is still the previous account.
+        std::fs::write(paths.store_dir().join("proxy-serving"), b"bsgong").unwrap();
+
+        assert_eq!(
+            active_slot_name(&paths, "claude-code").as_deref(),
+            Some("rnd"),
+            "the account just handed the turns is the one marked"
+        );
+    }
+
+    /// The order itself, without needing a live proxy to observe it.
+    #[test]
+    fn asked_for_beats_what_happened_beats_the_default() {
+        let n = |s: &str| Some(s.to_string());
+        use swapdex::commands::pick_active;
+        assert_eq!(
+            pick_active(n("rnd"), n("bsgong"), n("bsgong")),
+            n("rnd"),
+            "the instruction wins even though the proxy has not caught up"
+        );
+        assert_eq!(
+            pick_active(None, n("spare"), n("bsgong")),
+            n("spare"),
+            "nobody asked, so a rotation is the only thing that knows"
+        );
+        assert_eq!(
+            pick_active(None, None, n("bsgong")),
+            n("bsgong"),
+            "and otherwise, where sessions start"
+        );
+        assert_eq!(pick_active(None, None, None), None);
+    }
+}

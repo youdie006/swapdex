@@ -4293,10 +4293,37 @@ pub fn has_any_account(paths: &Paths) -> bool {
 /// handing turns to a Codex account left the mark where it was and the change
 /// read as nothing having happened. One resolution for both tools.
 pub fn active_slot_name(paths: &Paths, tool: &str) -> Option<String> {
-    if let Some(serving) = crate::proxy::serving_account_for(paths, tool) {
-        return Some(serving);
-    }
-    crate::slots::Slots::open_for(paths, tool).ok()?.payer()
+    let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+    let name_of = |dir: std::path::PathBuf| {
+        slots
+            .list()
+            .into_iter()
+            .find(|r| r.config_dir == dir)
+            .map(|r| r.name)
+    };
+    pick_active(
+        slots.serving_dir().and_then(&name_of),
+        crate::proxy::serving_account_for(paths, tool),
+        slots.default_dir().and_then(&name_of),
+    )
+}
+
+/// The order of authority behind that mark: what was ASKED FOR, then what
+/// HAPPENED, then where sessions start.
+///
+/// It used to read the other way round, and the past outranked the instruction:
+/// `proxy-serving` is what the proxy LAST did, which until the next turn goes
+/// out is still the previous account. So pressing Enter changed who pays and the
+/// row went on naming the old one, with nothing to say the key had worked.
+///
+/// A rotation still shows, because it happens when nobody asked for anything -
+/// exactly when the proxy's own record is the only answer there is.
+pub fn pick_active(
+    asked_for: Option<String>,
+    proxy_did: Option<String>,
+    default: Option<String>,
+) -> Option<String> {
+    asked_for.or(proxy_did).or(default)
 }
 
 /// What a screen should call the account paying the next turn.

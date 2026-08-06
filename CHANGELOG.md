@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.6] - 2026-08-06
+
+### Fixed
+- **The mark follows the key press, not the last turn.** The order of authority behind it had the past outranking the instruction: `proxy-serving` records what the proxy LAST did, which until the next turn goes out is still the previous account, and it was consulted first. So pressing Enter handed the turns over and the row went on naming the old account, with nothing on screen to say the key had worked. What was asked for now wins; a rotation still shows, because it happens when nobody asked for anything, which is exactly when the proxy's own record is the only answer there is.
+
 ## [0.35.5] - 2026-08-06
 
 ### Fixed
