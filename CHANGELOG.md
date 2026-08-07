@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.36.1] - 2026-08-07
+
+### Fixed
+- **A proxy that can serve nothing refuses to start.** It used to bind the port anyway, answer every turn by forwarding the CLIENT's own login, and say nothing about it - so it looked like it was working while doing none of what it exists for. Started from an ssh session with a locked Keychain, that state served for a full day before anyone noticed. It now checks before binding and fails with the reason, distinguishing "the Keychain will not open here" (the accounts ARE signed in; the fix is to start it from a terminal on the Mac) from "nothing is signed in" (the fix is `swapdex run <name>`). Failing is the better outcome: the shim gets no port and the tool runs with no proxy, which is the login the user already had. A single unreadable account among several still falls back per request, as before.
+
 ## [0.36.0] - 2026-08-07
 
 Both of these come from reading what the other tools in this space already do -

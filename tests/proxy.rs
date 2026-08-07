@@ -682,17 +682,23 @@ fn a_threshold_steps_off_before_the_account_refuses() {
 #[test]
 fn an_unusable_account_falls_back_to_the_clients_own_login() {
     let root = tempfile::tempdir().unwrap();
-    // A slot in the registry whose credential is unreadable.
+    // A slot in the registry whose credential is unreadable - and a second one
+    // that IS readable, because a proxy able to read nothing at all now refuses
+    // to start rather than answer every turn with the client's own login and
+    // never say so. The account under test is the one the pointer names.
+    seed_slot(root.path(), "healthy", "bbbb2222", "AT-HEALTHY", false);
     let store = root.path().join(".local/share/swapdex");
     let slot = store.join("slots").join("aaaa1111");
     std::fs::create_dir_all(&slot).unwrap();
     std::fs::write(slot.join(".credentials.json"), b"not json").unwrap();
+    let mut recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(store.join("slots.json")).unwrap()).unwrap();
+    recs.push(serde_json::json!({
+        "name": "broken", "id": "aaaa1111", "config_dir": slot, "adopted": false
+    }));
     std::fs::write(
         store.join("slots.json"),
-        format!(
-            r#"[{{"name":"broken","id":"aaaa1111","config_dir":"{}","adopted":false}}]"#,
-            slot.display()
-        ),
+        serde_json::to_vec_pretty(&recs).unwrap(),
     )
     .unwrap();
     std::fs::write(
@@ -1928,16 +1934,20 @@ mod a_sandboxed_run_starts_no_daemon {
 #[test]
 fn the_serving_mark_names_who_actually_paid() {
     let root = tempfile::tempdir().unwrap();
-    // Registered, pointed at, and never signed into.
+    // Registered, pointed at, and never signed into - beside one that IS signed
+    // in, so the proxy has something to serve with and starts at all.
+    seed_slot(root.path(), "healthy", "bbbb2222", "AT-HEALTHY", false);
     let store = root.path().join(".local/share/swapdex");
     let slot = store.join("slots").join("cccc3333");
     std::fs::create_dir_all(&slot).unwrap();
+    let mut recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(store.join("slots.json")).unwrap()).unwrap();
+    recs.push(serde_json::json!({
+        "name": "nologin", "id": "cccc3333", "config_dir": slot, "adopted": false
+    }));
     std::fs::write(
         store.join("slots.json"),
-        serde_json::to_vec_pretty(&serde_json::json!([{
-            "name": "nologin", "id": "cccc3333", "config_dir": slot, "adopted": false
-        }]))
-        .unwrap(),
+        serde_json::to_vec_pretty(&recs).unwrap(),
     )
     .unwrap();
     std::fs::write(
@@ -2429,5 +2439,65 @@ fn a_lapsed_subscription_does_not_block_the_fleet() {
     assert!(
         seen.iter().any(|a| a.contains("AT-GOOD")),
         "it moved to the account that could serve: {seen:?}"
+    );
+}
+
+/// A proxy that can read no credential still binds the port, still answers, and
+/// forwards the CLIENT's own login on every turn - looking like it works while
+/// doing nothing it exists to do. Started from an ssh session with a locked
+/// Keychain, that state served for a full day before anyone noticed.
+///
+/// Refusing is the better failure: the shim asks for a port, gets none, and the
+/// tool runs with no proxy - which is the login the user already has.
+#[test]
+fn a_proxy_with_nothing_to_serve_with_refuses_to_start() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots").join("aaaa1111");
+    std::fs::create_dir_all(&slot).unwrap();
+    // Registered, never signed into.
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "name": "nologin", "id": "aaaa1111", "config_dir": slot, "adopted": false
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Spawned rather than run to completion: a proxy that DOES start never
+    // returns, so `output()` would hang instead of failing - and a test that
+    // hangs when the behaviour regresses is a test nobody reads.
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:9")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let exited = (0..40).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    if !exited {
+        child.kill().ok();
+        child.wait().ok();
+        panic!("the proxy started even though it can read no credential");
+    }
+    let out = child.wait_with_output().unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "it must not start: {said}");
+    assert!(
+        said.contains("swapdex run"),
+        "and it says what to do about it: {said}"
+    );
+    assert!(
+        !store.join("proxy").exists(),
+        "no marker either - nothing should think a proxy is up"
     );
 }

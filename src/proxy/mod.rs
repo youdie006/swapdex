@@ -383,6 +383,26 @@ fn ctrl_c_cleanup<F: Fn() + Send + Sync + 'static>(f: F) -> Result<()> {
 
 pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     crate::atomic::ensure_not_root()?;
+    // Refuse before binding anything if there is nothing to serve WITH. A proxy
+    // that can read no credential still answers, forwarding the client's own
+    // login on every turn, and says nothing - it looks like it works while doing
+    // nothing it exists to do. That state, started from an ssh session with a
+    // locked Keychain, served for a full day before anyone noticed. Failing here
+    // means the shim gets no port and the tool runs with no proxy, which is the
+    // login the user already has, and it works.
+    if opts.tool != "codex" {
+        let reads: Vec<_> = crate::slots::Slots::open_for(paths, &opts.tool)
+            .map(|s| {
+                s.list()
+                    .into_iter()
+                    .map(|r| creds::slot_token_detail(&r.config_dir).map(|_| ()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(why) = creds::startup_refusal(&reads) {
+            return Err(anyhow!("{why}"));
+        }
+    }
     // Loopback only: this holds a live credential, so it must never be
     // reachable off the machine.
     let server = tiny_http::Server::http(("127.0.0.1", opts.port))

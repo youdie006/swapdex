@@ -266,3 +266,77 @@ mod tests {
         assert!(slot_token(dir.path()).is_none());
     }
 }
+
+/// Why a proxy must not start, given what it could read from every account.
+///
+/// A proxy that can read nothing still binds the port, still answers, and
+/// forwards the CLIENT's own login on every turn - so it looks like it is
+/// working while doing nothing it exists to do. That state cost a full day:
+/// started from an ssh session where the Keychain was locked, it served for
+/// hours without one line saying so.
+///
+/// Refusing is the better failure. The shim asks for a port and gets none, so
+/// the tool runs with no proxy at all - which is exactly the login the user
+/// already has, and it works.
+pub fn startup_refusal(reads: &[Result<(), TokenUnavailable>]) -> Option<String> {
+    if reads.is_empty() || reads.iter().any(Result::is_ok) {
+        return None;
+    }
+    let locked = reads
+        .iter()
+        .filter(|r| matches!(r, Err(TokenUnavailable::KeychainLocked)))
+        .count();
+    Some(if locked == reads.len() {
+        "every account is signed in, but this shell cannot open the Keychain to read one. \
+         A proxy here would forward your own login on every turn and never say so, which is \
+         worse than no proxy. Start it from a terminal on the Mac itself, or unlock with \
+         `security unlock-keychain`."
+            .to_string()
+    } else {
+        "no account has a readable login, so there is nothing to serve turns with. \
+         Sign one in - `swapdex run <name>` - and start the proxy again."
+            .to_string()
+    })
+}
+
+#[cfg(test)]
+mod startup_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn one_readable_login_is_enough_to_start() {
+        assert!(startup_refusal(&[Ok(()), Err(TokenUnavailable::NoLogin)]).is_none());
+        assert!(startup_refusal(&[Ok(())]).is_none());
+    }
+
+    /// A locked Keychain is its own diagnosis - the accounts ARE signed in, and
+    /// telling the user to sign in again sends them to fix something that works.
+    #[test]
+    fn a_locked_keychain_says_so_rather_than_blaming_the_login() {
+        let why = startup_refusal(&[
+            Err(TokenUnavailable::KeychainLocked),
+            Err(TokenUnavailable::KeychainLocked),
+        ])
+        .expect("refused");
+        assert!(why.contains("Keychain"), "{why}");
+        assert!(
+            why.contains("unlock-keychain"),
+            "the fix comes with it: {why}"
+        );
+        assert!(!why.contains("Sign one in"), "not the wrong remedy: {why}");
+    }
+
+    #[test]
+    fn nothing_signed_in_asks_for_a_sign_in() {
+        let why = startup_refusal(&[Err(TokenUnavailable::NoLogin)]).expect("refused");
+        assert!(why.contains("swapdex run"), "{why}");
+    }
+
+    /// No accounts at all is not this function's problem to report - starting
+    /// with an empty registry is already handled, and refusing here would
+    /// duplicate that with a worse message.
+    #[test]
+    fn an_empty_registry_is_left_to_the_caller() {
+        assert!(startup_refusal(&[]).is_none());
+    }
+}
