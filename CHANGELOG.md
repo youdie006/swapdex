@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.36.0] - 2026-08-07
+
+Both of these come from reading what the other tools in this space already do -
+see the survey in the project notes.
+
+### Fixed
+- **A refusal no longer sidelines you for half an hour.** Claude Code reads a `Retry-After` over 20 seconds as "cool down for thirty minutes"; under that, it just sleeps. So relaying a spent window's hour-long wait cost the user thirty minutes over something they could step around by pressing Enter. When another account could have taken the turn, the wait handed back is capped at 20s. When there is nowhere to go the real wait stands, because a capped value would only walk the client into the same wall every twenty seconds.
+- **A lapsed subscription no longer answers for the whole fleet.** `403` appeared nowhere in the proxy: only `401` and `429` moved a turn along, so an unentitled account took every request, refused it, and stopped, while accounts with quota sat unused. 403 says "this ACCOUNT cannot serve" - the same shape as the other two - and the account is held out rather than asked again. `400` and `404` are deliberately not in that set: a bad request is bad on every account, and retrying it elsewhere spends a second account's quota to be told the same thing.
+
 ## [0.35.7] - 2026-08-07
 
 ### Fixed

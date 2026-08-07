@@ -2290,3 +2290,144 @@ mod an_instruction_outranks_what_already_happened {
         assert_eq!(pick_active(None, None, None), None);
     }
 }
+
+/// A refusal we cannot rotate around still goes back as a 429 - that is true.
+/// But Claude Code reads a `Retry-After` over 20s as "cool down for thirty
+/// minutes", so relaying a spent window's hour-long wait sidelines the user for
+/// half an hour over something they could step around by pressing Enter. When
+/// another account could take the turn, the wait handed back is capped.
+fn upstream_refusing_with_a_long_wait(sink: Arc<Mutex<Vec<Seen>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            sink.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let resp = tiny_http::Response::from_string("{\"error\":\"spent\"}")
+                .with_status_code(429)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"retry-after"[..], &b"3600"[..]).unwrap(),
+                )
+                .with_header(
+                    tiny_http::Header::from_bytes(
+                        &b"anthropic-ratelimit-unified-status"[..],
+                        &b"rejected"[..],
+                    )
+                    .unwrap(),
+                );
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[test]
+fn a_refusal_does_not_cool_the_client_down_for_half_an_hour() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "spare", "bbbb2222", "AT-SPARE", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = upstream_refusing_with_a_long_wait(sink.clone());
+    // --no-auto: the proxy will not rotate, so the refusal reaches the client.
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--no-auto"]);
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let resp = agent
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("authorization", "Bearer CLIENT-OWN")
+        .send("{\"t\":1}")
+        .unwrap();
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .map(|v| v.to_str().unwrap_or("").to_string());
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(status, 429, "the refusal is still a refusal");
+    assert_eq!(
+        retry_after.as_deref(),
+        Some("20"),
+        "capped, because `spare` could have taken this turn"
+    );
+}
+
+/// An upstream that refuses the FIRST account it sees with 403 (a lapsed
+/// subscription) and serves anybody else.
+fn upstream_refusing_one_account(sink: Arc<Mutex<Vec<Seen>>>, unentitled: &'static str) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            let barred = auth.contains(unentitled);
+            sink.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let resp = if barred {
+                tiny_http::Response::from_string("{\"error\":\"not entitled\"}")
+                    .with_status_code(403)
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}").with_status_code(200)
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// One account whose subscription lapsed used to answer for the whole fleet:
+/// every turn landed on it, got a 403, and stopped - while accounts with quota
+/// sat unused. 403 says "this ACCOUNT cannot serve", the same shape as 401 and
+/// 429, so the turn moves along.
+#[test]
+fn a_lapsed_subscription_does_not_block_the_fleet() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "lapsed", "aaaa1111", "AT-LAPSED", true);
+    seed_slot(root.path(), "good", "bbbb2222", "AT-GOOD", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = upstream_refusing_one_account(sink.clone(), "AT-LAPSED");
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let resp = agent
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("authorization", "Bearer CLIENT-OWN")
+        .send("{\"t\":1}")
+        .unwrap();
+    let status = resp.status();
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = auths(&sink);
+    assert_eq!(status, 200, "the turn was served, not abandoned: {seen:?}");
+    assert!(
+        seen.iter().any(|a| a.contains("AT-GOOD")),
+        "it moved to the account that could serve: {seen:?}"
+    );
+}

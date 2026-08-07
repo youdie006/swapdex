@@ -266,3 +266,133 @@ mod spent_expiry_tests {
         assert!(!q.still_spent_since(0, 0));
     }
 }
+
+/// How long a `Retry-After` may claim before Claude Code stops sleeping and
+/// starts a THIRTY MINUTE cooldown instead. Measured from its own retry logic:
+/// `429 -> Retry-After (<=20s: sleep, >20s: 30min cooldown)`.
+pub const CLIENT_SLEEPS_UP_TO_SECS: u64 = 20;
+
+/// Rewrite the `Retry-After` on a 429 we are handing back, so the client does
+/// not sit out half an hour over a wall the user can step around in seconds.
+///
+/// Only when there IS somewhere to step: another account with room. Then the
+/// honest thing is "wait a moment", because a moment is all it takes to press
+/// Enter. With nothing to switch to, the real wait stands - telling a client to
+/// retry in 20 seconds against a window that reopens in three hours would just
+/// walk it into the wall over and over.
+pub fn cap_retry_after(
+    headers: &[(String, String)],
+    somewhere_to_go: bool,
+) -> Vec<(String, String)> {
+    if !somewhere_to_go {
+        return headers.to_vec();
+    }
+    headers
+        .iter()
+        .map(|(n, v)| {
+            if n.eq_ignore_ascii_case("retry-after") {
+                let secs = v
+                    .trim()
+                    .parse::<u64>()
+                    .map(|s| s.min(CLIENT_SLEEPS_UP_TO_SECS))
+                    .unwrap_or(CLIENT_SLEEPS_UP_TO_SECS);
+                (n.clone(), secs.to_string())
+            } else {
+                (n.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+    fn get<'a>(hs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        hs.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn a_long_wait_is_capped_when_another_account_could_serve() {
+        let out = cap_retry_after(&h(&[("Retry-After", "3600"), ("x-other", "keep")]), true);
+        assert_eq!(
+            get(&out, "retry-after"),
+            Some("20"),
+            "the client sleeps instead of cooling down for 30 minutes"
+        );
+        assert_eq!(
+            get(&out, "x-other"),
+            Some("keep"),
+            "nothing else is touched"
+        );
+    }
+
+    #[test]
+    fn a_short_wait_is_left_alone() {
+        let out = cap_retry_after(&h(&[("retry-after", "5")]), true);
+        assert_eq!(get(&out, "retry-after"), Some("5"));
+    }
+
+    /// With nowhere to switch, the real wait is the useful one: a capped value
+    /// would send the client back into the same wall every twenty seconds.
+    #[test]
+    fn the_real_wait_stands_when_there_is_nowhere_to_go() {
+        let out = cap_retry_after(&h(&[("retry-after", "3600")]), false);
+        assert_eq!(get(&out, "retry-after"), Some("3600"));
+    }
+
+    #[test]
+    fn a_response_without_the_header_is_unchanged() {
+        let out = cap_retry_after(&h(&[("content-type", "application/json")]), true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(get(&out, "content-type"), Some("application/json"));
+    }
+}
+
+/// Does this status mean "this ACCOUNT cannot serve the turn" - as opposed to
+/// something wrong with the request itself?
+///
+/// 403 was missing, and it is the one that says a subscription lapsed. One
+/// unentitled account then answered for the whole fleet: every turn hit it, got
+/// a 403, and stopped, while accounts with quota sat unused. The upstream
+/// project fixed the same hole on 2026-08-04 ("한 계정의 구독 만료가 전체
+/// 트래픽을 막던 문제").
+///
+/// 400 and 404 are deliberately NOT here: those are the request's fault, and
+/// retrying them on another account just spends a second account's quota to get
+/// the same answer.
+pub fn account_cannot_serve(status: u16) -> bool {
+    matches!(status, 401 | 403 | 429)
+}
+
+#[cfg(test)]
+mod failover_status_tests {
+    use super::*;
+
+    #[test]
+    fn a_lapsed_subscription_moves_the_turn_along() {
+        assert!(
+            account_cannot_serve(403),
+            "403: this account is not entitled"
+        );
+        assert!(account_cannot_serve(401), "401: its login is not accepted");
+        assert!(account_cannot_serve(429), "429: it is out of quota");
+    }
+
+    /// A bad request is bad on every account. Retrying it elsewhere spends a
+    /// second account's quota to be told the same thing.
+    #[test]
+    fn a_broken_request_is_not_an_account_problem() {
+        for s in [200, 400, 404, 500, 529] {
+            assert!(!account_cannot_serve(s), "{s} is not the account's fault");
+        }
+    }
+}

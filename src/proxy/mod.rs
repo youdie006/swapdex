@@ -730,6 +730,10 @@ fn forward_turn(
     // Retries of the CURRENT account after a throttle, counted so a wall is never
     // mistaken for a pause and retried forever.
     let mut attempt = 0u32;
+    // Remembered across the loop so the exit can shape a refusal it could not
+    // rotate around: the last account tried, and whether anything else could have
+    // taken the turn.
+    let mut refused_by: Option<String> = None;
     let up = loop {
         // An already-lapsed token earns a 401 and cannot be refreshed from here,
         // so treat it exactly like having no login: step aside rather than spend
@@ -807,12 +811,12 @@ fn forward_turn(
             // account's and a refusal is its own answer to give. Claude's path
             // checked the pin before rotating and this one did not, so a pinned
             // run quietly billed a different account the moment it was refused.
-            if (up.status == 429 || up.status == 401)
+            if ratelimit::account_cannot_serve(up.status)
                 && live(paths, opts).0
                 && opts.account.is_none()
             {
                 tried.push(slot.name.clone());
-                if up.status == 401 {
+                if up.status == 401 || up.status == 403 {
                     sh.unusable
                         .lock()
                         .unwrap()
@@ -914,6 +918,16 @@ fn forward_turn(
                 .unwrap()
                 .insert(slot.name.clone(), (q, now_secs()));
         }
+        if up.status == 403 {
+            println!(
+                "{}: not entitled to serve this - a lapsed subscription, most likely.                  Holding it out so it cannot answer for the whole fleet.",
+                slot.name
+            );
+            sh.unusable
+                .lock()
+                .unwrap()
+                .mark(&slot.name, std::time::Instant::now());
+        }
         if up.status == 401 {
             println!(
                 "{}: login no longer accepted - run `swapdex run {}` once to sign it in again",
@@ -924,7 +938,7 @@ fn forward_turn(
                 .unwrap()
                 .mark(&slot.name, std::time::Instant::now());
         }
-        if up.status != 429 && up.status != 401 {
+        if !ratelimit::account_cannot_serve(up.status) {
             break up;
         }
 
@@ -939,6 +953,7 @@ fn forward_turn(
             e.1 = now_secs();
         }
         if !live(paths, opts).0 || opts.account.is_some() {
+            refused_by = Some(slot.name.clone());
             break up;
         }
         tried.push(slot.name.clone());
@@ -990,11 +1005,32 @@ fn forward_turn(
                 }
                 println!("{}: no other account can serve this turn", slot.name);
                 std::io::stdout().flush().ok();
+                refused_by = Some(slot.name.clone());
                 break up;
             }
         }
     };
 
+    // A 429 we could not rotate around still goes back as a 429 - it is true. But
+    // Claude Code reads a `Retry-After` over 20s as "cool down for thirty
+    // minutes", and half an hour is absurd when the user can press Enter and be
+    // on another account in seconds. Cap it only when there IS another account:
+    // with nowhere to go, the real wait is the useful one.
+    let mut up = up;
+    if up.status == 429 {
+        if let Some(name) = refused_by {
+            let tried = [name];
+            let somewhere = next_account(paths, sh, &tried).is_some();
+            if somewhere {
+                println!(
+                    "  another account could take this - telling the client to retry in {}s                      rather than let it cool down for 30 minutes",
+                    ratelimit::CLIENT_SLEEPS_UP_TO_SECS
+                );
+                std::io::stdout().flush().ok();
+            }
+            up.headers = ratelimit::cap_retry_after(&up.headers, somewhere);
+        }
+    }
     Ok(up)
 }
 
