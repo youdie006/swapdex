@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.39.1] - 2026-08-07
+
+### Fixed
+- **Usage reads are paced per account instead of all on one clock.** Every account was read on the same fixed interval, which is wrong at both ends: the one near its limit - whose number a rotation actually turns on - went stale between reads, while one sitting at 3% was asked over and over for an answer that could not change. Reading them all together is also what got the usage endpoint to rate-limit swapdex during a survey of its own rivals. An account now waits in proportion to how close it is to mattering: a minute when it is nearly out or has never been measured, fifteen when it has most of its window left. More room can never mean a shorter wait, so the pacing cannot invert at a boundary and hammer exactly the account that needs it least.
+
 ## [0.39.0] - 2026-08-07
 
 ### Added

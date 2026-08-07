@@ -582,3 +582,62 @@ mod hysteresis_tests {
         assert!(!worth_moving_to(Some(1.0), None, HYSTERESIS_MARGIN));
     }
 }
+
+/// How long to wait before measuring an account's usage again.
+///
+/// A fixed interval reads every account at the same rate, which is wrong at both
+/// ends: an account near its limit is the one whose number matters and it goes
+/// stale between reads, while an account at 3% is asked over and over for an
+/// answer that will not change. Reading them all on one clock is also what got
+/// the usage endpoint to rate-limit us during a survey.
+///
+/// So the interval follows how close the account is to mattering.
+pub fn measure_after(headroom: Option<f64>) -> std::time::Duration {
+    let secs = match headroom {
+        // Never measured: find out soon, because a threshold cannot apply to an
+        // account nobody has read.
+        None => 60,
+        // Nearly out - this is the number a rotation will turn on.
+        Some(h) if h <= 10.0 => 60,
+        Some(h) if h <= 25.0 => 120,
+        Some(h) if h <= 50.0 => 300,
+        // Plenty left. Asking again in two minutes buys nothing.
+        _ => 900,
+    };
+    std::time::Duration::from_secs(secs)
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    #[test]
+    fn a_nearly_spent_account_is_watched_closely() {
+        assert!(measure_after(Some(5.0)) <= std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_fresh_one_is_left_alone_far_longer() {
+        assert!(measure_after(Some(95.0)) >= std::time::Duration::from_secs(600));
+    }
+
+    /// Monotone: more room can never mean a shorter wait. Without this the
+    /// pacing could invert at a boundary and hammer exactly the account that
+    /// needs it least.
+    #[test]
+    fn more_room_never_means_a_shorter_wait() {
+        let mut last = std::time::Duration::ZERO;
+        for h in [0.0, 10.0, 25.0, 50.0, 75.0, 100.0] {
+            let d = measure_after(Some(h));
+            assert!(d >= last, "wait shrank at {h}%: {last:?} -> {d:?}");
+            last = d;
+        }
+    }
+
+    /// An unmeasured account is not "plenty left" - the threshold cannot apply
+    /// to a number nobody has, so it is read soon rather than last.
+    #[test]
+    fn an_unmeasured_account_is_read_soon() {
+        assert_eq!(measure_after(None), measure_after(Some(0.0)));
+    }
+}

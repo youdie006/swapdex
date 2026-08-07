@@ -34,6 +34,9 @@ struct Measurement {
     /// When its soonest window turns over, epoch seconds. What `consume-first`
     /// sorts on: quota about to reset costs nothing to spend.
     resets_at: Option<i64>,
+    /// When this reading was taken, so the NEXT one can be paced per account:
+    /// one near its limit is worth watching, one at 3% is not.
+    taken: Option<std::time::Instant>,
 }
 
 impl Measurement {
@@ -242,7 +245,10 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
 /// How long a utilization reading is trusted before being taken again. Long
 /// enough that the proxy is not a stream of requests, short enough that a fast
 /// burn is noticed before it hits the wall.
-const MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+/// How often the measurement PASS runs. Each account then decides for itself
+/// whether it is due (`pick::measure_after`), so this is only the shortest wait
+/// any account could want - it is not how often any single one is read.
+const MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How often idle accounts are renewed so their refresh tokens never go stale.
 ///
@@ -327,8 +333,24 @@ fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
 /// The read itself. Records when it finished, not when it began, so a slow read
 /// is not immediately due again.
 fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
-    let mut out = HashMap::new();
+    // Carry forward what is still fresh enough. Reading every account on one
+    // clock asks the fresh ones for an answer that has not changed, and it is
+    // what got the usage endpoint to rate-limit us.
+    let mut out: HashMap<String, Measurement> = {
+        let m = sh.measured.lock().unwrap();
+        m.1.clone()
+    };
+    let now = std::time::Instant::now();
     for r in slots {
+        if let Some(prev) = out.get(&r.name) {
+            let due = prev.taken.is_none_or(|t| {
+                now.duration_since(t)
+                    >= pick::measure_after(pick::headroom(prev.five_h, prev.seven_d))
+            });
+            if !due {
+                continue;
+            }
+        }
         let Some(tok) = creds::slot_token(&r.config_dir) else {
             continue;
         };
@@ -351,6 +373,7 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                         .flatten()
                         .filter_map(|w| w.resets_at)
                         .min(),
+                    taken: Some(std::time::Instant::now()),
                 },
             );
         }
