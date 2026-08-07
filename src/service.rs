@@ -36,6 +36,7 @@ fn short_tool(tool: &str) -> &'static str {
 /// cannot be read afterwards, and that is how a broken one went unnoticed.
 pub fn launchd_plist(exe: &Path, tool: &str, log_dir: &Path) -> String {
     let label = launchd_label(tool);
+    let port = crate::commands::default_port_for(tool);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,6 +49,8 @@ pub fn launchd_plist(exe: &Path, tool: &str, log_dir: &Path) -> String {
     <string>proxy</string>
     <string>--tool</string>
     <string>{tool}</string>
+    <string>--port</string>
+    <string>{port}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -65,13 +68,14 @@ pub fn launchd_plist(exe: &Path, tool: &str, log_dir: &Path) -> String {
 /// A systemd USER unit - not a system one. The proxy holds one person's
 /// credentials and must run as that person, never as root.
 pub fn systemd_service(exe: &Path, tool: &str) -> String {
+    let port = crate::commands::default_port_for(tool);
     format!(
         "[Unit]\n\
          Description=swapdex {tool} proxy\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
-         ExecStart={exe} proxy --tool {tool}\n\
+         ExecStart={exe} proxy --tool {tool} --port {port}\n\
          Restart=always\n\
          RestartSec=5\n\
          \n\
@@ -144,14 +148,17 @@ fn stop_running(paths: &Paths, tool: &str) {
 /// Hand the unit to the supervisor. Failures are reported, never fatal: the file
 /// is written either way, and `launchctl`/`systemctl` can be run by hand.
 fn load(path: &Path, tool: &str) {
-    let run = |prog: &str, args: &[&str]| {
+    // `quiet` marks a step whose failure is the NORMAL case - booting out an
+    // agent that was never loaded. Printing launchctl's "Input/output error"
+    // there made a clean first install read as if something had gone wrong.
+    let run = |prog: &str, args: &[&str], quiet: bool| {
         let out = std::process::Command::new(prog).args(args).output();
         match out {
             Ok(o) if o.status.success() => true,
             Ok(o) => {
                 let e = String::from_utf8_lossy(&o.stderr);
                 let e = e.trim();
-                if !e.is_empty() {
+                if !e.is_empty() && !quiet {
                     eprintln!("swapdex: {prog} said: {e}");
                 }
                 false
@@ -165,15 +172,17 @@ fn load(path: &Path, tool: &str) {
     if cfg!(target_os = "macos") {
         let p = path.display().to_string();
         // Replace rather than add: bootstrap fails outright on an already-loaded
-        // label, and "already there" is the normal case on a re-install.
+        // label, and "already there" is the normal case on a re-install. Nothing
+        // to boot out is equally normal, which is why that step says nothing.
         let target = format!("gui/{}", unsafe { libc::getuid() });
-        run("launchctl", &["bootout", &target, &p]);
-        run("launchctl", &["bootstrap", &target, &p]);
+        run("launchctl", &["bootout", &target, &p], true);
+        run("launchctl", &["bootstrap", &target, &p], false);
     } else {
-        run("systemctl", &["--user", "daemon-reload"]);
+        run("systemctl", &["--user", "daemon-reload"], false);
         run(
             "systemctl",
             &["--user", "enable", "--now", &systemd_unit(tool)],
+            false,
         );
     }
 }
@@ -235,6 +244,21 @@ mod tests {
             p.contains("/tmp/logs/io.github.youdie006.swapdex.claude.log"),
             "its output is kept, because a proxy that logs nowhere cannot be diagnosed: {p}"
         );
+    }
+
+    /// Each agent must name its OWN port. Without one the unit takes the CLI
+    /// default, which is Claude's - so the Codex agent tried to bind a port the
+    /// Claude agent already held, exited 1, and was restarted into that failure
+    /// by the supervisor. `proxy --ensure` knew to add one for Codex; the unit
+    /// did not, because it does not go through `--ensure`.
+    #[test]
+    fn each_agent_carries_the_port_it_should_bind() {
+        let claude = launchd_plist(Path::new("/x/swapdex"), "claude-code", Path::new("/l"));
+        let codex = launchd_plist(Path::new("/x/swapdex"), "codex", Path::new("/l"));
+        assert!(claude.contains("<string>8787</string>"), "{claude}");
+        assert!(codex.contains("<string>8788</string>"), "{codex}");
+        let u = systemd_service(Path::new("/x/swapdex"), "codex");
+        assert!(u.contains("--port 8788"), "{u}");
     }
 
     #[test]

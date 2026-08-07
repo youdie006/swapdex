@@ -1624,6 +1624,17 @@ pub fn proxy(
 /// takes the next one, so both tools' shims can start their own.
 pub const DEFAULT_PROXY_PORT: u16 = 8787;
 
+/// The port a tool's proxy binds when nobody names one. Codex takes the next
+/// port so both can run at once - the rule `proxy --ensure` has always applied,
+/// now stated once so anything else writing a proxy invocation agrees with it.
+pub fn default_port_for(tool: &str) -> u16 {
+    if tool == "codex" {
+        DEFAULT_PROXY_PORT + 1
+    } else {
+        DEFAULT_PROXY_PORT
+    }
+}
+
 /// `proxy --ensure` - print the port of a live proxy, starting one in the
 /// background if there is none. This is what lets a plain `claude` (through the
 /// shim) get proxy mode without the user running or remembering anything. Exits

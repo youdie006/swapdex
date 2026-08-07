@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.38.1] - 2026-08-07
+
+### Fixed
+- **Each service agent binds its own port.** The unit named no port, so it took the command line's default - which is Claude's. The Codex agent therefore tried to bind a port the Claude agent already held, exited, and was restarted into that same failure by the supervisor. `proxy --ensure` had always known to give Codex the next port; the unit does not go through `--ensure`, so the rule now lives in one place both use.
+- **A first install no longer looks like it failed.** Installing boots the agent out before loading it, because "already loaded" is the normal case on a re-install - but on a FIRST install there is nothing to boot out, and launchctl's complaint about it was printed as though something had gone wrong.
+
 ## [0.38.0] - 2026-08-07
 
 ### Added
