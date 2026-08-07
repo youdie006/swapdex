@@ -4467,6 +4467,36 @@ pub fn serve(
     Ok(0)
 }
 
+/// `swapdex strategy [roomiest|consume-first]` - which account auto-continue
+/// reaches for when the current one is full.
+pub fn strategy(paths: &Paths, value: Option<&str>) -> Result<i32> {
+    let mut cfg = crate::settings::load(paths);
+    let Some(value) = value else {
+        let s = cfg.strategy();
+        println!("{}", s.as_str());
+        println!(
+            "{}",
+            match s {
+                crate::proxy::pick::Strategy::Roomiest =>
+                    "  reaches for the account with the most left - the largest buffer for a burst",
+                crate::proxy::pick::Strategy::ConsumeFirst =>
+                    "  reaches for the window about to reset, so quota does not lapse unused",
+            }
+        );
+        return Ok(0);
+    };
+    let Some(parsed) = crate::proxy::pick::Strategy::parse(value) else {
+        eprintln!("swapdex: unknown strategy '{value}' - use `roomiest` or `consume-first`");
+        return Ok(2);
+    };
+    cfg.proxy_strategy = Some(parsed.as_str().to_string());
+    crate::settings::save(paths, &cfg)?;
+    println!("strategy: {}", parsed.as_str());
+    // Read per request, so a proxy already running follows without a restart.
+    println!("  a running proxy follows this from its next turn");
+    Ok(0)
+}
+
 /// `swapdex service install` - hand the proxy to launchd or systemd.
 ///
 /// Two things this fixes, both learned the hard way. A proxy started by the shim

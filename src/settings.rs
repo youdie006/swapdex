@@ -26,6 +26,11 @@ pub struct Settings {
     /// waiting for it to refuse a turn. `None` = wait for the refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_threshold: Option<f64>,
+    /// Which account to reach for when the current one is full: `roomiest` (the
+    /// most left) or `consume-first` (the window about to reset, so nothing
+    /// lapses unused). `None` = roomiest, the behaviour swapdex has always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_strategy: Option<String>,
 }
 
 impl Settings {
@@ -57,6 +62,16 @@ impl Settings {
 
     /// Rank for rotation: ranked accounts first in their listed order, everything
     /// else after, so a partial ranking is still meaningful.
+    /// The rotation strategy, defaulting to the long-standing one. An
+    /// unrecognised value in the file is ignored rather than fatal: a settings
+    /// file is a convenience and must never fail a command.
+    pub fn strategy(&self) -> crate::proxy::pick::Strategy {
+        self.proxy_strategy
+            .as_deref()
+            .and_then(crate::proxy::pick::Strategy::parse)
+            .unwrap_or_default()
+    }
+
     pub fn rank(&self, name: &str) -> usize {
         self.priority
             .iter()

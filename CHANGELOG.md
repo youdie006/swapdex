@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.39.0] - 2026-08-07
+
+### Added
+- **`swapdex strategy consume-first` spends the quota that is about to reset.** Auto-continue reached for the account with the most left, which is the largest buffer for a burst but lets a nearly-reset window lapse unused. `consume-first` takes the soonest-resetting one instead: quota minutes from turning over costs nothing to spend, and spending it leaves the long windows intact. `roomiest` stays the default and the old behaviour. An account with nothing left is skipped under either, because "soonest" means nothing when there is nothing to spend, and an explicit priority still outranks both.
+
+### Fixed
+- **The session stops trading places over a marginal difference.** Only a time cooldown stood between two accounts either side of the threshold, so they handed the session back and forth every time it lapsed - and every hop throws away a warm prompt cache, which is organisation-scoped and expensive to rebuild. A move now has to buy at least ten points of headroom. (Not under `consume-first`, where moving to a smaller window is the whole point.)
+
 ## [0.38.1] - 2026-08-07
 
 ### Fixed

@@ -389,3 +389,196 @@ mod extra_usage_tests {
         }
     }
 }
+
+/// Which account to reach for when the current one is full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Strategy {
+    /// Most room left first. Spreads the load and keeps the largest buffer for a
+    /// burst - the rule swapdex has always used.
+    #[default]
+    Roomiest,
+    /// Soonest-resetting window first. Quota that is about to reset costs
+    /// nothing to spend, and spending it leaves the long windows untouched;
+    /// picking the roomiest account instead lets the nearly-reset one lapse
+    /// unused. teamclaude prefers this, and claude-swap calls it `consume-first`.
+    ConsumeFirst,
+}
+
+impl Strategy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "roomiest" | "best" => Some(Self::Roomiest),
+            "consume-first" | "consume_first" | "soonest" => Some(Self::ConsumeFirst),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Roomiest => "roomiest",
+            Self::ConsumeFirst => "consume-first",
+        }
+    }
+}
+
+/// Order candidates by the chosen strategy. An explicit rank still wins in both:
+/// the user saying "prefer this one" outranks any measurement.
+///
+/// `resets_in` is seconds until the account's soonest window turns over. An
+/// account with nothing measured sorts after measured ones under either
+/// strategy - unmeasured is not "empty" and not "free".
+pub fn order_by<T>(
+    items: &mut [T],
+    strategy: Strategy,
+    rank: impl Fn(&T) -> usize,
+    room: impl Fn(&T) -> Option<f64>,
+    resets_in: impl Fn(&T) -> Option<i64>,
+) {
+    match strategy {
+        Strategy::Roomiest => by_headroom(items, rank, room),
+        Strategy::ConsumeFirst => items.sort_by(|a, b| {
+            rank(a).cmp(&rank(b)).then_with(|| {
+                // Anything with no room left is not a candidate at all, whatever
+                // its reset says: spending "soonest" makes no sense when there is
+                // nothing left to spend.
+                let usable = |t: &T| room(t).is_none_or(|r| r > 0.0);
+                match (usable(a), usable(b)) {
+                    (true, false) => return std::cmp::Ordering::Less,
+                    (false, true) => return std::cmp::Ordering::Greater,
+                    _ => {}
+                }
+                match (resets_in(a), resets_in(b)) {
+                    (Some(x), Some(y)) => x.cmp(&y), // soonest first
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            })
+        }),
+    }
+}
+
+/// How much MORE room a candidate needs before the session is moved onto it.
+///
+/// A cooldown alone stops a fast flip-flop but not a slow one: two accounts
+/// either side of the line trade the session every time the timer lapses, and
+/// each hop throws away a warm prompt cache. A margin says "only move for a
+/// real improvement".
+pub const HYSTERESIS_MARGIN: f64 = 10.0;
+
+/// Is the candidate enough better than where we are to be worth the move?
+///
+/// Unmeasured on either side means the question cannot be answered, and the
+/// answer is no - moving on a guess is how a session ends up somewhere nobody
+/// chose.
+pub fn worth_moving_to(
+    current_room: Option<f64>,
+    candidate_room: Option<f64>,
+    margin: f64,
+) -> bool {
+    match (current_room, candidate_room) {
+        (Some(now), Some(next)) => next - now >= margin,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod strategy_tests {
+    use super::*;
+
+    /// (name, rank, room, seconds until its soonest window resets)
+    type Acct = (&'static str, usize, Option<f64>, Option<i64>);
+
+    fn order(strategy: Strategy, mut v: Vec<Acct>) -> Vec<&'static str> {
+        order_by(&mut v, strategy, |a| a.1, |a| a.2, |a| a.3);
+        v.into_iter().map(|a| a.0).collect()
+    }
+
+    #[test]
+    fn roomiest_takes_the_account_with_the_most_left() {
+        let v = vec![
+            ("tight", 0, Some(5.0), Some(60)),
+            ("roomy", 0, Some(80.0), Some(9_000)),
+        ];
+        assert_eq!(order(Strategy::Roomiest, v), ["roomy", "tight"]);
+    }
+
+    /// The point of consume-first: `soon` has less left, but its window turns
+    /// over in a minute, so spending it costs nothing and leaves `roomy` intact.
+    /// Roomiest would let that minute's worth lapse unused.
+    #[test]
+    fn consume_first_takes_the_window_about_to_reset() {
+        let v = vec![
+            ("roomy", 0, Some(80.0), Some(9_000)),
+            ("soon", 0, Some(30.0), Some(60)),
+        ];
+        assert_eq!(order(Strategy::ConsumeFirst, v), ["soon", "roomy"]);
+    }
+
+    /// "Soonest" is meaningless for an account with nothing left to spend.
+    #[test]
+    fn consume_first_still_skips_an_account_with_nothing_in_it() {
+        let v = vec![
+            ("empty", 0, Some(0.0), Some(30)),
+            ("has-some", 0, Some(20.0), Some(9_000)),
+        ];
+        assert_eq!(order(Strategy::ConsumeFirst, v), ["has-some", "empty"]);
+    }
+
+    #[test]
+    fn an_explicit_rank_outranks_both_strategies() {
+        for s in [Strategy::Roomiest, Strategy::ConsumeFirst] {
+            let v = vec![
+                ("second", 1, Some(99.0), Some(10)),
+                ("preferred", 0, Some(1.0), Some(99_999)),
+            ];
+            assert_eq!(order(s, v)[0], "preferred", "{s:?}");
+        }
+    }
+
+    #[test]
+    fn unmeasured_accounts_sort_after_measured_ones() {
+        for s in [Strategy::Roomiest, Strategy::ConsumeFirst] {
+            let v = vec![
+                ("unknown", 0, None, None),
+                ("known", 0, Some(50.0), Some(500)),
+            ];
+            assert_eq!(order(s, v)[0], "known", "{s:?}");
+        }
+    }
+
+    #[test]
+    fn the_names_round_trip() {
+        for s in [Strategy::Roomiest, Strategy::ConsumeFirst] {
+            assert_eq!(Strategy::parse(s.as_str()), Some(s));
+        }
+        assert_eq!(Strategy::parse("best"), Some(Strategy::Roomiest));
+        assert_eq!(Strategy::parse("nonsense"), None);
+    }
+}
+
+#[cfg(test)]
+mod hysteresis_tests {
+    use super::*;
+
+    /// Two accounts either side of the line traded the session every time the
+    /// cooldown lapsed, and every hop cost a warm prompt cache. A move now has
+    /// to buy something.
+    #[test]
+    fn a_marginal_improvement_is_not_worth_the_move() {
+        assert!(!worth_moving_to(Some(8.0), Some(12.0), HYSTERESIS_MARGIN));
+        assert!(worth_moving_to(Some(8.0), Some(40.0), HYSTERESIS_MARGIN));
+    }
+
+    #[test]
+    fn moving_to_something_worse_is_never_worth_it() {
+        assert!(!worth_moving_to(Some(50.0), Some(20.0), HYSTERESIS_MARGIN));
+    }
+
+    /// Unmeasured cannot be compared, and moving on a guess is how a session
+    /// lands somewhere nobody chose.
+    #[test]
+    fn an_unmeasured_side_is_not_a_reason_to_move() {
+        assert!(!worth_moving_to(None, Some(90.0), HYSTERESIS_MARGIN));
+        assert!(!worth_moving_to(Some(1.0), None, HYSTERESIS_MARGIN));
+    }
+}

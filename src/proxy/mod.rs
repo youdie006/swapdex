@@ -19,12 +19,31 @@ use std::sync::{Arc, Mutex};
 /// Everything the request threads share: the upstream client, where upstream is,
 /// the per-account quota state, and the account-choice state. One struct so a
 /// request handler keeps a small signature as the proxy grows.
-/// One account's measured utilization: the 5h and 7d percentages (either may be
-/// unmeasured), and whether it can keep serving once those are full - which it
-/// can when extra usage is enabled and its spend cap is not reached. Without
-/// that last part a full window read as a wall, and the proxy stepped off an
-/// account that was answering turns perfectly well.
-type Utilization = (Option<f64>, Option<f64>, bool);
+/// One account's measured state. A struct rather than a tuple because it now
+/// carries four unrelated facts, and `(a, b, c, d)` at a call site says none of
+/// them.
+#[derive(Clone, Copy, Debug, Default)]
+struct Measurement {
+    /// Percentages USED, either of which may be unmeasured.
+    five_h: Option<f64>,
+    seven_d: Option<f64>,
+    /// Can it keep serving once those are full? True when extra usage is enabled
+    /// and its spend cap is not reached. Without this a full window read as a
+    /// wall, and the proxy stepped off an account answering turns perfectly well.
+    credits: bool,
+    /// When its soonest window turns over, epoch seconds. What `consume-first`
+    /// sorts on: quota about to reset costs nothing to spend.
+    resets_at: Option<i64>,
+}
+
+impl Measurement {
+    /// Seconds until the soonest window resets, relative to `now`.
+    fn resets_in(&self, now: i64) -> Option<i64> {
+        self.resets_at.map(|r| r - now)
+    }
+}
+
+type Utilization = Measurement;
 
 /// Measured utilization per account, with when the reading was taken.
 type Measured = (Option<std::time::Instant>, HashMap<String, Utilization>);
@@ -163,7 +182,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                 .unwrap()
                 .1
                 .get(&chosen.name)
-                .is_some_and(|(a, b, c)| pick::over_threshold_with(*a, *b, t, *c));
+                .is_some_and(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits));
             // A move made moments ago stands: without this, two accounts either
             // side of the line trade the session back and forth.
             let cooling = sh
@@ -321,11 +340,18 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         if let crate::quota::Fetch::Ok(q) = crate::quota::fetch_with_retry(&token) {
             out.insert(
                 r.name.clone(),
-                (
-                    q.five_hour.map(|w| w.used_pct),
-                    q.seven_day.map(|w| w.used_pct),
-                    q.can_serve_past_windows(),
-                ),
+                Measurement {
+                    five_h: q.five_hour.map(|w| w.used_pct),
+                    seven_d: q.seven_day.map(|w| w.used_pct),
+                    credits: q.can_serve_past_windows(),
+                    // The soonest of the two windows: that is the one whose
+                    // quota is about to become free.
+                    resets_at: [q.five_hour, q.seven_day]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|w| w.resets_at)
+                        .min(),
+                },
             );
         }
     }
@@ -337,9 +363,12 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
     } else {
         let mut parts: Vec<String> = out
             .iter()
-            .map(|(n, (a, b, credits))| {
-                let worst = [*a, *b].into_iter().flatten().fold(f64::NAN, f64::max);
-                let via = if *credits { " (on credits)" } else { "" };
+            .map(|(n, m)| {
+                let worst = [m.five_h, m.seven_d]
+                    .into_iter()
+                    .flatten()
+                    .fold(f64::NAN, f64::max);
+                let via = if m.credits { " (on credits)" } else { "" };
                 if worst.is_finite() {
                     format!("{n} {worst:.0}%{via}")
                 } else {
@@ -369,18 +398,29 @@ fn usable_under_threshold(
     let unusable = sh.unusable.lock().unwrap();
     let now = std::time::Instant::now();
     let now_s = now_secs();
-    // Most room first, so the session lands somewhere it can stay - picking the
-    // first eligible account tends to land on one that is nearly full too.
-    pick::by_headroom(
+    // Ordered by the chosen strategy, so the session lands somewhere it can stay -
+    // picking the first eligible account tends to land on one nearly full too.
+    let room = |r: &crate::slots::SlotRecord| {
+        measured
+            .1
+            .get(&r.name)
+            .and_then(|m| pick::headroom(m.five_h, m.seven_d))
+    };
+    pick::order_by(
         &mut slots,
+        cfg.strategy(),
         |r| cfg.rank(&r.name),
-        |r| {
-            measured
-                .1
-                .get(&r.name)
-                .and_then(|(a, b, _)| pick::headroom(*a, *b))
-        },
+        room,
+        |r| measured.1.get(&r.name).and_then(|m| m.resets_in(now_s)),
     );
+    // Where we are now, so a move has to buy something. A cooldown alone stops a
+    // fast flip-flop but not a slow one: two accounts either side of the line
+    // trade the session every time the timer lapses, and each hop throws away a
+    // warm prompt cache.
+    let here = measured
+        .1
+        .get(current)
+        .and_then(|m| pick::headroom(m.five_h, m.seven_d));
     slots.into_iter().find(|r| {
         r.name != current
             && !cfg.is_disabled(&r.name)
@@ -391,8 +431,14 @@ fn usable_under_threshold(
             && !measured
                 .1
                 .get(&r.name)
-                .is_some_and(|(a, b, c)| pick::over_threshold_with(*a, *b, threshold, *c))
+                .is_some_and(|m| {
+                    pick::over_threshold_with(m.five_h, m.seven_d, threshold, m.credits)
+                })
             && creds::slot_token(&r.config_dir).is_some()
+            // Under consume-first the point IS to move to a smaller window, so
+            // the margin would forbid the very move the strategy asks for.
+            && (cfg.strategy() == pick::Strategy::ConsumeFirst
+                || pick::worth_moving_to(here, room(r), pick::HYSTERESIS_MARGIN))
     })
 }
 
@@ -599,7 +645,7 @@ fn next_account_in(
                 measured
                     .1
                     .get(&r.name)
-                    .and_then(|(a, b, _)| pick::headroom(*a, *b))
+                    .and_then(|m| pick::headroom(m.five_h, m.seven_d))
             },
         );
     }

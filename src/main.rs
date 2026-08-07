@@ -218,6 +218,13 @@ enum Cmd {
         /// A fraction, a percentage, or `off`; omit to show the current setting
         value: Option<String>,
     },
+    /// Which account auto-continue reaches for: `roomiest` or `consume-first`
+    Strategy {
+        /// Omit to show. `roomiest` takes the account with the most left;
+        /// `consume-first` takes the window about to reset, so nothing lapses
+        /// unused.
+        value: Option<String>,
+    },
     /// Turn auto-continue (proxy hands a spent session to another account) on/off
     Auto {
         /// `on`, `off`, or omit to show the current setting
@@ -405,6 +412,7 @@ fn main() {
             *ensure,
             *threshold,
         ),
+        Cmd::Strategy { value } => commands::strategy(&paths, value.as_deref()),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
         Cmd::Slash => commands::install_slash(&paths),
         Cmd::Threshold { value } => commands::threshold(&paths, value.as_deref()),
