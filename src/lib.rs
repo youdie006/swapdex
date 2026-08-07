@@ -12,6 +12,7 @@ pub mod quota;
 pub mod quota_cache;
 pub mod refresh;
 pub mod secret;
+pub mod service;
 pub mod session_link;
 pub mod settings;
 pub mod shim;

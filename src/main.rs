@@ -14,6 +14,24 @@ struct Cli {
 }
 
 #[derive(clap::Subcommand)]
+enum ServiceCmd {
+    /// Install and start the agent, so the proxy survives a closed terminal and
+    /// comes back by itself
+    Install {
+        /// Which tool's proxy (default: claude)
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
+    },
+    /// Stop and remove it
+    Uninstall {
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
+    },
+    /// Where the unit is and whether it is loaded
+    Status,
+}
+
+#[derive(clap::Subcommand)]
 enum Cmd {
     /// Save the current live login as a named profile
     Add {
@@ -89,6 +107,11 @@ enum Cmd {
         /// this is what keeps an account nobody touches from needing a sign-in.
         #[arg(long, conflicts_with = "name")]
         keep_alive: bool,
+    },
+    /// Keep the proxy running as a background service (launchd / systemd)
+    Service {
+        #[command(subcommand)]
+        what: ServiceCmd,
     },
     /// List the permanent account slots
     Slots,
@@ -344,6 +367,11 @@ fn main() {
                 commands::refresh(&paths, name.as_deref())
             }
         }
+        Cmd::Service { what } => match what {
+            ServiceCmd::Install { tool } => commands::service_install(&paths, *tool),
+            ServiceCmd::Uninstall { tool } => commands::service_uninstall(*tool),
+            ServiceCmd::Status => commands::service_status(&paths),
+        },
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),

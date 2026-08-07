@@ -4456,6 +4456,72 @@ pub fn serve(
     Ok(0)
 }
 
+/// `swapdex service install` - hand the proxy to launchd or systemd.
+///
+/// Two things this fixes, both learned the hard way. A proxy started by the shim
+/// dies with the shell that started it, so killing a terminal quietly removes it;
+/// and one started over ssh on macOS cannot open the Keychain, so it answers
+/// every turn with the client's own login and never says so. An agent runs in the
+/// user's own login session, has that access, and is restarted when it stops.
+pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
+    let tool = slot_tool(sel);
+    let path = crate::service::install(paths, tool)?;
+    println!(
+        "the {} proxy is now a service: {}",
+        tool_binary(tool),
+        crate::util::redact_path(&path.display().to_string())
+    );
+    println!(
+        "  it starts at login, comes back if it stops, and writes what it says to {}",
+        crate::util::redact_path(&crate::service::log_dir(paths).display().to_string())
+    );
+    Ok(0)
+}
+
+/// `swapdex service uninstall` - stop it and take the unit away.
+pub fn service_uninstall(sel: Option<ToolSel>) -> Result<i32> {
+    let tool = slot_tool(sel);
+    match crate::service::uninstall(tool)? {
+        Some(p) => println!(
+            "removed {}",
+            crate::util::redact_path(&p.display().to_string())
+        ),
+        None => println!("no {} service was installed", tool_binary(tool)),
+    }
+    Ok(0)
+}
+
+/// `swapdex service status` - what is installed, and whether it is up.
+pub fn service_status(paths: &Paths) -> Result<i32> {
+    let home = dirs::home_dir();
+    for tool in ["claude-code", "codex"] {
+        let path = home.as_ref().map(|h| {
+            if cfg!(target_os = "macos") {
+                crate::service::launchd_path(h, tool)
+            } else {
+                crate::service::systemd_path(h, tool)
+            }
+        });
+        let installed = path.as_ref().is_some_and(|p| p.exists());
+        let running = crate::proxy::running_proxy_for(paths, tool).is_some();
+        println!(
+            "{:<12} service: {:<13} proxy: {}",
+            tool_binary(tool),
+            if installed {
+                "installed"
+            } else {
+                "not installed"
+            },
+            if running { "running" } else { "not running" }
+        );
+    }
+    println!(
+        "  logs: {}",
+        crate::util::redact_path(&crate::service::log_dir(paths).display().to_string())
+    );
+    Ok(0)
+}
+
 /// `swapdex refresh --keep-alive` - renew every idle account heading for expiry.
 ///
 /// The same sweep the proxy runs on a timer, exposed so it can be run by hand or

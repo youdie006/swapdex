@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.38.0] - 2026-08-07
+
+### Added
+- **`swapdex service install` hands the proxy to launchd or systemd.** Two things this fixes, both learned the hard way. A proxy the shim starts dies with the shell that started it, so closing a terminal quietly removes it. And one started over ssh on macOS cannot open the Keychain, so it answers every turn by forwarding the client's own login - which is how a broken proxy served for a full day unnoticed. An agent runs in the user's own login session, has that access, restarts if it stops, and keeps its output in a file rather than sending it nowhere. `service status` says what is installed and whether it is up; `service uninstall` takes it away. The unit is a USER agent, never a system one: this process holds one person's credentials. Installing stops whatever the shim already started first, because with restart-on-failure set, a supervised proxy that cannot bind the port would be restarted into that same failure forever.
+
 ## [0.37.0] - 2026-08-07
 
 ### Added
