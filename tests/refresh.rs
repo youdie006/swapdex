@@ -197,3 +197,69 @@ fn a_refused_renewal_changes_nothing() {
         "the credential is untouched"
     );
 }
+
+/// The keep-alive sweep is the answer to accounts that die of neglect. An OAuth
+/// refresh token rotates when it is used; leave an account alone long enough and
+/// only a browser sign-in brings it back. Three accounts on the machine this was
+/// written for died exactly that way and stayed dead for a week.
+///
+/// So the sweep renews AHEAD of expiry - a token with hours left still gets
+/// exercised - and it must reach an account nobody is using, which is the one at
+/// risk.
+#[test]
+fn keep_alive_renews_an_account_that_has_not_lapsed_yet() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "idle", "aaaa1111");
+    // Rewrite it to something still VALID, a couple of hours from expiry: the
+    // state `swapdex refresh` would leave alone and neglect would then kill.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(
+        slot.join(".credentials.json"),
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
+               "expiresAt":{},"refreshTokenExpiresAt":{}}}}}"#,
+            now_ms + 2 * 3_600_000,
+            now_ms + 30 * 86_400_000
+        ),
+    )
+    .unwrap();
+
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = fake_oauth(
+        asked.clone(),
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+    );
+    let out = Command::new(bin())
+        .args(["refresh", "--keep-alive"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_OAUTH_URL", &url)
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "a token still valid for two hours was exercised anyway: {said}"
+    );
+    let after = std::fs::read_to_string(slot.join(".credentials.json")).unwrap();
+    assert!(
+        after.contains("NEW-AT"),
+        "the renewed token was written: {after}"
+    );
+    assert!(
+        after.contains("NEW-RT"),
+        "and the rotated refresh token replaced the spent one: {after}"
+    );
+    assert!(
+        said.contains("idle"),
+        "it says which account it renewed: {said}"
+    );
+}

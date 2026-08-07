@@ -4456,6 +4456,41 @@ pub fn serve(
     Ok(0)
 }
 
+/// `swapdex refresh --keep-alive` - renew every idle account heading for expiry.
+///
+/// The same sweep the proxy runs on a timer, exposed so it can be run by hand or
+/// from cron on a machine where the proxy is not always up. An account nobody
+/// touches is the one that dies: its refresh token goes stale unused, and then
+/// only a browser sign-in brings it back.
+pub fn keep_alive(paths: &Paths) -> Result<i32> {
+    let slots: Vec<(String, std::path::PathBuf)> =
+        crate::slots::Slots::open_for(paths, "claude-code")
+            .map(|s| {
+                s.list()
+                    .into_iter()
+                    .map(|r| (r.name, r.config_dir))
+                    .collect()
+            })
+            .unwrap_or_default();
+    if slots.is_empty() {
+        println!("no Claude accounts to keep alive");
+        return Ok(0);
+    }
+    let (renewed, failed) = crate::refresh::keep_alive_sweep(&slots, now_ms());
+    for name in &renewed {
+        println!("renewed {name}");
+    }
+    for (name, why) in &failed {
+        eprintln!("{}", why.remedy(name));
+    }
+    if renewed.is_empty() && failed.is_empty() {
+        println!("every account has time left - nothing needed renewing");
+    }
+    // A sweep that could not renew something is worth an exit code, so cron can
+    // notice; nothing to do is success.
+    Ok(i32::from(!failed.is_empty()) * 4)
+}
+
 /// `swapdex refresh [name]` - renew a lapsed access token so the account stays
 /// usable without signing in again.
 ///

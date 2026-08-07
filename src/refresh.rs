@@ -352,3 +352,121 @@ mod tests {
         );
     }
 }
+
+/// How long before an access token lapses a keep-alive sweep renews it.
+///
+/// Wider than `needs_refresh`'s five minutes on purpose: that one answers "is
+/// this token unusable right now", which is a question you ask when a turn is
+/// waiting. This one answers "will this account still work tomorrow", and the
+/// sweep runs whether or not anybody is using the account.
+pub const KEEP_ALIVE_WINDOW_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// Should a keep-alive sweep renew this credential now?
+///
+/// An OAuth refresh token is not a key that sits still - it is exercised, and it
+/// rotates. Leave an account idle long enough and its refresh token goes stale,
+/// and then only a browser sign-in brings it back. Three of this machine's
+/// accounts died exactly that way and stayed dead for a week.
+///
+/// So the sweep renews ahead of expiry rather than at it. Nothing to renew, or a
+/// refresh token already gone, is not this function's problem: renewing needs a
+/// refresh token, and a dead one needs a human.
+pub fn wants_keep_alive(blob: &[u8], now_ms: i64) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob) else {
+        return false;
+    };
+    let oauth = &v["claudeAiOauth"];
+    if oauth["refreshToken"].as_str().is_none_or(str::is_empty) {
+        return false;
+    }
+    if refresh_token_expired(blob, now_ms) {
+        return false;
+    }
+    oauth["expiresAt"]
+        .as_i64()
+        .is_some_and(|exp| exp - now_ms <= KEEP_ALIVE_WINDOW_MS)
+}
+
+#[cfg(test)]
+mod keep_alive_tests {
+    use super::*;
+
+    fn blob(expires_in_ms: i64, refresh: &str, refresh_expiry: Option<i64>) -> Vec<u8> {
+        let now = 1_700_000_000_000i64;
+        let mut o = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "a",
+                "refreshToken": refresh,
+                "expiresAt": now + expires_in_ms,
+            }
+        });
+        if let Some(r) = refresh_expiry {
+            o["claudeAiOauth"]["refreshTokenExpiresAt"] = (now + r).into();
+        }
+        serde_json::to_vec(&o).unwrap()
+    }
+    const NOW: i64 = 1_700_000_000_000;
+
+    #[test]
+    fn an_idle_account_is_renewed_before_it_lapses() {
+        let hour = 60 * 60 * 1000;
+        assert!(
+            wants_keep_alive(&blob(2 * hour, "r", None), NOW),
+            "two hours left is inside the window"
+        );
+        assert!(
+            !wants_keep_alive(&blob(12 * hour, "r", None), NOW),
+            "half a day left needs nothing yet"
+        );
+    }
+
+    /// Renewing takes a refresh token. Without one - or with one already gone -
+    /// the sweep has nothing to do, and only a sign-in helps.
+    #[test]
+    fn there_is_nothing_to_sweep_without_a_live_refresh_token() {
+        let hour = 60 * 60 * 1000;
+        assert!(
+            !wants_keep_alive(&blob(hour, "", None), NOW),
+            "no refresh token"
+        );
+        assert!(
+            !wants_keep_alive(&blob(hour, "r", Some(-1)), NOW),
+            "the refresh token itself has expired"
+        );
+    }
+
+    #[test]
+    fn nonsense_is_never_swept() {
+        assert!(!wants_keep_alive(b"not json", NOW));
+        assert!(!wants_keep_alive(br#"{"claudeAiOauth":{}}"#, NOW));
+    }
+}
+
+/// Renew every idle account whose token is heading for expiry. Returns the names
+/// it renewed and the ones it could not, so a caller can say what happened.
+///
+/// Deliberately per-account and forgiving: one account's dead refresh token must
+/// not stop the sweep reaching the next. `refresh_slot` refuses a slot the tool
+/// is running in, which is the guard that keeps this from logging anyone out.
+pub fn keep_alive_sweep(
+    slots: &[(String, std::path::PathBuf)],
+    now_ms: i64,
+) -> (Vec<String>, Vec<(String, RefreshError)>) {
+    let (mut renewed, mut failed) = (Vec::new(), Vec::new());
+    for (name, dir) in slots {
+        let Some(blob) = read_credential(dir) else {
+            continue;
+        };
+        if !wants_keep_alive(blob.expose(), now_ms) {
+            continue;
+        }
+        match refresh_slot(dir, now_ms) {
+            Ok(()) => renewed.push(name.clone()),
+            // Being in use is the guard doing its job, not a failure worth
+            // reporting: that account is alive by definition.
+            Err(RefreshError::InUse) => {}
+            Err(e) => failed.push((name.clone(), e)),
+        }
+    }
+    (renewed, failed)
+}

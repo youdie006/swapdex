@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.37.0] - 2026-08-07
+
+### Added
+- **Accounts stop dying of neglect.** An OAuth refresh token rotates when it is used and goes stale when it is not, so an account nobody touches eventually needs a browser sign-in to come back - three accounts on the machine this was built for died that way and stayed dead a week. `swapdex refresh` only ever renewed a token that had already lapsed (or was five minutes from it), which answers "can this serve a turn right now", not "will this account still work tomorrow". A keep-alive sweep now renews any idle account within six hours of expiry: the running proxy does it every 30 minutes, and `swapdex refresh --keep-alive` runs the same sweep by hand or from cron, for a machine where the proxy is not always up. The guard is unchanged and is the whole reason this is safe - a slot the tool is running in is never renewed, because rotating its token is what logs a live session out.
+
 ## [0.36.1] - 2026-08-07
 
 ### Fixed

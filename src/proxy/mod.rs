@@ -225,6 +225,49 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
 /// burn is noticed before it hits the wall.
 const MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How often idle accounts are renewed so their refresh tokens never go stale.
+///
+/// An OAuth refresh token rotates when used; leave an account alone long enough
+/// and only a browser sign-in brings it back. Three accounts on this machine died
+/// that way and stayed dead a week. Half an hour is far more often than needed to
+/// stay ahead of a six-hour window, and cheap: most sweeps renew nothing.
+const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Renew idle accounts on a timer, for as long as the proxy runs.
+///
+/// Its own thread rather than the request path: keeping accounts alive must not
+/// depend on somebody sending a turn, and that is exactly the account it needs to
+/// reach - the one nobody is using.
+fn spawn_keep_alive(paths: &Paths, tool: &str) {
+    if tool == "codex" {
+        // Codex renews inside its own home and exposes no expiry swapdex can read.
+        return;
+    }
+    let paths = paths.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(KEEP_ALIVE_EVERY);
+        let slots: Vec<(String, std::path::PathBuf)> =
+            match crate::slots::Slots::open_for(&paths, "claude-code") {
+                Ok(s) => s
+                    .list()
+                    .into_iter()
+                    .map(|r| (r.name, r.config_dir))
+                    .collect(),
+                Err(_) => continue,
+            };
+        let (renewed, failed) = crate::refresh::keep_alive_sweep(&slots, now_ms());
+        for name in &renewed {
+            println!("keep-alive: renewed {name}");
+        }
+        for (name, why) in &failed {
+            println!("keep-alive: {}", why.remedy(name));
+        }
+        if !renewed.is_empty() || !failed.is_empty() {
+            std::io::stdout().flush().ok();
+        }
+    });
+}
+
 /// How long a pre-emptive move stands before another can happen. Long enough that
 /// two accounts near the line cannot trade the session between them, short enough
 /// that a genuine second wall is still stepped over.
@@ -473,6 +516,8 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         (false, _) => println!("  auto is off - `swapdex auto on` lets it move by itself"),
     }
     std::io::stdout().flush().ok();
+
+    spawn_keep_alive(paths, &opts.tool);
 
     let server = Arc::new(server);
     let sh = Arc::new(Shared {

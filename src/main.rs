@@ -84,6 +84,11 @@ enum Cmd {
     Refresh {
         /// One account, or every Claude account when omitted
         name: Option<String>,
+        /// Renew every idle account heading for expiry, not only lapsed ones.
+        /// A refresh token rotates when used and goes stale when it is not, so
+        /// this is what keeps an account nobody touches from needing a sign-in.
+        #[arg(long, conflicts_with = "name")]
+        keep_alive: bool,
     },
     /// List the permanent account slots
     Slots,
@@ -332,7 +337,13 @@ fn main() {
             tool,
             quiet,
         } => commands::serve(&paths, name.as_deref(), *off, *tool, *quiet),
-        Cmd::Refresh { name } => commands::refresh(&paths, name.as_deref()),
+        Cmd::Refresh { name, keep_alive } => {
+            if *keep_alive {
+                commands::keep_alive(&paths)
+            } else {
+                commands::refresh(&paths, name.as_deref())
+            }
+        }
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),
