@@ -1597,27 +1597,24 @@ pub fn proxy(
     if ensure {
         return proxy_ensure(paths, port, slot_tool(sel));
     }
-    // Precedence: an explicit flag for this run, else the saved setting.
-    let auto = if auto {
-        true
-    } else if no_auto {
-        false
-    } else {
-        crate::settings::load(paths).auto()
+    // A flag decides THIS run; no flag means "whatever the setting says", and the
+    // proxy re-reads that on every request - so `swapdex auto on` reaches one that
+    // is already running rather than waiting for a restart nobody performs.
+    let auto = match (auto, no_auto) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
     };
     // A threshold means "step off before the wall", which needs one usage read per
-    // account; opt-in, so the proxy originates no traffic unless asked. The flag
-    // is for one run; the setting is what the shim-started proxy sees.
-    let cfg = crate::settings::load(paths);
-    let threshold = threshold
-        .map(|t| t.clamp(0.05, 1.0))
-        .or_else(|| cfg.threshold());
+    // account; opt-in, so the proxy originates no traffic unless asked.
+    let threshold_pinned = threshold.is_some();
     let opts = crate::proxy::Opts {
         port,
         account,
         tool: slot_tool(sel).to_string(),
         auto,
-        threshold,
+        threshold: threshold.map(|t| t.clamp(0.05, 1.0)),
+        threshold_pinned,
     };
     crate::proxy::serve(paths, &opts)?;
     Ok(0)

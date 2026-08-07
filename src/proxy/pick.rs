@@ -50,27 +50,29 @@ impl Chooser {
 /// `None` for either window means "not measured", never "empty" - an unmeasured
 /// account must not be skipped on a guess.
 pub fn over_threshold(five_h: Option<f64>, seven_d: Option<f64>, threshold: f64) -> bool {
-    over_threshold_with(five_h, seven_d, threshold, false)
+    let limit = (threshold * 100.0).clamp(0.0, 100.0);
+    [five_h, seven_d].into_iter().flatten().any(|p| p >= limit)
 }
 
 /// The same, told whether the account can keep serving past its windows.
 ///
-/// It can when extra usage is enabled and its spend cap is not reached:
-/// Anthropic goes on answering and bills credits. Stepping off then moves a
-/// conversation onto an account nobody chose, to avoid a wall that is not
-/// there. That is what a machine reading "0% left" while working all afternoon
-/// looked like.
+/// Credits do NOT keep a full account in front. They cost money, and the whole
+/// point of stepping off at a threshold is to reach for an account that still
+/// has free room. Blocking the step meant swapdex burned credits on a capped
+/// account while another sat idle with quota to spare - so the flag no longer
+/// suppresses the threshold.
+///
+/// Where credits DO matter is the fallback: when nothing else is below the
+/// threshold, the proxy stays put, and an account with credits can still serve
+/// that turn. That path needs no flag - it is what "no better account, stay
+/// here" already does.
 pub fn over_threshold_with(
     five_h: Option<f64>,
     seven_d: Option<f64>,
     threshold: f64,
-    credits_available: bool,
+    _credits_available: bool,
 ) -> bool {
-    if credits_available {
-        return false;
-    }
-    let limit = (threshold * 100.0).clamp(0.0, 100.0);
-    [five_h, seven_d].into_iter().flatten().any(|p| p >= limit)
+    over_threshold(five_h, seven_d, threshold)
 }
 
 /// How much room an account has left: the worst of its measured windows, so an
@@ -363,16 +365,19 @@ mod extra_usage_tests {
     /// extra usage available Anthropic keeps serving past the cap and bills
     /// credits, so the account is not out - and rotating away from it moves a
     /// conversation for no reason, onto an account the user did not choose.
+    /// Credits are a last resort, not a reason to stay. A capped account with
+    /// credits still steps aside for one with free room - otherwise swapdex
+    /// spends money while another account sits idle with quota to spare. When
+    /// there is nowhere better, the proxy stays put anyway, and the credits carry
+    /// that turn.
     #[test]
-    fn a_full_window_backed_by_credits_is_not_a_wall() {
-        assert!(
-            over_threshold_with(Some(100.0), Some(55.0), 0.98, false),
-            "no credits: the wall is real"
-        );
-        assert!(
-            !over_threshold_with(Some(100.0), Some(55.0), 0.98, true),
-            "credits available: the account can still take the turn"
-        );
+    fn credits_do_not_keep_a_capped_account_in_front() {
+        for credits in [false, true] {
+            assert!(
+                over_threshold_with(Some(100.0), Some(55.0), 0.98, credits),
+                "capped is capped (credits: {credits})"
+            );
+        }
     }
 
     /// Credits do not make a fresh account any less fresh, and they are not a

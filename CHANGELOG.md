@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.35.7] - 2026-08-07
+
+### Fixed
+- **A setting reaches the proxy that is already running.** `swapdex auto on` and `swapdex threshold 0.8` were read once, at startup, so changing one did nothing until somebody restarted the proxy - and nothing tells a user to, or does it for them. The pointers deciding who serves have always been read per request; the settings are now too. An explicit `--auto` / `--no-auto` still wins, because that is a decision about one run rather than a default. (Updating swapdex itself already needed no such step: the shim asks for a proxy on every launch, and one from an older build is replaced on the same port.)
+- **Credits no longer keep a capped account in front.** Stepping off at the threshold exists to reach an account with free room, and treating extra usage as a reason to stay meant swapdex spent money while another account sat idle with quota to spare. Where credits actually matter is the fallback, and that needed no flag: when nothing else is below the threshold the proxy stays put anyway, and the credits carry that turn.
+
 ## [0.35.6] - 2026-08-06
 
 ### Fixed

@@ -62,12 +62,38 @@ pub struct Opts {
     /// is and in how a turn's account is expressed - Claude puts it in the body,
     /// Codex in a header pair - but not in anything else the proxy does.
     pub tool: String,
-    /// Continue on another account when the current one is spent.
-    pub auto: bool,
+    /// Continue on another account when the current one is spent, when the
+    /// command line SAID so. `None` means "whatever the setting says right now",
+    /// re-read per request - so `swapdex auto on` reaches a proxy that is already
+    /// running, instead of waiting for a restart nobody performs.
+    pub auto: Option<bool>,
     /// Step off an account once a window reaches this fraction (0.98 = 98%),
     /// BEFORE it refuses a turn. `None` waits for the refusal instead, which costs
     /// one failed turn per wall. Needs one usage read per account, so it is opt-in.
     pub threshold: Option<f64>,
+    /// Was the threshold given on the command line? If not, the setting is read
+    /// per request, for the same reason.
+    pub threshold_pinned: bool,
+}
+
+/// Auto-continue for THIS request: the flag when one was given, else the setting
+/// as it stands now.
+fn auto_now(flag: Option<bool>, setting: bool) -> bool {
+    flag.unwrap_or(setting)
+}
+
+/// The two settings a request needs, read at the moment it is served rather than
+/// once at startup: `swapdex auto on` and `swapdex threshold 0.8` must reach the
+/// proxy already running, the way the pointers deciding who serves already do.
+fn live(paths: &Paths, opts: &Opts) -> (bool, Option<f64>) {
+    let cfg = crate::settings::load(paths);
+    let auto = auto_now(opts.auto, cfg.auto());
+    let threshold = if opts.threshold_pinned {
+        opts.threshold
+    } else {
+        cfg.threshold()
+    };
+    (auto, threshold.filter(|_| auto))
 }
 
 /// Is this an authentication exchange rather than a turn?
@@ -123,12 +149,13 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
     // elsewhere instead of walking into the wall. The turn that OBSERVED this was
     // still served by that account (rotating mid-turn would drop the prompt cache
     // for nothing), which is why the check belongs here and not there.
-    if opts.auto {
+    let (auto, live_threshold) = live(paths, opts);
+    if auto {
         // Stepping off BEFORE the wall needs a reading, and the only zero-spend
         // reading that exists is Anthropic's usage endpoint. Codex has none, so
         // its accounts are moved when one actually refuses a turn - never by
         // asking one API about another's account.
-        if let Some(t) = opts.threshold.filter(|_| opts.tool != "codex") {
+        if let Some(t) = live_threshold.filter(|_| opts.tool != "codex") {
             refresh_measured(&list, sh);
             let full = sh
                 .measured
@@ -413,7 +440,11 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // background by the shim, so its settings are otherwise invisible - and a
     // threshold that silently failed to load looks exactly like one that is
     // working.
-    match (opts.auto, opts.threshold.filter(|_| !is_codex)) {
+    // Read the same way a request reads them, and said to be what they are NOW -
+    // they are consulted again on every turn, so this line is a snapshot, not a
+    // promise for the life of the process.
+    let (auto_now_, thr_now) = live(paths, opts);
+    match (auto_now_, thr_now.filter(|_| !is_codex)) {
         (true, Some(t)) => println!(
             "  auto: hands the session on at {:.0}% used, or when an account refuses",
             (t * 100.0).round()
@@ -451,6 +482,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
             tool: opts.tool.clone(),
             auto: opts.auto,
             threshold: opts.threshold,
+            threshold_pinned: opts.threshold_pinned,
         };
         std::thread::spawn(move || {
             // A failure here is the user's problem to see: answering with a bare
@@ -775,7 +807,10 @@ fn forward_turn(
             // account's and a refusal is its own answer to give. Claude's path
             // checked the pin before rotating and this one did not, so a pinned
             // run quietly billed a different account the moment it was refused.
-            if (up.status == 429 || up.status == 401) && opts.auto && opts.account.is_none() {
+            if (up.status == 429 || up.status == 401)
+                && live(paths, opts).0
+                && opts.account.is_none()
+            {
                 tried.push(slot.name.clone());
                 if up.status == 401 {
                     sh.unusable
@@ -903,7 +938,7 @@ fn forward_turn(
             e.0.rejected = true;
             e.1 = now_secs();
         }
-        if !opts.auto || opts.account.is_some() {
+        if !live(paths, opts).0 || opts.account.is_some() {
             break up;
         }
         tried.push(slot.name.clone());
@@ -1080,5 +1115,26 @@ mod tests {
         ] {
             assert!(!is_auth_exchange(p), "must NOT be exempt: {p}");
         }
+    }
+}
+
+#[cfg(test)]
+mod live_settings_tests {
+    use super::*;
+
+    /// `swapdex auto on` has to reach the proxy that is already running. The
+    /// settings were read ONCE at startup, so changing one did nothing until
+    /// somebody restarted the proxy - and nothing tells a user to, or does it for
+    /// them. The pointers deciding who serves are read per request already; a
+    /// setting is no different.
+    ///
+    /// An explicit `--auto` / `--no-auto` on the command line still wins: that is
+    /// a decision about THIS run, not a default to be overridden from elsewhere.
+    #[test]
+    fn a_flag_wins_and_otherwise_the_setting_is_read_now() {
+        assert!(auto_now(Some(true), false), "--auto stands");
+        assert!(!auto_now(Some(false), true), "--no-auto stands");
+        assert!(auto_now(None, true), "no flag: follow the setting");
+        assert!(!auto_now(None, false));
     }
 }
