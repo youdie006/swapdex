@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.44.0] - 2026-08-09
+
+### Fixed
+- **`swapdex quota` no longer reports a locked keychain as a missing login.** Reading a Keychain secret needs an unlocked login keychain, which a remote or non-interactive shell does not have. That refusal was collapsed into the same "no saved token" line printed for an account nobody has signed into, so over ssh every macOS account read as having no login - and what that implies is to go sign in again, to accounts that were signed in the whole time. The distinction already existed one layer down; quota was discarding it.
+
 ## [0.43.0] - 2026-08-09
 
 ### Fixed
