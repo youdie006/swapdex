@@ -310,8 +310,11 @@ const ALL_KEYS: &[KeyHint] = &[
 /// What an account is doing right now, for the status column. Following the shape
 /// teamclaude uses: one word per row that answers "can this account serve me?"
 /// without reading the bars.
+/// The point at which a window counts as gone. One number, because a row and the
+/// fleet line both ask the question and two copies would drift.
+const SPENT: f64 = 99.0;
+
 fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
-    const SPENT: f64 = 99.0;
     if r.disabled {
         // Out of rotation is a deliberate state, so it is said plainly and not
         // dressed as a problem.
@@ -1125,7 +1128,20 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     .chars()
                                     .flat_map(|c| [c, ' '])
                                     .collect();
-                                let rule_w = bar_col.saturating_sub(title.chars().count() + 3);
+                                // What the whole group adds up to, on the line
+                                // that already exists. Adding the percentages up
+                                // in your head is work a dashboard should have
+                                // done, and a separate row would cost a line per
+                                // tool on a screen whose point is seeing accounts
+                                // together.
+                                let fleet = fleet_of(
+                                    rows.iter().filter(|x| group_of(&x.tools) == g),
+                                    |x| quota_pct.as_ref().and_then(|q| usage_for(q, x)),
+                                );
+                                let summary = fleet_line(&fleet);
+                                let rule_w = bar_col.saturating_sub(
+                                    title.chars().count() + 3 + summary.chars().count(),
+                                );
                                 lines.push(Line::from(vec![
                                     Span::styled(
                                         format!("  {title}"),
@@ -1134,6 +1150,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                     Span::styled(
                                         "\u{2500}".repeat(rule_w.clamp(2, 40)),
                                         Style::default().fg(Color::Rgb(72, 70, 88)),
+                                    ),
+                                    Span::styled(
+                                        summary,
+                                        Style::default().fg(Color::Rgb(140, 138, 160)),
                                     ),
                                 ]));
                                 // And air BELOW it: a heading touching its first
@@ -2106,6 +2126,151 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     ratatui::restore();
     timing.report();
     Ok(outcome)
+}
+
+/// The one line that answers "how much have I got, all in?" before the per-row
+/// detail does.
+///
+/// Reading a column of percentages and adding them up in your head is the thing
+/// a dashboard should have already done. teamclaude puts a FLEET row above its
+/// accounts for the same reason.
+#[derive(Debug, Default, PartialEq)]
+pub struct Fleet {
+    /// Accounts that could serve a turn right now.
+    pub ready: usize,
+    /// Accounts in the group at all.
+    pub total: usize,
+    /// Headroom summed across the ready ones, as a share of what they could hold
+    /// if every one were untouched. `None` when nothing was measured - which is
+    /// not the same as nothing left.
+    pub left_pct: Option<f64>,
+    /// The soonest moment any spent account comes back, unix seconds.
+    pub next_reset: Option<i64>,
+}
+
+/// The summary as it appears beside a group heading. Empty when there is nothing
+/// worth saying - one account is not a fleet, and a line that restates the row
+/// below it is noise.
+pub fn fleet_line(f: &Fleet) -> String {
+    if f.total < 2 {
+        return String::new();
+    }
+    let mut s = format!("  {}/{} ready", f.ready, f.total);
+    if let Some(left) = f.left_pct {
+        s.push_str(&format!(" · {left:.0}% left"));
+    }
+    s
+}
+
+/// Summarise one tool's rows. `usage` looks a row's figures up by name.
+pub fn fleet_of<'a>(
+    rows: impl Iterator<Item = &'a Row>,
+    usage: impl Fn(&Row) -> Option<&'a Usage>,
+) -> Fleet {
+    let (mut f, mut measured, mut sum) = (Fleet::default(), 0usize, 0.0f64);
+    for r in rows {
+        f.total += 1;
+        let u = usage(r);
+        // "Ready" is about serving, so a row with no login is never counted -
+        // an account nobody can use is not capacity.
+        let spent = u.is_some_and(|u| {
+            !u.on_credits
+                && (u.five_h.is_some_and(|p| p >= SPENT) || u.seven_d.is_some_and(|p| p >= SPENT))
+        });
+        if !r.needs_login && !spent {
+            f.ready += 1;
+        }
+        if let Some(u) = u {
+            if let Some(worst) = [u.five_h, u.seven_d]
+                .into_iter()
+                .flatten()
+                .fold(None::<f64>, |acc, p| Some(acc.map_or(p, |a: f64| a.max(p))))
+            {
+                measured += 1;
+                sum += (100.0 - worst).clamp(0.0, 100.0);
+            }
+            for reset in [u.five_h_reset, u.seven_d_reset].into_iter().flatten() {
+                f.next_reset = Some(f.next_reset.map_or(reset, |cur: i64| cur.min(reset)));
+            }
+        }
+    }
+    if measured > 0 {
+        f.left_pct = Some(sum / measured as f64);
+    }
+    f
+}
+
+#[cfg(test)]
+mod fleet_tests {
+    use super::*;
+
+    fn row(name: &str, needs_login: bool) -> Row {
+        Row {
+            name: name.into(),
+            ident: String::new(),
+            tools: "claude-code".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        }
+    }
+    fn used(five_h: f64, reset: i64) -> Usage {
+        Usage {
+            five_h: Some(five_h),
+            five_h_reset: Some(reset),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn it_counts_what_could_actually_serve() {
+        let rows = [
+            row("fresh", false),
+            row("spent", false),
+            row("nologin", true),
+        ];
+        let u = |r: &Row| match r.name.as_str() {
+            "fresh" => Some(Box::leak(Box::new(used(10.0, 500))) as &Usage),
+            "spent" => Some(Box::leak(Box::new(used(100.0, 200))) as &Usage),
+            _ => None,
+        };
+        let f = fleet_of(rows.iter(), u);
+        assert_eq!(f.total, 3);
+        assert_eq!(
+            f.ready, 1,
+            "the spent one and the signed-out one are not capacity"
+        );
+        assert_eq!(f.left_pct, Some(45.0), "90 and 0 across the two measured");
+        assert_eq!(f.next_reset, Some(200), "the soonest anything comes back");
+    }
+
+    /// Nothing measured is not "nothing left" - an empty gauge and an empty
+    /// account must not read the same.
+    #[test]
+    fn unmeasured_is_not_reported_as_empty() {
+        let rows = [row("a", false)];
+        let f = fleet_of(rows.iter(), |_| None);
+        assert_eq!(f.left_pct, None);
+        assert_eq!(f.ready, 1, "unmeasured but signed in - it can still serve");
+    }
+
+    /// An account past its window but carrying credits is still capacity.
+    #[test]
+    fn credits_still_count_as_ready() {
+        let rows = [row("credits", false)];
+        let f = fleet_of(rows.iter(), |_| {
+            Some(Box::leak(Box::new(Usage {
+                five_h: Some(100.0),
+                on_credits: true,
+                ..Default::default()
+            })))
+        });
+        assert_eq!(f.ready, 1);
+    }
 }
 
 #[cfg(test)]

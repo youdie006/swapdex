@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.41.0] - 2026-08-09
+
+### Added
+- **The dashboard adds the accounts up for you.** Each tool's heading now carries what the whole group comes to - `2/3 ready · 47% left` - so the question a dashboard exists to answer is answered before the per-account detail. It sits on the heading line that was already there rather than costing a row per tool, and it says nothing at all when a group has one account, because restating the line below it is noise. An account past its window but carrying credits still counts as ready, and one nobody has measured is not reported as empty - an unread gauge and a spent account must not read the same.
+
 ## [0.40.1] - 2026-08-09
 
 ### Fixed
