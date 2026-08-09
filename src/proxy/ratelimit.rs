@@ -396,3 +396,63 @@ mod failover_status_tests {
         }
     }
 }
+
+/// Is there enough evidence to bench this account for the next quarter of an
+/// hour, or only enough to move THIS turn along?
+///
+/// Two different verdicts have been sharing one signal. A 429 is reason enough
+/// to serve the turn elsewhere - the account said no, and arguing costs the
+/// user a turn. But writing "spent" against the account holds it out of the
+/// rotation for fifteen minutes, and a bare 429 with no rate-limit headers is a
+/// throttle as often as a wall. Benching on that is how an account with quota
+/// left sits idle.
+///
+/// The response's own headers are the proof: `*-status: rejected` says the
+/// window is gone. Repeated refusals are the other proof - an account that keeps
+/// saying no past the retries is out, whatever it declined to explain.
+pub fn proven_spent(headers: &[(String, String)], attempt: u32) -> bool {
+    from_headers(headers).is_some_and(|q| q.rejected) || attempt >= 3
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_response_saying_rejected_is_proof() {
+        assert!(proven_spent(
+            &h(&[("anthropic-ratelimit-unified-status", "rejected")]),
+            0
+        ));
+    }
+
+    /// A bare 429 explains nothing. Move the turn along by all means, but do not
+    /// hold the account out of the rotation for a quarter of an hour on it.
+    #[test]
+    fn a_bare_refusal_is_not_proof() {
+        assert!(!proven_spent(&h(&[]), 0));
+        assert!(!proven_spent(&h(&[("retry-after", "5")]), 0));
+    }
+
+    /// Saying no over and over IS the explanation.
+    #[test]
+    fn refusing_past_the_retries_is_proof_enough() {
+        assert!(proven_spent(&h(&[]), 3));
+    }
+
+    /// A window the response calls fine is not spent, however many times it is
+    /// asked - that would bench an account for something else's fault.
+    #[test]
+    fn a_window_reported_healthy_is_never_called_spent_early() {
+        let ok = h(&[("anthropic-ratelimit-unified-status", "allowed")]);
+        assert!(!proven_spent(&ok, 0));
+        assert!(!proven_spent(&ok, 2));
+    }
+}

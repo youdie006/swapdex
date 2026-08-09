@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.40.1] - 2026-08-09
+
+### Fixed
+- **A bare refusal no longer benches an account for a quarter of an hour.** Two different verdicts were sharing one signal. A 429 is reason enough to serve the turn somewhere else - the account said no, and arguing costs a turn. But writing "spent" against it holds it out of the rotation for fifteen minutes, and a 429 carrying no rate-limit headers is a throttle as often as a wall; benching on that is how an account with quota left sits idle. Marking an account spent now needs the response's own `*-status: rejected`, or refusals that keep coming past the retries - saying no over and over being its own explanation. Moving the turn along is unchanged.
+
 ## [0.40.0] - 2026-08-09
 
 ### Added

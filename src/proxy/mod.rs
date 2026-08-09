@@ -966,7 +966,10 @@ fn forward_turn(
                         .lock()
                         .unwrap()
                         .mark(&slot.name, std::time::Instant::now());
-                } else {
+                } else if ratelimit::proven_spent(&up.headers, attempt) {
+                    // Moving the turn along needs only a refusal; holding the
+                    // account out of the rotation for a quarter of an hour needs
+                    // the response to say WHY, or to keep saying no.
                     let mut spent = sh.quota.lock().unwrap();
                     let e = spent.entry(slot.name.clone()).or_default();
                     e.0.rejected = true;
@@ -1104,7 +1107,7 @@ fn forward_turn(
         // than handing the client a failure - that is what "continue the session
         // elsewhere" has to mean. Without --auto, or with nothing left to try,
         // the client gets the real response.
-        if up.status == 429 {
+        if up.status == 429 && ratelimit::proven_spent(&up.headers, attempt) {
             let mut spent = sh.quota.lock().unwrap();
             let e = spent.entry(slot.name.clone()).or_default();
             e.0.rejected = true;
