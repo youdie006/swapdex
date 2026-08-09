@@ -6,6 +6,7 @@ pub mod commands;
 pub mod mcp;
 pub mod native_sessions;
 pub mod paths;
+pub mod portable;
 pub mod proc;
 pub mod proxy;
 pub mod quota;

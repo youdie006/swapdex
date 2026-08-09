@@ -218,6 +218,19 @@ enum Cmd {
         /// A fraction, a percentage, or `off`; omit to show the current setting
         value: Option<String>,
     },
+    /// Write this machine's account setup (names and settings, NEVER logins)
+    Export {
+        /// Where to write it; omit for stdout
+        out: Option<std::path::PathBuf>,
+    },
+    /// Re-create that setup here. Accounts already present are left alone, and
+    /// each still needs its own sign-in - a login never travels.
+    Import {
+        file: std::path::PathBuf,
+        /// Show what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// A cheaper model to ask for when every account is past the threshold
     FallbackModel {
         /// Omit to show, `off` to clear. e.g. `claude-sonnet-5`
@@ -417,6 +430,8 @@ fn main() {
             *ensure,
             *threshold,
         ),
+        Cmd::Export { out } => commands::export(&paths, out.as_deref()),
+        Cmd::Import { file, dry_run } => commands::import(&paths, file, *dry_run),
         Cmd::FallbackModel { value } => commands::fallback_model(&paths, value.as_deref()),
         Cmd::Strategy { value } => commands::strategy(&paths, value.as_deref()),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),

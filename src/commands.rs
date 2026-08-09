@@ -4467,6 +4467,85 @@ pub fn serve(
     Ok(0)
 }
 
+/// `swapdex export [file]` - this machine's account setup, without a single
+/// secret in it.
+pub fn export(paths: &Paths, out: Option<&std::path::Path>) -> Result<i32> {
+    use anyhow::Context;
+    let text = serde_json::to_string_pretty(&crate::portable::export(paths))?;
+    match out {
+        Some(p) => {
+            std::fs::write(p, format!("{text}\n"))
+                .with_context(|| format!("write {}", p.display()))?;
+            println!(
+                "wrote {} - names and settings only; every account still signs in on its own machine",
+                crate::util::redact_path(&p.display().to_string())
+            );
+        }
+        None => println!("{text}"),
+    }
+    Ok(0)
+}
+
+/// `swapdex import <file>` - re-create that setup here.
+pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i32> {
+    use anyhow::Context;
+    let bytes = std::fs::read(file).with_context(|| format!("read {}", file.display()))?;
+    let incoming: crate::portable::Portable =
+        serde_json::from_slice(&bytes).context("that file is not a swapdex export")?;
+    if incoming.version > crate::portable::FORMAT_VERSION {
+        eprintln!(
+            "swapdex: that export was written by a newer swapdex (format {}) - upgrade first",
+            incoming.version
+        );
+        return Ok(2);
+    }
+    let here: Vec<(String, String)> = ["claude-code", "codex"]
+        .into_iter()
+        .flat_map(|t| {
+            crate::slots::Slots::open_for(paths, t)
+                .map(|s| {
+                    s.list()
+                        .into_iter()
+                        .map(|r| (r.name, t.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    let settings = incoming.settings.clone();
+    let todo = crate::portable::plan(&here, &incoming);
+    if todo.is_empty() {
+        println!("every account in that file is already here");
+    }
+    for a in &todo {
+        if dry_run {
+            println!("would create {} ({})", a.name, tool_binary(&a.tool));
+            continue;
+        }
+        match crate::slots::Slots::open_for(paths, &a.tool).and_then(|mut s| s.create(&a.name)) {
+            Ok(rec) => {
+                crate::slots::link_shared_config(
+                    &rec.config_dir,
+                    &shared_source(paths, &a.tool),
+                    &a.tool,
+                );
+                println!("created {} ({})", a.name, tool_binary(&a.tool));
+            }
+            Err(e) => eprintln!("swapdex: could not create '{}': {e}", a.name),
+        }
+    }
+    if let Some(s) = settings {
+        if !dry_run {
+            crate::settings::save(paths, &s)?;
+            println!("settings applied");
+        }
+    }
+    if !todo.is_empty() && !dry_run {
+        println!("  each one still needs its own sign-in: `swapdex run <name>`");
+    }
+    Ok(0)
+}
+
 /// `swapdex fallback-model [<model>|off]` - what to ask for when every account
 /// is past the threshold and there is nowhere left to rotate.
 pub fn fallback_model(paths: &Paths, value: Option<&str>) -> Result<i32> {

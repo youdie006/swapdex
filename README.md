@@ -121,6 +121,10 @@ swapdex usage
 # Remaining quota per Claude account -- the one opt-in network read
 swapdex quota
 
+# Set up a second machine with the same accounts (never carries a login)
+swapdex export setup.json    # on the machine you already use
+swapdex import setup.json    # on the new one, then sign each account in
+
 # Anything off? Every finding comes with its fix
 swapdex doctor
 ```
