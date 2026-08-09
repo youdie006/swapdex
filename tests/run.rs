@@ -572,11 +572,29 @@ fn doctor_detects_shim_bypassed_and_active() {
     );
     run_in(root.path(), &["run", "work"], &path);
     run_in(root.path(), &["shim"], &path);
-    // Shim dir NOT on PATH: a plain `claude` resolves to the real (fake) one.
+    // Shim dir NOT on PATH, but `swapdex shim` just edited the shell profile:
+    // the setup IS right, this shell simply predates the edit. Saying "add it to
+    // PATH" here sends someone to do what was already done, so doctor names the
+    // profile and says to open a new terminal - and does NOT count it a problem.
+    let out = run_in(root.path(), &["doctor"], &path);
+    assert!(
+        out.contains("not on THIS shell's PATH") && out.contains("open a new terminal"),
+        "a shell predating the profile edit is not a broken setup: {out}"
+    );
+    assert!(
+        !out.contains("shim          problem"),
+        "and it is not counted as a fault: {out}"
+    );
+
+    // Nothing configuring it anywhere IS a real finding, with the PATH fix.
+    let profile = root.path().join("home/.bashrc");
+    if profile.exists() {
+        std::fs::write(&profile, "").unwrap();
+    }
     let out = run_in(root.path(), &["doctor"], &path);
     assert!(
         out.contains("NOT taking effect") && out.contains("PATH"),
-        "bypassed shim is called out with the PATH fix: {out}"
+        "an unconfigured shim is still called out with the PATH fix: {out}"
     );
     // Shim dir FIRST on PATH: the shim genuinely intercepts a plain `claude`.
     let shim_first = format!(

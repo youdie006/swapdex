@@ -226,6 +226,47 @@ fn find_real(shim_dir: &Path, bin: &str) -> Option<PathBuf> {
 /// `$HOME/...`, `~/...`, or in full, and matching only the spelling this version
 /// happens to emit appended the line again on every install. A real profile ended
 /// up with three copies of it.
+/// How far the shim actually reaches, as far as THIS process can tell.
+///
+/// The distinction that matters is between "not set up" and "set up, but this
+/// particular shell never read the file that sets it up". A non-interactive
+/// shell - a cron job, a script, `ssh host cmd` - does not source `.zshrc`, so
+/// the shim directory is missing from its PATH even though every interactive
+/// terminal on the machine has it. Reporting that as a fault sends someone to
+/// fix a configuration that was already correct.
+#[derive(Debug, PartialEq)]
+pub enum ShimReach {
+    /// A plain `claude` goes through the shim here and now.
+    Active,
+    /// The profile adds it; this shell just did not read that profile.
+    ConfiguredElsewhere,
+    /// Nothing puts it on PATH. This one is a real finding.
+    Missing,
+}
+
+/// Decide between those three from facts the caller has already gathered.
+/// Pure, so the interesting case can be tested without a shell to run in.
+pub fn shim_reach(active: bool, profile_text: Option<&str>, shim_dir: &Path) -> ShimReach {
+    if active {
+        return ShimReach::Active;
+    }
+    // Scoped to THIS shim directory on purpose. Matching swapdex's marker
+    // comment alone would let a profile that set up some other store excuse a
+    // real finding here - and on a machine where swapdex was ever installed,
+    // that marker is always present.
+    match profile_text {
+        Some(t) if profile_already_adds(t, shim_dir) => ShimReach::ConfiguredElsewhere,
+        _ => ShimReach::Missing,
+    }
+}
+
+/// The shell profile's text, if there is one to read.
+pub fn shell_profile_text() -> Option<(PathBuf, String)> {
+    let p = shell_profile()?;
+    let t = std::fs::read_to_string(&p).ok()?;
+    Some((p, t))
+}
+
 fn profile_already_adds(profile_text: &str, shim_dir: &Path) -> bool {
     let full = shim_dir.to_string_lossy().to_string();
     let home = dirs::home_dir().map(|h| h.to_string_lossy().to_string());
@@ -368,6 +409,51 @@ fn make_executable(p: &Path) -> Result<()> {
             .context("chmod shim")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    /// The case that sent me chasing a non-existent bug: doctor run over ssh
+    /// reported the shim inactive, because `ssh host cmd` starts a shell that
+    /// never reads .zshrc. The machine was configured correctly the whole time.
+    #[test]
+    fn a_shell_that_never_read_the_profile_is_not_a_broken_setup() {
+        let dir = Path::new("/Users/x/Library/Application Support/swapdex/bin");
+        let zshrc = "export PATH=\"/Users/x/Library/Application Support/swapdex/bin:$PATH\"\n";
+        assert_eq!(
+            shim_reach(false, Some(zshrc), dir),
+            ShimReach::ConfiguredElsewhere
+        );
+    }
+
+    #[test]
+    fn nothing_putting_it_on_path_is_still_a_real_finding() {
+        let dir = Path::new("/Users/x/Library/Application Support/swapdex/bin");
+        assert_eq!(
+            shim_reach(false, Some("export EDITOR=vim\n"), dir),
+            ShimReach::Missing
+        );
+        assert_eq!(shim_reach(false, None, dir), ShimReach::Missing);
+    }
+
+    /// Caught by an existing doctor test rather than by me: swapdex writes a
+    /// marker comment when it edits a profile, so on any machine where it has
+    /// ever run, matching that marker alone would silence a genuine finding for
+    /// a different store. The profile has to add THIS directory.
+    #[test]
+    fn a_profile_that_set_up_some_other_store_excuses_nothing() {
+        let mine = Path::new("/tmp/store-a/bin");
+        let theirs = "# added by swapdex\nexport PATH=\"/tmp/store-b/bin:$PATH\"\n";
+        assert_eq!(shim_reach(false, Some(theirs), mine), ShimReach::Missing);
+    }
+
+    #[test]
+    fn a_shim_that_works_here_needs_no_explaining() {
+        let dir = Path::new("/tmp/bin");
+        assert_eq!(shim_reach(true, None, dir), ShimReach::Active);
+    }
 }
 
 #[cfg(test)]

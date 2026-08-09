@@ -6,7 +6,7 @@
 //
 // Usage:
 //   node publish.mjs [<version>] [--dry-run]
-//     <version>   defaults to the main package.json version.
+//     <version>   defaults to the version in Cargo.toml.
 //     --dry-run   builds + `npm pack`s into ./build, publishes nothing.
 //
 // Binaries come from https://github.com/youdie006/swapdex/releases/download/
@@ -31,7 +31,20 @@ const mainPkg = JSON.parse(readFileSync(mainPkgPath, "utf8"));
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
-const version = args.find((a) => !a.startsWith("--")) || mainPkg.version;
+
+// The version comes from Cargo.toml, which is the one place the release is
+// declared. It used to default to this package.json's own version - but that
+// field is REWRITTEN by this script on every publish, so after shipping 0.41.0
+// a bare re-run tried to publish 0.41.0 again and npm refused. A second source
+// of truth for a version number is how channels drift apart, so there is now
+// only one, and a mismatch is a hard stop rather than a silent old release.
+function cargoVersion() {
+  const toml = readFileSync(join(here, "..", "Cargo.toml"), "utf8");
+  const m = toml.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!m) throw new Error("no version found in Cargo.toml");
+  return m[1];
+}
+const version = args.find((a) => !a.startsWith("--")) || cargoVersion();
 const SCOPE = "@youdie006";
 
 // swapdex is a Unix tool (Linux, WSL, macOS). musl binaries are static, so the
