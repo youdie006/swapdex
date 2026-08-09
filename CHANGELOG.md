@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.43.0] - 2026-08-09
+
+### Fixed
+- **doctor no longer calls a correct shim setup broken.** A shell that never reads your shell profile - a script, a cron job, `ssh host cmd` - has no shim directory on its PATH, and doctor reported that as the shim not taking effect, printing as the fix the very line already sitting in the profile. The same wrong message appeared in a terminal that started before `swapdex shim` edited that profile. doctor now separates three states - active here, set up but not on this shell's PATH, and nothing configuring it anywhere - and only the last is counted a problem. The check is scoped to the shim directory in question, so a profile that set up a different store cannot excuse a real finding.
+
+### Changed
+- **The release script takes the version from `Cargo.toml`.** It used to default to its own `package.json` version - a field the script rewrites on every publish - so a bare re-run after a release tried to publish that same version again and npm refused. One source of truth is what keeps the four channels from drifting apart.
+
 ## [0.42.0] - 2026-08-09
 
 ### Added
