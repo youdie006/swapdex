@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.40.0] - 2026-08-09
+
+### Added
+- **`swapdex fallback-model` asks for a cheaper model rather than let a turn hit the wall.** A new axis: until now swapdex could only change WHICH ACCOUNT pays, so once every account was out there was nothing left to do. It can now ask for a smaller model instead - but only then. Changing the model gives you something other than what you asked for, so rotating to an account with room always comes first, the setting is off unless you turn it on, and the proxy says on the turn it happens. The corner is recognised two ways: every account measured past the threshold, or every account having refused this very turn - the second needs no usage reading, so it works where that endpoint cannot be reached.
+
 ## [0.39.1] - 2026-08-07
 
 ### Fixed

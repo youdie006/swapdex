@@ -80,3 +80,69 @@ mod tests {
         assert!(align_account(&body_with(&uid), &[A.into()], "").is_none());
     }
 }
+
+/// Swap the model a request asks for, when the account serving it has nothing
+/// left and there is nowhere else to go.
+///
+/// This is the last thing swapdex will do before a turn fails, never the first.
+/// Rotating to an account with room is always better, because it gives the user
+/// what they asked for; changing the model gives them something else. So it is
+/// opt-in, it only applies once every account is past the threshold, and the
+/// proxy says so on the turn it happens.
+///
+/// `None` when there is nothing to change - no model field, or it already asks
+/// for the fallback - so a caller can tell "rewritten" from "left alone".
+pub fn swap_model(body: &[u8], fallback: &str) -> Option<Vec<u8>> {
+    if fallback.is_empty() {
+        return None;
+    }
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let current = v.get("model")?.as_str()?;
+    if current == fallback {
+        return None;
+    }
+    *v.get_mut("model")? = serde_json::Value::String(fallback.to_string());
+    serde_json::to_vec(&v).ok()
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    fn model_of(b: &[u8]) -> String {
+        serde_json::from_slice::<serde_json::Value>(b).unwrap()["model"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn the_model_is_replaced_and_nothing_else_is() {
+        let body = br#"{"model":"claude-opus-5","max_tokens":100,"messages":[{"role":"user"}]}"#;
+        let out = swap_model(body, "claude-sonnet-5").expect("rewritten");
+        assert_eq!(model_of(&out), "claude-sonnet-5");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["max_tokens"], 100, "the rest of the request is untouched");
+        assert!(v["messages"].is_array());
+    }
+
+    /// "Nothing to do" has to be distinguishable from "done", so the caller only
+    /// announces a change that happened.
+    #[test]
+    fn asking_for_the_fallback_already_is_left_alone() {
+        let body = br#"{"model":"claude-sonnet-5"}"#;
+        assert!(swap_model(body, "claude-sonnet-5").is_none());
+    }
+
+    #[test]
+    fn a_request_with_no_model_is_left_alone() {
+        assert!(swap_model(br#"{"messages":[]}"#, "claude-sonnet-5").is_none());
+        assert!(swap_model(b"not json", "claude-sonnet-5").is_none());
+    }
+
+    /// An empty setting is how "off" is spelled, and off must never rewrite.
+    #[test]
+    fn no_fallback_configured_changes_nothing() {
+        assert!(swap_model(br#"{"model":"claude-opus-5"}"#, "").is_none());
+    }
+}

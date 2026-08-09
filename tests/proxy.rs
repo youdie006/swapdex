@@ -2501,3 +2501,77 @@ fn a_proxy_with_nothing_to_serve_with_refuses_to_start() {
         "no marker either - nothing should think a proxy is up"
     );
 }
+
+/// An upstream that reports every account as nearly spent and echoes back the
+/// model it was asked for.
+fn upstream_reporting_full(sink: Arc<Mutex<Vec<String>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let url = rq.url().to_string();
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            if url.contains("usage") {
+                let _ = rq.respond(tiny_http::Response::from_string(
+                    r#"{"five_hour":{"utilization":99.0},"seven_day":{"utilization":99.0}}"#,
+                ));
+                continue;
+            }
+            let model = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["model"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            let fallback = model == "claude-sonnet-5";
+            sink.lock().unwrap().push(model);
+            // Refuse everything except the fallback: that is what "every account
+            // is out" looks like from here, and it needs no usage endpoint.
+            let resp = if fallback {
+                tiny_http::Response::from_string("{\"ok\":true}").with_status_code(200)
+            } else {
+                tiny_http::Response::from_string("{\"error\":\"spent\"}").with_status_code(429)
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Changing the model gives the user something other than what they asked for,
+/// so it is the LAST thing swapdex does: only once every account is past the
+/// threshold and there is nowhere left to rotate. With room anywhere, the model
+/// they asked for goes through untouched.
+#[test]
+fn the_fallback_model_is_asked_for_only_when_there_is_nowhere_left() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
+    seed_slot(root.path(), "two", "bbbb2222", "AT-TWO", false);
+    std::fs::write(
+        root.path().join(".local/share/swapdex/settings.json"),
+        br#"{"fallback_model":"claude-sonnet-5","proxy_threshold":0.9}"#,
+    )
+    .unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = upstream_reporting_full(sink.clone());
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    for _ in 0..2 {
+        let _ = agent
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .header("authorization", "Bearer CLIENT-OWN")
+            .send(r#"{"model":"claude-opus-5","messages":[]}"#);
+    }
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|m| m == "claude-sonnet-5"),
+        "with every account past the threshold it asked for the fallback: {seen:?}"
+    );
+}

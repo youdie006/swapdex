@@ -31,6 +31,12 @@ pub struct Settings {
     /// lapses unused). `None` = roomiest, the behaviour swapdex has always had.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_strategy: Option<String>,
+    /// A cheaper model to ask for when EVERY account is past the threshold and
+    /// there is nowhere left to rotate. Off unless set: changing the model gives
+    /// the user something other than what they asked for, so it is the last
+    /// thing swapdex does before a turn fails, never the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
 }
 
 impl Settings {

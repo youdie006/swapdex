@@ -218,6 +218,11 @@ enum Cmd {
         /// A fraction, a percentage, or `off`; omit to show the current setting
         value: Option<String>,
     },
+    /// A cheaper model to ask for when every account is past the threshold
+    FallbackModel {
+        /// Omit to show, `off` to clear. e.g. `claude-sonnet-5`
+        value: Option<String>,
+    },
     /// Which account auto-continue reaches for: `roomiest` or `consume-first`
     Strategy {
         /// Omit to show. `roomiest` takes the account with the most left;
@@ -412,6 +417,7 @@ fn main() {
             *ensure,
             *threshold,
         ),
+        Cmd::FallbackModel { value } => commands::fallback_model(&paths, value.as_deref()),
         Cmd::Strategy { value } => commands::strategy(&paths, value.as_deref()),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
         Cmd::Slash => commands::install_slash(&paths),

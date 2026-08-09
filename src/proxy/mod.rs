@@ -71,6 +71,9 @@ struct Shared {
     /// Measured utilization per account (5h, 7d percentages) from the zero-spend
     /// usage endpoint, with when it was read. Only used when a threshold is set.
     measured: Mutex<Measured>,
+    /// Every account is past the threshold and there is nowhere to move: the one
+    /// state in which asking for a cheaper model beats failing the turn.
+    cornered: Mutex<bool>,
     /// When the last pre-emptive move happened. Threshold switching without a
     /// cooldown flip-flops: two accounts hovering either side of the line hand the
     /// session back and forth, and every hop costs the prompt cache.
@@ -201,6 +204,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                             chosen.name, better.name
                         );
                         std::io::stdout().flush().ok();
+                        *sh.cornered.lock().unwrap() = false;
                         *sh.rotated.lock().unwrap() = Some(better.name.clone());
                         *sh.last_preempt.lock().unwrap() = Some(std::time::Instant::now());
                         return Ok(better);
@@ -215,6 +219,12 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                             chosen.name
                         );
                         std::io::stdout().flush().ok();
+                        // Nowhere to rotate. If a fallback model is configured,
+                        // the request path may ask for it rather than let the
+                        // turn hit the wall - the LAST thing swapdex tries,
+                        // never the first, because rotating gives the user what
+                        // they asked for and this does not.
+                        *sh.cornered.lock().unwrap() = true;
                     }
                 }
             }
@@ -600,6 +610,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         chooser: Mutex::new(pick::Chooser::default()),
         rotated: Mutex::new(None),
         unusable: Mutex::new(pick::Sidelined::default()),
+        cornered: Mutex::new(false),
         measured: Mutex::new((None, HashMap::new())),
         last_preempt: Mutex::new(None),
     });
@@ -1000,6 +1011,19 @@ fn forward_turn(
         // Keep the account identity in the body consistent with the token serving
         // this turn: the client names the account the conversation started with.
         let mut body = client_body.clone();
+        // Cornered - every account past the threshold, nothing to rotate to. A
+        // configured fallback model is the last thing to try before the turn
+        // walks into the wall, and it is announced, because the user asked for a
+        // different model and is getting this one.
+        if *sh.cornered.lock().unwrap() {
+            if let Some(m) = crate::settings::load(paths).fallback_model.as_deref() {
+                if let Some(swapped) = identity::swap_model(&body, m) {
+                    println!("  every account is past the threshold - asking for {m} instead");
+                    std::io::stdout().flush().ok();
+                    body = swapped;
+                }
+            }
+        }
         if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
             if let Some(aligned) = identity::align_account(&body, &known_uuids, &serving) {
                 body = aligned;
@@ -1091,6 +1115,9 @@ fn forward_turn(
             break up;
         }
         tried.push(slot.name.clone());
+        // Cornered by refusal rather than by measurement: every account has now
+        // said no to THIS turn. Same corner, and it needs no usage reading.
+        *sh.cornered.lock().unwrap() = next_account(paths, sh, &tried).is_none();
         match next_account(paths, sh, &tried) {
             Some(next) => {
                 println!(

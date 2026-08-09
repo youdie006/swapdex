@@ -4467,6 +4467,36 @@ pub fn serve(
     Ok(0)
 }
 
+/// `swapdex fallback-model [<model>|off]` - what to ask for when every account
+/// is past the threshold and there is nowhere left to rotate.
+pub fn fallback_model(paths: &Paths, value: Option<&str>) -> Result<i32> {
+    let mut cfg = crate::settings::load(paths);
+    let Some(value) = value else {
+        match cfg.fallback_model.as_deref() {
+            Some(m) => {
+                println!("{m}");
+                println!("  asked for only when every account is past the threshold");
+            }
+            None => println!(
+                "off - a turn with nowhere left to go gets the refusal, not a different model"
+            ),
+        }
+        return Ok(0);
+    };
+    if value.eq_ignore_ascii_case("off") || value.is_empty() {
+        cfg.fallback_model = None;
+        crate::settings::save(paths, &cfg)?;
+        println!("fallback model off");
+        return Ok(0);
+    }
+    cfg.fallback_model = Some(value.to_string());
+    crate::settings::save(paths, &cfg)?;
+    println!("fallback model: {value}");
+    println!("  used ONLY when every account is past the threshold - rotating to an account");
+    println!("  with room comes first, because that gives you the model you asked for");
+    Ok(0)
+}
+
 /// `swapdex strategy [roomiest|consume-first]` - which account auto-continue
 /// reaches for when the current one is full.
 pub fn strategy(paths: &Paths, value: Option<&str>) -> Result<i32> {
