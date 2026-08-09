@@ -53,6 +53,41 @@ impl TokenUnavailable {
             ),
         }
     }
+
+    /// The short reason, for a list that has one line per account. `remedy` is
+    /// the full paragraph; this is what fits next to a name.
+    pub fn short(&self) -> &'static str {
+        match self {
+            Self::NoLogin => "no saved token",
+            // NOT "no saved token". The login is there; this shell cannot read
+            // it. Saying otherwise sends someone to re-sign-in an account that
+            // was signed in the whole time.
+            Self::KeychainLocked => "signed in, but this shell cannot read the keychain",
+        }
+    }
+}
+
+#[cfg(test)]
+mod unavailable_tests {
+    use super::*;
+
+    /// A locked keychain and an account with no login must never read the same.
+    /// Over ssh every macOS account reports as tokenless, and three separate
+    /// times this session that output was nearly taken for the truth about
+    /// 병승's accounts.
+    #[test]
+    fn a_locked_keychain_does_not_read_as_a_missing_login() {
+        assert_eq!(TokenUnavailable::NoLogin.short(), "no saved token");
+        let locked = TokenUnavailable::KeychainLocked.short();
+        assert!(
+            !locked.contains("no saved token"),
+            "a locked keychain must not read as an absent login: {locked}"
+        );
+        assert!(
+            locked.contains("signed in"),
+            "it says the login is fine: {locked}"
+        );
+    }
 }
 
 /// Has this slot's access token already expired? Sending an expired token just

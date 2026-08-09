@@ -5680,6 +5680,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         /// The saved token has already lapsed. Sending it earns a refusal that
         /// looks like the endpoint being busy, so it is never sent.
         expired: bool,
+        /// Set when the login could not be READ, carrying why - a locked
+        /// keychain is not an account without a login.
+        unreadable: Option<String>,
     }
 
     let live_id = adapters::claude::Claude.identity(paths).ok().flatten();
@@ -5721,12 +5724,20 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             // Only one of the two is alive - the tool refreshes the slot's
             // credential in place, while nothing refreshes a copy - so the slot
             // answers for the account and the snapshot is not consulted at all.
+            let mut unreadable: Option<String> = None;
             if let Some(dir) = slot_dir_named(paths, &p.name) {
-                if let Some(t) = crate::proxy::creds::slot_token(&dir) {
-                    token = Some(String::from_utf8_lossy(t.expose()).to_string());
-                    expired = crate::proxy::creds::slot_token_expired(&dir, now_ms());
-                    email = crate::proxy::creds::slot_email(&dir).or(email);
-                    uuid = crate::proxy::creds::slot_account_uuid(&dir).or(uuid);
+                match crate::proxy::creds::slot_token_detail(&dir) {
+                    Ok(t) => {
+                        token = Some(String::from_utf8_lossy(t.expose()).to_string());
+                        expired = crate::proxy::creds::slot_token_expired(&dir, now_ms());
+                        email = crate::proxy::creds::slot_email(&dir).or(email);
+                        uuid = crate::proxy::creds::slot_account_uuid(&dir).or(uuid);
+                    }
+                    // Keep WHY. Collapsing a locked keychain into "no token"
+                    // tells the user an account they are signed into has no
+                    // login - the one reading this over ssh sees that for every
+                    // account on the machine.
+                    Err(why) => unreadable = Some(why.short().to_string()),
                 }
             }
             let active = live_uuid.is_some() && uuid == live_uuid;
@@ -5748,6 +5759,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 // The live login is refreshed by Claude itself, so only a
                 // SNAPSHOT can be stale.
                 expired: expired && !active,
+                unreadable,
             });
         }
     }
@@ -5759,7 +5771,10 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             if rows.iter().any(|x| x.name == r.name) {
                 continue;
             }
-            let token = crate::proxy::creds::slot_token(&r.config_dir)
+            let read = crate::proxy::creds::slot_token_detail(&r.config_dir);
+            let unreadable = read.as_ref().err().map(|w| w.short().to_string());
+            let token = read
+                .ok()
                 .map(|t| String::from_utf8_lossy(t.expose()).to_string());
             let uuid = crate::proxy::creds::slot_account_uuid(&r.config_dir);
             let active = live_uuid.is_some() && uuid == live_uuid;
@@ -5783,6 +5798,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     }
                     crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms())
                 },
+                unreadable,
             });
         }
     }
@@ -5797,6 +5813,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 token: live_token.clone(),
                 active: true,
                 expired: false,
+                unreadable: None,
             },
         );
     }
@@ -5826,7 +5843,14 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     let mut offline: Option<String> = None;
     for (i, r) in rows.iter().enumerate() {
         match &r.token {
-            None => results.push((i, Fetch::Offline("no saved token".into()))),
+            None => results.push((
+                i,
+                Fetch::Offline(
+                    r.unreadable
+                        .clone()
+                        .unwrap_or_else(|| "no saved token".into()),
+                ),
+            )),
             // Do not ask on behalf of a token that has already lapsed. The
             // endpoint refuses it the same way it refuses a burst, so the answer
             // would read as "busy, try again in a moment" - advice that can never
