@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.42.0] - 2026-08-09
 
 ### Added
 - **`swapdex export` / `swapdex import` set up a second machine without redoing it by hand.** Export writes the shape of your setup - account names, which tool each belongs to, and your rotation settings - and import re-creates it somewhere else. What it deliberately does NOT carry is a login, or even a path: a file that can hold a token is a file that eventually gets pasted into a chat window, and swapdex exists to keep credentials where they already are. Each account still signs in on its own machine. An account already present is left alone rather than overwritten, because the local one is the one with a login in it and the incoming file has none; `--dry-run` shows what would be created first.
