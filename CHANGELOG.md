@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.50.0] - 2026-08-11
+
+### Fixed
+- **A supervised proxy takes the port back instead of restarting forever.** A proxy the shim started outlives its shell, is reparented to launchd, and keeps the port. The service agent then cannot bind, exits 1, and `KeepAlive` restarts it into that same failure for as long as the machine is on - 166 times on a real Mac before anyone looked. When the port is held by another swapdex proxy for the SAME tool, the new one now displaces it and binds. Anything else on that port belongs to someone else and is left alone, so a genuine conflict still surfaces as an error rather than a silent takeover.
+
 ## [0.49.0] - 2026-08-11
 
 ### Fixed

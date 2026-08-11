@@ -592,8 +592,11 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     }
     // Loopback only: this holds a live credential, so it must never be
     // reachable off the machine.
-    let server = tiny_http::Server::http(("127.0.0.1", opts.port))
-        .map_err(|e| anyhow!("cannot bind 127.0.0.1:{}: {e}", opts.port))?;
+    let server = match tiny_http::Server::http(("127.0.0.1", opts.port)) {
+        Ok(s) => s,
+        Err(e) => take_the_port(paths, &opts.tool, opts.port)
+            .ok_or_else(|| anyhow!("cannot bind 127.0.0.1:{}: {e}", opts.port))?,
+    };
     let port = server
         .server_addr()
         .to_ip()
@@ -1348,6 +1351,34 @@ pub fn running_proxy(paths: &Paths) -> Option<(i32, u16, String)> {
 }
 
 /// The same, for one tool's proxy.
+/// The port is taken. If the holder is ANOTHER swapdex proxy for this same tool,
+/// take it over.
+///
+/// A shim-started proxy that outlives its shell is reparented to launchd and
+/// keeps the port. The supervised agent then cannot bind, exits 1, and KeepAlive
+/// restarts it into that same failure for as long as the machine is on - 166
+/// times on a real machine before anyone looked. Only a swapdex proxy serving
+/// THIS tool is displaced: anything else on the port is somebody else's and is
+/// left alone, so the error still surfaces.
+fn take_the_port(paths: &Paths, tool: &str, port: u16) -> Option<tiny_http::Server> {
+    let (pid, held, _) = running_proxy_for(paths, tool)?;
+    if held != port {
+        return None;
+    }
+    println!("  another swapdex {tool} proxy (pid {pid}) holds {port} - taking it over");
+    std::io::stdout().flush().ok();
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    // Give it a moment to release, then the one retry. Looping here would just
+    // be the supervisor's restart loop moved inside the process.
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Ok(s) = tiny_http::Server::http(("127.0.0.1", port)) {
+            return Some(s);
+        }
+    }
+    None
+}
+
 pub fn running_proxy_for(paths: &Paths, tool: &str) -> Option<(i32, u16, String)> {
     let raw = std::fs::read_to_string(crate::shim::proxy_marker_for(paths, tool)).ok()?;
     let mut it = raw.split_whitespace();

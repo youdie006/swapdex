@@ -2575,3 +2575,47 @@ fn the_fallback_model_is_asked_for_only_when_there_is_nowhere_left() {
         "with every account past the threshold it asked for the fallback: {seen:?}"
     );
 }
+
+/// A proxy started by the shim outlives its shell, gets reparented to launchd,
+/// and keeps the port. The supervised agent then cannot bind, exits 1, and
+/// KeepAlive restarts it into that same failure for as long as the machine is
+/// on - 166 times on a real Mac before anyone looked at it. The new one takes
+/// the port from the old instead.
+#[test]
+fn a_second_proxy_for_the_same_tool_takes_the_port_rather_than_failing() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+
+    let (mut first, port) = start_proxy(root.path(), &upstream, &[]);
+    // The squatter is up and holds a real port; now ask for that exact one.
+    let mut second = Command::new(bin())
+        .args(["proxy", "--port", &port.to_string()])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // It must come up - on that port - within a few seconds.
+    let mut took_over = false;
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(Some(st)) = second.try_wait() {
+            panic!("the second proxy exited ({st}) instead of taking the port");
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+            && matches!(first.try_wait(), Ok(Some(_)))
+        {
+            took_over = true;
+            break;
+        }
+    }
+    second.kill().ok();
+    first.kill().ok();
+    assert!(
+        took_over,
+        "the second proxy should hold the port and the first should be gone"
+    );
+}
