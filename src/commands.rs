@@ -3247,6 +3247,38 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     );
                 }
             }
+            // Two directories can hold ONE login. Nothing said so, and the
+            // fleet then reads as more accounts than exist - while a rate limit
+            // on one applies to its twin. Not a fault (keeping two directories
+            // for one account is a fair thing to do), so it is stated rather
+            // than counted as a problem.
+            {
+                let named: Vec<(String, Option<String>)> = ["claude-code", "codex"]
+                    .into_iter()
+                    .flat_map(|t| {
+                        crate::slots::Slots::open_for(paths, t)
+                            .map(|s| s.list())
+                            .unwrap_or_default()
+                    })
+                    .map(|r| {
+                        (
+                            r.name.clone(),
+                            crate::proxy::creds::slot_account_uuid(&r.config_dir),
+                        )
+                    })
+                    .collect();
+                for group in crate::slots::slots_sharing_an_account(&named) {
+                    report(
+                        "shared account",
+                        true,
+                        format!(
+                            "{} hold the same login in different directories - rotation \
+                             counts them once, because a rate limit belongs to the account",
+                            group.join(" and ")
+                        ),
+                    );
+                }
+            }
             // A slot named after a tool cannot be refused after the fact, but it
             // can be named: it reads as that tool's home and points elsewhere.
             {

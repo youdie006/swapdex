@@ -68,6 +68,31 @@ pub fn name_reads_as_a_tool_home(name: &str) -> bool {
     )
 }
 
+/// Slots that turn out to hold the SAME account, grouped.
+///
+/// Two directories can hold one login, and nothing on screen said so: the fleet
+/// read as four accounts when three were distinct, and a rate limit hit on one
+/// applies to its twin. Worth stating plainly - keeping two directories for one
+/// account is a fair thing to do, but only if you know that is what you have.
+///
+/// A slot whose identity cannot be read is never grouped. Two unknowns are not
+/// evidence of one account.
+pub fn slots_sharing_an_account(named: &[(String, Option<String>)]) -> Vec<Vec<String>> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, uuid) in named {
+        let Some(u) = uuid else { continue };
+        match groups.iter_mut().find(|(k, _)| k == u) {
+            Some((_, names)) => names.push(name.clone()),
+            None => groups.push((u.clone(), vec![name.clone()])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, names)| names)
+        .filter(|names| names.len() > 1)
+        .collect()
+}
+
 /// A name that will not be mistaken for a tool's home, built from one that is.
 pub fn suggest_non_colliding(name: &str, taken: &[String]) -> String {
     let base = format!("{}-account", name.trim().to_ascii_lowercase());
@@ -449,6 +474,43 @@ pub fn link_shared_config(
         }
     }
     linked
+}
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+
+    fn n(v: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.map(str::to_string)))
+            .collect()
+    }
+
+    /// The real shape of 병승's Mac, found only by reading uuids by hand:
+    /// ~/.claude and ~/.claude-company are one login in two directories.
+    #[test]
+    fn two_directories_holding_one_login_are_reported_together() {
+        let got = slots_sharing_an_account(&n(&[
+            ("bsgong", Some("8dd1a9aa")),
+            ("rnd", Some("202743db")),
+            ("bsgong-slot", Some("8dd1a9aa")),
+        ]));
+        assert_eq!(
+            got,
+            vec![vec!["bsgong".to_string(), "bsgong-slot".to_string()]]
+        );
+    }
+
+    /// Two identities nobody can read are not evidence of one account.
+    #[test]
+    fn unreadable_identities_are_never_grouped() {
+        assert!(slots_sharing_an_account(&n(&[("a", None), ("b", None)])).is_empty());
+    }
+
+    #[test]
+    fn distinct_accounts_say_nothing() {
+        assert!(slots_sharing_an_account(&n(&[("a", Some("u1")), ("b", Some("u2"))])).is_empty());
+    }
 }
 
 #[cfg(test)]
