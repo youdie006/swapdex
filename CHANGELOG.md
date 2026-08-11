@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.45.0] - 2026-08-11
+
+### Fixed
+- **A spent account no longer hands the turn to its own twin.** One account can sit in two slots - two directories, one login - and everything about rotation was keyed on the slot NAME while a rate limit belongs to the ACCOUNT. So when one hit the wall, the next turn went to the other, which is behind that same wall: a rotation that looked like one and bought nothing but a second refusal and a round trip. Slots that share an account uuid are now ruled out together. An identity that cannot be read rules nothing out, because unknown is not the same as spent - otherwise the first refusal would bench every remaining account at once.
+
 ## [0.44.0] - 2026-08-09
 
 ### Fixed

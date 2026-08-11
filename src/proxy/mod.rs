@@ -687,23 +687,34 @@ fn next_account_in(
     let unusable = sh.unusable.lock().unwrap();
     let now = std::time::Instant::now();
     let now_s = now_secs();
-    slots.into_iter().find(|r| {
-        !tried.contains(&r.name)
-            && !unusable.contains(&r.name, now)
-            && !spent
-                .get(&r.name)
-                .is_some_and(|(q, at)| q.still_spent_since(*at, now_s))
-            // "Disabled" means do not pick this one FOR me; switching to it by
-            // hand still works, which is why the check lives here and not in
-            // pick_slot.
-            && !cfg.is_disabled(&r.name)
+    // Reduce each slot to the facts the choice turns on, then let pick decide.
+    // The rule that one ACCOUNT can sit in two slots lives there, where it is
+    // tested: a rate limit belongs to the account, so handing the next turn to a
+    // twin directory is a rotation that looks like one and buys nothing.
+    let candidates: Vec<pick::Candidate> = slots
+        .iter()
+        .map(|r| pick::Candidate {
+            name: r.name.clone(),
+            uuid: creds::slot_account_uuid(&r.config_dir),
+            ruled_out: tried.contains(&r.name)
+                || unusable.contains(&r.name, now)
+                || spent
+                    .get(&r.name)
+                    .is_some_and(|(q, at)| q.still_spent_since(*at, now_s))
+                // "Disabled" means do not pick this one FOR me; switching to it
+                // by hand still works, which is why the check lives here and not
+                // in pick_slot.
+                || cfg.is_disabled(&r.name),
             // Never offer a slot that was never signed into, or whose token has
             // already lapsed: either one just earns a 401, and nothing here can
             // refresh it. What a login LOOKS like differs per tool, and asking
             // the Claude question about a Codex slot answered "no login" for
             // every one of them - so a refused Codex turn had nowhere to go.
-            && has_usable_login(tool, &r.config_dir)
-    })
+            usable: has_usable_login(tool, &r.config_dir),
+        })
+        .collect();
+    let chosen = pick::next_usable(&candidates)?.name.clone();
+    slots.into_iter().find(|r| r.name == chosen)
 }
 
 /// Is there a login in this slot at all - asked WITHOUT touching it?

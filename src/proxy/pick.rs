@@ -42,6 +42,68 @@ impl Chooser {
     }
 }
 
+/// The account identities already ruled out this turn.
+///
+/// Everything else here keys off a slot NAME, but a rate limit belongs to the
+/// ACCOUNT - and one account can sit in two slots. 병승's Mac has exactly that:
+/// `~/.claude` and `~/.claude-company` are both `8dd1a9aa-...`. Handing the next
+/// turn from one to the other looks like a rotation and buys nothing, because
+/// the wall it just hit is the same wall.
+///
+/// `named` is (slot name, that slot's account uuid). A slot whose uuid cannot be
+/// read contributes nothing: unknown is not the same as spent, and excluding on
+/// a blank would rule out every account at once.
+pub fn burned_uuids(named: &[(String, Option<String>)], ruled_out: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = named
+        .iter()
+        .filter(|(name, _)| ruled_out.iter().any(|r| r == name))
+        .filter_map(|(_, uuid)| uuid.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// One candidate, reduced to the facts the choice actually turns on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Candidate {
+    pub name: String,
+    /// The account this slot holds, when it can be read.
+    pub uuid: Option<String>,
+    /// Ruled out by name already: tried this turn, known spent, benched, or
+    /// disabled by the user.
+    pub ruled_out: bool,
+    /// Has a login that could serve.
+    pub usable: bool,
+}
+
+/// The next slot that can serve, with the identity rule applied.
+///
+/// Pure so the identity rule is actually exercised. The version of this that
+/// lived inline was covered only by a test of its helper, and removing the rule
+/// from the caller broke nothing - the same way a fix shipped three times in one
+/// day changed nothing anyone could see.
+pub fn next_usable(candidates: &[Candidate]) -> Option<&Candidate> {
+    let ruled_out: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.ruled_out)
+        .map(|c| c.name.clone())
+        .collect();
+    let named: Vec<(String, Option<String>)> = candidates
+        .iter()
+        .map(|c| (c.name.clone(), c.uuid.clone()))
+        .collect();
+    let burned = burned_uuids(&named, &ruled_out);
+    candidates.iter().find(|c| {
+        !c.ruled_out
+            && c.usable
+            && !c
+                .uuid
+                .as_deref()
+                .is_some_and(|u| burned.iter().any(|b| b == u))
+    })
+}
+
 /// Is this account too full to start a turn on? A window at or past `threshold`
 /// (a fraction, so 0.98 is 98%) is treated as gone: the next turn would very
 /// likely be the one that hits the wall, and stepping across BEFORE that keeps a
@@ -124,6 +186,91 @@ pub fn rotate_target(
         .filter(|r| r.name != current)
         .find(|r| !state.get(&r.name).is_some_and(|q| q.rejected))
         .map(|r| r.name.clone())
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn named() -> Vec<(String, Option<String>)> {
+        vec![
+            ("bsgong".into(), Some("8dd1a9aa".into())),
+            ("bsgong-slot".into(), Some("8dd1a9aa".into())),
+            ("rnd".into(), Some("202743db".into())),
+        ]
+    }
+
+    /// The real shape of 병승's Mac: two slots, one account. Once one has hit the
+    /// wall, the other is behind the same wall.
+    #[test]
+    fn one_account_in_two_slots_is_burned_once_either_is() {
+        let burned = burned_uuids(&named(), &["bsgong".to_string()]);
+        assert_eq!(burned, vec!["8dd1a9aa"], "its twin is ruled out too");
+        assert!(
+            !burned.contains(&"202743db".to_string()),
+            "a genuinely different account is untouched"
+        );
+    }
+
+    /// A uuid that cannot be read must not rule anything out - excluding on a
+    /// blank would burn every account whose identity is merely unknown.
+    #[test]
+    fn an_unreadable_identity_rules_nothing_out() {
+        let named = vec![("a".to_string(), None), ("b".to_string(), None)];
+        assert!(burned_uuids(&named, &["a".to_string()]).is_empty());
+    }
+
+    fn c(name: &str, uuid: Option<&str>, ruled_out: bool) -> Candidate {
+        Candidate {
+            name: name.into(),
+            uuid: uuid.map(str::to_string),
+            ruled_out,
+            usable: true,
+        }
+    }
+
+    /// The whole point, end to end: bsgong just hit the wall, and bsgong-slot is
+    /// the SAME login in another directory. The turn must go to rnd.
+    #[test]
+    fn a_spent_account_does_not_hand_the_turn_to_its_own_twin() {
+        let list = [
+            c("bsgong", Some("8dd1a9aa"), true),
+            c("bsgong-slot", Some("8dd1a9aa"), false),
+            c("rnd", Some("202743db"), false),
+        ];
+        assert_eq!(
+            next_usable(&list).map(|c| c.name.as_str()),
+            Some("rnd"),
+            "the twin is behind the same wall"
+        );
+    }
+
+    /// With no twin in the list, nothing changes about the ordinary case.
+    #[test]
+    fn an_ordinary_failover_still_moves_to_the_next_account() {
+        let list = [c("a", Some("u-a"), true), c("b", Some("u-b"), false)];
+        assert_eq!(next_usable(&list).map(|c| c.name.as_str()), Some("b"));
+    }
+
+    /// Identity unknown must not exclude: on a store where no uuid can be read,
+    /// the rule would otherwise rule out every remaining account at once.
+    #[test]
+    fn unknown_identities_do_not_block_a_failover() {
+        let list = [c("a", None, true), c("b", None, false)];
+        assert_eq!(next_usable(&list).map(|c| c.name.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn a_slot_with_no_usable_login_is_never_offered() {
+        let mut only = c("a", Some("u"), false);
+        only.usable = false;
+        assert_eq!(next_usable(&[only]), None);
+    }
+
+    #[test]
+    fn nothing_tried_burns_nothing() {
+        assert!(burned_uuids(&named(), &[]).is_empty());
+    }
 }
 
 #[cfg(test)]
