@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.49.0] - 2026-08-11
+
+### Fixed
+- **The dashboard names the account that actually serves.** A saved snapshot is a copy nothing refreshes - the slot answers for the account - but it carries credentials, so it read as "signed in" and took the row from a live slot that needed one. On a real machine that showed `claude`, a snapshot from weeks earlier, while the slot `personal` sat unnamed and unsigned-in: the one account needing attention was the one hidden. A slot now outranks a snapshot outright rather than as a tiebreak, and the row still borrows the label from whichever half knows the email, so a never-signed-in slot is not shown nameless.
+- **The proxy says when a benched account sends the turn back.** After the threshold moved the session and the new account reported a spent window, every following turn fell back to the original account through the quietest path in the proxy - no line, turn after turn, directly under one saying that account was near its limit.
+
 ## [0.48.0] - 2026-08-11
 
 ### Fixed

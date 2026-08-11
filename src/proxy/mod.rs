@@ -245,6 +245,15 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             || creds::slot_token_expired(&chosen.config_dir, now_ms());
         if known_spent {
             if let Some(better) = next_account(paths, sh, std::slice::from_ref(&chosen.name)) {
+                // Say it. This used to be the quietest path in the proxy: the
+                // account the rotation had settled on was benched, every turn
+                // fell back here, and the log showed only the fallback serving
+                // turn after turn with no reason given.
+                println!(
+                    "{} is benched - this turn goes to {}",
+                    chosen.name, better.name
+                );
+                std::io::stdout().flush().ok();
                 return Ok(better);
             }
         }

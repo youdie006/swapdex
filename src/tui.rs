@@ -147,14 +147,18 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
     // switches by pointer - which the proxy and the active marker both follow -
     // while a snapshot copies credentials and moves no pointer, so keeping the
     // snapshot row made Enter appear to do nothing.
+    // A SLOT outranks a snapshot outright, not merely as a tiebreak. The slot is
+    // where the account lives and what a switch moves; the snapshot is a copy
+    // nothing refreshes. Ranking usability first let a stale copy that still
+    // carried credentials read as "signed in" and take the row from a live slot
+    // that needed one - hiding the single thing that needed doing.
     let rank = |r: &Row| {
         let usable = match (r.needs_login, r.active) {
             (false, true) => 0,
             (false, false) => 1,
             (true, _) => 2,
         };
-        // Slots first within the same usability.
-        (usable, u8::from(!r.is_slot))
+        (u8::from(!r.is_slot), usable)
     };
     // (identity, index of the current winner, every member's index). The winner
     // takes the FIRST-seen position, so an account does not jump down the list
@@ -213,6 +217,19 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
                 also: Vec::new(),
             },
         );
+        // The winner is the row that SERVES; the label can still come from
+        // whichever half knows who the account is. A slot that has never been
+        // signed into has no email to show, and printing a nameless row would
+        // trade one kind of blank for another.
+        if !row.ident.contains('@') {
+            if let Some(known) = members
+                .iter()
+                .map(|i| &rows[*i].ident)
+                .find(|id| id.contains('@'))
+            {
+                row.ident = known.clone();
+            }
+        }
         row.also = also;
         out.push(row);
     }
@@ -2550,6 +2567,39 @@ mod tests {
         assert_eq!(click_item_index(0, 13, 5, &real), 3);
         // Past the end clamps to the last item rather than panicking.
         assert_eq!(click_item_index(0, 200, 5, &heights), 2);
+    }
+
+    /// The row has to be named after the thing that actually serves. A saved
+    /// snapshot is a dead copy - nothing refreshes it, and the slot answers for
+    /// the account - but it carries credentials, so it read as "signed in" and
+    /// outranked a slot that needed one. On a real machine that showed `claude`
+    /// (a snapshot from weeks ago) while the live slot `personal` sat unnamed
+    /// and unsigned-in, so the one thing needing attention was the one hidden.
+    #[test]
+    fn a_live_slot_is_named_even_when_a_snapshot_of_it_looks_signed_in() {
+        let row = |name: &str, ident: &str, is_slot: bool, needs_login: bool| Row {
+            name: name.into(),
+            ident: ident.into(),
+            tools: "claude-code".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login,
+            stale: false,
+            is_slot,
+            also: Vec::new(),
+        };
+        let out = dedupe_by_identity(vec![
+            row("claude", "you@gmail.com [max]", false, false),
+            row("personal", "you@gmail.com", true, true),
+        ]);
+        assert_eq!(out.len(), 1, "still one account, one row");
+        assert_eq!(out[0].name, "personal", "named after what serves");
+        assert!(
+            out[0].needs_login,
+            "and it says the account needs a login, which the snapshot was hiding"
+        );
+        assert_eq!(out[0].also, vec!["claude".to_string()], "nothing is lost");
     }
 
     /// One account, one row. A saved snapshot and a slot can carry the same
