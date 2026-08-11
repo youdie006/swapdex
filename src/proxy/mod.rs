@@ -366,9 +366,16 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // account that serves fine can still vanish from this line: serving
         // RENEWS a lapsed token on the way past, and measuring does not - so an
         // account answering 200s all day can be unmeasurable, and nothing said so.
-        let Some(tok) = creds::slot_token(&r.config_dir) else {
-            unread.push(format!("{} (login not readable here)", r.name));
-            continue;
+        // Ask for the REASON, not just the token. `slot_token` is the lossy
+        // wrapper, and "not readable" covers two different situations - a
+        // keychain that will not release the secret to this process, and a slot
+        // with nothing signed in - whose remedies are opposites.
+        let tok = match creds::slot_token_detail(&r.config_dir) {
+            Ok(t) => t,
+            Err(why) => {
+                unread.push(format!("{} ({})", r.name, why.short()));
+                continue;
+            }
         };
         let token = String::from_utf8_lossy(tok.expose()).to_string();
         if !crate::quota::token_usable(&token) {

@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.47.1] - 2026-08-11
+
+### Fixed
+- **"login not readable" now says which of the two it is.** The measurement path was still asking through the lossy reader, so a keychain that will not release a secret to this process and a slot with nothing signed into it printed the same words - and their remedies are opposites (fix the environment, versus sign in). It asks for the reason now, the same way `swapdex quota` already did.
+
 ## [0.47.0] - 2026-08-11
 
 ### Fixed
