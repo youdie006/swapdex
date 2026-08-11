@@ -50,8 +50,25 @@ impl Chooser {
 /// this round's failures. An account in BOTH keeps its number: a failed re-read
 /// does not erase what was already known, and printing both made one account
 /// appear twice on a line that then contradicted itself.
-pub fn usage_line(measured: &[(String, String)], unread: &[(String, String)]) -> String {
-    let mut parts: Vec<String> = measured.iter().map(|(n, v)| format!("{n} {v}")).collect();
+pub fn usage_line(
+    measured: &[(String, String)],
+    unread: &[(String, String)],
+    refused: &[String],
+) -> String {
+    // A percentage is what an account's WINDOWS say; whether it will actually
+    // take a turn is what its last answer said. Those can disagree - an account
+    // reading 0% whose overage is spent refuses every turn - and printing only
+    // the percentage promises a reserve that is not there.
+    let mut parts: Vec<String> = measured
+        .iter()
+        .map(|(n, v)| {
+            if refused.iter().any(|r| r == n) {
+                format!("{n} {v} but refusing turns")
+            } else {
+                format!("{n} {v}")
+            }
+        })
+        .collect();
     parts.sort();
     let mut rest: Vec<String> = unread
         .iter()
@@ -219,6 +236,20 @@ mod usage_line_tests {
             .collect()
     }
 
+    /// The finding that prompted this: rnd measured 0% and was printed as a
+    /// fresh reserve, two lines below its own answers saying its overage was
+    /// spent. The threshold handed it the session, it refused twice, and the
+    /// session came straight back - while the line still said 0%.
+    #[test]
+    fn an_account_that_is_refusing_turns_does_not_read_as_a_reserve() {
+        let line = usage_line(&p(&[("rnd", "0% (on credits)")]), &[], &["rnd".to_string()]);
+        assert!(line.contains("refusing"), "{line}");
+        assert!(
+            line.contains("0%"),
+            "the measurement is still shown: {line}"
+        );
+    }
+
     /// The line that gave this away: bsgong had a number carried over AND a
     /// throttled re-read this round, so it was printed twice - a single line
     /// claiming an account was both 89% and unreadable.
@@ -230,6 +261,7 @@ mod usage_line_tests {
                 ("bsgong", "usage endpoint throttled"),
                 ("rnd", "usage endpoint throttled"),
             ]),
+            &[],
         );
         assert_eq!(
             line,
@@ -245,13 +277,18 @@ mod usage_line_tests {
         let line = usage_line(
             &p(&[("a", "50%")]),
             &p(&[("a", "usage endpoint throttled")]),
+            &[],
         );
         assert_eq!(line, "a 50%");
     }
 
     #[test]
     fn accounts_with_no_number_are_named_with_their_reason() {
-        let line = usage_line(&p(&[]), &p(&[("b", "no saved token"), ("a", "throttled")]));
+        let line = usage_line(
+            &p(&[]),
+            &p(&[("b", "no saved token"), ("a", "throttled")]),
+            &[],
+        );
         assert_eq!(line, "a (throttled), b (no saved token)");
     }
 }

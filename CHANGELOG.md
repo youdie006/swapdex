@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.48.0] - 2026-08-11
+
+### Fixed
+- **An account that is refusing turns no longer reads as a reserve.** A percentage is what an account's windows say; whether it will actually take a turn is what its last answer said, and those can disagree. On a real machine the usage line read `rnd 0% (on credits)` two lines below rnd's own replies saying its overage was spent - so the threshold handed rnd the session, rnd refused twice, and the session came straight back to an account at 98%. The rotation was right; only the line describing it was wrong, and it promised a fresh account that did not exist. The measurement is still shown, with what the account is actually doing next to it.
+
 ## [0.47.2] - 2026-08-11
 
 ### Fixed

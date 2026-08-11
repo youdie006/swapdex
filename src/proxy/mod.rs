@@ -352,6 +352,22 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
     };
     let now = std::time::Instant::now();
     let mut unread: Vec<(String, String)> = Vec::new();
+    // What the accounts' own answers said, which can contradict what their
+    // windows say. An account measured at 0% whose overage is spent refuses
+    // every turn, and printing only the percentage offers a reserve that is not
+    // there - the threshold hands it the session and it comes straight back.
+    let refused: Vec<String> = {
+        let q = sh.quota.lock().unwrap();
+        let now_s = now_secs();
+        slots
+            .iter()
+            .filter(|r| {
+                q.get(&r.name)
+                    .is_some_and(|(quota, at)| quota.still_spent_since(*at, now_s))
+            })
+            .map(|r| r.name.clone())
+            .collect()
+    };
     for r in slots {
         if let Some(prev) = out.get(&r.name) {
             let due = prev.taken.is_none_or(|t| {
@@ -420,7 +436,7 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let why = if unread.is_empty() {
             String::new()
         } else {
-            format!(": {}", pick::usage_line(&[], &unread))
+            format!(": {}", pick::usage_line(&[], &unread, &refused))
         };
         println!("  (no account's usage could be read{why} - the threshold cannot apply)");
     } else {
@@ -447,7 +463,10 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // An account that has a number keeps it: a failed re-read does not
         // erase what was already known, and printing both made one account
         // appear twice on a line that then contradicted itself.
-        println!("  usage: {}", pick::usage_line(&measured, &unread));
+        println!(
+            "  usage: {}",
+            pick::usage_line(&measured, &unread, &refused)
+        );
     }
     std::io::stdout().flush().ok();
     let mut m = sh.measured.lock().unwrap();
