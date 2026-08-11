@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.47.2] - 2026-08-11
+
+### Fixed
+- **An account is named once on the usage line.** A number carried over from an earlier round and a failed re-read this round were both printed, so one account appeared twice and the line contradicted itself - `bsgong 89% (on credits), bsgong (usage endpoint throttled)`. An account that has a number keeps it: a failed re-read does not erase what was already known, which is also what lets the threshold keep working across a throttled round.
+
 ## [0.47.1] - 2026-08-11
 
 ### Fixed

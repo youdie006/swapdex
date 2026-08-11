@@ -42,6 +42,27 @@ impl Chooser {
     }
 }
 
+/// The one-line usage summary: what each account reads, and for the ones that
+/// read nothing, why.
+///
+/// `measured` is (name, rendered value) for accounts with a number - including
+/// values carried over from an earlier round. `unread` is (name, reason) for
+/// this round's failures. An account in BOTH keeps its number: a failed re-read
+/// does not erase what was already known, and printing both made one account
+/// appear twice on a line that then contradicted itself.
+pub fn usage_line(measured: &[(String, String)], unread: &[(String, String)]) -> String {
+    let mut parts: Vec<String> = measured.iter().map(|(n, v)| format!("{n} {v}")).collect();
+    parts.sort();
+    let mut rest: Vec<String> = unread
+        .iter()
+        .filter(|(n, _)| !measured.iter().any(|(m, _)| m == n))
+        .map(|(n, why)| format!("{n} ({why})"))
+        .collect();
+    rest.sort();
+    parts.extend(rest);
+    parts.join(", ")
+}
+
 /// The account identities already ruled out this turn.
 ///
 /// Everything else here keys off a slot NAME, but a rate limit belongs to the
@@ -186,6 +207,53 @@ pub fn rotate_target(
         .filter(|r| r.name != current)
         .find(|r| !state.get(&r.name).is_some_and(|q| q.rejected))
         .map(|r| r.name.clone())
+}
+
+#[cfg(test)]
+mod usage_line_tests {
+    use super::*;
+
+    fn p(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    /// The line that gave this away: bsgong had a number carried over AND a
+    /// throttled re-read this round, so it was printed twice - a single line
+    /// claiming an account was both 89% and unreadable.
+    #[test]
+    fn an_account_with_a_number_is_never_also_listed_as_unread() {
+        let line = usage_line(
+            &p(&[("bsgong", "89% (on credits)")]),
+            &p(&[
+                ("bsgong", "usage endpoint throttled"),
+                ("rnd", "usage endpoint throttled"),
+            ]),
+        );
+        assert_eq!(
+            line,
+            "bsgong 89% (on credits), rnd (usage endpoint throttled)"
+        );
+        assert_eq!(line.matches("bsgong").count(), 1, "named once: {line}");
+    }
+
+    /// A failed re-read must not erase a number that was already known - that is
+    /// what makes the threshold keep working across a throttled round.
+    #[test]
+    fn a_failed_reread_keeps_the_number_it_already_had() {
+        let line = usage_line(
+            &p(&[("a", "50%")]),
+            &p(&[("a", "usage endpoint throttled")]),
+        );
+        assert_eq!(line, "a 50%");
+    }
+
+    #[test]
+    fn accounts_with_no_number_are_named_with_their_reason() {
+        let line = usage_line(&p(&[]), &p(&[("b", "no saved token"), ("a", "throttled")]));
+        assert_eq!(line, "a (throttled), b (no saved token)");
+    }
 }
 
 #[cfg(test)]

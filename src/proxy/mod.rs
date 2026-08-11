@@ -351,7 +351,7 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         m.1.clone()
     };
     let now = std::time::Instant::now();
-    let mut unread: Vec<String> = Vec::new();
+    let mut unread: Vec<(String, String)> = Vec::new();
     for r in slots {
         if let Some(prev) = out.get(&r.name) {
             let due = prev.taken.is_none_or(|t| {
@@ -373,26 +373,26 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let tok = match creds::slot_token_detail(&r.config_dir) {
             Ok(t) => t,
             Err(why) => {
-                unread.push(format!("{} ({})", r.name, why.short()));
+                unread.push((r.name.clone(), why.short().to_string()));
                 continue;
             }
         };
         let token = String::from_utf8_lossy(tok.expose()).to_string();
         if !crate::quota::token_usable(&token) {
-            unread.push(format!(
-                "{} (token lapsed - serving renews it, measuring does not)",
-                r.name
+            unread.push((
+                r.name.clone(),
+                "token lapsed - serving renews it, measuring does not".to_string(),
             ));
             continue;
         }
         crate::quota::pace_between_accounts();
         let fetched = crate::quota::fetch_with_retry(&token);
-        if let Some(why) = fetched.why_no_number() {
+        if let Some(why) = fetched.why_no_number().map(str::to_string) {
             // Say WHY. A dropped read used to make the account vanish from the
             // usage line, and an account with no measurement cannot be held to
             // the threshold - so the one that silently disappears is the one
             // that stops stepping off before it hits a wall.
-            unread.push(format!("{} ({why})", r.name));
+            unread.push((r.name.clone(), why));
         }
         if let crate::quota::Fetch::Ok(q) = fetched {
             out.insert(
@@ -420,11 +420,11 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let why = if unread.is_empty() {
             String::new()
         } else {
-            format!(": {}", unread.join(", "))
+            format!(": {}", pick::usage_line(&[], &unread))
         };
         println!("  (no account's usage could be read{why} - the threshold cannot apply)");
     } else {
-        let mut parts: Vec<String> = out
+        let measured: Vec<(String, String)> = out
             .iter()
             .map(|(n, m)| {
                 let worst = [m.five_h, m.seven_d]
@@ -432,21 +432,22 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     .flatten()
                     .fold(f64::NAN, f64::max);
                 let via = if m.credits { " (on credits)" } else { "" };
-                if worst.is_finite() {
-                    format!("{n} {worst:.0}%{via}")
+                let value = if worst.is_finite() {
+                    format!("{worst:.0}%{via}")
                 } else {
-                    format!("{n} ?")
-                }
+                    "?".to_string()
+                };
+                (n.clone(), value)
             })
             .collect();
         // An account that answered and one that could not be READ must not look
         // the same. Naming the unread ones keeps a partial round from reading as
         // a complete one - which is how the account actually serving dropped out
         // of this line unnoticed.
-        parts.sort();
-        unread.sort();
-        parts.extend(unread);
-        println!("  usage: {}", parts.join(", "));
+        // An account that has a number keeps it: a failed re-read does not
+        // erase what was already known, and printing both made one account
+        // appear twice on a line that then contradicted itself.
+        println!("  usage: {}", pick::usage_line(&measured, &unread));
     }
     std::io::stdout().flush().ok();
     let mut m = sh.measured.lock().unwrap();
