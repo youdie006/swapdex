@@ -362,11 +362,20 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                 continue;
             }
         }
+        // Both of these used to `continue` without a word, which is where the
+        // account that serves fine can still vanish from this line: serving
+        // RENEWS a lapsed token on the way past, and measuring does not - so an
+        // account answering 200s all day can be unmeasurable, and nothing said so.
         let Some(tok) = creds::slot_token(&r.config_dir) else {
+            unread.push(format!("{} (login not readable here)", r.name));
             continue;
         };
         let token = String::from_utf8_lossy(tok.expose()).to_string();
         if !crate::quota::token_usable(&token) {
+            unread.push(format!(
+                "{} (token lapsed - serving renews it, measuring does not)",
+                r.name
+            ));
             continue;
         }
         crate::quota::pace_between_accounts();

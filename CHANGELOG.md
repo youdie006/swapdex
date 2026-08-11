@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.47.0] - 2026-08-11
+
+### Fixed
+- **The proxy says which account it could not measure, and why.** Every failed usage read was dropped by one `if let Fetch::Ok`, and two checks before it skipped without a word, so a throttled endpoint, a token that had lapsed, and a login that could not be read all produced the same thing: the account vanished from the `usage:` line, and a partial round read exactly like a complete one. That silence is not cosmetic - an account with no measurement cannot be held to the threshold, so the one that quietly disappears is the one that stops stepping off before it hits a wall. On one real machine that was the account actually serving. The lapsed-token case is worth naming on its own: serving renews a token on the way past and measuring does not, so an account answering 200s all day can still be unmeasurable.
+
 ## [0.46.0] - 2026-08-11
 
 ### Added
