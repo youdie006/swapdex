@@ -157,10 +157,20 @@ pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
     let blob = slot_token_blob(dir)?;
     let cred: serde_json::Value = serde_json::from_slice(&blob).ok()?;
     let sub = cred["claudeAiOauth"]["subscriptionType"].as_str()?;
-    // A personal plan cannot be the login of an organisation account.
+    // Worth pointing at, NOT proof. This used to read "the name and the login
+    // belong to different accounts", which the data cannot support: a person in
+    // an organisation may hold a personal Max or Pro plan, and that is an
+    // ordinary setup rather than a fault. The credential carries a plan name and
+    // scopes - no account identifier at all - so nothing here can tell one
+    // account from two. What it CAN do is say what it sees and name the one
+    // check that settles it.
     if matches!(sub, "max" | "pro") {
         return Some(format!(
-            "recorded as {email} ({org}) but signed in on a '{sub}' plan -              the name and the login belong to different accounts"
+            "recorded as {email} ({org}), and its credential is a '{sub}' plan. \
+             That is normal if you hold a personal plan alongside the \
+             organisation; if you did not expect it, the config was written by a \
+             different login than the one in this slot - `swapdex whoami` while \
+             running as this account settles it"
         ));
     }
     None
@@ -244,9 +254,9 @@ mod tests {
         );
     }
 
-    // The name comes from one file and the numbers from another, and nothing
-    // keeps them in step - so a config whose identity was overwritten shows one
-    // person's name above another person's usage.
+    // The name comes from one file and the plan from another, and nothing keeps
+    // them in step - so a config whose identity was overwritten shows one
+    // person's name above another person's usage. Worth pointing at; not proof.
     #[test]
     fn an_identity_that_cannot_match_its_login_is_reported() {
         let dir = tempfile::tempdir().unwrap();
@@ -266,14 +276,26 @@ mod tests {
             )
             .unwrap()
         };
-        // An organisation account signed in on a personal plan cannot be one
-        // account: say so, and name both halves.
+        // An organisation identity beside a personal plan: name both halves.
         id("a@company.com", "Acme RnD");
         cred("max");
-        let msg = identity_contradicts_login(dir.path()).expect("contradiction");
+        let msg = identity_contradicts_login(dir.path()).expect("worth reporting");
         assert!(msg.contains("a@company.com"), "{msg}");
         assert!(msg.contains("Acme RnD"), "{msg}");
         assert!(msg.contains("max"), "{msg}");
+        // ...but it must NOT claim to know they are two accounts. A person in an
+        // organisation may hold a personal Max or Pro plan, and the credential
+        // carries no account identifier - only a plan name and scopes - so
+        // nothing here can tell one account from two. Asserting it anyway sent
+        // someone to re-sign-in a login that was fine.
+        assert!(
+            !msg.contains("different accounts"),
+            "it states what it sees, it does not conclude: {msg}"
+        );
+        assert!(
+            msg.contains("normal if"),
+            "and it says plainly when this is an ordinary setup: {msg}"
+        );
 
         // The same account consistently: nothing to report.
         cred("team");

@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.51.0] - 2026-08-11
+
+### Fixed
+- **doctor stops concluding that an account name and its login are different accounts.** It read an organisation in `.claude.json` beside a `max` or `pro` credential and declared the two belonged to different people, then told you to sign in again. The data cannot support that: someone in an organisation may hold a personal plan, which is an ordinary setup, and the credential carries no account identifier at all - only a plan name and scopes - so nothing local can tell one account from two. It now states what it sees, says plainly when that is normal, names the check that settles it, and is not counted among the problems. A problem list that includes maybes is one people stop reading.
+
 ## [0.50.0] - 2026-08-11
 
 ### Fixed

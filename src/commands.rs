@@ -3239,12 +3239,12 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                             .map(|why| format!("'{}' is {why}", r.name))
                     })
                     .collect();
+                // Stated, not counted as a problem: the evidence available here
+                // cannot separate "two accounts got mixed" from "this person has
+                // a personal plan and an organisation", and a problem count that
+                // includes maybes is one people stop reading.
                 for line in &mixed {
-                    report(
-                        "account identity",
-                        false,
-                        format!("{line} - sign in again to make them agree"),
-                    );
+                    report("account identity", true, line.clone());
                 }
             }
             // Two directories can hold ONE login. Nothing said so, and the
