@@ -90,6 +90,27 @@ pub enum Fetch {
     Throttled,
 }
 
+impl Fetch {
+    /// Why this read produced no number, in the words the log should use.
+    /// `None` when it succeeded.
+    ///
+    /// Every failure used to be dropped by the same `if let Fetch::Ok` and the
+    /// account simply vanished from the usage line - so a throttled endpoint, an
+    /// account with no login, and an unreachable network all read as the same
+    /// silence. That silence matters: an account with no measurement cannot be
+    /// held to the threshold, so the account it hides is exactly the one that
+    /// stops rotating before it hits a wall.
+    pub fn why_no_number(&self) -> Option<&'static str> {
+        match self {
+            Self::Ok(_) => None,
+            Self::Throttled => Some("usage endpoint throttled"),
+            Self::Unauthorized => Some("token rejected"),
+            Self::Offline(_) => Some("could not reach the endpoint"),
+            Self::Unexpected(_, _) => Some("unexpected reply"),
+        }
+    }
+}
+
 /// Pull the OAuth access token out of a Claude credentials blob
 /// (`{"claudeAiOauth":{"accessToken":...}}`).
 pub fn token_from_credentials(bytes: &[u8]) -> Option<String> {
@@ -406,6 +427,29 @@ fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
         None => (String::new(), text.trim().parse::<u32>().unwrap_or(0)),
     };
     Ok((body, code))
+}
+
+#[cfg(test)]
+mod why_tests {
+    use super::*;
+
+    /// The distinction that was being thrown away: a throttled endpoint says
+    /// nothing about the account, and an account nobody can read is not an
+    /// account at 0%. Collapsing them made the serving account vanish from the
+    /// usage line with no trace of why.
+    #[test]
+    fn every_failure_says_what_it_was() {
+        assert_eq!(Fetch::Ok(Quota::default()).why_no_number(), None);
+        let throttled = Fetch::Throttled.why_no_number().unwrap();
+        let unauth = Fetch::Unauthorized.why_no_number().unwrap();
+        let offline = Fetch::Offline("dns".into()).why_no_number().unwrap();
+        assert!(throttled.contains("throttled"), "{throttled}");
+        assert!(
+            unauth != throttled,
+            "a rejected token is not a busy endpoint"
+        );
+        assert!(offline != throttled && offline != unauth, "{offline}");
+    }
 }
 
 #[cfg(test)]

@@ -351,6 +351,7 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         m.1.clone()
     };
     let now = std::time::Instant::now();
+    let mut unread: Vec<String> = Vec::new();
     for r in slots {
         if let Some(prev) = out.get(&r.name) {
             let due = prev.taken.is_none_or(|t| {
@@ -369,7 +370,15 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
             continue;
         }
         crate::quota::pace_between_accounts();
-        if let crate::quota::Fetch::Ok(q) = crate::quota::fetch_with_retry(&token) {
+        let fetched = crate::quota::fetch_with_retry(&token);
+        if let Some(why) = fetched.why_no_number() {
+            // Say WHY. A dropped read used to make the account vanish from the
+            // usage line, and an account with no measurement cannot be held to
+            // the threshold - so the one that silently disappears is the one
+            // that stops stepping off before it hits a wall.
+            unread.push(format!("{} ({why})", r.name));
+        }
+        if let crate::quota::Fetch::Ok(q) = fetched {
             out.insert(
                 r.name.clone(),
                 Measurement {
@@ -392,7 +401,12 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
     // measured is indistinguishable from one that is working, and this read is
     // the only thing standing between the two.
     if out.is_empty() {
-        println!("  (no account's usage could be read - the threshold cannot apply)");
+        let why = if unread.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", unread.join(", "))
+        };
+        println!("  (no account's usage could be read{why} - the threshold cannot apply)");
     } else {
         let mut parts: Vec<String> = out
             .iter()
@@ -409,7 +423,13 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                 }
             })
             .collect();
+        // An account that answered and one that could not be READ must not look
+        // the same. Naming the unread ones keeps a partial round from reading as
+        // a complete one - which is how the account actually serving dropped out
+        // of this line unnoticed.
         parts.sort();
+        unread.sort();
+        parts.extend(unread);
         println!("  usage: {}", parts.join(", "));
     }
     std::io::stdout().flush().ok();
