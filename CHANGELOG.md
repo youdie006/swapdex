@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.46.0] - 2026-08-11
+
+### Added
+- **`swapdex doctor` says when two slots hold the same login.** Two directories can carry one account, and nothing on screen said so - the fleet reads as more accounts than exist, and a rate limit hit on one applies to its twin. It is stated rather than counted as a problem, because keeping two directories for one account is a fair thing to do as long as you know that is what you have. A slot whose identity cannot be read is never grouped: two unknowns are not evidence of one account.
+
 ## [0.45.0] - 2026-08-11
 
 ### Fixed
