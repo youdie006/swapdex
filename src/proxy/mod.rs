@@ -31,18 +31,26 @@ struct Measurement {
     /// and its spend cap is not reached. Without this a full window read as a
     /// wall, and the proxy stepped off an account answering turns perfectly well.
     credits: bool,
-    /// When its soonest window turns over, epoch seconds. What `consume-first`
-    /// sorts on: quota about to reset costs nothing to spend.
-    resets_at: Option<i64>,
+    /// When each window turns over, epoch seconds. Kept SEPARATELY: they answer
+    /// different questions - the 5h says when this afternoon frees up, the 7d
+    /// says which day the account is out until - and collapsing them to the
+    /// soonest one threw the second away.
+    five_h_reset: Option<i64>,
+    seven_d_reset: Option<i64>,
     /// When this reading was taken, so the NEXT one can be paced per account:
     /// one near its limit is worth watching, one at 3% is not.
     taken: Option<std::time::Instant>,
 }
 
 impl Measurement {
-    /// Seconds until the soonest window resets, relative to `now`.
+    /// Seconds until the SOONEST window resets, relative to `now`. What
+    /// `consume-first` sorts on: quota about to reset costs nothing to spend.
     fn resets_in(&self, now: i64) -> Option<i64> {
-        self.resets_at.map(|r| r - now)
+        [self.five_h_reset, self.seven_d_reset]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|r| r - now)
     }
 }
 
@@ -428,11 +436,8 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     credits: q.can_serve_past_windows(),
                     // The soonest of the two windows: that is the one whose
                     // quota is about to become free.
-                    resets_at: [q.five_hour, q.seven_day]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|w| w.resets_at)
-                        .min(),
+                    five_h_reset: q.five_hour.and_then(|w| w.resets_at),
+                    seven_d_reset: q.seven_day.and_then(|w| w.resets_at),
                     taken: Some(std::time::Instant::now()),
                 },
             );
@@ -449,35 +454,34 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         };
         println!("  (no account's usage could be read{why} - the threshold cannot apply)");
     } else {
+        // Each window on its own, both of them. The 5h and the 7d answer
+        // different questions - when this afternoon frees up, versus which day
+        // the account is out until - and one number that was the larger of the
+        // two answered neither.
+        let now_s = now_secs();
+        let tz = tz_offset();
+        let win = |pct: Option<f64>, at: Option<i64>, label: &str| -> Option<String> {
+            let p = pct?;
+            let when = at
+                .map(|t| format!(" resets {}", pick::reset_clock(t, now_s, tz)))
+                .unwrap_or_default();
+            Some(format!("{label} {p:.0}%{when}"))
+        };
         let measured: Vec<(String, String)> = out
             .iter()
             .map(|(n, m)| {
-                let worst = [m.five_h, m.seven_d]
-                    .into_iter()
-                    .flatten()
-                    .fold(f64::NAN, f64::max);
                 let via = if m.credits { " (on credits)" } else { "" };
-                // The reset time rides along only for a window at its limit.
-                // Until then it is a number nobody acts on, and a line nobody
-                // reads is worse than a line missing a detail - claude-swap and
-                // teamclaude both gate it the same way. A clock, not a
-                // countdown: this line is written once and read later.
-                let due = if worst.is_finite() && worst >= 99.0 {
-                    m.resets_at
-                        .map(|at| {
-                            format!(
-                                ", resets {}",
-                                pick::reset_clock(at, now_secs(), tz_offset())
-                            )
-                        })
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                let value = if worst.is_finite() {
-                    format!("{worst:.0}%{via}{due}")
-                } else {
+                let parts: Vec<String> = [
+                    win(m.five_h, m.five_h_reset, "5h"),
+                    win(m.seven_d, m.seven_d_reset, "7d"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let value = if parts.is_empty() {
                     "?".to_string()
+                } else {
+                    format!("{}{via}", parts.join(" · "))
                 };
                 (n.clone(), value)
             })
@@ -489,10 +493,10 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // An account that has a number keeps it: a failed re-read does not
         // erase what was already known, and printing both made one account
         // appear twice on a line that then contradicted itself.
-        println!(
-            "  usage: {}",
-            pick::usage_line(&measured, &unread, &refused)
-        );
+        println!("  usage:");
+        for line in pick::usage_block(&measured, &unread, &refused) {
+            println!("    {line}");
+        }
     }
     std::io::stdout().flush().ok();
     let mut m = sh.measured.lock().unwrap();

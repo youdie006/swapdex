@@ -50,6 +50,44 @@ impl Chooser {
 /// this round's failures. An account in BOTH keeps its number: a failed re-read
 /// does not erase what was already known, and printing both made one account
 /// appear twice on a line that then contradicted itself.
+/// The same information as `usage_line`, one account per line.
+///
+/// With both windows and both reset times, a single joined line ran past 150
+/// characters and stopped being readable - which defeats the point of printing
+/// it. `swapdex quota` already lays accounts out this way; the log follows.
+pub fn usage_block(
+    measured: &[(String, String)],
+    unread: &[(String, String)],
+    refused: &[String],
+) -> Vec<String> {
+    let width = measured
+        .iter()
+        .map(|(n, _)| n.chars().count())
+        .chain(unread.iter().map(|(n, _)| n.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let mut out: Vec<String> = measured
+        .iter()
+        .map(|(n, v)| {
+            let mark = if refused.iter().any(|r| r == n) {
+                "  - refusing turns"
+            } else {
+                ""
+            };
+            format!("{n:width$}  {v}{mark}")
+        })
+        .collect();
+    out.sort();
+    let mut rest: Vec<String> = unread
+        .iter()
+        .filter(|(n, _)| !measured.iter().any(|(m, _)| m == n))
+        .map(|(n, why)| format!("{n:width$}  ({why})"))
+        .collect();
+    rest.sort();
+    out.extend(rest);
+    out
+}
+
 pub fn usage_line(
     measured: &[(String, String)],
     unread: &[(String, String)],
@@ -257,6 +295,58 @@ pub fn rotate_target(
         .filter(|r| r.name != current)
         .find(|r| !state.get(&r.name).is_some_and(|q| q.rejected))
         .map(|r| r.name.clone())
+}
+
+#[cfg(test)]
+mod usage_block_tests {
+    use super::*;
+
+    fn p(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    /// One account per line, names aligned, and the same rules the single line
+    /// had: a number survives a failed re-read, and nothing is named twice.
+    #[test]
+    fn each_account_gets_its_own_line() {
+        let out = usage_block(
+            &p(&[
+                ("bsgong", "5h 61% resets 1:47pm · 7d 27% resets Tue 9am"),
+                ("rnd", "5h 0% · 7d 6% resets Sun 5pm"),
+            ]),
+            &p(&[("personal", "no saved token"), ("bsgong", "throttled")]),
+            &[],
+        );
+        assert_eq!(out.len(), 3, "one line each, bsgong not repeated: {out:?}");
+        assert!(out[0].starts_with("bsgong"), "{out:?}");
+        assert!(
+            out.iter().any(|l| l.contains("(no saved token)")),
+            "{out:?}"
+        );
+        // Names line up, so the values form a column. Measured from where the
+        // VALUE starts, not from the first double space - that one lands right
+        // after each name and differs by name length even when the layout is
+        // perfect, which is what the first version of this check got wrong.
+        let starts: Vec<usize> = out
+            .iter()
+            .map(|l| {
+                let name_end = l.find(' ').expect("name then padding");
+                name_end + (l[name_end..].len() - l[name_end..].trim_start().len())
+            })
+            .collect();
+        assert!(
+            starts.windows(2).all(|w| w[0] == w[1]),
+            "values form a column: {starts:?} in {out:?}"
+        );
+    }
+
+    #[test]
+    fn an_account_refusing_turns_is_marked() {
+        let out = usage_block(&p(&[("rnd", "5h 0%")]), &[], &["rnd".to_string()]);
+        assert!(out[0].contains("refusing"), "{out:?}");
+    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.54.0] - 2026-08-12
+
+### Changed
+- **The proxy reports each window separately, with its own reset time.** It used to print one number per account - the larger of the 5h and the 7d - and one reset, the sooner of the two. Those answer different questions: the 5h says when this afternoon frees up, the 7d says which day the account is out until, and a single number answered neither. Both now appear, each with the time it returns.
+- **That report is one account per line.** Two windows and two reset times ran a joined line past 150 characters, which defeats the point of printing it; names are padded so the readings form a column, the way `swapdex quota` already lays them out.
+
 ## [0.53.0] - 2026-08-12
 
 ### Changed
