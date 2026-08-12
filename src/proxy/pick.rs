@@ -118,6 +118,24 @@ pub fn usage_line(
     parts.join(", ")
 }
 
+/// One window as it should READ: how much is left, said in words.
+///
+/// swapdex speaks one language about quota - what is LEFT. The dashboard gauge
+/// says `62% left` and `swapdex quota` says `39% left`, but this line printed
+/// the percentage USED with no word, so `5h 0%` meant a full window while
+/// looking exactly like an empty one. One tool cannot hold two conventions and
+/// expect either to be trusted.
+///
+/// `used_pct` is what the endpoint reports; the conversion happens here, at the
+/// edge, so every decision inside still reasons about usage.
+pub fn window_left(label: &str, used_pct: f64, resets: Option<String>) -> String {
+    let left = (100.0 - used_pct).clamp(0.0, 100.0);
+    match resets {
+        Some(r) => format!("{label} {left:.0}% left, resets {r}"),
+        None => format!("{label} {left:.0}% left"),
+    }
+}
+
 /// A reset time as a CLOCK, for output that is written once and read later.
 ///
 /// The dashboard counts down because it redraws; a log line does not. A
@@ -346,6 +364,35 @@ mod usage_block_tests {
     fn an_account_refusing_turns_is_marked() {
         let out = usage_block(&p(&[("rnd", "5h 0%")]), &[], &["rnd".to_string()]);
         assert!(out[0].contains("refusing"), "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod window_left_tests {
+    use super::*;
+
+    /// The line printed the percentage USED with no word while every other
+    /// surface said what was LEFT, so "5h 0%" meant a full window and read as
+    /// an empty one. 병승 read it exactly that way.
+    #[test]
+    fn a_window_reports_what_is_left_not_what_is_used() {
+        assert_eq!(window_left("5h", 0.0, None), "5h 100% left");
+        assert_eq!(window_left("7d", 30.0, None), "7d 70% left");
+        assert_eq!(window_left("5h", 100.0, None), "5h 0% left");
+    }
+
+    #[test]
+    fn the_reset_rides_along_when_there_is_one() {
+        let s = window_left("5h", 61.0, Some("1:47pm".into()));
+        assert_eq!(s, "5h 39% left, resets 1:47pm");
+    }
+
+    /// A reading outside 0..100 (a rounding artefact from the endpoint) must not
+    /// print a negative allowance.
+    #[test]
+    fn a_reading_past_the_ends_is_clamped() {
+        assert_eq!(window_left("5h", 105.0, None), "5h 0% left");
+        assert_eq!(window_left("5h", -3.0, None), "5h 100% left");
     }
 }
 

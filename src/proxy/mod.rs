@@ -504,11 +504,9 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let now_s = now_secs();
         let tz = tz_offset();
         let win = |pct: Option<f64>, at: Option<i64>, label: &str| -> Option<String> {
-            let p = pct?;
-            let when = at
-                .map(|t| format!(" resets {}", pick::reset_clock(t, now_s, tz)))
-                .unwrap_or_default();
-            Some(format!("{label} {p:.0}%{when}"))
+            let used = pct?;
+            let when = at.map(|t| pick::reset_clock(t, now_s, tz));
+            Some(pick::window_left(label, used, when))
         };
         let measured: Vec<(String, String)> = out
             .iter()

@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.57.0] - 2026-08-12
+
+### Fixed
+- **The proxy's usage line says what is LEFT, like everything else.** It printed the percentage USED, with no word - so `5h 0%` meant a full window and read as an empty one, while the dashboard gauge beside it said `62% left` and `swapdex quota` said `39% left`. One tool cannot hold two conventions and expect either to be trusted. Every window now reads `5h 100% left, resets 1:47pm`. The conversion happens at the edge, so every decision inside still reasons about usage.
+
 ## [0.56.0] - 2026-08-12
 
 ### Fixed
