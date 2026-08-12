@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.58.0] - 2026-08-12
+
+### Fixed
+- **A row no longer says "no login" beside its own live usage figures.** The dashboard asked the question two different ways: slot rows through the reader that knows a Keychain which will not open is not an account nobody signed into, profile rows through the wrapper that throws that distinction away. An account with both a profile and a slot of the same name keeps only the profile row, so the lossy answer was the only one shown - `rnd` read as signed out while reporting 100% and 94% left. Both now ask through one helper, and the distinction itself is pinned by a test that can run off a Mac.
+
 ## [0.57.0] - 2026-08-12
 
 ### Fixed

@@ -1494,6 +1494,29 @@ pub fn running_proxy_for(paths: &Paths, tool: &str) -> Option<(i32, u16, String)
 }
 
 #[cfg(test)]
+mod login_present_tests {
+    use super::*;
+    use crate::proxy::creds::TokenUnavailable;
+
+    /// The distinction the row builders kept losing. It only shows itself on
+    /// macOS - elsewhere there is no Keychain to be locked - so it is pinned
+    /// here, where the value can be constructed on any platform, rather than
+    /// left to a test that silently proves nothing off a Mac.
+    #[test]
+    fn a_locked_keychain_is_a_signed_in_account() {
+        assert!(
+            login_present(Err(TokenUnavailable::KeychainLocked)),
+            "a Keychain that will not open is not an account nobody signed into"
+        );
+        assert!(
+            !login_present(Err(TokenUnavailable::NoLogin)),
+            "nothing to read is a missing login"
+        );
+        assert!(login_present(Ok(crate::secret::Secret::new(b"t".to_vec()))));
+    }
+}
+
+#[cfg(test)]
 mod seed_tests {
     use super::*;
 

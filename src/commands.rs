@@ -2538,8 +2538,18 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         disabled: cfg.is_disabled(&p.name),
                         // A slot with no readable token cannot serve a turn; say so
                         // rather than letting it look ready and fail later.
-                        needs_login: slot_dir_of(&p.name)
-                            .is_some_and(|d| crate::proxy::creds::slot_token(&d).is_none()),
+                        //
+                        // Asked the same way the slot rows below ask it. This one
+                        // used `slot_token`, the wrapper that throws away WHY, so
+                        // a Keychain that would not open read as an account never
+                        // signed into - and a row said "no login" beside its own
+                        // live usage figures. A profile and a slot sharing a name
+                        // leaves only this row, so the lossy answer was the only
+                        // one shown.
+                        needs_login: row_needs_login(
+                            "claude-code",
+                            slot_dir_of(&p.name).as_deref(),
+                        ),
                         name: p.name.clone(),
                         ident: identity_column(email, tier),
                         tools: p
@@ -2606,7 +2616,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // A Keychain that will not open is not an account that was
                     // never signed in; telling the user to log in again would
                     // send them to fix something that is not broken.
-                    needs_login: !crate::proxy::has_login("claude-code", dir),
+                    needs_login: row_needs_login("claude-code", Some(dir)),
                     name: name.clone(),
                     ident: identity_column(crate::proxy::creds::slot_email(dir), None),
                     tools: "claude-code".into(),
@@ -4527,6 +4537,20 @@ pub fn serve(
     Ok(0)
 }
 
+/// Does this row have to say "no login"?
+///
+/// One place, because there were two and they disagreed. The slot rows asked
+/// `has_login`, which knows a Keychain that will not open is not an account
+/// nobody signed into; the profile rows asked `slot_token`, the wrapper that
+/// throws that distinction away. A profile and a slot sharing a name leaves only
+/// the profile row, so on a real machine `rnd` said "no login" beside its own
+/// live usage figures.
+///
+/// A row with no slot behind it has nothing to sign into and never asks.
+pub fn row_needs_login(tool: &str, dir: Option<&std::path::Path>) -> bool {
+    dir.is_some_and(|d| !crate::proxy::has_login(tool, d))
+}
+
 /// `swapdex export [file]` - this machine's account setup, without a single
 /// secret in it.
 pub fn export(paths: &Paths, out: Option<&std::path::Path>) -> Result<i32> {
@@ -6191,7 +6215,7 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{keychain_verdict, win_line};
+    use super::{keychain_verdict, row_needs_login, win_line};
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
@@ -6221,6 +6245,27 @@ mod tests {
         let line = win_line("7d", &full, 0);
         assert!(line.contains("100% left"), "{line}");
         assert!(!line.contains("resets"), "no reset when absent: {line}");
+    }
+
+    /// The two row builders asked this question differently, and the lossy one
+    /// won on any account with both a profile and a slot: `rnd` said "no login"
+    /// beside its own live usage figures, because a Keychain that would not open
+    /// read as an account nobody had signed into. One helper now, so they cannot
+    /// drift apart again.
+    #[test]
+    fn a_row_with_a_readable_login_does_not_ask_for_one() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing there yet: it needs a login, and says so.
+        assert!(row_needs_login("claude-code", Some(dir.path())));
+        // A credential in the slot: nothing to ask for.
+        std::fs::write(
+            dir.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"T"}}"#,
+        )
+        .unwrap();
+        assert!(!row_needs_login("claude-code", Some(dir.path())));
+        // A row with no slot behind it has nothing to sign into.
+        assert!(!row_needs_login("claude-code", None));
     }
 
     const BARE: &str = "Claude Code-credentials";
