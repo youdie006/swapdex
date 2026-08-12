@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.53.0] - 2026-08-12
+
+### Changed
+- **Reset times are clock times everywhere, not countdowns.** `62% left 6d` on the dashboard read as more quota - a second bare number beside a percentage does. A time cannot: `5pm` is unmistakably a time, needs no word to be understood, and is shorter than the countdown it replaces, which is what lets it fit at all. `swapdex quota` moved the same way: it prints once and may be read, scrolled back to, or piped long afterwards, and a countdown is true for one second while the time it names stays true. Both first-party CLIs (Claude Code, Codex) show resets this way and neither ships a countdown anywhere.
+- **The dashboard's gauge widens when the terminal allows**, so the reset can appear at all. It was capped at 12 columns - too narrow for anything but the percentage - which is why 0.52.0's attempt to name the countdown never reached the screen. Where there is no room the reset is dropped rather than shown bare; the reading always survives.
+
 ## [0.52.0] - 2026-08-12
 
 ### Changed

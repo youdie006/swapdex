@@ -796,13 +796,23 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
     // Most to least, first that fits: the countdown is the first thing to go,
     // then the word. Truncating instead produced "98% l", and a bar too narrow
     // for the word is too narrow for anything but the number anyway.
-    let reset = reset_secs.map(fmt_reset).filter(|r| !r.is_empty());
+    // A CLOCK, not a countdown. "6d" beside "62%" reads as more quota; "5pm"
+    // cannot be read as anything but a time, so it needs no word to be
+    // unambiguous - and it is shorter, which is what lets it fit at all. Both
+    // first-party CLIs (Claude Code, Codex) show reset times this way and
+    // neither ships a countdown anywhere.
+    let reset = reset_secs.map(fmt_reset_clock).filter(|r| !r.is_empty());
     // Most to least, first that fits. The bare countdown used to sit right
     // against the percentage - "62% left 6d" - and a second number with no word
     // beside a quota reads as more quota. Every tool surveyed writes the word:
     // Claude Code "Resets 5am", Codex "(resets 09:25)", teamclaude "reset 30m".
     // So the word goes in whenever it fits, and only then does the bare form
     // stand in - a bar too narrow for "resets" is too narrow for much anyway.
+    // Most to least, first that fits. There is deliberately NO bare-countdown
+    // rung: a second number beside a percentage with no word attached reads as
+    // more quota, which is the confusion this is here to end. If the word will
+    // not fit, the countdown goes rather than appear unlabelled - `swapdex
+    // quota` carries it in full for anyone who wants it.
     let mut label = format!("{left:.0}%");
     for candidate in [
         reset
@@ -866,6 +876,27 @@ fn quota_fill(pct: f64) -> Color {
 
 /// A reset countdown, shortest useful form: `48m`, `2h14m`, `3d4h`. Empty when
 /// the window has already reset (nothing to count down to).
+/// The same instant as a clock time on the wall. `swapdex quota` counts down
+/// because it prints once and is read at once; this is the dashboard, where a
+/// time that does not move is easier to hold in your head than a number that
+/// ticks - and a time cannot be mistaken for a quantity of quota.
+fn fmt_reset_clock(resets_at_secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // The endpoint reports either an absolute epoch or a relative span; a small
+    // number is seconds from now, the same reading `fmt_reset` takes.
+    let at = if resets_at_secs > now {
+        resets_at_secs
+    } else if resets_at_secs > 0 && resets_at_secs < 60 * 60 * 24 * 30 {
+        now + resets_at_secs
+    } else {
+        return String::new();
+    };
+    crate::proxy::pick::reset_clock(at, now, crate::proxy::tz_offset())
+}
+
 fn fmt_reset(resets_at_secs: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1109,7 +1140,16 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 let inner = (body.width as usize).saturating_sub(4);
                                 // "5h " + bar + "  7d " + bar; the wider bar has
                                 // room for the countdown inside it.
-                                let bw = if inner.saturating_sub(bar_col) >= 34 {
+                                // Wide enough to carry "62% left, resets 2h46m"
+                                // when the terminal allows it. The bar was
+                                // capped at 12, which is too narrow for the
+                                // word - so a named countdown could never
+                                // appear and the label fell back to the bare
+                                // form the word exists to replace.
+                                let avail = inner.saturating_sub(bar_col);
+                                let bw = if avail >= 3 + 24 + 5 + 24 {
+                                    24
+                                } else if avail >= 34 {
                                     12
                                 } else {
                                     7
@@ -2788,31 +2828,50 @@ mod tests {
         );
     }
 
-    /// A second number beside a percentage, with no word attached, reads as
-    /// more quota - 병승 saw "62% left 6d" and asked whether the 6d was
-    /// remaining allowance. It is a reset countdown. Every tool surveyed writes
-    /// the word (Claude Code "Resets 5am", Codex "(resets 09:25)", teamclaude
-    /// "reset 30m"), so swapdex does too whenever the bar can carry it.
+    /// The widths the dashboard ACTUALLY uses - 7, 12 and 24. The first version
+    /// of this test picked 26, a width the layout never produces, so it passed
+    /// while the shipped dashboard still drew the ambiguous form at 12.
+    ///
+    /// The contract: a reset is shown as a CLOCK or not at all. "6d" beside
+    /// "62%" reads as more quota - 병승 asked whether it was - while "5pm"
+    /// cannot be read as a quantity, so it needs no word to be understood and
+    /// is shorter besides.
     #[test]
-    fn a_reset_countdown_says_that_is_what_it_is() {
-        let wide: String = quota_bar(Some(38.0), Some(6 * 86400), 26)
+    fn a_reset_is_shown_as_a_time_or_not_at_all() {
+        for w in [7usize, 12, 24] {
+            for secs in [2 * 3600 + 46 * 60, 6 * 86400] {
+                let text: String = quota_bar(Some(38.0), Some(secs), w)
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect();
+                assert_eq!(text.chars().count(), w, "the bar is exactly its width");
+                let t = text.trim();
+                assert!(t.contains("62%"), "the reading always survives: {t:?}");
+                // No relative countdown may reach the screen at any width.
+                for bare in ["6d", "2h46m", "46m"] {
+                    assert!(!t.contains(bare), "width {w} drew a countdown: {t:?}");
+                }
+                // Whatever reset it does show has to look like a time.
+                if t.len() > "62% left".len() {
+                    assert!(
+                        t.contains("am") || t.contains("pm"),
+                        "width {w} showed something that is not a time: {t:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where there is room, the word goes in too.
+    #[test]
+    fn a_wide_bar_names_the_reset() {
+        let wide: String = quota_bar(Some(38.0), Some(2 * 3600 + 46 * 60), 24)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
         assert!(wide.contains("62% left"), "{wide:?}");
-        assert!(
-            wide.contains("resets"),
-            "the countdown is named, not left bare beside the percentage: {wide:?}"
-        );
-
-        // Too narrow for the word: the bare countdown still beats dropping it,
-        // and the bar is still exactly its width.
-        let narrow: String = quota_bar(Some(38.0), Some(6 * 86400), 14)
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert_eq!(narrow.chars().count(), 14);
-        assert!(narrow.contains("62% left"), "{narrow:?}");
+        assert!(wide.contains("resets"), "{wide:?}");
+        assert!(wide.contains("pm") || wide.contains("am"), "{wide:?}");
     }
 
     #[test]
@@ -2847,12 +2906,16 @@ mod tests {
             "a spent window says so plainly: {:?}",
             full[1].content
         );
-        // The countdown joins when it fits, and is dropped when it does not.
+        // The reset joins as a TIME when it fits, and is dropped when it does not.
         let wide: String = quota_bar(Some(10.0), Some(3600), 17)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
-        assert!(wide.contains("90% left") && wide.contains("1h"), "{wide:?}");
+        assert!(wide.contains("90% left"), "{wide:?}");
+        assert!(
+            wide.contains("am") || wide.contains("pm"),
+            "a clock, not a countdown: {wide:?}"
+        );
         let narrow: String = quota_bar(Some(10.0), Some(3600), 5)
             .iter()
             .map(|s| s.content.to_string())

@@ -1370,7 +1370,7 @@ pub fn running_proxy(paths: &Paths) -> Option<(i32, u16, String)> {
 /// The same, for one tool's proxy.
 /// Seconds east of UTC where this machine is, so a reset time reads as the
 /// clock on the wall rather than as UTC. Zero if the platform will not say.
-fn tz_offset() -> i64 {
+pub fn tz_offset() -> i64 {
     let t = now_secs() as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {

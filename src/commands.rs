@@ -6038,27 +6038,18 @@ fn win_line(label: &str, w: &crate::quota::Window, now: i64) -> String {
     let rem = w.remaining_pct();
     let filled = ((rem / 100.0) * 10.0).round().clamp(0.0, 10.0) as usize;
     let bar: String = "\u{2593}".repeat(filled) + &"\u{2591}".repeat(10 - filled);
+    // The time, not the wait. A countdown has to be recomputed to stay true, so
+    // it decays the moment this output is scrolled back to or piped to a file,
+    // while a clock stays right - and 몇시에 리셋인지가 몇시간 남았는지보다
+    // 머리에 남는다. Both first-party CLIs print reset times this way.
     let reset = match w.resets_at {
-        Some(ts) => format!("   resets in {}", human_until(now, ts)),
+        Some(ts) => format!(
+            "   resets {}",
+            crate::proxy::pick::reset_clock(ts, now, crate::proxy::tz_offset())
+        ),
         None => String::new(),
     };
     format!("{label:<9} {bar}  {rem:>3.0}% left{reset}")
-}
-
-/// A coarse "2h 14m" / "3d 4h" countdown to `ts` from `now` (unix seconds).
-fn human_until(now: i64, ts: i64) -> String {
-    let d = ts - now;
-    if d <= 0 {
-        return "now".into();
-    }
-    let (days, hrs, mins) = (d / 86400, (d % 86400) / 3600, (d % 3600) / 60);
-    if days > 0 {
-        format!("{days}d {hrs}h")
-    } else if hrs > 0 {
-        format!("{hrs}h {mins}m")
-    } else {
-        format!("{mins}m")
-    }
 }
 
 /// One account's quota as JSON (for `swapdex quota --json`). An unexpected shape
@@ -6200,18 +6191,10 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_until, keychain_verdict, win_line};
+    use super::{keychain_verdict, win_line};
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
-    }
-
-    #[test]
-    fn human_until_formats_countdowns() {
-        assert_eq!(human_until(1000, 900), "now", "past resets read as now");
-        assert_eq!(human_until(0, 30), "0m", "sub-minute rounds down");
-        assert_eq!(human_until(0, 2 * 3600 + 14 * 60), "2h 14m");
-        assert_eq!(human_until(0, 3 * 86400 + 4 * 3600), "3d 4h");
     }
 
     #[test]
@@ -6220,9 +6203,17 @@ mod tests {
             used_pct: 61.0,
             resets_at: Some(2 * 3600 + 14 * 60),
         };
+        // A clock, not a countdown: this output is written once and may be
+        // read, scrolled back to, or piped long after. "resets in 2h 14m" is
+        // true for one second; the time it names stays true.
         let line = win_line("5h", &w, 0);
         assert!(line.contains("39% left"), "{line}");
-        assert!(line.contains("resets in 2h 14m"), "{line}");
+        assert!(line.contains("resets"), "{line}");
+        assert!(
+            line.contains("am") || line.contains("pm"),
+            "the reset is a time: {line}"
+        );
+        assert!(!line.contains("in 2h"), "no countdown: {line}");
         let full = crate::quota::Window {
             used_pct: 0.0,
             resets_at: None,
