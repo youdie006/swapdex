@@ -189,7 +189,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
         // its accounts are moved when one actually refuses a turn - never by
         // asking one API about another's account.
         if let Some(t) = live_threshold.filter(|_| opts.tool != "codex") {
-            refresh_measured(&list, sh);
+            refresh_measured(paths, &list, sh);
             let full = sh
                 .measured
                 .lock()
@@ -328,7 +328,7 @@ const PREEMPT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300
 /// Read each account's utilization from the zero-spend usage endpoint, at most
 /// once per `MEASURE_EVERY`. This is the same read `swapdex quota` performs, with
 /// each account's own token; it spends no message quota.
-fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
+fn refresh_measured(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
     let first = {
         let mut m = sh.measured.lock().unwrap();
         match m.0 {
@@ -349,17 +349,56 @@ fn refresh_measured(slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
     // waiting out the usage endpoint's throttling, which is seconds, and by then
     // there is a previous reading good enough to choose with.
     if first {
-        measure_now(slots, sh);
+        measure_now(paths, slots, sh);
         return;
     }
     let slots: Vec<crate::slots::SlotRecord> = slots.to_vec();
     let sh = Arc::clone(sh);
-    std::thread::spawn(move || measure_now(&slots, &sh));
+    let paths = paths.clone();
+    std::thread::spawn(move || measure_now(&paths, &slots, &sh));
+}
+
+/// Carry the last known readings across a restart.
+///
+/// The proxy used to start with nothing and ask the usage endpoint about every
+/// account at once, however recently each had been read - and several accounts
+/// arriving together is precisely the burst that endpoint throttles. Three
+/// service restarts in an afternoon put every account on a real machine into
+/// "usage endpoint throttled" simultaneously.
+///
+/// The cache already records WHEN each reading was taken, so its age survives
+/// the restart: an account read moments ago is not due, one read an hour ago is.
+/// `quota_cache::load` has already dropped any window that has since turned
+/// over, so nothing stale is carried forward as if it were current.
+fn seed_from_cache(cache: &crate::quota_cache::Cache, now: i64) -> HashMap<String, Measurement> {
+    cache
+        .iter()
+        .map(|(name, e)| {
+            // A stamp from the future (a clock that jumped, a file copied from
+            // another machine) must not become an Instant ahead of now - that
+            // account would never come due again.
+            let age = (now - e.at).max(0) as u64;
+            let taken = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(age))
+                .unwrap_or_else(std::time::Instant::now);
+            (
+                name.clone(),
+                Measurement {
+                    five_h: e.five_h,
+                    seven_d: e.seven_d,
+                    credits: e.on_credits,
+                    five_h_reset: e.five_h_reset,
+                    seven_d_reset: e.seven_d_reset,
+                    taken: Some(taken),
+                },
+            )
+        })
+        .collect()
 }
 
 /// The read itself. Records when it finished, not when it began, so a slow read
 /// is not immediately due again.
-fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
+fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     // Carry forward what is still fresh enough. Reading every account on one
     // clock asks the fresh ones for an answer that has not changed, and it is
     // what got the usage endpoint to rate-limit us.
@@ -369,6 +408,9 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
     };
     let now = std::time::Instant::now();
     let mut unread: Vec<(String, String)> = Vec::new();
+    // Which accounts this round actually asked about, so the write-back does
+    // not restamp a carried-over value as if it had just been read.
+    let mut just_read: std::collections::HashSet<String> = std::collections::HashSet::new();
     // What the accounts' own answers said, which can contradict what their
     // windows say. An account measured at 0% whose overage is spent refuses
     // every turn, and printing only the percentage offers a reserve that is not
@@ -419,6 +461,7 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
             continue;
         }
         crate::quota::pace_between_accounts();
+        just_read.insert(r.name.clone());
         let fetched = crate::quota::fetch_with_retry(&token);
         if let Some(why) = fetched.why_no_number().map(str::to_string) {
             // Say WHY. A dropped read used to make the account vanish from the
@@ -499,6 +542,29 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
         }
     }
     std::io::stdout().flush().ok();
+    // Write the readings back where the dashboard and the next restart can find
+    // them. Only what was actually READ this round is written; a carried-over
+    // value keeps its original age rather than being restamped as fresh.
+    let fresh: Vec<(String, crate::quota_cache::Entry)> = out
+        .iter()
+        .filter(|(n, _)| just_read.contains(*n))
+        .map(|(n, m)| {
+            (
+                n.clone(),
+                crate::quota_cache::Entry {
+                    five_h: m.five_h,
+                    five_h_reset: m.five_h_reset,
+                    seven_d: m.seven_d,
+                    seven_d_reset: m.seven_d_reset,
+                    at: now_secs(),
+                    on_credits: m.credits,
+                },
+            )
+        })
+        .collect();
+    if !fresh.is_empty() {
+        crate::quota_cache::update(paths, &fresh);
+    }
     let mut m = sh.measured.lock().unwrap();
     *m = (Some(std::time::Instant::now()), out);
 }
@@ -700,7 +766,13 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         rotated: Mutex::new(None),
         unusable: Mutex::new(pick::Sidelined::default()),
         cornered: Mutex::new(false),
-        measured: Mutex::new((None, HashMap::new())),
+        // Start from what was last known rather than from nothing: see
+        // `seed_from_cache`. Without this every restart re-asked the endpoint
+        // about every account at once.
+        measured: Mutex::new((
+            None,
+            seed_from_cache(&crate::quota_cache::load(paths), now_secs()),
+        )),
         last_preempt: Mutex::new(None),
     });
     loop {
@@ -1421,6 +1493,77 @@ pub fn running_proxy_for(paths: &Paths, tool: &str) -> Option<(i32, u16, String)
     let build = it.next().unwrap_or("").to_string();
     // Signal 0 tests for existence without touching the process.
     (unsafe { libc::kill(pid, 0) } == 0).then_some((pid, port, build))
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    fn entry(at: i64, five_h: f64) -> crate::quota_cache::Entry {
+        crate::quota_cache::Entry {
+            five_h: Some(five_h),
+            five_h_reset: Some(at + 3600),
+            seven_d: Some(10.0),
+            seven_d_reset: Some(at + 86400),
+            at,
+            on_credits: false,
+        }
+    }
+
+    /// A restart used to throw every reading away, so each one asked the usage
+    /// endpoint again the moment the proxy came up - even for an account read
+    /// seconds earlier. Several accounts arriving at once is exactly the burst
+    /// that endpoint throttles, and three restarts in an afternoon put every
+    /// account on this machine into "usage endpoint throttled" at once.
+    #[test]
+    fn a_reading_taken_moments_ago_is_not_due_again_after_a_restart() {
+        let now = 1_800_000_000;
+        let mut cache = crate::quota_cache::Cache::new();
+        cache.insert("bsgong".into(), entry(now - 5, 87.0));
+        let seeded = seed_from_cache(&cache, now);
+        let m = seeded.get("bsgong").expect("carried over");
+        assert_eq!(m.five_h, Some(87.0));
+        assert_eq!(m.seven_d, Some(10.0));
+        // 87% used leaves 13% - measure_after says 60s for that - and only 5
+        // seconds have passed, so it is not due.
+        let taken = m.taken.expect("a restored reading knows its age");
+        let due = taken.elapsed() >= pick::measure_after(pick::headroom(m.five_h, m.seven_d));
+        assert!(
+            !due,
+            "an account read 5s ago must not be asked again at once"
+        );
+    }
+
+    /// Old enough to be worth asking again: the cache must not freeze a reading
+    /// in place either.
+    #[test]
+    fn a_stale_reading_is_still_due() {
+        let now = 1_800_000_000;
+        let mut cache = crate::quota_cache::Cache::new();
+        cache.insert("rnd".into(), entry(now - 3600, 87.0));
+        let seeded = seed_from_cache(&cache, now);
+        let m = seeded.get("rnd").unwrap();
+        let taken = m.taken.expect("age");
+        assert!(
+            taken.elapsed() >= pick::measure_after(pick::headroom(m.five_h, m.seven_d)),
+            "an hour-old reading is due"
+        );
+    }
+
+    /// A reading from the future, or a clock that jumped, must not become an
+    /// Instant in the future - that would make the account never due again.
+    #[test]
+    fn a_reading_stamped_ahead_of_now_is_treated_as_just_taken() {
+        let now = 1_800_000_000;
+        let mut cache = crate::quota_cache::Cache::new();
+        cache.insert("x".into(), entry(now + 999, 50.0));
+        let m = seed_from_cache(&cache, now);
+        let taken = m.get("x").unwrap().taken.expect("age");
+        assert!(
+            taken.elapsed() < std::time::Duration::from_secs(2),
+            "clamped to now"
+        );
+    }
 }
 
 #[cfg(test)]

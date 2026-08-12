@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.56.0] - 2026-08-12
+
+### Fixed
+- **A restart no longer asks about every account at once.** The proxy started with nothing remembered, so every account was due immediately however recently it had been read - and several arriving together is exactly the burst the usage endpoint throttles. Three service restarts in an afternoon put every account on a real machine into "usage endpoint throttled" simultaneously, which also means the threshold cannot apply and preemptive rotation stops. It now starts from the readings on disk, whose recorded age survives the restart: an account read moments ago is not asked again, one read an hour ago is. Windows that have since turned over were already dropped on load, so nothing stale is carried forward as current. Each round writes back what it actually read, leaving carried-over values with their original age rather than restamping them as fresh.
+
 ## [0.55.0] - 2026-08-12
 
 ### Changed
