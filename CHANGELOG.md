@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.55.0] - 2026-08-12
+
+### Changed
+- **The dashboard gauge holds one reading; the reset time sits beside it.** Crammed inside, `62% left 6d` read as two quantities of quota, and it forced the bar wide enough to hold a sentence. Outside, there is room: `5h [ 62% left ] resets 1:47pm   7d [ 27% left ] resets Tue 9am`. The bar is back to its natural width, the two numbers can no longer be mistaken for each other, and a narrow terminal drops the word, then the time, while the readings always survive.
+
 ## [0.54.0] - 2026-08-12
 
 ### Changed

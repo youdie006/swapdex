@@ -770,7 +770,7 @@ enum Screen {
 /// the percentage (and the reset countdown when it fits) sits centred on the bar
 /// rather than beside it, so two windows fit on one row and each number is
 /// unambiguously attached to its own bar. Returns the spans to render.
-fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Span<'static>> {
+fn quota_bar(pct: Option<f64>, width: usize) -> Vec<Span<'static>> {
     // Filled by BACKGROUND colour, not block characters: with blocks, the cells
     // the label occupies had no block in them, so the number sat in a visible gap
     // in the fill. Colouring the cells instead means the fill runs unbroken
@@ -784,46 +784,22 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
         )];
     };
     let pct = pct.clamp(0.0, 100.0);
-    // "62% left", plus the reset countdown when the width can carry it.
+    // The gauge carries ONE reading: how much is left.
     //
-    // The bar shows how much is SPENT and the number says how much is LEFT, and
-    // for a while the number carried no word at all - so "2%" on a window that
-    // had just reset read as "almost nothing left" when it meant the opposite.
-    // Claude's own status counts down, and so does `swapdex quota`; a dashboard
-    // that counted up without saying so was the only thing speaking the other
-    // language.
+    // The bar's fill and its number both measure what is LEFT. They used to
+    // disagree - the fill rose as an account was spent while the number counted
+    // down - so an untouched account showed "100% left" across an empty bar. A
+    // fuel gauge that empties as you fill the tank is not a gauge.
+    //
+    // The word matters too: "2%" on a window that had just reset read as almost
+    // nothing left when it meant the opposite.
+    //
+    // The reset time is NOT in here. Crammed in beside the percentage it read
+    // as a second quantity of quota ("62% left 6d"), and it forced the bar wide
+    // enough to hold a sentence. It sits outside the gauge now.
     let left = 100.0 - pct;
-    // Most to least, first that fits: the countdown is the first thing to go,
-    // then the word. Truncating instead produced "98% l", and a bar too narrow
-    // for the word is too narrow for anything but the number anyway.
-    // A CLOCK, not a countdown. "6d" beside "62%" reads as more quota; "5pm"
-    // cannot be read as anything but a time, so it needs no word to be
-    // unambiguous - and it is shorter, which is what lets it fit at all. Both
-    // first-party CLIs (Claude Code, Codex) show reset times this way and
-    // neither ships a countdown anywhere.
-    let reset = reset_secs.map(fmt_reset_clock).filter(|r| !r.is_empty());
-    // Most to least, first that fits. The bare countdown used to sit right
-    // against the percentage - "62% left 6d" - and a second number with no word
-    // beside a quota reads as more quota. Every tool surveyed writes the word:
-    // Claude Code "Resets 5am", Codex "(resets 09:25)", teamclaude "reset 30m".
-    // So the word goes in whenever it fits, and only then does the bare form
-    // stand in - a bar too narrow for "resets" is too narrow for much anyway.
-    // Most to least, first that fits. There is deliberately NO bare-countdown
-    // rung: a second number beside a percentage with no word attached reads as
-    // more quota, which is the confusion this is here to end. If the word will
-    // not fit, the countdown goes rather than appear unlabelled - `swapdex
-    // quota` carries it in full for anyone who wants it.
     let mut label = format!("{left:.0}%");
-    for candidate in [
-        reset
-            .as_ref()
-            .map(|r| format!("{left:.0}% left, resets {r}")),
-        reset.as_ref().map(|r| format!("{left:.0}% left {r}")),
-        Some(format!("{left:.0}% left")),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for candidate in [format!("{left:.0}% left"), format!("{left:.0}%")] {
         if candidate.chars().count() <= width {
             label = candidate;
             break;
@@ -1138,31 +1114,59 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 let left_w: usize =
                                     top.iter().map(|s| s.content.chars().count()).sum();
                                 let inner = (body.width as usize).saturating_sub(4);
-                                // "5h " + bar + "  7d " + bar; the wider bar has
-                                // room for the countdown inside it.
-                                // Wide enough to carry "62% left, resets 2h46m"
-                                // when the terminal allows it. The bar was
-                                // capped at 12, which is too narrow for the
-                                // word - so a named countdown could never
-                                // appear and the label fell back to the bare
-                                // form the word exists to replace.
+                                // "5h " + gauge + reset + "  7d " + gauge + reset.
+                                // The gauge holds only the reading; the reset
+                                // time sits BESIDE it, where there is room, so
+                                // the bar stays narrow and the two numbers can
+                                // never be mistaken for each other.
                                 let avail = inner.saturating_sub(bar_col);
-                                let bw = if avail >= 3 + 24 + 5 + 24 {
-                                    24
-                                } else if avail >= 34 {
-                                    12
-                                } else {
-                                    7
+                                let stamp = |at: Option<i64>| -> String {
+                                    at.map(fmt_reset_clock)
+                                        .filter(|r| !r.is_empty())
+                                        .unwrap_or_default()
                                 };
-                                let needed = 3 + bw + 5 + bw;
+                                let (r5, r7) = (stamp(u.five_h_reset), stamp(u.seven_d_reset));
+                                // Longest first: the gauges are the point, the
+                                // times ride along when the terminal has room,
+                                // and a narrow window keeps the readings.
+                                let bw = if avail >= 34 { 12 } else { 7 };
+                                let tail = |r: &str, word: bool| -> String {
+                                    if r.is_empty() {
+                                        String::new()
+                                    } else if word {
+                                        format!(" resets {r}")
+                                    } else {
+                                        format!(" {r}")
+                                    }
+                                };
+                                let (t5, t7) = {
+                                    let full = (tail(&r5, true), tail(&r7, true));
+                                    let bare = (tail(&r5, false), tail(&r7, false));
+                                    let fits = |a: &str, b: &str| {
+                                        3 + bw + a.chars().count()
+                                            + 5 + bw + b.chars().count()
+                                            <= avail
+                                    };
+                                    if fits(&full.0, &full.1) {
+                                        full
+                                    } else if fits(&bare.0, &bare.1) {
+                                        bare
+                                    } else {
+                                        (String::new(), String::new())
+                                    }
+                                };
+                                let needed = 3 + bw + t5.chars().count()
+                                    + 5 + bw + t7.chars().count();
                                 let start = bar_col.min(inner.saturating_sub(needed));
                                 top.push(
                                     Span::raw(" ".repeat(start.saturating_sub(left_w).max(1))),
                                 );
                                 top.push(Span::styled("5h ", Style::default().fg(MUTED)));
-                                top.extend(quota_bar(u.five_h, u.five_h_reset, bw));
+                                top.extend(quota_bar(u.five_h, bw));
+                                top.push(Span::styled(t5, Style::default().fg(MUTED)));
                                 top.push(Span::styled("  7d ", Style::default().fg(MUTED)));
-                                top.extend(quota_bar(u.seven_d, u.seven_d_reset, bw));
+                                top.extend(quota_bar(u.seven_d, bw));
+                                top.push(Span::styled(t7, Style::default().fg(MUTED)));
                                 // Snapshot figures say when they were taken, so an
                                 // old number is never read as a current one.
                                 let note = trailing_note(&u, quota_rx.is_some());
@@ -2802,7 +2806,7 @@ mod tests {
     #[test]
     fn the_fill_matches_the_number_beside_it() {
         let filled_cells = |used: f64| -> usize {
-            quota_bar(Some(used), None, 20)
+            quota_bar(Some(used), 20)
                 .first()
                 .map(|s| s.content.chars().count())
                 .unwrap_or(0)
@@ -2828,60 +2832,37 @@ mod tests {
         );
     }
 
-    /// The widths the dashboard ACTUALLY uses - 7, 12 and 24. The first version
-    /// of this test picked 26, a width the layout never produces, so it passed
-    /// while the shipped dashboard still drew the ambiguous form at 12.
-    ///
-    /// The contract: a reset is shown as a CLOCK or not at all. "6d" beside
-    /// "62%" reads as more quota - 병승 asked whether it was - while "5pm"
-    /// cannot be read as a quantity, so it needs no word to be understood and
-    /// is shorter besides.
+    /// The gauge holds ONE reading and nothing else. The reset time lives
+    /// beside it now: crammed inside, "62% left 6d" read as two quantities of
+    /// quota - 병승 asked whether the 6d was remaining allowance - and it forced
+    /// the bar wide enough to hold a sentence.
     #[test]
-    fn a_reset_is_shown_as_a_time_or_not_at_all() {
-        for w in [7usize, 12, 24] {
-            for secs in [2 * 3600 + 46 * 60, 6 * 86400] {
-                let text: String = quota_bar(Some(38.0), Some(secs), w)
-                    .iter()
-                    .map(|s| s.content.to_string())
-                    .collect();
-                assert_eq!(text.chars().count(), w, "the bar is exactly its width");
-                let t = text.trim();
-                assert!(t.contains("62%"), "the reading always survives: {t:?}");
-                // No relative countdown may reach the screen at any width.
-                for bare in ["6d", "2h46m", "46m"] {
-                    assert!(!t.contains(bare), "width {w} drew a countdown: {t:?}");
-                }
-                // Whatever reset it does show has to look like a time.
-                if t.len() > "62% left".len() {
-                    assert!(
-                        t.contains("am") || t.contains("pm"),
-                        "width {w} showed something that is not a time: {t:?}"
-                    );
-                }
+    fn the_gauge_carries_only_what_is_left() {
+        for w in [7usize, 12, 20] {
+            let text: String = quota_bar(Some(38.0), w)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect();
+            assert_eq!(text.chars().count(), w, "the bar is exactly its width");
+            let t = text.trim();
+            assert!(t.starts_with("62%"), "the reading always survives: {t:?}");
+            for stray in ["resets", "am", "pm", "6d", "2h"] {
+                assert!(
+                    !t.contains(stray),
+                    "width {w} put a time in the gauge: {t:?}"
+                );
             }
         }
     }
 
-    /// Where there is room, the word goes in too.
-    #[test]
-    fn a_wide_bar_names_the_reset() {
-        let wide: String = quota_bar(Some(38.0), Some(2 * 3600 + 46 * 60), 24)
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(wide.contains("62% left"), "{wide:?}");
-        assert!(wide.contains("resets"), "{wide:?}");
-        assert!(wide.contains("pm") || wide.contains("am"), "{wide:?}");
-    }
-
     #[test]
     fn quota_bar_writes_what_is_left_inside_the_bar() {
-        let spans = quota_bar(Some(62.0), None, 14);
+        let spans = quota_bar(Some(62.0), 14);
         let text: String = spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text.chars().count(), 14, "the bar is exactly its width");
         assert!(text.contains("38% left"), "62% spent is 38% left: {text:?}");
         // A window barely touched reads as nearly full, not nearly empty.
-        let fresh: String = quota_bar(Some(2.0), None, 14)
+        let fresh: String = quota_bar(Some(2.0), 14)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
@@ -2894,7 +2875,7 @@ mod tests {
         assert_eq!(spans[0].content.chars().count(), 5);
         assert_eq!(spans[1].content.chars().count(), 9);
         // A spent window has nothing filled, and still says so in words.
-        let full = quota_bar(Some(100.0), Some(3600), 14);
+        let full = quota_bar(Some(100.0), 14);
         assert_eq!(
             full[0].content.chars().count(),
             0,
@@ -2906,17 +2887,18 @@ mod tests {
             "a spent window says so plainly: {:?}",
             full[1].content
         );
-        // The reset joins as a TIME when it fits, and is dropped when it does not.
-        let wide: String = quota_bar(Some(10.0), Some(3600), 17)
+        // Room for the word, and nothing else joins it - the reset lives beside
+        // the gauge, not in it.
+        let wide: String = quota_bar(Some(10.0), 17)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
         assert!(wide.contains("90% left"), "{wide:?}");
         assert!(
-            wide.contains("am") || wide.contains("pm"),
-            "a clock, not a countdown: {wide:?}"
+            !wide.contains("am") && !wide.contains("pm"),
+            "no time inside the gauge: {wide:?}"
         );
-        let narrow: String = quota_bar(Some(10.0), Some(3600), 5)
+        let narrow: String = quota_bar(Some(10.0), 5)
             .iter()
             .map(|s| s.content.to_string())
             .collect();
@@ -2926,7 +2908,7 @@ mod tests {
             "{narrow:?}"
         );
         // No data: an empty track of the right width, no number invented.
-        let none = quota_bar(None, None, 6);
+        let none = quota_bar(None, 6);
         assert_eq!(none.len(), 1);
         assert_eq!(none[0].content.chars().count(), 6);
         assert_eq!(none[0].content.trim(), "");
