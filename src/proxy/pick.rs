@@ -80,6 +80,39 @@ pub fn usage_line(
     parts.join(", ")
 }
 
+/// A reset time as a CLOCK, for output that is written once and read later.
+///
+/// The dashboard counts down because it redraws; a log line does not. A
+/// countdown printed into a file is right for one second and overstates the
+/// wait by however long ago it was written, so what goes here is the time
+/// itself. Same-day stays bare (`3pm`); anything further carries its day, which
+/// is the one convention every tool surveyed arrived at independently.
+///
+/// `at` and `now` are unix seconds; `tz_offset` is the local offset in seconds.
+pub fn reset_clock(at: i64, now: i64, tz_offset: i64) -> String {
+    if at <= now {
+        return "now".into();
+    }
+    let l = at + tz_offset;
+    let (h24, mins) = ((l % 86400) / 3600, (l % 3600) / 60);
+    let ampm = if h24 < 12 { "am" } else { "pm" };
+    let h12 = match h24 % 12 {
+        0 => 12,
+        h => h,
+    };
+    // Minutes are dropped on the hour, the way a person says it.
+    let time = if mins == 0 {
+        format!("{h12}{ampm}")
+    } else {
+        format!("{h12}:{mins:02}{ampm}")
+    };
+    if at - now < 86400 && (l / 86400) == ((now + tz_offset) / 86400) {
+        return time;
+    }
+    const DAY: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    format!("{} {time}", DAY[((l / 86400) % 7) as usize])
+}
+
 /// The account identities already ruled out this turn.
 ///
 /// Everything else here keys off a slot NAME, but a rate limit belongs to the
@@ -224,6 +257,37 @@ pub fn rotate_target(
         .filter(|r| r.name != current)
         .find(|r| !state.get(&r.name).is_some_and(|q| q.rejected))
         .map(|r| r.name.clone())
+}
+
+#[cfg(test)]
+mod reset_clock_tests {
+    use super::*;
+
+    /// A log line is read after it is written, so it carries the time rather
+    /// than a countdown that decays into a lie the moment it is printed.
+    #[test]
+    fn a_same_day_reset_is_just_the_time() {
+        // 1970-01-01 00:00 UTC + 15h = 3pm, still the same day.
+        assert_eq!(reset_clock(15 * 3600, 9 * 3600, 0), "3pm");
+        assert_eq!(reset_clock(15 * 3600 + 30 * 60, 9 * 3600, 0), "3:30pm");
+        assert_eq!(reset_clock(9 * 3600, 8 * 3600, 0), "9am");
+    }
+
+    /// Past due says so rather than printing a time that already went by.
+    #[test]
+    fn a_reset_already_past_reads_as_now() {
+        assert_eq!(reset_clock(100, 100, 0), "now");
+        assert_eq!(reset_clock(50, 100, 0), "now");
+    }
+
+    /// Beyond today it carries the day - the one convention every surveyed tool
+    /// reinvented, because "3pm" three days out is a trap.
+    #[test]
+    fn a_reset_on_another_day_carries_the_day() {
+        let out = reset_clock(3 * 86400 + 15 * 3600, 9 * 3600, 0);
+        assert!(out.contains("3pm"), "{out}");
+        assert!(out.len() > "3pm".len(), "it names the day too: {out}");
+    }
 }
 
 #[cfg(test)]

@@ -797,8 +797,17 @@ fn quota_bar(pct: Option<f64>, reset_secs: Option<i64>, width: usize) -> Vec<Spa
     // then the word. Truncating instead produced "98% l", and a bar too narrow
     // for the word is too narrow for anything but the number anyway.
     let reset = reset_secs.map(fmt_reset).filter(|r| !r.is_empty());
+    // Most to least, first that fits. The bare countdown used to sit right
+    // against the percentage - "62% left 6d" - and a second number with no word
+    // beside a quota reads as more quota. Every tool surveyed writes the word:
+    // Claude Code "Resets 5am", Codex "(resets 09:25)", teamclaude "reset 30m".
+    // So the word goes in whenever it fits, and only then does the bare form
+    // stand in - a bar too narrow for "resets" is too narrow for much anyway.
     let mut label = format!("{left:.0}%");
     for candidate in [
+        reset
+            .as_ref()
+            .map(|r| format!("{left:.0}% left, resets {r}")),
         reset.as_ref().map(|r| format!("{left:.0}% left {r}")),
         Some(format!("{left:.0}% left")),
     ]
@@ -2777,6 +2786,33 @@ mod tests {
             quota_fill(5.0),
             "a fresh window is not drawn like a spent one"
         );
+    }
+
+    /// A second number beside a percentage, with no word attached, reads as
+    /// more quota - 병승 saw "62% left 6d" and asked whether the 6d was
+    /// remaining allowance. It is a reset countdown. Every tool surveyed writes
+    /// the word (Claude Code "Resets 5am", Codex "(resets 09:25)", teamclaude
+    /// "reset 30m"), so swapdex does too whenever the bar can carry it.
+    #[test]
+    fn a_reset_countdown_says_that_is_what_it_is() {
+        let wide: String = quota_bar(Some(38.0), Some(6 * 86400), 26)
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(wide.contains("62% left"), "{wide:?}");
+        assert!(
+            wide.contains("resets"),
+            "the countdown is named, not left bare beside the percentage: {wide:?}"
+        );
+
+        // Too narrow for the word: the bare countdown still beats dropping it,
+        // and the bar is still exactly its width.
+        let narrow: String = quota_bar(Some(38.0), Some(6 * 86400), 14)
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(narrow.chars().count(), 14);
+        assert!(narrow.contains("62% left"), "{narrow:?}");
     }
 
     #[test]

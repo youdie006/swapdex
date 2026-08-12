@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.52.0] - 2026-08-12
+
+### Changed
+- **A reset countdown says that it is one.** The dashboard drew `62% left 6d`, and a second number beside a percentage with no word attached reads as more quota - it is the time until that window comes back. The word goes in whenever the bar can carry it, and the bare countdown only stands in on a bar too narrow for it. Every tool surveyed writes the word: Claude Code `Resets 5am`, Codex `(resets 09:25)`, teamclaude `reset 30m`.
+- **The proxy's usage line names when a spent window returns.** It carries a clock time rather than a countdown, because that line is written once and read later - a countdown printed into a log is right for a second and then overstates the wait by however long ago it was written. Same-day stays bare (`resets 3pm`); anything further carries its day. It rides along only for a window actually at its limit: until then it is a number nobody acts on, and a line nobody reads is worse than a line missing a detail.
+
 ## [0.51.0] - 2026-08-11
 
 ### Fixed

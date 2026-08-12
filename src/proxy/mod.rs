@@ -457,8 +457,25 @@ fn measure_now(slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     .flatten()
                     .fold(f64::NAN, f64::max);
                 let via = if m.credits { " (on credits)" } else { "" };
+                // The reset time rides along only for a window at its limit.
+                // Until then it is a number nobody acts on, and a line nobody
+                // reads is worse than a line missing a detail - claude-swap and
+                // teamclaude both gate it the same way. A clock, not a
+                // countdown: this line is written once and read later.
+                let due = if worst.is_finite() && worst >= 99.0 {
+                    m.resets_at
+                        .map(|at| {
+                            format!(
+                                ", resets {}",
+                                pick::reset_clock(at, now_secs(), tz_offset())
+                            )
+                        })
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let value = if worst.is_finite() {
-                    format!("{worst:.0}%{via}")
+                    format!("{worst:.0}%{via}{due}")
                 } else {
                     "?".to_string()
                 };
@@ -1351,6 +1368,17 @@ pub fn running_proxy(paths: &Paths) -> Option<(i32, u16, String)> {
 }
 
 /// The same, for one tool's proxy.
+/// Seconds east of UTC where this machine is, so a reset time reads as the
+/// clock on the wall rather than as UTC. Zero if the platform will not say.
+fn tz_offset() -> i64 {
+    let t = now_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return 0;
+    }
+    tm.tm_gmtoff as i64
+}
+
 /// The port is taken. If the holder is ANOTHER swapdex proxy for this same tool,
 /// take it over.
 ///
