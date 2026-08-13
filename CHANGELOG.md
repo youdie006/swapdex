@@ -7,6 +7,7 @@ All notable changes to swapdex are documented here. This project follows
 ## [Unreleased]
 
 ### Fixed
+- **A window with no reset yet keeps its column.** The five-hour window starts on first use, so an account that has not touched it has no reset time to show - and rendering that as nothing pulled everything after it left on that row alone, putting its 7d block several columns ahead of the rows around it. The slot now holds its width across the whole frame and says `not started`, so the reason for the blank is on screen instead of being left to the reader.
 - **The reset time no longer reads as part of the gauge.** It sits outside the bar, but only one space away, and the gauge ends in a dark track cell - so the time butted against it and read as though it were inside, which is the confusion moving it out was meant to end. Two spaces now separate them.
 
 ## [0.58.0] - 2026-08-12

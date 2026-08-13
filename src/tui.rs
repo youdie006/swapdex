@@ -236,6 +236,43 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
     out
 }
 
+/// The reset slot, padded so every row's next column starts at one place.
+///
+/// A window nobody has used has no reset time - the five-hour window starts on
+/// first use, so there is nothing to count to. Rendering that as an empty string
+/// pulled everything after it left on that row alone, and `rnd`'s 7d block sat
+/// several columns ahead of the rows above and below. The slot keeps its width
+/// either way, and says why it is empty rather than leaving a hole.
+///
+/// A slot too narrow for the phrase pads instead of truncating it into nonsense.
+pub fn reset_slot(reset: Option<&str>, word: bool, width: usize) -> String {
+    const UNSTARTED: &str = "not started";
+    let body = match reset {
+        Some(r) if word => format!("resets {r}"),
+        Some(r) => r.to_string(),
+        None if width >= UNSTARTED.chars().count() => UNSTARTED.to_string(),
+        None => String::new(),
+    };
+    let pad = width.saturating_sub(body.chars().count());
+    format!("{body}{}", " ".repeat(pad))
+}
+
+/// How wide that slot has to be for every row in the frame to line up. Zero when
+/// no row has a reset at all - then the column is not drawn.
+pub fn reset_slot_width(resets: &[Option<String>], word: bool) -> usize {
+    let longest = resets
+        .iter()
+        .flatten()
+        .map(|r| r.chars().count() + if word { 7 } else { 0 })
+        .max()
+        .unwrap_or(0);
+    if longest == 0 {
+        0
+    } else {
+        longest.max("not started".len())
+    }
+}
+
 /// Sort accounts by tool group (canonical order), keeping the original order
 /// inside a group, so accounts of one tool sit together under one heading.
 pub fn group_sorted(mut rows: Vec<Row>) -> Vec<Row> {
@@ -1044,6 +1081,22 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         .max()
                         .unwrap_or(0);
                     let bar_col = usage_bar_column(&rows);
+                    // Reset slots are sized across every row, not per row: a
+                    // window nobody has used has no reset, and letting that row
+                    // draw a shorter slot broke the column down the list.
+                    let (all5, all7): (Vec<Option<String>>, Vec<Option<String>>) = rows
+                        .iter()
+                        .map(|r| {
+                            let u = quota_pct
+                                .as_ref()
+                                .and_then(|q| usage_for(q, r).cloned())
+                                .unwrap_or_default();
+                            let f = |at: Option<i64>| {
+                                at.map(fmt_reset_clock).filter(|s| !s.is_empty())
+                            };
+                            (f(u.five_h_reset), f(u.seven_d_reset))
+                        })
+                        .unzip();
                     let heads = group_heads(&rows);
                     let items: Vec<ListItem> = rows
                         .iter()
@@ -1135,18 +1188,29 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 // butted against it and reading as part of the
                                 // bar - which is the confusion moving it
                                 // outside was meant to end.
-                                let tail = |r: &str, word: bool| -> String {
-                                    if r.is_empty() {
+                                // Two leading spaces, then a slot sized across the
+                                // WHOLE frame. The gauge ends in a dark track
+                                // cell, so one space left the time butted against
+                                // it; and a row whose window has no reset must
+                                // still hold the column, or everything after it
+                                // slides left on that row alone.
+                                let slot = |r: &str, word: bool, w: usize| -> String {
+                                    if w == 0 {
                                         String::new()
-                                    } else if word {
-                                        format!("  resets {r}")
                                     } else {
-                                        format!("  {r}")
+                                        let v = (!r.is_empty()).then_some(r);
+                                        format!("  {}", reset_slot(v, word, w))
                                     }
                                 };
                                 let (t5, t7) = {
-                                    let full = (tail(&r5, true), tail(&r7, true));
-                                    let bare = (tail(&r5, false), tail(&r7, false));
+                                    let mk = |word: bool| {
+                                        (
+                                            slot(&r5, word, reset_slot_width(&all5, word)),
+                                            slot(&r7, word, reset_slot_width(&all7, word)),
+                                        )
+                                    };
+                                    let full = mk(true);
+                                    let bare = mk(false);
                                     let fits = |a: &str, b: &str| {
                                         3 + bw + a.chars().count()
                                             + 5 + bw + b.chars().count()
@@ -2835,6 +2899,48 @@ mod tests {
             quota_fill(5.0),
             "a fresh window is not drawn like a spent one"
         );
+    }
+
+    /// A window nobody has used has no reset - the five-hour window starts on
+    /// first use. Rendering that as an empty string pulled everything after it
+    /// left on that row alone, so `rnd`'s 7d block sat several columns ahead of
+    /// the rows above and below it.
+    #[test]
+    fn a_missing_reset_keeps_its_place_in_the_row() {
+        let resets = vec![
+            Some("2:10pm".to_string()),
+            None,
+            Some("Mon 12:59pm".to_string()),
+        ];
+        let w = reset_slot_width(&resets, true);
+        let cells: Vec<String> = resets
+            .iter()
+            .map(|r| reset_slot(r.as_deref(), true, w))
+            .collect();
+        let widths: Vec<usize> = cells.iter().map(|c| c.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|x| x[0] == x[1]),
+            "every slot is one width: {widths:?} in {cells:?}"
+        );
+        assert!(cells[0].starts_with("resets 2:10pm"), "{:?}", cells[0]);
+        assert!(
+            cells[1].starts_with("not started"),
+            "an unused window says so rather than leaving a hole: {:?}",
+            cells[1]
+        );
+    }
+
+    /// No row has a reset: the column is not drawn at all rather than filling
+    /// the row with phrases nobody asked for.
+    #[test]
+    fn a_frame_with_no_resets_draws_no_slot() {
+        assert_eq!(reset_slot_width(&[None, None], true), 0);
+    }
+
+    /// Too narrow for the phrase: pad, never truncate it into nonsense.
+    #[test]
+    fn a_slot_too_narrow_for_the_phrase_stays_blank() {
+        assert_eq!(reset_slot(None, true, 6), "      ");
     }
 
     /// The gauge holds ONE reading and nothing else. The reset time lives
