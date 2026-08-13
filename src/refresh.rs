@@ -82,16 +82,6 @@ impl RefreshError {
     }
 }
 
-/// Does this credential need renewing? True when the access token has lapsed or
-/// is about to - a token that expires mid-flight is already useless.
-pub fn needs_refresh(blob: &[u8], now_ms: i64) -> bool {
-    const SLACK_MS: i64 = 5 * 60_000;
-    serde_json::from_slice::<serde_json::Value>(blob)
-        .ok()
-        .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64())
-        .is_some_and(|exp| exp - now_ms <= SLACK_MS)
-}
-
 /// Has the refresh token itself expired? Then nothing here can help and only a
 /// sign-in will - saying so is the difference between a fixable state and a
 /// mysterious one.
@@ -286,23 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn renewal_is_due_before_the_token_actually_lapses() {
-        let now = 1_800_000_000_000i64;
-        let at = |exp: i64| format!(r#"{{"claudeAiOauth":{{"expiresAt":{exp}}}}}"#);
-        assert!(needs_refresh(at(now - 1).as_bytes(), now), "already lapsed");
-        assert!(
-            needs_refresh(at(now + 60_000).as_bytes(), now),
-            "a minute left would lapse mid-flight"
-        );
-        assert!(
-            !needs_refresh(at(now + 3_600_000).as_bytes(), now),
-            "an hour"
-        );
-        // No expiry recorded is not a reason to renew.
-        assert!(!needs_refresh(br#"{"claudeAiOauth":{}}"#, now));
-    }
-
-    #[test]
     fn an_expired_refresh_token_is_named_rather_than_retried() {
         let now = 1_800_000_000_000i64;
         let blob = format!(
@@ -355,10 +328,11 @@ mod tests {
 
 /// How long before an access token lapses a keep-alive sweep renews it.
 ///
-/// Wider than `needs_refresh`'s five minutes on purpose: that one answers "is
-/// this token unusable right now", which is a question you ask when a turn is
-/// waiting. This one answers "will this account still work tomorrow", and the
-/// sweep runs whether or not anybody is using the account.
+/// Deliberately wide. "Is this token unusable right NOW" is a different
+/// question, asked when a turn is waiting, and answered on the serving path by
+/// `slot_token_expired` and `has_usable_login`. This one answers "will this
+/// account still work tomorrow", and the sweep runs whether or not anybody is
+/// using the account.
 pub const KEEP_ALIVE_WINDOW_MS: i64 = 6 * 60 * 60 * 1000;
 
 /// Should a keep-alive sweep renew this credential now?

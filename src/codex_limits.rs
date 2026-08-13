@@ -11,7 +11,6 @@
 //! that moment - the active one. It is therefore reported for the active Codex
 //! account only, rather than guessed at for the others.
 
-use crate::paths::Paths;
 use std::path::{Path, PathBuf};
 
 /// One window as Codex reports it.
@@ -106,20 +105,6 @@ fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::V
         _ => None,
     }
 }
-
-/// The newest limits Codex recorded, from transcripts touched within
-/// `max_age_secs`. `None` when no recent transcript carries any - Codex only
-/// writes them once the API has reported a window.
-///
-/// This is a SNAPSHOT from when Codex last ran, not a live reading: unlike
-/// Claude's, there is no endpoint to ask. A window whose `resets_at` has since
-/// passed is therefore dropped rather than shown - the number it held describes a
-/// window that no longer exists, and reporting 6% of a window that reset is worse
-/// than reporting nothing.
-pub fn latest(paths: &Paths, now: u64, max_age_secs: u64) -> Option<Limits> {
-    from_sessions_dir(&paths.codex_sessions(), now, max_age_secs)
-}
-
 /// The same reading, for ONE account's home.
 ///
 /// Only the bare `~/.codex` was ever read, so an account that is a slot - which
@@ -177,6 +162,7 @@ fn collect_jsonl(dir: &Path, now: u64, max_age: u64, out: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Paths;
 
     /// Two fixed moments for the fixtures: a window that has NOT reset and one
     /// that has. They were literal timestamps once, which passed until the day
@@ -260,18 +246,19 @@ mod tests {
         write_transcript_resetting(&sessions, "a.jsonl", 16.0, Some(42.0), PAST_RESET);
         let paths = Paths::rooted(d.path());
         // "Now" before the reset: both windows stand.
-        let l = latest(&paths, PAST_RESET as u64 - 1, 10 * 86400).expect("both windows live");
+        let l = for_slot(paths.codex_dir(), PAST_RESET as u64 - 1, 10 * 86400)
+            .expect("both windows live");
         assert!(l.short.is_some() && l.long.is_some());
         // "Now" after it: nothing to report rather than numbers describing a
         // window that no longer exists.
         assert!(
-            latest(&paths, PAST_RESET as u64 + 1, 10 * 86400).is_none(),
+            for_slot(paths.codex_dir(), PAST_RESET as u64 + 1, 10 * 86400).is_none(),
             "a reset window is not reported as used"
         );
     }
 
     #[test]
-    fn latest_prefers_the_newest_transcript_that_has_limits() {
+    fn the_newest_transcript_that_has_limits_wins() {
         let d = tempfile::tempdir().unwrap();
         let sessions = d.path().join(".codex/sessions/2026/07/27");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -283,9 +270,9 @@ mod tests {
         let now = std::time::SystemTime::now();
         let paths = Paths::rooted(d.path());
         let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let got = latest(&paths, secs, 86400).expect("found");
+        let got = for_slot(paths.codex_dir(), secs, 86400).expect("found");
         assert_eq!(got.short.unwrap().used_pct, 55.0, "the newest one wins");
         // A transcript older than the window is not consulted at all.
-        assert!(latest(&paths, secs + 200_000, 3600).is_none());
+        assert!(for_slot(paths.codex_dir(), secs + 200_000, 3600).is_none());
     }
 }

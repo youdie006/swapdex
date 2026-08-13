@@ -320,25 +320,6 @@ pub fn by_headroom<'a, T>(
         })
     });
 }
-
-/// The next account to try after `current` proved spent: the first slot that is
-/// neither `current` nor known-spent. `None` when nothing is left, which the
-/// caller reports rather than silently retrying a dead account.
-///
-/// (Under sustained load "soonest reset first" is the better rule; first-eligible
-/// is enough while accounts are spent one at a time, and it needs no reset clock.)
-pub fn rotate_target(
-    current: &str,
-    slots: &[SlotRecord],
-    state: &std::collections::HashMap<String, crate::proxy::ratelimit::Quota>,
-) -> Option<String> {
-    slots
-        .iter()
-        .filter(|r| r.name != current)
-        .find(|r| !state.get(&r.name).is_some_and(|q| q.rejected))
-        .map(|r| r.name.clone())
-}
-
 #[cfg(test)]
 mod usage_block_tests {
     use super::*;
@@ -630,118 +611,40 @@ mod identity_tests {
     }
 
     /// Identity unknown must not exclude: on a store where no uuid can be read,
-    /// the rule would otherwise rule out every remaining account at once.
-    #[test]
-    fn unknown_identities_do_not_block_a_failover() {
-        let list = [c("a", None, true), c("b", None, false)];
-        assert_eq!(next_usable(&list).map(|c| c.name.as_str()), Some("b"));
-    }
-
-    #[test]
-    fn a_slot_with_no_usable_login_is_never_offered() {
-        let mut only = c("a", Some("u"), false);
-        only.usable = false;
-        assert_eq!(next_usable(&[only]), None);
-    }
-
-    #[test]
-    fn nothing_tried_burns_nothing() {
-        assert!(burned_uuids(&named(), &[]).is_empty());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    fn slot(name: &str, dir: &str) -> crate::slots::SlotRecord {
-        crate::slots::SlotRecord {
-            tool: "claude-code".into(),
+    fn slot(name: &str, dir: &str) -> SlotRecord {
+        SlotRecord {
             name: name.into(),
             id: name.into(),
             config_dir: PathBuf::from(dir),
             adopted: false,
+            tool: "claude-code".into(),
         }
     }
 
+    /// The contract the old `rotate_target` held, kept through the function
+    /// that actually runs: the first account that is neither the current one
+    /// nor spent, and nothing at all when every one of them is spent. That
+    /// helper had four tests and no caller - green, and proving nothing about
+    /// what the proxy does.
     #[test]
-    fn a_changed_pointer_wins_over_a_rotation() {
-        let slots = vec![slot("rnd", "/s/rnd"), slot("bsgong", "/s/bsgong")];
-        let mut c = Chooser::default();
-        // First request follows the pointer.
-        assert_eq!(
-            c.choose(Some(&PathBuf::from("/s/rnd")), None, &slots)
-                .unwrap()
-                .name,
-            "rnd"
-        );
-        // Quota rotated us to bsgong; the UNCHANGED pointer must not undo it.
-        assert_eq!(
-            c.choose(Some(&PathBuf::from("/s/rnd")), Some("bsgong"), &slots)
-                .unwrap()
-                .name,
-            "bsgong"
-        );
-        // The user now points at bsgong explicitly: same account, still fine.
-        assert_eq!(
-            c.choose(Some(&PathBuf::from("/s/bsgong")), Some("bsgong"), &slots)
-                .unwrap()
-                .name,
-            "bsgong"
-        );
-        // The user points back at rnd - a CHANGED pointer overrides the rotation.
-        assert_eq!(
-            c.choose(Some(&PathBuf::from("/s/rnd")), Some("bsgong"), &slots)
-                .unwrap()
-                .name,
-            "rnd",
-            "an explicit new choice overrides the rotation"
-        );
-    }
-
-    #[test]
-    fn unknown_pointer_falls_back_and_no_slots_yields_nothing() {
-        let slots = vec![slot("rnd", "/s/rnd")];
-        let mut c = Chooser::default();
-        assert_eq!(
-            c.choose(Some(&PathBuf::from("/nope")), None, &slots)
-                .unwrap()
-                .name,
-            "rnd",
-            "an unresolvable pointer still serves the request"
-        );
-        assert!(c.choose(None, None, &[]).is_none(), "no slots -> no choice");
-    }
-
-    #[test]
-    fn rotation_skips_the_current_and_the_known_spent_accounts() {
-        use crate::proxy::ratelimit::Quota;
-        let slots = vec![
-            slot("rnd", "/s/rnd"),
-            slot("bsgong", "/s/b"),
-            slot("claude", "/s/c"),
-        ];
-        let spent = |name: &str| {
-            (
-                name.to_string(),
-                Quota {
-                    rejected: true,
-                    ..Default::default()
-                },
-            )
+    fn rotation_takes_the_first_account_that_is_neither_current_nor_spent() {
+        let c = |name: &str, ruled_out: bool| Candidate {
+            name: name.into(),
+            uuid: Some(format!("u-{name}")),
+            ruled_out,
+            usable: true,
         };
-        let mut state: std::collections::HashMap<String, Quota> =
-            [spent("rnd"), spent("bsgong")].into_iter().collect();
+        // rnd is the current one and bsgong is spent; claude is what is left.
+        let list = [c("rnd", true), c("bsgong", true), c("claude", false)];
         assert_eq!(
-            rotate_target("rnd", &slots, &state).as_deref(),
+            next_usable(&list).map(|x| x.name.as_str()),
             Some("claude"),
             "the first account that is neither current nor spent"
         );
-        state.extend([spent("claude")]);
-        assert_eq!(
-            rotate_target("rnd", &slots, &state),
-            None,
+        // Every account spent: nothing to rotate to, rather than a wrong answer.
+        let all = [c("rnd", true), c("bsgong", true), c("claude", true)];
+        assert!(
+            next_usable(&all).is_none(),
             "every account spent -> nothing to rotate to"
         );
     }

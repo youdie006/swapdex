@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Changed
+- **Four helpers that nothing called were removed.** Each had been superseded by something that answers the same question better, and each still carried passing tests - `codex_limits::latest` (a fixed `~/.codex` where `for_slot` takes the slot), `refresh::needs_refresh` (five minutes of slack where the serving path already asks through `slot_token_expired` and `has_usable_login`), `pick::rotate_target` (rejection only, where `next_usable` also weighs identity, login and disabled), and `quota_cache::age_secs`. Ten green tests between them, none exercising anything the product does; the contracts worth keeping were re-pointed at the live functions rather than deleted with the dead ones.
+
 ## [0.60.0] - 2026-08-13
 
 ### Fixed

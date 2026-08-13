@@ -112,11 +112,6 @@ pub fn update(paths: &Paths, fresh: &[(String, Entry)]) {
     }
 }
 
-/// How old a reading is, in seconds, or `None` when there is none.
-pub fn age_secs(e: &Entry, now: i64) -> i64 {
-    (now - e.at).max(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +141,6 @@ mod tests {
         let c = load(&paths);
         assert_eq!(c["a"].five_h, Some(55.0));
         assert_eq!(c["b"].five_h, Some(20.0), "b is untouched");
-        assert_eq!(age_secs(&c["b"], 260), 60);
     }
 
     // Every reading taken while utilization was misread is exactly 100, and
