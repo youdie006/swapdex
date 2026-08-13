@@ -4414,11 +4414,31 @@ pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
     let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
     let who = slots.payer()?;
     let rec = slots.get(&who)?;
-    Some(if crate::proxy::has_login(tool, &rec.config_dir) {
-        who
-    } else {
-        format!("{who} (no login)")
-    })
+    let email = match tool {
+        "codex" => codex_slot_email(&rec.config_dir),
+        _ => crate::proxy::creds::slot_email(&rec.config_dir),
+    };
+    Some(payer_line(
+        &who,
+        email.as_deref(),
+        crate::proxy::has_login(tool, &rec.config_dir),
+    ))
+}
+
+/// The one line Codex has room for. Its `/status` prints the provider name and
+/// nothing else about identity, so this is where the account has to appear -
+/// and a SLOT NAME is not an account. `work` is a label its owner chose; it
+/// does not say which login is being billed, which is the question somebody
+/// reads that line to answer.
+pub fn payer_line(name: &str, email: Option<&str>, has_login: bool) -> String {
+    match (email.filter(|e| *e != name), has_login) {
+        (Some(e), true) => format!("{name} ({e})"),
+        (Some(e), false) => format!("{name} ({e}, no login)"),
+        (None, true) => name.to_string(),
+        // The shape callers already depended on, kept: a name with nothing
+        // known about it still says plainly that it cannot pay.
+        (None, false) => format!("{name} (no login)"),
+    }
 }
 
 /// `--tool codex` where it is needed, nothing where it is not.
@@ -6215,7 +6235,7 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{keychain_verdict, row_needs_login, win_line};
+    use super::{keychain_verdict, payer_line, row_needs_login, win_line};
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
@@ -6266,6 +6286,30 @@ mod tests {
         assert!(!row_needs_login("claude-code", Some(dir.path())));
         // A row with no slot behind it has nothing to sign into.
         assert!(!row_needs_login("claude-code", None));
+    }
+
+    /// Codex prints the provider name and nothing else about identity, so that
+    /// one field has to answer "which account am I on". It carried the SLOT
+    /// NAME - `swapdex: work` - which is a label its owner chose and says
+    /// nothing about the login being billed. 병승 asked exactly that question
+    /// looking straight at the line meant to answer it.
+    #[test]
+    fn the_payer_line_names_the_account_not_just_the_slot() {
+        assert_eq!(
+            payer_line("work", Some("polarisairnd@gmail.com"), true),
+            "work (polarisairnd@gmail.com)"
+        );
+        // No email to show (Codex slot never signed in, or Claude before its
+        // first read): the name alone, never a blank or a lie.
+        assert_eq!(payer_line("work", None, true), "work");
+        // A name that IS the address does not repeat itself.
+        assert_eq!(payer_line("me@x.com", Some("me@x.com"), true), "me@x.com");
+        // The state still rides along, in the shape callers already read.
+        assert_eq!(
+            payer_line("work", Some("a@b.c"), false),
+            "work (a@b.c, no login)"
+        );
+        assert_eq!(payer_line("work", None, false), "work (no login)");
     }
 
     const BARE: &str = "Claude Code-credentials";
