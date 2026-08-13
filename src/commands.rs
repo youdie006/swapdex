@@ -4418,7 +4418,16 @@ pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
         "codex" => codex_slot_email(&rec.config_dir),
         _ => crate::proxy::creds::slot_email(&rec.config_dir),
     };
-    let home = active_slot_name(paths, tool);
+    // The DEFAULT pointer, not `active_slot_name` - that one consults the
+    // serving pointer first, so it always agreed with the payer and the note
+    // could never appear. `use` is what decides where a plain launch lands.
+    let home = slots.default_dir().and_then(|d| {
+        slots
+            .list()
+            .into_iter()
+            .find(|r| r.config_dir == d)
+            .map(|r| r.name)
+    });
     Some(format!(
         "{}{}",
         payer_line(
