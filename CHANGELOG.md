@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.60.0] - 2026-08-13
+
+### Fixed
+- **Codex's `/status` says which account is paying.** With a custom `model_provider` configured Codex drops its account section entirely, so running through the proxy costs you the only place that answered "which account am I on". The shim already put the payer in the provider name - the one field Codex still prints - but it put the SLOT NAME: `swapdex: work`. A slot name is a label its owner chose. It carries the account now: `swapdex: work (polarisairnd@gmail.com)`.
+- **And where the session actually lives, when that is somewhere else.** swapdex keeps two pointers on purpose - `serve` decides who pays, `use` decides where new sessions live - and with one field to show, a session billed to `work` while its history piled up in `codex-main` read as though it were running as `work`. The home is named only when the two differ: `swapdex: work (polarisairnd@gmail.com) - home: codex-main`.
+- **Reset times always show minutes.** Dropping them on the hour reads the way a person speaks - `3pm` - but these sit in a column, and a three-character time beside a six-character one leaves a hole that reads as a broken layout.
+
 ## [0.59.0] - 2026-08-13
 
 ### Fixed
