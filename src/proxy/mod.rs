@@ -82,6 +82,9 @@ struct Shared {
     /// Every account is past the threshold and there is nowhere to move: the one
     /// state in which asking for a cheaper model beats failing the turn.
     cornered: Mutex<bool>,
+    /// The last redirection announced, so a `serve` pointer stuck on a benched
+    /// account does not print the same sentence on every turn.
+    benched_note: Mutex<Option<(String, String)>>,
     /// When the last pre-emptive move happened. Threshold switching without a
     /// cooldown flip-flops: two accounts hovering either side of the line hand the
     /// session back and forth, and every hop costs the prompt cache.
@@ -251,17 +254,30 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             // A lapsed token cannot serve and cannot be refreshed from here, so
             // treat it the same as spent when choosing where to start.
             || creds::slot_token_expired(&chosen.config_dir, now_ms());
+        if !known_spent {
+            // Served without redirection: the episode is over, so its return is
+            // worth announcing again.
+            pick::clear_bench_note(&mut sh.benched_note.lock().unwrap());
+        }
         if known_spent {
             if let Some(better) = next_account(paths, sh, std::slice::from_ref(&chosen.name)) {
-                // Say it. This used to be the quietest path in the proxy: the
-                // account the rotation had settled on was benched, every turn
+                // Say it - once. This used to be the quietest path in the proxy:
+                // the account the rotation had settled on was benched, every turn
                 // fell back here, and the log showed only the fallback serving
-                // turn after turn with no reason given.
-                println!(
-                    "{} is benched - this turn goes to {}",
-                    chosen.name, better.name
-                );
-                std::io::stdout().flush().ok();
+                // turn after turn with no reason given. Saying it on EVERY turn
+                // was the opposite mistake: a `serve` pointer stuck on a benched
+                // account repeated one sentence until nobody read any of them.
+                if pick::announce_bench(
+                    &mut sh.benched_note.lock().unwrap(),
+                    &chosen.name,
+                    &better.name,
+                ) {
+                    println!(
+                        "{} is benched - turns go to {} until it comes back",
+                        chosen.name, better.name
+                    );
+                    std::io::stdout().flush().ok();
+                }
                 return Ok(better);
             }
         }
@@ -764,6 +780,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         rotated: Mutex::new(None),
         unusable: Mutex::new(pick::Sidelined::default()),
         cornered: Mutex::new(false),
+        benched_note: Mutex::new(None),
         // Start from what was last known rather than from nothing: see
         // `seed_from_cache`. Without this every restart re-asked the endpoint
         // about every account at once.

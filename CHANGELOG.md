@@ -4,10 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.59.0] - 2026-08-13
 
 ### Fixed
 - **A window with no reset yet keeps its column.** The five-hour window starts on first use, so an account that has not touched it has no reset time to show - and rendering that as nothing pulled everything after it left on that row alone, putting its 7d block several columns ahead of the rows around it. The slot now holds its width across the whole frame and says `not started`, so the reason for the blank is on screen instead of being left to the reader.
+- **A benched account is announced once, not every turn.** A `serve` pointer naming an account that has been benched redirects every turn to the same place, and the line saying so printed on every one of them until nobody read any of them. It is said once per episode now - again when the destination changes, or after a turn goes through without redirection, because a bench that came and went is news the second time too. The opposite mistake was the previous one: that path used to say nothing at all.
 - **The reset time no longer reads as part of the gauge.** It sits outside the bar, but only one space away, and the gauge ends in a dark track cell - so the time butted against it and read as though it were inside, which is the confusion moving it out was meant to end. Two spaces now separate them.
 
 ## [0.58.0] - 2026-08-12

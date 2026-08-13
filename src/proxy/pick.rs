@@ -118,6 +118,31 @@ pub fn usage_line(
     parts.join(", ")
 }
 
+/// Is this redirection worth saying out loud again?
+///
+/// The account a `serve` pointer names can be benched, and then every turn is
+/// redirected to the same place - so the same sentence printed on every turn
+/// for as long as the bench lasted. A line repeated that often stops being read,
+/// and it buries the ones that matter.
+///
+/// It is said once per episode: when the pair changes, or after a turn that was
+/// not redirected at all (the situation ended and has now come back). `memo`
+/// carries that state between turns.
+pub fn announce_bench(memo: &mut Option<(String, String)>, from: &str, to: &str) -> bool {
+    let pair = (from.to_string(), to.to_string());
+    if memo.as_ref() == Some(&pair) {
+        return false;
+    }
+    *memo = Some(pair);
+    true
+}
+
+/// A turn served without redirection: the episode is over, so the next one is
+/// worth announcing again.
+pub fn clear_bench_note(memo: &mut Option<(String, String)>) {
+    *memo = None;
+}
+
 /// One window as it should READ: how much is left, said in words.
 ///
 /// swapdex speaks one language about quota - what is LEFT. The dashboard gauge
@@ -364,6 +389,47 @@ mod usage_block_tests {
     fn an_account_refusing_turns_is_marked() {
         let out = usage_block(&p(&[("rnd", "5h 0%")]), &[], &["rnd".to_string()]);
         assert!(out[0].contains("refusing"), "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod announce_bench_tests {
+    use super::*;
+
+    /// A `serve` pointer naming a benched account redirects every turn, and the
+    /// same sentence printed on every one of them. Said once instead.
+    #[test]
+    fn the_same_redirection_is_announced_once() {
+        let mut memo = None;
+        assert!(
+            announce_bench(&mut memo, "rnd", "bsgong"),
+            "first time, say it"
+        );
+        assert!(
+            !announce_bench(&mut memo, "rnd", "bsgong"),
+            "same again, stay quiet"
+        );
+        assert!(!announce_bench(&mut memo, "rnd", "bsgong"));
+    }
+
+    /// A different destination is a different fact.
+    #[test]
+    fn a_new_destination_is_announced() {
+        let mut memo = None;
+        announce_bench(&mut memo, "rnd", "bsgong");
+        assert!(announce_bench(&mut memo, "rnd", "personal"));
+        assert!(announce_bench(&mut memo, "personal", "bsgong"));
+    }
+
+    /// Once a turn goes through without redirection the episode is over, so its
+    /// return is news again - otherwise a bench that came and went would be
+    /// announced only the very first time it ever happened.
+    #[test]
+    fn the_episode_ending_makes_the_next_one_news() {
+        let mut memo = None;
+        announce_bench(&mut memo, "rnd", "bsgong");
+        clear_bench_note(&mut memo);
+        assert!(announce_bench(&mut memo, "rnd", "bsgong"));
     }
 }
 
