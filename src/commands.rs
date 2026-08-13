@@ -4418,11 +4418,31 @@ pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
         "codex" => codex_slot_email(&rec.config_dir),
         _ => crate::proxy::creds::slot_email(&rec.config_dir),
     };
-    Some(payer_line(
-        &who,
-        email.as_deref(),
-        crate::proxy::has_login(tool, &rec.config_dir),
+    let home = active_slot_name(paths, tool);
+    Some(format!(
+        "{}{}",
+        payer_line(
+            &who,
+            email.as_deref(),
+            crate::proxy::has_login(tool, &rec.config_dir),
+        ),
+        home_note(&who, home.as_deref())
     ))
+}
+
+/// Where the session's files live, when that is NOT the account paying for it.
+///
+/// swapdex keeps two pointers on purpose: `serve` decides who PAYS, `use`
+/// decides where new sessions LIVE. Codex shows one field, so it showed the
+/// payer - and a session billed to `work` while its history piled up in
+/// `codex-main` looked, from that one line, like it was running as `work`.
+/// Naming the home too costs a few characters and only when they differ; when
+/// they agree there is nothing to disambiguate.
+pub fn home_note(payer: &str, home: Option<&str>) -> String {
+    match home {
+        Some(h) if h != payer => format!(" - home: {h}"),
+        _ => String::new(),
+    }
 }
 
 /// The one line Codex has room for. Its `/status` prints the provider name and
@@ -6235,7 +6255,7 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{keychain_verdict, payer_line, row_needs_login, win_line};
+    use super::{home_note, keychain_verdict, payer_line, row_needs_login, win_line};
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
@@ -6310,6 +6330,21 @@ mod tests {
             "work (a@b.c, no login)"
         );
         assert_eq!(payer_line("work", None, false), "work (no login)");
+    }
+
+    /// Two pointers on purpose - `serve` decides who pays, `use` decides where
+    /// sessions live - but Codex shows ONE field, so a session billed to `work`
+    /// while its history piled up in `codex-main` read as though it were running
+    /// as `work`. 병승 asked whether it had actually gone into that slot.
+    #[test]
+    fn the_home_is_named_only_when_it_differs_from_the_payer() {
+        assert_eq!(home_note("work", Some("codex-main")), " - home: codex-main");
+        assert_eq!(
+            home_note("work", Some("work")),
+            "",
+            "nothing to disambiguate when they agree"
+        );
+        assert_eq!(home_note("work", None), "", "no pointer, nothing to say");
     }
 
     const BARE: &str = "Claude Code-credentials";
