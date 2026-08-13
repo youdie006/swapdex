@@ -1130,13 +1130,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 // times ride along when the terminal has room,
                                 // and a narrow window keeps the readings.
                                 let bw = if avail >= 34 { 12 } else { 7 };
+                                // TWO spaces, not one. The gauge ends in a dark
+                                // track cell, so a single space left the time
+                                // butted against it and reading as part of the
+                                // bar - which is the confusion moving it
+                                // outside was meant to end.
                                 let tail = |r: &str, word: bool| -> String {
                                     if r.is_empty() {
                                         String::new()
                                     } else if word {
-                                        format!(" resets {r}")
+                                        format!("  resets {r}")
                                     } else {
-                                        format!(" {r}")
+                                        format!("  {r}")
                                     }
                                 };
                                 let (t5, t7) = {

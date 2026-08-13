@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Fixed
+- **The reset time no longer reads as part of the gauge.** It sits outside the bar, but only one space away, and the gauge ends in a dark track cell - so the time butted against it and read as though it were inside, which is the confusion moving it out was meant to end. Two spaces now separate them.
+
 ## [0.58.0] - 2026-08-12
 
 ### Fixed
