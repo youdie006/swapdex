@@ -181,12 +181,11 @@ pub fn reset_clock(at: i64, now: i64, tz_offset: i64) -> String {
         0 => 12,
         h => h,
     };
-    // Minutes are dropped on the hour, the way a person says it.
-    let time = if mins == 0 {
-        format!("{h12}{ampm}")
-    } else {
-        format!("{h12}:{mins:02}{ampm}")
-    };
+    // Minutes are ALWAYS shown, even on the hour. Dropping them reads the way a
+    // person speaks - "3pm" - but these sit in a column, and a three-character
+    // time beside a six-character one leaves a hole the eye reads as a broken
+    // layout. Speaking naturally is not worth a column that looks wrong.
+    let time = format!("{h12}:{mins:02}{ampm}");
     if at - now < 86400 && (l / 86400) == ((now + tz_offset) / 86400) {
         return time;
     }
@@ -471,9 +470,15 @@ mod reset_clock_tests {
     #[test]
     fn a_same_day_reset_is_just_the_time() {
         // 1970-01-01 00:00 UTC + 15h = 3pm, still the same day.
-        assert_eq!(reset_clock(15 * 3600, 9 * 3600, 0), "3pm");
+        assert_eq!(reset_clock(15 * 3600, 9 * 3600, 0), "3:00pm");
         assert_eq!(reset_clock(15 * 3600 + 30 * 60, 9 * 3600, 0), "3:30pm");
-        assert_eq!(reset_clock(9 * 3600, 8 * 3600, 0), "9am");
+        assert_eq!(reset_clock(9 * 3600, 8 * 3600, 0), "9:00am");
+        // On the hour and not: the same width, so a column of them lines up.
+        assert_eq!(
+            reset_clock(15 * 3600, 9 * 3600, 0).len(),
+            reset_clock(15 * 3600 + 30 * 60, 9 * 3600, 0).len(),
+            "an on-the-hour time is no shorter than any other"
+        );
     }
 
     /// Past due says so rather than printing a time that already went by.
@@ -488,8 +493,8 @@ mod reset_clock_tests {
     #[test]
     fn a_reset_on_another_day_carries_the_day() {
         let out = reset_clock(3 * 86400 + 15 * 3600, 9 * 3600, 0);
-        assert!(out.contains("3pm"), "{out}");
-        assert!(out.len() > "3pm".len(), "it names the day too: {out}");
+        assert!(out.contains("3:00pm"), "{out}");
+        assert!(out.len() > "3:00pm".len(), "it names the day too: {out}");
     }
 }
 
