@@ -2403,19 +2403,15 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         //
         // This used to caption each home with whoever the switch timeline said was
         // PAYING when the reading was written, on the reasoning that the numbers
-        // came back on the serving account's token. Measured on a real machine,
-        // they do not: a Codex turn driven through the proxy carries no rate
-        // limits in its response headers and none in its SSE body, and only two
-        // requests reach the proxy at all - yet the transcript gains a
-        // `rate_limits` entry. The CLI fetches its limits by a path the proxy
-        // never sees, with its own login, so what lands in a home describes THAT
-        // home's account.
+        // came back on the serving account's token. That moved real numbers onto
+        // the wrong row: an account with no transcripts at all showed a reading
+        // while the one holding every one of them showed nothing. Nothing else
+        // surveyed attributes a reading this way; every one binds it to the
+        // credential that fetched it, which for a transcript is the home.
         //
-        // The payer caption therefore moved real numbers onto the wrong row: an
-        // account with no transcripts at all showed a reading while the one
-        // holding every one of them showed nothing. No other tool surveyed attributes a
-        // reading this way; every one of them binds it to the credential that
-        // fetched it, which for Codex is the home.
+        // A reading found here is not the only reading obtainable, and
+        // `codex_limits` records the two paths that are known to exist and
+        // untried. This is the one swapdex has.
         let codex_homes: Vec<(String, std::path::PathBuf)> =
             crate::slots::Slots::open_for(paths, "codex")
                 .map(|s| {

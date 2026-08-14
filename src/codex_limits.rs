@@ -11,24 +11,33 @@
 //! reading can only be attributed by WHERE it was read from, and each account's
 //! home is read separately.
 //!
-//! That is not a compromise, it is the right answer. Measured on a real machine:
-//! a Codex turn driven through swapdex's proxy carries no rate limits in its
-//! response headers and none in its SSE body, and only two requests reach the
-//! proxy - yet the transcript gains a `rate_limits` entry. The CLI fetches its
-//! limits by a path the proxy never sees, using its OWN login. What lands in a
-//! home therefore describes that home's account, whoever happened to be paying
-//! for the turns.
+//! Whatever else is true, the home is the right caption for a reading found in
+//! it. An earlier version captioned each one with the payer from the switch
+//! timeline instead, and that produced the symptom which started this: an
+//! account with no transcripts at all showing a reading, beside the home holding
+//! every one of them showing none. Nothing else surveyed attributes a reading to
+//! anything but the credential that fetched it.
 //!
-//! An earlier version captioned each reading with the payer from the switch
-//! timeline. No other tool surveyed does that; they all bind a reading to the
-//! credential that fetched it, which here is the home. It also produced the
-//! visible symptom that started this: an account with no transcripts at all
-//! showing a reading, beside the home holding every one of them showing none.
+//! It is a weaker source than Claude's, though, and this file should not be read
+//! as saying no better one exists. What was measured is narrow: one probe, on one
+//! machine, on the request path this proxy carries, saw no rate limits in the
+//! response headers or the SSE body while the transcript gained a `rate_limits`
+//! entry anyway.
 //!
-//! Upstream will not close the gap - openai/codex#16323 asked for a user id
-//! next to `rate_limits` and was declined, noting that on Team plans quotas are
-//! per USER while the account id is shared, so even that would not have been
-//! enough.
+//! Two paths are known to exist and neither has been tried here. icoretech/
+//! codex-pooler, a self-hosted Codex gateway, parses `x-codex-primary-used-percent`
+//! / `-window-minutes` / `-reset-at` (and the `secondary` set) off upstream
+//! responses, and probes `/backend-api/codex/usage`, `/backend-api/wham/usage`
+//! and `/api/codex/usage` on `chatgpt.com` with the account's own bearer token
+//! plus `chatgpt-account-id`. An endpoint would answer per CREDENTIAL, which is
+//! the question this module can only approximate - and would settle it for an
+//! account whose home holds no transcripts, where there is nothing here to read.
+//! Whether either reaches us is unverified; this proxy has never looked for
+//! anything but `anthropic-ratelimit-unified-*`.
+//!
+//! What upstream will not do is name the account in the transcript:
+//! openai/codex#16323 asked for a user id next to `rate_limits` and was declined,
+//! noting that on Team plans quotas are per USER while the account id is shared.
 
 use std::path::{Path, PathBuf};
 
