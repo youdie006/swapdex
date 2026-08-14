@@ -23,7 +23,7 @@
 //! timeline. No other tool surveyed does that; they all bind a reading to the
 //! credential that fetched it, which here is the home. It also produced the
 //! visible symptom that started this: an account with no transcripts at all
-//! showing a reading, beside one holding 458 of them showing none.
+//! showing a reading, beside the home holding every one of them showing none.
 //!
 //! Upstream will not close the gap - openai/codex#16323 asked for a user id
 //! next to `rate_limits` and was declined, noting that on Team plans quotas are

@@ -2413,7 +2413,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         //
         // The payer caption therefore moved real numbers onto the wrong row: an
         // account with no transcripts at all showed a reading while the one
-        // holding 458 of them showed nothing. No other tool surveyed attributes a
+        // holding every one of them showed nothing. No other tool surveyed attributes a
         // reading this way; every one of them binds it to the credential that
         // fetched it, which for Codex is the home.
         let codex_homes: Vec<(String, std::path::PathBuf)> =
@@ -6373,7 +6373,7 @@ mod tests {
     /// A Codex reading is keyed by the home it was read from, and by nothing
     /// else. The previous version captioned it with whoever the switch timeline
     /// said was paying, which put a reading on an account holding no transcripts
-    /// while the one holding 458 of them showed none. Passing the home as the
+    /// while the one holding every transcript showed none. Passing the home as the
     /// only argument is what makes that impossible to reintroduce here.
     #[test]
     fn a_codex_reading_is_keyed_by_the_home_it_came_from() {
