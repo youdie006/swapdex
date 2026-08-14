@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.61.0] - 2026-08-14
 
 ### Fixed
 - **A dead end says which kind it is.** Two situations reach it and they are not the same news: every account past its threshold, or every account refusing this turn whatever their windows say. Only the first had words, so three accounts sitting at 98-100% left - all refusing because an organisation's overage budget was spent - were reported as "past the threshold", with the three lines contradicting it printed directly above. It is also said once per episode now rather than on every turn.
