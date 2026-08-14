@@ -2396,22 +2396,20 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 },
             ));
         }
-        // Codex reports its own windows into its session transcripts, so its
-        // usage costs a local file read - no network, unlike Claude's.
+        // Codex usage comes from two places, and a row takes whichever answers.
         //
-        // A reading belongs to the home it was read from.
+        // The account itself answers per CREDENTIAL and names itself. That is
+        // the only source that can report a home holding no transcripts, which
+        // is not a rare case - a saved account that has not been driven through
+        // this machine has none, and its row was a permanent blank.
         //
-        // This used to caption each home with whoever the switch timeline said was
-        // PAYING when the reading was written, on the reasoning that the numbers
-        // came back on the serving account's token. That moved real numbers onto
-        // the wrong row: an account with no transcripts at all showed a reading
-        // while the one holding every one of them showed nothing. Nothing else
-        // surveyed attributes a reading this way; every one binds it to the
-        // credential that fetched it, which for a transcript is the home.
+        // Its transcripts answer for free and keep answering when the endpoint
+        // is throttled or the machine is offline. A reading found there belongs
+        // to the home it was read from; captioning it with whoever the switch
+        // timeline said was PAYING moved real numbers onto the wrong row.
         //
-        // A reading found here is not the only reading obtainable, and
-        // `codex_limits` records the two paths that are known to exist and
-        // untried. This is the one swapdex has.
+        // This runs on a thread, off the render loop, which is what makes it
+        // safe to put a network call here at all.
         let codex_homes: Vec<(String, std::path::PathBuf)> =
             crate::slots::Slots::open_for(paths, "codex")
                 .map(|s| {
@@ -2422,10 +2420,19 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 })
                 .unwrap_or_default();
         for (name, dir) in &codex_homes {
-            let Some(l) = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400) else {
-                continue;
-            };
-            claude.push(codex_usage_row(name, &l));
+            let live = crate::proxy::codex::slot_auth(dir).and_then(|auth| {
+                match crate::codex_usage::fetch(&auth) {
+                    crate::codex_usage::Fetch::Ok(a) => Some(*a),
+                    // Any other outcome falls through to the transcript rather
+                    // than blanking the row: a throttled endpoint says nothing
+                    // about the account behind it.
+                    _ => None,
+                }
+            });
+            let transcript = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400);
+            if let Some(row) = codex_row(name, live.as_ref(), transcript, now_secs() as i64) {
+                claude.push(row);
+            }
         }
         claude
     }
@@ -4567,6 +4574,33 @@ pub fn serve(
     Ok(0)
 }
 
+/// One Codex account's row, from whichever source could answer.
+///
+/// Two can. The account itself answers per CREDENTIAL and names itself, and it
+/// answers for a home holding no transcripts at all - the case where there is
+/// nothing local to read and the row was a permanent blank. Its transcripts
+/// answer for free, with no network, and keep working when the endpoint is
+/// throttled or the machine is offline.
+///
+/// The live answer wins when there is one, and is stamped with the time it was
+/// taken rather than inheriting the transcript's age. Neither source means no
+/// row: shown at zero, an account nobody has measured reads as a full one.
+pub fn codex_row(
+    home: &str,
+    live: Option<&crate::codex_usage::Account>,
+    transcript: Option<crate::codex_limits::Limits>,
+    now: i64,
+) -> Option<(String, crate::tui::Usage)> {
+    match live {
+        Some(a) => {
+            let mut l = a.limits;
+            l.observed_at = Some(now);
+            Some(codex_usage_row(home, &l))
+        }
+        None => transcript.map(|l| codex_usage_row(home, &l)),
+    }
+}
+
 /// One Codex account's row: the reading, under the name of the home it came from.
 ///
 /// The name is the ONLY thing this can be keyed by, and taking it as the sole
@@ -6273,7 +6307,8 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_usage_row, home_note, keychain_verdict, payer_line, row_needs_login, win_line,
+        codex_row, codex_usage_row, home_note, keychain_verdict, payer_line, row_needs_login,
+        win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -6366,11 +6401,58 @@ mod tests {
         assert_eq!(home_note("work", None), "", "no pointer, nothing to say");
     }
 
+    /// A live answer from the account beats a transcript, and the transcript
+    /// still answers when there is no live one. An account with neither is
+    /// absent rather than shown at zero - zero is a number, and it would read
+    /// as a full account sitting idle.
+    #[test]
+    fn a_live_reading_wins_over_a_transcript_and_a_transcript_over_nothing() {
+        let w = |pct: f64| crate::codex_limits::Window {
+            used_pct: pct,
+            window_minutes: 10080,
+            resets_at: Some(1_787_011_538),
+        };
+        let live = crate::codex_usage::Account {
+            email: Some("someone@example.com".into()),
+            limits: crate::codex_limits::Limits {
+                short: Some(w(84.0)),
+                long: None,
+                observed_at: None,
+            },
+            ..Default::default()
+        };
+        let stale = crate::codex_limits::Limits {
+            short: Some(w(12.0)),
+            long: None,
+            observed_at: Some(1_786_000_000),
+        };
+        let now = 1_786_600_000;
+
+        let (who, u) = codex_row("work", Some(&live), Some(stale), now).expect("live answers");
+        assert_eq!(who, "work");
+        assert_eq!(u.seven_d, Some(84.0));
+        // A live answer is stamped now, not left to inherit the transcript age.
+        assert_eq!(u.observed_at, Some(now));
+
+        let (_, u) = codex_row("work", None, Some(stale), now).expect("transcript answers");
+        assert_eq!(u.seven_d, Some(12.0));
+        assert_eq!(u.observed_at, Some(1_786_000_000));
+
+        // The case this whole change exists for: a home with no transcripts at
+        // all, whose account can still answer for itself.
+        let (_, u) = codex_row("work", Some(&live), None, now).expect("live alone answers");
+        assert_eq!(u.seven_d, Some(84.0));
+
+        assert!(codex_row("work", None, None, now).is_none());
+    }
+
     /// A Codex reading is keyed by the home it was read from, and by nothing
     /// else. The previous version captioned it with whoever the switch timeline
     /// said was paying, which put a reading on an account holding no transcripts
     /// while the one holding every transcript showed none. Passing the home as the
-    /// only argument is what makes that impossible to reintroduce here.
+    /// only argument is what makes that impossible to reintroduce here. A live
+    /// reading from `codex_usage` names its own account and needs no such care;
+    /// it comes through here only to share one shape with the transcript path.
     #[test]
     fn a_codex_reading_is_keyed_by_the_home_it_came_from() {
         let l = crate::codex_limits::Limits {

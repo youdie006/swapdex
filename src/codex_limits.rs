@@ -18,26 +18,16 @@
 //! every one of them showing none. Nothing else surveyed attributes a reading to
 //! anything but the credential that fetched it.
 //!
-//! It is a weaker source than Claude's, though, and this file should not be read
-//! as saying no better one exists. What was measured is narrow: one probe, on one
-//! machine, on the request path this proxy carries, saw no rate limits in the
-//! response headers or the SSE body while the transcript gained a `rate_limits`
-//! entry anyway.
+//! This is no longer the only source, and it is the weaker one. `codex_usage`
+//! asks the account itself and gets an answer that NAMES itself, so nothing has
+//! to be inferred from where a file sits - and it answers for a home holding no
+//! transcripts, which this module cannot do at all. Prefer it; what remains here
+//! is the reading that costs nothing and still works offline or when the
+//! endpoint is throttled.
 //!
-//! Two paths are known to exist and neither has been tried here. icoretech/
-//! codex-pooler, a self-hosted Codex gateway, parses `x-codex-primary-used-percent`
-//! / `-window-minutes` / `-reset-at` (and the `secondary` set) off upstream
-//! responses, and probes `/backend-api/codex/usage`, `/backend-api/wham/usage`
-//! and `/api/codex/usage` on `chatgpt.com` with the account's own bearer token
-//! plus `chatgpt-account-id`. An endpoint would answer per CREDENTIAL, which is
-//! the question this module can only approximate - and would settle it for an
-//! account whose home holds no transcripts, where there is nothing here to read.
-//! Whether either reaches us is unverified; this proxy has never looked for
-//! anything but `anthropic-ratelimit-unified-*`.
-//!
-//! What upstream will not do is name the account in the transcript:
-//! openai/codex#16323 asked for a user id next to `rate_limits` and was declined,
-//! noting that on Team plans quotas are per USER while the account id is shared.
+//! Upstream will not name the account in the transcript: openai/codex#16323
+//! asked for a user id next to `rate_limits` and was declined, noting that on
+//! Team plans quotas are per USER while the account id is shared.
 
 use std::path::{Path, PathBuf};
 
@@ -62,7 +52,7 @@ pub struct Limits {
     /// It used to be the transcript's mtime, which moves every time Codex writes
     /// anything at all. A conversation that kept running without the API
     /// restating the windows made an hours-old snapshot look freshly taken - and
-    /// the age IS the caveat here, since there is no endpoint to ask.
+    /// the age IS the caveat for a reading taken from here.
     pub observed_at: Option<i64>,
 }
 
