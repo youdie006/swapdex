@@ -10,6 +10,14 @@
 //! is "the newest limits Codex saw", which belong to the account signed in at
 //! that moment - the active one. It is therefore reported for the active Codex
 //! account only, rather than guessed at for the others.
+//!
+//! NOTE: the caller in `commands.rs` no longer honours that last sentence. It
+//! walks every Codex slot and attributes each reading to whoever the switch
+//! timeline says was PAYING when it was observed. On a real machine that put a
+//! reading on an account with no transcripts at all while the account holding
+//! 458 of them showed nothing - the numbers were right about the quota and
+//! wrong about whose row to sit on. Reconciling the two is open work; this
+//! module's own answer is the one written above.
 
 use std::path::{Path, PathBuf};
 
@@ -50,8 +58,14 @@ fn window_from(v: &serde_json::Value) -> Option<Window> {
     })
 }
 
-/// Pull the newest `rate_limits` block and the session's `email` out of one
-/// transcript. Scans from the end: the last block is the current picture.
+/// Pull the newest `rate_limits` block out of one transcript.
+///
+/// The block carries `limit_id`, `plan_type` and the windows - and NO account
+/// identifier. Neither does the session header. So a reading taken from here
+/// cannot say whose it is; only where it was read from. This used to claim it
+/// also pulled "the session's email", which the transcript has never contained,
+/// and reading that comment is how someone would conclude these numbers arrive
+/// already attributed.
 fn from_transcript(path: &Path) -> Option<Limits> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut limits: Option<Limits> = None;
