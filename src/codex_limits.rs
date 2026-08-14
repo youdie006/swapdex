@@ -6,18 +6,29 @@
 //! account's usage can be shown the same way Claude's is, except it costs a local
 //! file read instead of an HTTP request.
 //!
-//! The transcript does NOT say which account it belongs to, so what this yields
-//! is "the newest limits Codex saw", which belong to the account signed in at
-//! that moment - the active one. It is therefore reported for the active Codex
-//! account only, rather than guessed at for the others.
+//! The transcript does NOT say which account it belongs to - not in the
+//! `rate_limits` block, not in the session header, nowhere in the file. So a
+//! reading can only be attributed by WHERE it was read from, and each account's
+//! home is read separately.
 //!
-//! NOTE: the caller in `commands.rs` no longer honours that last sentence. It
-//! walks every Codex slot and attributes each reading to whoever the switch
-//! timeline says was PAYING when it was observed. On a real machine that put a
-//! reading on an account with no transcripts at all while the account holding
-//! 458 of them showed nothing - the numbers were right about the quota and
-//! wrong about whose row to sit on. Reconciling the two is open work; this
-//! module's own answer is the one written above.
+//! That is not a compromise, it is the right answer. Measured on a real machine:
+//! a Codex turn driven through swapdex's proxy carries no rate limits in its
+//! response headers and none in its SSE body, and only two requests reach the
+//! proxy - yet the transcript gains a `rate_limits` entry. The CLI fetches its
+//! limits by a path the proxy never sees, using its OWN login. What lands in a
+//! home therefore describes that home's account, whoever happened to be paying
+//! for the turns.
+//!
+//! An earlier version captioned each reading with the payer from the switch
+//! timeline. No other tool surveyed does that; they all bind a reading to the
+//! credential that fetched it, which here is the home. It also produced the
+//! visible symptom that started this: an account with no transcripts at all
+//! showing a reading, beside one holding 458 of them showing none.
+//!
+//! Upstream will not close the gap - openai/codex#16323 asked for a user id
+//! next to `rate_limits` and was declined, noting that on Team plans quotas are
+//! per USER while the account id is shared, so even that would not have been
+//! enough.
 
 use std::path::{Path, PathBuf};
 
@@ -177,6 +188,39 @@ fn collect_jsonl(dir: &Path, now: u64, max_age: u64, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
     use crate::paths::Paths;
+
+    /// A slot with no transcripts of its own reports nothing.
+    ///
+    /// This is the shape the payer caption broke: on a real machine an account
+    /// with zero session files showed a reading, because a reading taken from
+    /// ANOTHER home was captioned with whoever the timeline said was paying.
+    /// A reading belongs to the home it was read from, so a home with none has
+    /// none.
+    #[test]
+    fn a_home_with_no_transcripts_reports_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let with = d.path().join("has/sessions/2026/08/14");
+        let without = d.path().join("none");
+        std::fs::create_dir_all(&with).unwrap();
+        std::fs::create_dir_all(without.join("sessions")).unwrap();
+        write_transcript(&with, "a.jsonl", 16.0, Some(42.0));
+
+        // Real "now": the age gate compares against the files just written, and
+        // a far-future now would filter them out before the reset check ever
+        // mattered - which is exactly what the first version of this test did.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            for_slot(&d.path().join("has"), now, 10 * 86400).is_some(),
+            "the home that holds the transcript reports its reading"
+        );
+        assert!(
+            for_slot(&without, now, 10 * 86400).is_none(),
+            "a home with no transcripts reports nothing - never another home's numbers"
+        );
+    }
 
     /// Two fixed moments for the fixtures: a window that has NOT reset and one
     /// that has. They were literal timestamps once, which passed until the day

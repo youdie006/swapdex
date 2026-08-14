@@ -2399,14 +2399,23 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         // Codex reports its own windows into its session transcripts, so its
         // usage costs a local file read - no network, unlike Claude's.
         //
-        // The transcript does not name an account, and two different ones are
-        // involved: it sits in the home Codex RAN in, while the numbers came back
-        // on the token of the account that SERVED those turns. Under `serve` those
-        // differ, so reading a home and captioning it with that home's owner put
-        // one account's usage under another's name - the same mistake this project
-        // has already had to fix once on the Claude side. Each home is read
-        // separately and captioned with whoever was paying when it was written.
-        let timeline = crate::session_link::read_timeline(paths);
+        // A reading belongs to the home it was read from.
+        //
+        // This used to caption each home with whoever the switch timeline said was
+        // PAYING when the reading was written, on the reasoning that the numbers
+        // came back on the serving account's token. Measured on a real machine,
+        // they do not: a Codex turn driven through the proxy carries no rate
+        // limits in its response headers and none in its SSE body, and only two
+        // requests reach the proxy at all - yet the transcript gains a
+        // `rate_limits` entry. The CLI fetches its limits by a path the proxy
+        // never sees, with its own login, so what lands in a home describes THAT
+        // home's account.
+        //
+        // The payer caption therefore moved real numbers onto the wrong row: an
+        // account with no transcripts at all showed a reading while the one
+        // holding 458 of them showed nothing. No other tool surveyed attributes a
+        // reading this way; every one of them binds it to the credential that
+        // fetched it, which for Codex is the home.
         let codex_homes: Vec<(String, std::path::PathBuf)> =
             crate::slots::Slots::open_for(paths, "codex")
                 .map(|s| {
@@ -2420,31 +2429,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             let Some(l) = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400) else {
                 continue;
             };
-            let payer = l
-                .observed_at
-                .and_then(|at| crate::session_link::payer_at(&timeline, "codex", at))
-                .unwrap_or_else(|| name.clone());
-            {
-                {
-                    let mut u = crate::tui::Usage {
-                        observed_at: l.observed_at,
-                        ..Default::default()
-                    };
-                    // Place each window by its LENGTH, not by the API's
-                    // primary/secondary labels: a ~5h window is the session
-                    // one, anything longer is the weekly column.
-                    for w in [l.short, l.long].into_iter().flatten() {
-                        if w.window_minutes <= 600 {
-                            u.five_h = Some(w.used_pct);
-                            u.five_h_reset = w.resets_at;
-                        } else {
-                            u.seven_d = Some(w.used_pct);
-                            u.seven_d_reset = w.resets_at;
-                        }
-                    }
-                    claude.push((payer, u));
-                }
-            }
+            claude.push(codex_usage_row(name, &l));
         }
         claude
     }
@@ -4586,6 +4571,33 @@ pub fn serve(
     Ok(0)
 }
 
+/// One Codex account's row: the reading, under the name of the home it came from.
+///
+/// The name is the ONLY thing this can be keyed by, and taking it as the sole
+/// argument is the point - a caller cannot substitute a different account for it.
+/// An earlier version looked up whoever the switch timeline said was paying when
+/// the reading was written, which moved real numbers onto an account that had no
+/// transcripts at all.
+pub fn codex_usage_row(home: &str, l: &crate::codex_limits::Limits) -> (String, crate::tui::Usage) {
+    let mut u = crate::tui::Usage {
+        observed_at: l.observed_at,
+        ..Default::default()
+    };
+    // Place each window by its LENGTH, not by the API's primary/secondary
+    // labels: a ~5h window is the session one, anything longer is the weekly
+    // column. Codex often sends only a weekly window, as `primary`.
+    for w in [l.short, l.long].into_iter().flatten() {
+        if w.window_minutes <= 600 {
+            u.five_h = Some(w.used_pct);
+            u.five_h_reset = w.resets_at;
+        } else {
+            u.seven_d = Some(w.used_pct);
+            u.seven_d_reset = w.resets_at;
+        }
+    }
+    (home.to_string(), u)
+}
+
 /// Does this row have to say "no login"?
 ///
 /// One place, because there were two and they disagreed. The slot rows asked
@@ -6264,7 +6276,9 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{home_note, keychain_verdict, payer_line, row_needs_login, win_line};
+    use super::{
+        codex_usage_row, home_note, keychain_verdict, payer_line, row_needs_login, win_line,
+    };
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
@@ -6354,6 +6368,31 @@ mod tests {
             "nothing to disambiguate when they agree"
         );
         assert_eq!(home_note("work", None), "", "no pointer, nothing to say");
+    }
+
+    /// A Codex reading is keyed by the home it was read from, and by nothing
+    /// else. The previous version captioned it with whoever the switch timeline
+    /// said was paying, which put a reading on an account holding no transcripts
+    /// while the one holding 458 of them showed none. Passing the home as the
+    /// only argument is what makes that impossible to reintroduce here.
+    #[test]
+    fn a_codex_reading_is_keyed_by_the_home_it_came_from() {
+        let l = crate::codex_limits::Limits {
+            short: None,
+            long: Some(crate::codex_limits::Window {
+                used_pct: 45.0,
+                window_minutes: 10080,
+                resets_at: Some(1_787_011_538),
+            }),
+            observed_at: Some(1_786_600_000),
+        };
+        let (who, u) = codex_usage_row("codex-main", &l);
+        assert_eq!(who, "codex-main");
+        // A weekly-only reading fills the weekly column and leaves 5h empty,
+        // rather than being forced into the session slot.
+        assert_eq!(u.seven_d, Some(45.0));
+        assert_eq!(u.five_h, None);
+        assert_eq!(u.seven_d_reset, Some(1_787_011_538));
     }
 
     const BARE: &str = "Claude Code-credentials";

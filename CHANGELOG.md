@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Fixed
+- **A Codex usage reading is credited to the account it was read from.** Codex writes its rate limits into the transcripts under a home directory, and swapdex was captioning each reading with whoever the switch timeline said was PAYING at the moment it was written. Those are different questions, and on a machine where one account serves while another's home holds the sessions they gave different answers: an account with no transcripts at all was shown carrying real numbers, and the home holding 458 of them showed none. The reading belongs to the home. Measured first: Codex limits reach neither the proxy's response headers nor its SSE body, so binding a reading to the credential that fetched it is not available to us - and it would not be right either, since on a Team plan the quotas are per-user while the account id is shared. openai/codex#16323, which asked for a user id beside `rate_limits`, was declined.
+
 ## [0.63.0] - 2026-08-14
 
 ### Fixed
