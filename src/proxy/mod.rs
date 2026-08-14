@@ -549,7 +549,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let measured: Vec<(String, String)> = out
             .iter()
             .map(|(n, m)| {
-                let via = if m.credits { " (on credits)" } else { "" };
+                let via = pick::credits_note(m.credits, refused.iter().any(|(r, _)| r == n));
                 let parts: Vec<String> = [
                     win(m.five_h, m.five_h_reset, "5h"),
                     win(m.seven_d, m.seven_d_reset, "7d"),

@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.63.0] - 2026-08-14
+
+### Fixed
+- **An account that is refusing is not labelled as running on credits.** The usage endpoint answers that question from `extra_usage.is_enabled` and `spend_limit_reached` and carries no BALANCE, so an organisation whose pre-purchased credits have run to zero still reports extra usage enabled and under its cap. A real account printed `(on credits)` on the same line as `refusing turns (overage)` - one half promising a way through, the other reporting that there is none. An observed refusal wins: the endpoint describes a setting, the refusal is what happened to a request.
+
 ## [0.62.0] - 2026-08-14
 
 ### Fixed

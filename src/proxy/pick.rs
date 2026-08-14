@@ -181,6 +181,25 @@ pub fn clear_bench_note(memo: &mut Option<(String, String)>) {
     *memo = None;
 }
 
+/// Should this account be labelled as able to serve past its windows?
+///
+/// The usage endpoint answers from `extra_usage.is_enabled` and
+/// `spend_limit_reached`, and it carries no BALANCE - so an organisation whose
+/// pre-purchased credits have run to zero still reports enabled and under its
+/// cap. The account then read `(on credits)` on the same line that said it was
+/// refusing turns: one half promising a way through, the other half reporting
+/// that there is none.
+///
+/// An observed refusal wins. The endpoint describes a setting; the refusal is
+/// what actually happened to a request.
+pub fn credits_note(on_credits: bool, refused: bool) -> &'static str {
+    if on_credits && !refused {
+        " (on credits)"
+    } else {
+        ""
+    }
+}
+
 /// One window as it should READ: how much is left, said in words.
 ///
 /// swapdex speaks one language about quota - what is LEFT. The dashboard gauge
@@ -494,6 +513,28 @@ mod announce_bench_tests {
         announce_bench(&mut memo, "rnd", "bsgong");
         clear_bench_note(&mut memo);
         assert!(announce_bench(&mut memo, "rnd", "bsgong"));
+    }
+}
+
+#[cfg(test)]
+mod credits_note_tests {
+    use super::*;
+
+    /// The usage endpoint has no balance field, so an organisation out of
+    /// pre-purchased credits still reports extra usage enabled and under its
+    /// cap. A real account then printed "(on credits)" on the same line as
+    /// "refusing turns (overage)" - one half promising what the other half had
+    /// just disproved.
+    #[test]
+    fn an_account_observed_refusing_is_not_labelled_as_having_credits() {
+        assert_eq!(credits_note(true, false), " (on credits)");
+        assert_eq!(
+            credits_note(true, true),
+            "",
+            "a refusal that happened outranks a setting that says it should not have"
+        );
+        assert_eq!(credits_note(false, false), "");
+        assert_eq!(credits_note(false, true), "");
     }
 }
 
