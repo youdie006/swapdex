@@ -6,6 +6,9 @@ All notable changes to swapdex are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+- **A dead end says which kind it is.** Two situations reach it and they are not the same news: every account past its threshold, or every account refusing this turn whatever their windows say. Only the first had words, so three accounts sitting at 98-100% left - all refusing because an organisation's overage budget was spent - were reported as "past the threshold", with the three lines contradicting it printed directly above. It is also said once per episode now rather than on every turn.
+
 ### Changed
 - **Four helpers that nothing called were removed.** Each had been superseded by something that answers the same question better, and each still carried passing tests - `codex_limits::latest` (a fixed `~/.codex` where `for_slot` takes the slot), `refresh::needs_refresh` (five minutes of slack where the serving path already asks through `slot_token_expired` and `has_usable_login`), `pick::rotate_target` (rejection only, where `next_usable` also weighs identity, login and disabled), and `quota_cache::age_secs`. Ten green tests between them, none exercising anything the product does; the contracts worth keeping were re-pointed at the live functions rather than deleted with the dead ones.
 

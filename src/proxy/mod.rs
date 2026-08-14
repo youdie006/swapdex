@@ -81,7 +81,12 @@ struct Shared {
     measured: Mutex<Measured>,
     /// Every account is past the threshold and there is nowhere to move: the one
     /// state in which asking for a cheaper model beats failing the turn.
-    cornered: Mutex<bool>,
+    /// Why there is nowhere to send a turn, when there is nowhere - the two
+    /// ways into that corner are different news and must not be reported alike.
+    cornered: Mutex<Option<pick::Corner>>,
+    /// The corner already announced, so a fallback that lasts a while does not
+    /// repeat one sentence on every turn.
+    corner_note: Mutex<Option<pick::Corner>>,
     /// The last redirection announced, so a `serve` pointer stuck on a benched
     /// account does not print the same sentence on every turn.
     benched_note: Mutex<Option<(String, String)>>,
@@ -215,7 +220,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                             chosen.name, better.name
                         );
                         std::io::stdout().flush().ok();
-                        *sh.cornered.lock().unwrap() = false;
+                        *sh.cornered.lock().unwrap() = None;
                         *sh.rotated.lock().unwrap() = Some(better.name.clone());
                         *sh.last_preempt.lock().unwrap() = Some(std::time::Instant::now());
                         return Ok(better);
@@ -235,7 +240,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                         // turn hit the wall - the LAST thing swapdex tries,
                         // never the first, because rotating gives the user what
                         // they asked for and this does not.
-                        *sh.cornered.lock().unwrap() = true;
+                        *sh.cornered.lock().unwrap() = Some(pick::Corner::PastThreshold);
                     }
                 }
             }
@@ -779,7 +784,8 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         chooser: Mutex::new(pick::Chooser::default()),
         rotated: Mutex::new(None),
         unusable: Mutex::new(pick::Sidelined::default()),
-        cornered: Mutex::new(false),
+        cornered: Mutex::new(None),
+        corner_note: Mutex::new(None),
         benched_note: Mutex::new(None),
         // Start from what was last known rather than from nothing: see
         // `seed_from_cache`. Without this every restart re-asked the endpoint
@@ -1205,14 +1211,24 @@ fn forward_turn(
         // configured fallback model is the last thing to try before the turn
         // walks into the wall, and it is announced, because the user asked for a
         // different model and is getting this one.
-        if *sh.cornered.lock().unwrap() {
+        let corner = *sh.cornered.lock().unwrap();
+        if let Some(corner) = corner {
             if let Some(m) = crate::settings::load(paths).fallback_model.as_deref() {
                 if let Some(swapped) = identity::swap_model(&body, m) {
-                    println!("  every account is past the threshold - asking for {m} instead");
-                    std::io::stdout().flush().ok();
+                    // Once per episode, and naming the corner it actually is.
+                    // Repeating it every turn buried the lines above that said
+                    // what the accounts had left.
+                    let mut note = sh.corner_note.lock().unwrap();
+                    if *note != Some(corner) {
+                        *note = Some(corner);
+                        println!("  {} - asking for {m} instead", corner.describe());
+                        std::io::stdout().flush().ok();
+                    }
                     body = swapped;
                 }
             }
+        } else {
+            *sh.corner_note.lock().unwrap() = None;
         }
         if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
             if let Some(aligned) = identity::align_account(&body, &known_uuids, &serving) {
@@ -1307,7 +1323,9 @@ fn forward_turn(
         tried.push(slot.name.clone());
         // Cornered by refusal rather than by measurement: every account has now
         // said no to THIS turn. Same corner, and it needs no usage reading.
-        *sh.cornered.lock().unwrap() = next_account(paths, sh, &tried).is_none();
+        *sh.cornered.lock().unwrap() = next_account(paths, sh, &tried)
+            .is_none()
+            .then_some(pick::Corner::AllRefused);
         match next_account(paths, sh, &tried) {
             Some(next) => {
                 println!(

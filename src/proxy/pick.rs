@@ -118,6 +118,31 @@ pub fn usage_line(
     parts.join(", ")
 }
 
+/// Why there is nowhere left to send this turn.
+///
+/// Two different situations reach the same dead end, and they are not the same
+/// news. One is "every account has spent its window"; the other is "every
+/// account said no to this turn", which happens with windows barely touched -
+/// an organisation's overage budget can stop three accounts sitting at 98%
+/// left. Reporting the second as the first put a sentence about the threshold
+/// directly under three lines showing there was quota to spare.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Corner {
+    /// Every account measured at or past the configured threshold.
+    PastThreshold,
+    /// Every account refused this very turn, whatever their windows say.
+    AllRefused,
+}
+
+impl Corner {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PastThreshold => "every account is past the threshold",
+            Self::AllRefused => "every account is refusing turns",
+        }
+    }
+}
+
 /// Is this redirection worth saying out loud again?
 ///
 /// The account a `serve` pointer names can be benched, and then every turn is
@@ -369,6 +394,31 @@ mod usage_block_tests {
     fn an_account_refusing_turns_is_marked() {
         let out = usage_block(&p(&[("rnd", "5h 0%")]), &[], &["rnd".to_string()]);
         assert!(out[0].contains("refusing"), "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+
+    /// Three accounts at 98-100% left, all refusing because an organisation's
+    /// overage budget is spent, were reported as "past the threshold" - with
+    /// the three lines contradicting it printed directly above.
+    #[test]
+    fn a_corner_says_which_kind_it_is() {
+        assert_eq!(
+            Corner::PastThreshold.describe(),
+            "every account is past the threshold"
+        );
+        assert_eq!(
+            Corner::AllRefused.describe(),
+            "every account is refusing turns"
+        );
+        assert_ne!(
+            Corner::AllRefused.describe(),
+            Corner::PastThreshold.describe(),
+            "a refusal and a spent window are not the same news"
+        );
     }
 }
 
