@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.62.0] - 2026-08-14
+
+### Fixed
+- **A refusing account says which window closed.** The response names it, and the request log printed it, but the account report - the place you look to understand your accounts - said only "refusing turns". Beside "96% left" that reads as a contradiction, and it sends you to the quota page when the block is not about quota: `rnd 5h 96% left, 7d 90% left - refusing turns (overage)`. One word separates "you are out of quota" from "something else is stopping this account", and they are fixed in different places.
+
 ## [0.61.0] - 2026-08-14
 
 ### Fixed

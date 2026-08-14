@@ -436,16 +436,26 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     // windows say. An account measured at 0% whose overage is spent refuses
     // every turn, and printing only the percentage offers a reserve that is not
     // there - the threshold hands it the session and it comes straight back.
-    let refused: Vec<String> = {
+    // Carry WHICH window closed, not just that one did. The response names it
+    // ("overage-status"), and an account refusing with 90% of its windows left
+    // is a contradiction until the reader is told the block is not about quota.
+    let refused: Vec<(String, String)> = {
         let q = sh.quota.lock().unwrap();
         let now_s = now_secs();
         slots
             .iter()
-            .filter(|r| {
-                q.get(&r.name)
-                    .is_some_and(|(quota, at)| quota.still_spent_since(*at, now_s))
+            .filter_map(|r| {
+                let (quota, at) = q.get(&r.name)?;
+                quota.still_spent_since(*at, now_s).then(|| {
+                    let windows = quota
+                        .rejected_windows()
+                        .iter()
+                        .map(|w| w.trim_end_matches("-status"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (r.name.clone(), windows)
+                })
             })
-            .map(|r| r.name.clone())
             .collect()
     };
     for r in slots {
@@ -514,7 +524,14 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let why = if unread.is_empty() {
             String::new()
         } else {
-            format!(": {}", pick::usage_line(&[], &unread, &refused))
+            format!(
+                ": {}",
+                pick::usage_line(
+                    &[],
+                    &unread,
+                    &refused.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()
+                )
+            )
         };
         println!("  (no account's usage could be read{why} - the threshold cannot apply)");
     } else {

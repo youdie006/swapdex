@@ -58,7 +58,7 @@ impl Chooser {
 pub fn usage_block(
     measured: &[(String, String)],
     unread: &[(String, String)],
-    refused: &[String],
+    refused: &[(String, String)],
 ) -> Vec<String> {
     let width = measured
         .iter()
@@ -69,11 +69,22 @@ pub fn usage_block(
     let mut out: Vec<String> = measured
         .iter()
         .map(|(n, v)| {
-            let mark = if refused.iter().any(|r| r == n) {
-                "  - refusing turns"
-            } else {
-                ""
-            };
+            // NAME the window that closed. "refusing turns" beside "90% left"
+            // is a contradiction the reader has to resolve alone; "refusing
+            // turns (overage)" says the block is not about quota at all, which
+            // is the difference between looking at the wrong page of a console
+            // and the right one.
+            let mark = refused
+                .iter()
+                .find(|(r, _)| r == n)
+                .map(|(_, why)| {
+                    if why.is_empty() {
+                        "  - refusing turns".to_string()
+                    } else {
+                        format!("  - refusing turns ({why})")
+                    }
+                })
+                .unwrap_or_default();
             format!("{n:width$}  {v}{mark}")
         })
         .collect();
@@ -93,6 +104,8 @@ pub fn usage_line(
     unread: &[(String, String)],
     refused: &[String],
 ) -> String {
+    // (kept name-only: this form is the "nothing readable" fallback, where no
+    // account has a reading for a window name to hang off)
     // A percentage is what an account's WINDOWS say; whether it will actually
     // take a turn is what its last answer said. Those can disagree - an account
     // reading 0% whose overage is spent refuses every turn - and printing only
@@ -390,10 +403,31 @@ mod usage_block_tests {
         );
     }
 
+    /// "refusing turns" beside "90% left" is a contradiction the reader has to
+    /// resolve alone. The response names the window that closed, so the line
+    /// says which one: an account blocked on overage is not an account out of
+    /// quota, and the two send you to different places to fix it.
     #[test]
-    fn an_account_refusing_turns_is_marked() {
-        let out = usage_block(&p(&[("rnd", "5h 0%")]), &[], &["rnd".to_string()]);
-        assert!(out[0].contains("refusing"), "{out:?}");
+    fn a_refusing_account_names_the_window_that_closed() {
+        let out = usage_block(
+            &p(&[("rnd", "5h 96% left · 7d 90% left")]),
+            &[],
+            &p(&[("rnd", "overage")]),
+        );
+        assert!(out[0].contains("refusing turns"), "{out:?}");
+        assert!(
+            out[0].contains("overage"),
+            "it says WHICH window, not just that one closed: {out:?}"
+        );
+    }
+
+    /// Nothing named (an older response, or a refusal with no window headers):
+    /// the bare statement rather than an empty parenthesis.
+    #[test]
+    fn a_refusal_with_no_window_named_still_reads_cleanly() {
+        let out = usage_block(&p(&[("rnd", "5h 0% left")]), &[], &p(&[("rnd", "")]));
+        assert!(out[0].contains("refusing turns"), "{out:?}");
+        assert!(!out[0].contains("()"), "no empty parenthesis: {out:?}");
     }
 }
 
