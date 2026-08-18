@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.65.1] - 2026-08-18
+
+### Fixed
+- **Streaming answers no longer break partway with "Connection lost mid-response".** The HTTP client this proxy uses negotiates gzip and DECODES the body on the way in, so what reaches the client is plain bytes - but the upstream's `content-encoding: gzip` was being echoed along with them. The client then tried to gunzip text that was already text, and the stream died mid-answer. Claude Code reported it as `API Error: Connection lost mid-response. The response above may be incomplete.`; the proxy log recorded the same event as `gzip decompression failed`. It struck only when upstream chose to compress a response, which is why it came and went. The label is dropped now, along with `content-length`, since both describe bytes that no longer exist by the time the client sees them. Filtered separately from the upward direction, where a client may legitimately send an encoded request body that this proxy passes through untouched.
+
 ## [0.65.0] - 2026-08-18
 
 Codex does send its quota on the response headers. Measured through the proxy

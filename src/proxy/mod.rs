@@ -167,6 +167,31 @@ fn skip_header(name: &str) -> bool {
     )
 }
 
+/// Headers that must not be echoed back to the client.
+///
+/// `content-encoding` above all. ureq negotiates gzip and DECODES the body on
+/// the way in, so what this proxy hands on is plain bytes - but the upstream's
+/// `content-encoding: gzip` was being passed along with them. The client then
+/// tried to gunzip text that was already text and the stream died partway
+/// through, which Claude Code reports as "Connection lost mid-response" and the
+/// proxy log recorded as "gzip decompression failed".
+///
+/// Kept separate from `skip_header`, which filters what goes UP: a client may
+/// legitimately send an encoded request body, and dropping the label there
+/// would corrupt it in the other direction.
+fn skip_response_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "connection"
+            | "content-length"
+            | "transfer-encoding"
+            // The length and the encoding both describe bytes that no longer
+            // exist by the time they reach the client.
+            | "content-encoding"
+    )
+}
+
 /// The slot the next request should use. `--account` pins one absolutely;
 /// otherwise the registry and the `active-claude` pointer are re-read PER
 /// REQUEST, which is what lets `swapdex use <name>` (or Enter in the TUI) move a
@@ -1002,7 +1027,7 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Share
     let out_headers: Vec<tiny_http::Header> = up
         .headers
         .iter()
-        .filter(|(n, _)| !skip_header(n))
+        .filter(|(n, _)| !skip_response_header(n))
         .filter_map(|(n, v)| tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()).ok())
         .collect();
     // The length is unknown (responses stream, and SSE has no length at all), so
@@ -1737,5 +1762,45 @@ mod live_settings_tests {
         assert!(!auto_now(Some(false), true), "--no-auto stands");
         assert!(auto_now(None, true), "no flag: follow the setting");
         assert!(!auto_now(None, false));
+    }
+}
+
+#[cfg(test)]
+mod response_header_tests {
+    use super::*;
+
+    /// The one that broke real sessions. ureq decodes gzip on the way in, so
+    /// the body handed to the client is plain; echoing the label tells it to
+    /// gunzip text that is already text, and the stream dies partway through.
+    #[test]
+    fn the_encoding_label_does_not_outlive_the_encoding() {
+        assert!(skip_response_header("content-encoding"));
+        assert!(skip_response_header("Content-Encoding"));
+        // The length describes bytes that no longer exist either.
+        assert!(skip_response_header("content-length"));
+    }
+
+    /// Everything the client needs is still passed through - dropping too much
+    /// would trade one broken stream for another.
+    #[test]
+    fn the_headers_the_client_needs_are_kept() {
+        for keep in [
+            "content-type",
+            "anthropic-ratelimit-unified-5h-status",
+            "x-codex-primary-used-percent",
+            "retry-after",
+            "request-id",
+            "cache-control",
+        ] {
+            assert!(!skip_response_header(keep), "{keep} must reach the client");
+        }
+    }
+
+    /// A request may legitimately carry an encoded body, and this proxy passes
+    /// that body through untouched - so the upward filter must NOT drop the
+    /// label the way the downward one does.
+    #[test]
+    fn a_request_body_keeps_its_own_encoding() {
+        assert!(!skip_header("content-encoding"));
     }
 }
