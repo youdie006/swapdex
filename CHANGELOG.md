@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.65.2] - 2026-08-18
+
+### Fixed
+- **"Every account is past the threshold" is no longer said about accounts that have plenty left.** When nothing else can take a turn, the rotation filter has rejected each candidate for one of six reasons - disabled, sidelined by a refusal, out of quota, past the threshold, no readable token, or too close to be worth the move - and all six were reported as the threshold. On a real machine that printed `every account is past the threshold` while one account sat at **97% left**, refusing because its organisation's usage credits were at zero. That sends you to a quota page where nothing is wrong. The reason is now taken from the measurements: only when every other measured account really is above the line does it say so; otherwise it says they are refusing. Accounts that could not be measured are left out of the judgement rather than counted as spent - not knowing is not evidence.
+
 ## [0.65.1] - 2026-08-18
 
 ### Fixed

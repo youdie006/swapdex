@@ -156,6 +156,26 @@ impl Corner {
     }
 }
 
+/// Why no other account could take this turn.
+///
+/// The rotation filter rejects an account for six different reasons - disabled,
+/// sidelined by a refusal, out of quota, past the threshold, no readable token,
+/// or not far enough below to be worth the move - and every one of them used to
+/// be reported as "past the threshold". An account sitting at 97% left and
+/// refusing is not near its limit, and saying it is sends the reader to the
+/// quota page when the block is somewhere else entirely.
+///
+/// `over` is one entry per OTHER account: whether it is above the threshold.
+/// Accounts that could not be measured are absent - an unmeasured account is
+/// not evidence of anything.
+pub fn why_no_move(over: &[bool]) -> Corner {
+    if !over.is_empty() && over.iter().all(|b| *b) {
+        Corner::PastThreshold
+    } else {
+        Corner::AllRefused
+    }
+}
+
 /// Is this redirection worth saying out loud again?
 ///
 /// The account a `serve` pointer names can be benched, and then every turn is
@@ -1191,5 +1211,30 @@ mod pacing_tests {
     #[test]
     fn an_unmeasured_account_is_read_soon() {
         assert_eq!(measure_after(None), measure_after(Some(0.0)));
+    }
+}
+
+#[cfg(test)]
+mod why_no_move_tests {
+    use super::*;
+
+    #[test]
+    fn accounts_that_all_sit_above_the_line_are_past_the_threshold() {
+        assert_eq!(why_no_move(&[true, true]), Corner::PastThreshold);
+    }
+
+    /// The case that misled a real reader: two accounts spent, one at 97% left
+    /// and refusing. Blaming the threshold sends them to the quota page, where
+    /// nothing is wrong.
+    #[test]
+    fn one_account_with_room_means_something_else_is_blocking() {
+        assert_eq!(why_no_move(&[true, false]), Corner::AllRefused);
+        assert_eq!(why_no_move(&[false]), Corner::AllRefused);
+    }
+
+    /// Nothing measured is not evidence that everything is spent.
+    #[test]
+    fn no_measurements_at_all_does_not_claim_the_threshold() {
+        assert_eq!(why_no_move(&[]), Corner::AllRefused);
     }
 }

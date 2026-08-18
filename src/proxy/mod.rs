@@ -259,18 +259,31 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                     // other one is full too - but silence here is indistinguishable
                     // from the threshold not working at all.
                     None => {
-                        println!(
-                            "{} is past the threshold, and no other account is below it - \
-                             staying here",
-                            chosen.name
-                        );
+                        // WHY nothing else could take it, not merely that
+                        // nothing could. The filter rejects an account for six
+                        // different reasons and only one of them is the
+                        // threshold; an account at 97% left and refusing is not
+                        // near its limit, and saying it is sends the reader to
+                        // a quota page where nothing is wrong.
+                        let over: Vec<bool> = {
+                            let m = sh.measured.lock().unwrap();
+                            list.iter()
+                                .filter(|r| r.name != chosen.name)
+                                .filter_map(|r| m.1.get(&r.name))
+                                .map(|m| {
+                                    pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits)
+                                })
+                                .collect()
+                        };
+                        let corner = pick::why_no_move(&over);
+                        println!("{} - staying on {}", corner.describe(), chosen.name);
                         std::io::stdout().flush().ok();
                         // Nowhere to rotate. If a fallback model is configured,
                         // the request path may ask for it rather than let the
                         // turn hit the wall - the LAST thing swapdex tries,
                         // never the first, because rotating gives the user what
                         // they asked for and this does not.
-                        *sh.cornered.lock().unwrap() = Some(pick::Corner::PastThreshold);
+                        *sh.cornered.lock().unwrap() = Some(corner);
                     }
                 }
             }
