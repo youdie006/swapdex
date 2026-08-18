@@ -190,6 +190,33 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Account> {
     })
 }
 
+/// Plain words for a refusal, and - where the reason distinguishes them - who
+/// can clear it.
+///
+/// The workspace reasons come in owner and member forms, and that difference is
+/// the whole value of showing them: one of you can top the workspace up, the
+/// other can only go and ask.
+///
+/// A reason nobody has words for is returned as it arrived. Dropping it would
+/// leave an account refusing with no explanation, which is the exact failure
+/// this field exists to prevent.
+pub fn refusal_words(kind: &str) -> String {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "rate_limit_reached" => "out of quota".into(),
+        "workspace_owner_credits_depleted" => "credits spent - top them up in the workspace".into(),
+        "workspace_member_credits_depleted" => {
+            "workspace credits spent - its owner has to top them up".into()
+        }
+        "workspace_owner_usage_limit_reached" => {
+            "spend limit reached - raise it in the workspace".into()
+        }
+        "workspace_member_usage_limit_reached" => {
+            "workspace spend limit reached - its owner has to raise it".into()
+        }
+        _ => kind.trim().to_string(),
+    }
+}
+
 /// Record what a Codex response said about the account that served it.
 ///
 /// Returns whether anything was recorded. A response carrying none of these
@@ -546,6 +573,40 @@ mod tests {
         ));
         let c = crate::quota_cache::load_for(&paths, "codex");
         assert_eq!(c.get("work").map(|e| e.at), Some(1_786_600_000));
+    }
+
+    /// A refusal reason is worth showing only if it says something a person can
+    /// act on, and the owner/member split is exactly that: one of you can top up
+    /// the workspace and the other can only ask.
+    #[test]
+    fn a_refusal_says_what_happened_and_who_can_clear_it() {
+        assert_eq!(refusal_words("rate_limit_reached"), "out of quota");
+        assert_eq!(
+            refusal_words("workspace_owner_credits_depleted"),
+            "credits spent - top them up in the workspace"
+        );
+        assert_eq!(
+            refusal_words("workspace_member_credits_depleted"),
+            "workspace credits spent - its owner has to top them up"
+        );
+        assert_eq!(
+            refusal_words("workspace_owner_usage_limit_reached"),
+            "spend limit reached - raise it in the workspace"
+        );
+        assert_eq!(
+            refusal_words("workspace_member_usage_limit_reached"),
+            "workspace spend limit reached - its owner has to raise it"
+        );
+        // Case and padding are the server's business, not the reader's.
+        assert_eq!(refusal_words("  RATE_LIMIT_REACHED "), "out of quota");
+    }
+
+    /// A reason nobody has words for is still the reason. Dropping it leaves an
+    /// account refusing with no explanation at all, which is the failure this
+    /// whole field exists to prevent.
+    #[test]
+    fn an_unknown_refusal_is_shown_rather_than_swallowed() {
+        assert_eq!(refusal_words("some_new_thing"), "some_new_thing");
     }
 
     /// Codex writes a placeholder where an account has no workspace. Sending

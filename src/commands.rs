@@ -2348,6 +2348,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .get("on_credits")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false),
+                        ident: None,
                     },
                 ))
             })
@@ -2393,6 +2394,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     observed_at: Some(e.at),
                     note: None,
                     on_credits: e.on_credits,
+                    ident: None,
                 },
             ));
         }
@@ -2437,6 +2439,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             if let Some(row) = codex_row(
                 name,
                 live.as_ref(),
+                codex_slot_email(dir).as_deref(),
                 seen_by_proxy,
                 transcript,
                 now_secs() as i64,
@@ -2749,6 +2752,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             observed_at: Some(e.at),
                             note: None,
                             on_credits: e.on_credits,
+                            ident: None,
                         },
                     )
                 })
@@ -4584,6 +4588,42 @@ pub fn serve(
     Ok(0)
 }
 
+/// A Codex row's identity label, and a warning when the two answers disagree.
+///
+/// Two things claim to name the account. The usage endpoint says whose token
+/// the server just accepted; the home's saved `id_token` says whose the home
+/// believes it is. They are normally the same, and when they are not, the live
+/// answer is the true one and the disagreement is worth saying out loud: that
+/// gap is the shape of the identity mix-up where signing in as one account
+/// leaves another connected.
+///
+/// With no live answer the saved label stands unqualified. It is all there is,
+/// and marking it suspect would be inventing a doubt rather than reporting one.
+pub fn codex_identity(
+    live_email: Option<&str>,
+    live_plan: Option<&str>,
+    saved_email: Option<&str>,
+) -> String {
+    fn clean(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
+    let (live, saved) = (clean(live_email), clean(saved_email));
+    let mut out = identity_column(
+        live.or(saved).map(str::to_string),
+        clean(live_plan).map(str::to_string),
+    );
+    // Said in the identity column rather than the status word: a home that
+    // disagrees with the server about whose it is still serves turns perfectly
+    // well, so this is not a reason to call the account unusable. It is a
+    // reason to doubt the NAME, and it belongs where the name is.
+    if let (Some(l), Some(s)) = (live, saved) {
+        if !l.eq_ignore_ascii_case(s) {
+            out.push_str(&format!(" (saved as {s})"));
+        }
+    }
+    out
+}
+
 /// One Codex account's row, from whichever source could answer.
 ///
 /// Three can, and they fail in different places, which is why all three exist:
@@ -4605,6 +4645,7 @@ pub fn serve(
 pub fn codex_row(
     home: &str,
     live: Option<&crate::codex_usage::Account>,
+    saved_email: Option<&str>,
     seen_by_proxy: Option<crate::quota_cache::Entry>,
     transcript: Option<crate::codex_limits::Limits>,
     now: i64,
@@ -4612,7 +4653,24 @@ pub fn codex_row(
     if let Some(a) = live {
         let mut l = a.limits;
         l.observed_at = Some(now);
-        return Some(codex_usage_row(home, &l));
+        let (name, mut u) = codex_usage_row(home, &l);
+        // Why it is refusing, in the account's own words. Beside a window with
+        // room left, "out of quota" and "the workspace spend limit is reached"
+        // send you to entirely different places.
+        u.note = a.refused.as_deref().map(crate::codex_usage::refusal_words);
+        // Credits carry an account past a full window, so a window at 100% is
+        // not the end of it - unless the cap on those credits is reached too,
+        // which is a way through that is closed.
+        u.on_credits = a
+            .credits
+            .as_ref()
+            .is_some_and(|c| (c.has_credits || c.unlimited) && !c.overage_limit_reached);
+        u.ident = Some(codex_identity(
+            a.email.as_deref(),
+            a.plan.as_deref(),
+            saved_email,
+        ));
+        return Some((name, u));
     }
     let from_transcript = transcript.map(|l| codex_usage_row(home, &l));
     let from_proxy = seen_by_proxy.map(|e| {
@@ -6003,6 +6061,10 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             println!(
                 "No Claude accounts found. Log in with `claude`, or `swapdex add` to save one."
             );
+            // A machine can hold only Codex accounts, and returning here left
+            // it with nothing to show but a note about a tool it does not use.
+            println!();
+            print_codex_quota(paths, now_secs() as i64);
         }
         return Ok(0);
     }
@@ -6174,8 +6236,121 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         }
         println!();
     }
+    print_codex_quota(paths, now);
     println!("this is the only swapdex command that touches the network.");
     Ok(0)
+}
+
+/// The Codex half of `swapdex quota`.
+///
+/// Kept as its own pass rather than folded into the Claude loop above: the two
+/// answer different endpoints with different shapes, and the only thing they
+/// share is how a window is drawn. Silent when there are no Codex accounts, so
+/// a Claude-only machine sees no empty heading.
+fn print_codex_quota(paths: &Paths, now: i64) {
+    let slots: Vec<crate::slots::SlotRecord> = crate::slots::Slots::open_for(paths, "codex")
+        .map(|s| s.list())
+        .unwrap_or_default();
+    if slots.is_empty() {
+        return;
+    }
+    println!("codex - remaining on your Codex accounts");
+    println!("live from ChatGPT's usage endpoint; opt-in network, spends 0 message quota.\n");
+    for r in &slots {
+        let saved = codex_slot_email(&r.config_dir);
+        match crate::proxy::codex::slot_auth(&r.config_dir) {
+            None => {
+                println!("{}", r.name);
+                println!(
+                    "  no Codex login here yet - `swapdex run {} --tool codex` once signs it in",
+                    r.name
+                );
+            }
+            Some(auth) => match crate::codex_usage::fetch(&auth) {
+                crate::codex_usage::Fetch::Ok(a) => {
+                    println!(
+                        "{}   {}",
+                        r.name,
+                        codex_identity(a.email.as_deref(), a.plan.as_deref(), saved.as_deref())
+                    );
+                    for line in codex_quota_lines(&a, now) {
+                        println!("  {line}");
+                    }
+                }
+                // Each failure keeps its own name for the same reason it does on
+                // the Claude side: a busy endpoint and a dead login are different
+                // news, and one silence for both hides whichever matters.
+                f => {
+                    println!("{}   {}", r.name, saved.unwrap_or_default());
+                    println!("  {}", f.why_no_number().unwrap_or("no reading"));
+                }
+            },
+        }
+        println!();
+    }
+}
+
+/// What `swapdex quota` prints for one Codex account, beyond its name.
+///
+/// A dashboard row is one line, so the endpoint's per-model windows, its credit
+/// balance and its refusal reason had nowhere to go. They go here, on the
+/// surface that already prints a line per window.
+///
+/// Nothing is claimed that the response did not say. An account it said nothing
+/// about prints that it said nothing, rather than an encouraging blank.
+fn codex_quota_lines(a: &crate::codex_usage::Account, now: i64) -> Vec<String> {
+    let as_window = |w: &crate::codex_limits::Window| crate::quota::Window {
+        used_pct: w.used_pct,
+        resets_at: w.resets_at,
+    };
+    let mut out = Vec::new();
+    let placed = crate::codex_limits::place(&a.limits);
+    // Per-model names run far past the width a window label is normally given
+    // ("GPT-5.3-Codex-Spark" against "7d"), so the labels are padded to the
+    // widest of THIS account's before they are drawn. Without it the bars step
+    // sideways down the block and stop reading as one column.
+    let pad = a
+        .scoped
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .chain(std::iter::once(9))
+        .max()
+        .unwrap_or(9);
+    let line = |label: &str, w: &crate::codex_limits::Window| {
+        win_line(&format!("{label:<pad$}"), &as_window(w), now)
+    };
+    for (label, w) in [("5h", placed.five_h), ("7d", placed.seven_d)] {
+        if let Some(w) = w {
+            out.push(line(label, &w));
+        }
+    }
+    for (label, w) in &a.scoped {
+        out.push(line(label, w));
+    }
+    if out.is_empty() {
+        out.push("(the endpoint reported no windows - `swapdex quota --json` to inspect)".into());
+    }
+    // Whether a full window is a pause or the end of this account.
+    if let Some(c) = &a.credits {
+        out.push(match c {
+            _ if c.unlimited => "credits: unlimited".to_string(),
+            _ if c.overage_limit_reached => {
+                "credits: spend limit reached - a full window is the end until it is raised".into()
+            }
+            _ if c.has_credits => match &c.balance {
+                Some(b) => format!("credits: {b} - a full window is not the end"),
+                None => "credits available - a full window is not the end".into(),
+            },
+            _ => "no credits - a full window is the end of this account".to_string(),
+        });
+    }
+    if let Some(kind) = &a.refused {
+        out.push(format!(
+            "refusing turns: {}",
+            crate::codex_usage::refusal_words(kind)
+        ));
+    }
+    out
 }
 
 /// Render one window as a remaining-percent bar with its reset countdown.
@@ -6337,8 +6512,8 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_row, codex_usage_row, home_note, keychain_verdict, payer_line, row_needs_login,
-        win_line,
+        codex_identity, codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
+        payer_line, row_needs_login, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -6431,6 +6606,103 @@ mod tests {
         assert_eq!(home_note("work", None), "", "no pointer, nothing to say");
     }
 
+    /// Everything the endpoint says that a one-line row has no room for: the
+    /// per-model windows, the credit balance, and the refusal reason.
+    #[test]
+    fn the_codex_report_prints_what_a_row_cannot_hold() {
+        let w = |pct: f64, mins: i64| crate::codex_limits::Window {
+            used_pct: pct,
+            window_minutes: mins,
+            resets_at: Some(1_787_196_620),
+        };
+        let a = crate::codex_usage::Account {
+            email: Some("someone@example.com".into()),
+            plan: Some("pro".into()),
+            limits: crate::codex_limits::Limits {
+                short: Some(w(84.0, 10080)),
+                long: None,
+                observed_at: None,
+            },
+            scoped: vec![("GPT-5.3-Codex-Spark".into(), w(40.0, 10080))],
+            credits: Some(crate::codex_usage::Credits {
+                has_credits: false,
+                unlimited: false,
+                overage_limit_reached: false,
+                balance: Some("0".into()),
+            }),
+            refused: Some("workspace_member_credits_depleted".into()),
+        };
+        let out = codex_quota_lines(&a, 1_786_600_000).join("\n");
+
+        // The plan window, labelled by its LENGTH rather than by which field
+        // carried it.
+        assert!(out.contains("7d"), "{out}");
+        assert!(!out.contains("5h"), "a window Codex did not send: {out}");
+        // The per-model window, under the name the endpoint gave it.
+        assert!(out.contains("GPT-5.3-Codex-Spark"), "{out}");
+        // Every bar starts at one column, whatever the labels' lengths.
+        let starts: Vec<_> = out
+            .lines()
+            .filter(|l| l.contains('\u{2593}') || l.contains('\u{2591}'))
+            .map(|l| l.find(['\u{2593}', '\u{2591}']).unwrap())
+            .collect();
+        assert_eq!(starts.len(), 2, "{out}");
+        assert_eq!(starts[0], starts[1], "bars must line up: {out}");
+        // A balance of zero is a fact worth printing: it is the difference
+        // between a full window being a pause and being the end.
+        assert!(out.contains("no credits"), "{out}");
+        // And who can clear the refusal.
+        assert!(out.contains("its owner has to top them up"), "{out}");
+    }
+
+    /// Silence is not the same as good news. An account the endpoint said
+    /// nothing about must not print a reassuring blank.
+    #[test]
+    fn a_codex_report_with_no_windows_says_so() {
+        let a = crate::codex_usage::Account::default();
+        let out = codex_quota_lines(&a, 1_786_600_000).join("\n");
+        assert!(out.contains("no windows"), "{out}");
+        // Nothing was said about credits, so nothing is claimed about them.
+        assert!(!out.contains("credits"), "{out}");
+    }
+
+    /// The endpoint says whose token this is; the local `id_token` says whose
+    /// the home believes it is. When they disagree the LIVE answer is the true
+    /// one, and the disagreement itself is the news - it is the shape of the
+    /// identity mix-up where signing in as one account leaves another connected.
+    #[test]
+    fn a_live_identity_outranks_the_saved_one_and_a_mismatch_is_reported() {
+        assert_eq!(
+            codex_identity(Some("a@example.com"), Some("pro"), Some("a@example.com")),
+            "a@example.com [pro]"
+        );
+        assert_eq!(
+            codex_identity(
+                Some("live@example.com"),
+                Some("pro"),
+                Some("saved@example.com")
+            ),
+            "live@example.com [pro] (saved as saved@example.com)"
+        );
+
+        // With no live answer the saved label stands, unqualified - it is all
+        // there is, and marking it as suspect would be inventing a doubt.
+        assert_eq!(
+            codex_identity(None, None, Some("saved@example.com")),
+            "saved@example.com"
+        );
+
+        // A live answer with no saved one to compare is not a mismatch.
+        assert_eq!(
+            codex_identity(Some("live@example.com"), None, None),
+            "live@example.com"
+        );
+
+        // The plan is the column Codex rows have always left empty; the
+        // endpoint is the only thing that has ever stated it.
+        assert!(codex_identity(Some("a@example.com"), Some("pro"), None).ends_with("[pro]"));
+    }
+
     /// Three sources can answer, and between the two LOCAL ones the newer wins
     /// rather than a fixed rank. A reading the proxy took off a response is
     /// bound to the account that served the turn; a transcript is bound to the
@@ -6456,8 +6728,15 @@ mod tests {
         let now = 1_786_600_000;
 
         // The proxy saw it more recently than the transcript was written.
-        let (_, u) =
-            codex_row("work", None, Some(seen_by_proxy), Some(transcript), now).expect("a reading");
+        let (_, u) = codex_row(
+            "work",
+            None,
+            None,
+            Some(seen_by_proxy),
+            Some(transcript),
+            now,
+        )
+        .expect("a reading");
         assert_eq!(u.seven_d, Some(55.0));
         assert_eq!(u.observed_at, Some(1_786_590_000));
 
@@ -6466,13 +6745,14 @@ mod tests {
             at: 1_786_400_000,
             ..seen_by_proxy
         };
-        let (_, u) =
-            codex_row("work", None, Some(older_proxy), Some(transcript), now).expect("a reading");
+        let (_, u) = codex_row("work", None, None, Some(older_proxy), Some(transcript), now)
+            .expect("a reading");
         assert_eq!(u.seven_d, Some(12.0));
 
         // A proxy reading alone still answers - this is the source that works
         // for a home holding no transcripts while the machine is offline.
-        let (_, u) = codex_row("work", None, Some(seen_by_proxy), None, now).expect("a reading");
+        let (_, u) =
+            codex_row("work", None, None, Some(seen_by_proxy), None, now).expect("a reading");
         assert_eq!(u.seven_d, Some(55.0));
 
         // The live endpoint outranks both, being taken just now.
@@ -6487,6 +6767,7 @@ mod tests {
         let (_, u) = codex_row(
             "work",
             Some(&live),
+            None,
             Some(seen_by_proxy),
             Some(transcript),
             now,
@@ -6524,22 +6805,24 @@ mod tests {
         let now = 1_786_600_000;
 
         let (who, u) =
-            codex_row("work", Some(&live), None, Some(stale), now).expect("live answers");
+            codex_row("work", Some(&live), None, None, Some(stale), now).expect("live answers");
         assert_eq!(who, "work");
         assert_eq!(u.seven_d, Some(84.0));
         // A live answer is stamped now, not left to inherit the transcript age.
         assert_eq!(u.observed_at, Some(now));
 
-        let (_, u) = codex_row("work", None, None, Some(stale), now).expect("transcript answers");
+        let (_, u) =
+            codex_row("work", None, None, None, Some(stale), now).expect("transcript answers");
         assert_eq!(u.seven_d, Some(12.0));
         assert_eq!(u.observed_at, Some(1_786_000_000));
 
         // The case this whole change exists for: a home with no transcripts at
         // all, whose account can still answer for itself.
-        let (_, u) = codex_row("work", Some(&live), None, None, now).expect("live alone answers");
+        let (_, u) =
+            codex_row("work", Some(&live), None, None, None, now).expect("live alone answers");
         assert_eq!(u.seven_d, Some(84.0));
 
-        assert!(codex_row("work", None, None, None, now).is_none());
+        assert!(codex_row("work", None, None, None, None, now).is_none());
     }
 
     /// A Codex reading is keyed by the home it was read from, and by nothing

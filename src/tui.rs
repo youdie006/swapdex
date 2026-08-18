@@ -236,6 +236,99 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
     out
 }
 
+/// Label a row with what the account itself said, where it said anything.
+///
+/// A row's label otherwise comes from a file on this machine, which cannot know
+/// the server disagrees with it - and that disagreement is the whole shape of
+/// the mix-up where signing in as one account leaves another connected. A row
+/// with no live answer keeps the label it had.
+pub fn apply_live_identity(rows: &mut [Row], usage: &[(String, Usage)]) {
+    for r in rows.iter_mut() {
+        let names = |n: &String| *n == r.name || r.also.contains(n);
+        if let Some(id) = usage
+            .iter()
+            .find(|(n, _)| names(n))
+            .and_then(|(_, u)| u.ident.as_ref())
+            .filter(|id| !id.is_empty())
+        {
+            r.ident = id.clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_identity_tests {
+    use super::*;
+
+    fn row(name: &str, ident: &str) -> Row {
+        Row {
+            name: name.into(),
+            ident: ident.into(),
+            tools: "codex".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        }
+    }
+
+    fn said(ident: Option<&str>) -> Usage {
+        Usage {
+            ident: ident.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_row_takes_the_label_the_account_gave_itself() {
+        let mut rows = vec![
+            row("work", "saved@example.com"),
+            row("other", "b@example.com"),
+        ];
+        apply_live_identity(
+            &mut rows,
+            &[(
+                "work".into(),
+                said(Some("live@example.com [pro] (saved as saved@example.com)")),
+            )],
+        );
+        assert_eq!(
+            rows[0].ident,
+            "live@example.com [pro] (saved as saved@example.com)"
+        );
+        // A row nothing was said about keeps what it had.
+        assert_eq!(rows[1].ident, "b@example.com");
+    }
+
+    #[test]
+    fn a_reading_that_names_nobody_leaves_the_label_alone() {
+        let mut rows = vec![row("work", "saved@example.com")];
+        apply_live_identity(&mut rows, &[("work".into(), said(None))]);
+        assert_eq!(rows[0].ident, "saved@example.com");
+        // An empty name is not a name either - blanking the column would trade
+        // a stale label for no label.
+        apply_live_identity(&mut rows, &[("work".into(), said(Some("")))]);
+        assert_eq!(rows[0].ident, "saved@example.com");
+    }
+
+    /// The same account saved twice is one row, and the reading may be filed
+    /// under the name that was absorbed.
+    #[test]
+    fn a_merged_row_is_reached_by_the_name_it_absorbed() {
+        let mut r = row("work", "saved@example.com");
+        r.also = vec!["work-old".into()];
+        let mut rows = vec![r];
+        apply_live_identity(
+            &mut rows,
+            &[("work-old".into(), said(Some("live@example.com")))],
+        );
+        assert_eq!(rows[0].ident, "live@example.com");
+    }
+}
+
 /// The reset slot, padded so every row's next column starts at one place.
 ///
 /// A window nobody has used has no reset time - the five-hour window starts on
@@ -519,6 +612,11 @@ pub struct Usage {
     /// window at 100% is then not the end of it: the account was answering turns
     /// all afternoon while the row called it spent.
     pub on_credits: bool,
+    /// Who the account said it was, when the reading came from somewhere that
+    /// says. It travels with the numbers because it arrived with them, on the
+    /// same response - and a row labelled from a local file has no way to know
+    /// the server disagrees.
+    pub ident: Option<String>,
 }
 
 /// The word for an account whose windows are full but whose credits are not.
@@ -1733,6 +1831,9 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         // Collect a finished reading without waiting for one.
         if let Some(rx) = quota_rx.as_ref() {
             if let Ok(got) = rx.try_recv() {
+                // A reading can arrive knowing whose account it is, and a row
+                // labelled from a local file cannot know the server disagrees.
+                apply_live_identity(&mut rows, &got);
                 quota_pct = Some(got.into_iter().collect());
                 quota_fetched = Some(std::time::Instant::now());
                 quota_rx = None;
@@ -3224,6 +3325,7 @@ mod tests {
             observed_at: observed,
             note: note.map(str::to_string),
             on_credits: false,
+            ident: None,
         };
         assert_eq!(
             trailing_note(&u(Some("token expired"), None), false),
