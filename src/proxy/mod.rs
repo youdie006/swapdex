@@ -87,6 +87,12 @@ struct Shared {
     /// The corner already announced, so a fallback that lasts a while does not
     /// repeat one sentence on every turn.
     corner_note: Mutex<Option<pick::Corner>>,
+    /// When each account last REFUSED a turn, and when one last succeeded,
+    /// unix seconds. The refusal record in `quota` lapses on purpose - a rate
+    /// limit is a window, not a verdict - but the "(on credits)" label must not
+    /// come back with it before anything has actually gone through.
+    refused_at: Mutex<HashMap<String, i64>>,
+    ok_at: Mutex<HashMap<String, i64>>,
     /// Said once when a Codex response turns out to state its own windows.
     /// Whether Codex sends those headers is undocumented and was never checked
     /// here, so the first arrival is worth seeing - and its absence stays
@@ -165,6 +171,21 @@ fn skip_header(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "host" | "connection" | "content-length" | "transfer-encoding" | "accept-encoding"
     )
+}
+
+/// Remember what this account's last answer actually was.
+///
+/// `quota` already records a refusal, but it lapses by design, and the
+/// "(on credits)" label was coming back with it - promising a way through that
+/// had been tried and refused minutes earlier. These two stamps outlive the
+/// lapse, so the promise waits for a turn that actually goes through.
+fn note_outcome(sh: &Shared, name: &str, status: u16) {
+    let at = now_secs();
+    if ratelimit::account_cannot_serve(status) {
+        sh.refused_at.lock().unwrap().insert(name.to_string(), at);
+    } else if (200..300).contains(&status) {
+        sh.ok_at.lock().unwrap().insert(name.to_string(), at);
+    }
 }
 
 /// Headers that must not be echoed back to the client.
@@ -485,7 +506,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     let refused: Vec<(String, String)> = {
         let q = sh.quota.lock().unwrap();
         let now_s = now_secs();
-        slots
+        let by_headers: Vec<(String, String)> = slots
             .iter()
             .filter_map(|r| {
                 let (quota, at) = q.get(&r.name)?;
@@ -499,7 +520,22 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     (r.name.clone(), windows)
                 })
             })
-            .collect()
+            .collect();
+        // The headers are not the only witness, and on this API they are the
+        // rarer one: a 429 arrives with no `anthropic-ratelimit-unified-*` at
+        // all, so an account that had just refused three turns still printed
+        // "(on credits)" - offering a way through that had already failed.
+        let now_i = std::time::Instant::now();
+        let sidelined: Vec<String> = {
+            let held = sh.unusable.lock().unwrap();
+            slots
+                .iter()
+                .filter(|r| held.contains(&r.name, now_i))
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        let names: Vec<String> = slots.iter().map(|r| r.name.clone()).collect();
+        pick::refusing(&names, &by_headers, &sidelined)
     };
     for r in slots {
         if let Some(prev) = out.get(&r.name) {
@@ -592,7 +628,12 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         let measured: Vec<(String, String)> = out
             .iter()
             .map(|(n, m)| {
-                let via = pick::credits_note(m.credits, refused.iter().any(|(r, _)| r == n));
+                let honest = pick::still_offering_credits(
+                    m.credits,
+                    sh.refused_at.lock().unwrap().get(n).copied(),
+                    sh.ok_at.lock().unwrap().get(n).copied(),
+                );
+                let via = pick::credits_note(honest, refused.iter().any(|(r, _)| r == n));
                 let parts: Vec<String> = [
                     win(m.five_h, m.five_h_reset, "5h"),
                     win(m.seven_d, m.seven_d_reset, "7d"),
@@ -835,6 +876,8 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     let server = Arc::new(server);
     let sh = Arc::new(Shared {
         codex_headers_seen: std::sync::atomic::AtomicBool::new(false),
+        refused_at: Mutex::new(HashMap::new()),
+        ok_at: Mutex::new(HashMap::new()),
         agent: upstream::agent(),
         base: if opts.tool == "codex" {
             codex::base_url()
@@ -1185,6 +1228,7 @@ fn forward_turn(
             // Retries of THIS account for a throttle, counted so a wall is not
             // mistaken for a pause and retried forever.
             let mut up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
+            note_outcome(sh, &slot.name, up.status);
             match upstream::explain_failure(&mut up) {
                 // Same reasoning as the Claude path: the API says why, and
                 // three digits alone leave the user with nothing to act on.
@@ -1353,6 +1397,7 @@ fn forward_turn(
         // rejected window on a SUCCESSFUL response is noted but not acted on:
         // the account is still serving, and rotating away would drop the
         // prompt cache (which is organization-scoped) for nothing.
+        note_outcome(sh, &slot.name, up.status);
         // A refusal reaches the user as an error with no explanation unless the
         // reason is read off it here - the API sends one, it was simply never
         // looked at. The body is handed on to the client untouched.

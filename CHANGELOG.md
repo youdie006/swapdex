@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.65.3] - 2026-08-18
+
+### Fixed
+- **"(on credits)" stops flickering back onto an account that is refusing.** A refusal record lapses on purpose - a rate limit is a window, not a verdict - but the label was coming back with it. On a real machine one account read `refusing turns`, then `(on credits)`, then `refusing turns` again within a few minutes, and in the middle of that it offered a way through that had already been tried and refused. The label now waits for a turn that actually goes through: the proxy remembers when each account last refused and when one last succeeded, and only a success since the last refusal restores the promise. The credits reading comes from the usage endpoint, which describes a setting; the refusals come from turns that were really attempted. When they disagree the turns win.
+- **A refusal counts even when it names no window.** The refusing list was built only from `anthropic-ratelimit-unified-*-status: rejected`, and a 429 from this API carries none of those headers at all - so most refusals were never recorded as such. Accounts held out of rotation after a refusal are counted too now. Where both sources know, the one that names the window wins, since "refusing turns (overage)" and a bare "refusing turns" send the reader to different places.
+
 ## [0.65.2] - 2026-08-18
 
 ### Fixed

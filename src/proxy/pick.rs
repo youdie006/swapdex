@@ -212,6 +212,65 @@ pub fn clear_bench_note(memo: &mut Option<(String, String)>) {
 ///
 /// An observed refusal wins. The endpoint describes a setting; the refusal is
 /// what actually happened to a request.
+/// Which accounts are known to be refusing, and why.
+///
+/// Two things know it, and they know different amounts. A response's
+/// `anthropic-ratelimit-unified-*-status: rejected` names the WINDOW that
+/// closed, which is what separates "out of quota" from "blocked for some other
+/// reason". The sideline set only knows that a turn was refused.
+///
+/// Reading only the first missed almost every refusal in practice: a 429 from
+/// this API carries no `anthropic-ratelimit-unified-*` headers at all, so an
+/// account that had just refused three turns in a row still printed
+/// "(on credits)" - offering a way through that had already been tried and
+/// failed.
+///
+/// `by_headers` wins where both know: a named window beats a bare refusal.
+pub fn refusing(
+    names: &[String],
+    by_headers: &[(String, String)],
+    sidelined: &[String],
+) -> Vec<(String, String)> {
+    names
+        .iter()
+        .filter_map(|n| {
+            by_headers
+                .iter()
+                .find(|(h, _)| h == n)
+                .map(|(_, why)| (n.clone(), why.clone()))
+                .or_else(|| sidelined.contains(n).then(|| (n.clone(), String::new())))
+        })
+        .collect()
+}
+
+/// Is "(on credits)" still an honest thing to say about this account?
+///
+/// The credits reading comes from the usage ENDPOINT - extra usage enabled and
+/// under its cap - while the refusals come from turns that were actually tried.
+/// When they disagree the turns win, and they go on winning until one succeeds.
+///
+/// A refusal record lapses on purpose: a rate limit is a window, not a verdict.
+/// But letting the LABEL come back with it produced a flicker on a real
+/// machine: the same account read "refusing turns", then "(on credits)", then
+/// "refusing turns" again within a few minutes, and in the middle of that it
+/// promised a way through that had already been tried and refused.
+///
+/// Times are unix seconds. `None` for either means it has never happened.
+pub fn still_offering_credits(
+    on_credits: bool,
+    last_refusal: Option<i64>,
+    last_ok: Option<i64>,
+) -> bool {
+    if !on_credits {
+        return false;
+    }
+    match (last_refusal, last_ok) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(bad), Some(good)) => good >= bad,
+    }
+}
+
 pub fn credits_note(on_credits: bool, refused: bool) -> &'static str {
     if on_credits && !refused {
         " (on credits)"
@@ -1236,5 +1295,85 @@ mod why_no_move_tests {
     #[test]
     fn no_measurements_at_all_does_not_claim_the_threshold() {
         assert_eq!(why_no_move(&[]), Corner::AllRefused);
+    }
+}
+
+#[cfg(test)]
+mod refusing_tests {
+    use super::*;
+
+    fn n(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Two things know an account is refusing and they know different things.
+    /// The response headers name the window that closed; the sideline set only
+    /// knows a turn was refused. Reading only the headers missed every refusal
+    /// that arrived without them - which is most of them, since a 429 carries
+    /// no `anthropic-ratelimit-unified-*` at all.
+    #[test]
+    fn a_refusal_counts_whether_or_not_it_named_a_window() {
+        let got = refusing(
+            &n(&["bsgong", "rnd", "personal"]),
+            &[("bsgong".into(), "overage".into())],
+            &n(&["rnd"]),
+        );
+        assert_eq!(
+            got,
+            vec![
+                ("bsgong".to_string(), "overage".to_string()),
+                // Seen refusing, with nothing to say about which window.
+                ("rnd".to_string(), String::new()),
+            ]
+        );
+    }
+
+    /// An account both sources know about keeps the WINDOW, which is the more
+    /// useful of the two answers - and appears once.
+    #[test]
+    fn an_account_known_to_both_is_named_once_with_the_better_reason() {
+        let got = refusing(
+            &n(&["rnd"]),
+            &[("rnd".into(), "overage".into())],
+            &n(&["rnd"]),
+        );
+        assert_eq!(got, vec![("rnd".to_string(), "overage".to_string())]);
+    }
+
+    #[test]
+    fn an_account_nobody_has_seen_refuse_is_not_listed() {
+        assert!(refusing(&n(&["quiet"]), &[], &[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod credit_honesty_tests {
+    use super::*;
+
+    #[test]
+    fn an_account_that_has_never_refused_keeps_its_credits_label() {
+        assert!(still_offering_credits(true, None, None));
+        assert!(still_offering_credits(true, None, Some(100)));
+    }
+
+    /// The flicker this exists to stop: the refusal record lapses, and the
+    /// label comes back before anything has actually succeeded.
+    #[test]
+    fn a_lapsed_refusal_does_not_restore_the_promise_on_its_own() {
+        assert!(!still_offering_credits(true, Some(100), None));
+        assert!(!still_offering_credits(true, Some(100), Some(50)));
+    }
+
+    /// A success after the refusal settles it - the account is serving again.
+    #[test]
+    fn a_turn_that_succeeded_since_settles_it() {
+        assert!(still_offering_credits(true, Some(100), Some(101)));
+        assert!(still_offering_credits(true, Some(100), Some(100)));
+    }
+
+    /// No credits means no label, whatever the history.
+    #[test]
+    fn nothing_is_promised_for_an_account_with_no_credits() {
+        assert!(!still_offering_credits(false, None, Some(999)));
     }
 }
