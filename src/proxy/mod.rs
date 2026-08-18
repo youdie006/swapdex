@@ -1146,8 +1146,16 @@ fn forward_turn(
             note_serving_for(paths, &opts.tool, &slot.name);
             // Retries of THIS account for a throttle, counted so a wall is not
             // mistaken for a pause and retried forever.
-            let up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
-            println!("  {} {} -> {} [{}]", method, path, up.status, slot.name);
+            let mut up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
+            match upstream::explain_failure(&mut up) {
+                // Same reasoning as the Claude path: the API says why, and
+                // three digits alone leave the user with nothing to act on.
+                Some(why) => println!(
+                    "  {} {} -> {} [{}] - {why}",
+                    method, path, up.status, slot.name
+                ),
+                None => println!("  {} {} -> {} [{}]", method, path, up.status, slot.name),
+            }
             std::io::stdout().flush().ok();
             // Codex states its own windows on the response, when it states them
             // at all. The reading costs nothing - the response is already here -
@@ -1282,7 +1290,7 @@ fn forward_turn(
 
         // A 429 wears two meanings. A THROTTLE ("slow down", x-should-retry) is
         // fixed by waiting and retrying this same account.
-        let up = loop {
+        let mut up = loop {
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
             if up.status != 429 {
                 break up;
@@ -1307,6 +1315,13 @@ fn forward_turn(
         // rejected window on a SUCCESSFUL response is noted but not acted on:
         // the account is still serving, and rotating away would drop the
         // prompt cache (which is organization-scoped) for nothing.
+        // A refusal reaches the user as an error with no explanation unless the
+        // reason is read off it here - the API sends one, it was simply never
+        // looked at. The body is handed on to the client untouched.
+        if let Some(why) = upstream::explain_failure(&mut up) {
+            println!("{} {path} -> {} - {why}", slot.name, up.status);
+            std::io::stdout().flush().ok();
+        }
         let quota = ratelimit::from_headers(&up.headers);
         // Codex states its own windows on the response, when it states them at
         // all. That reading costs nothing - the response is already here - and
