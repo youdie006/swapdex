@@ -57,15 +57,18 @@ pub struct Credits {
 /// window from either source by its length.
 fn window_from(v: &Value) -> Option<crate::codex_limits::Window> {
     let used_pct = v.get("used_percent")?.as_f64()?;
+    // Zero is not a length, here for the same reason as on the header path: a
+    // window that does not exist arrives zeroed rather than absent, and taking
+    // it at face value draws a gauge for it.
     let window_minutes = v
         .get("limit_window_seconds")
         .and_then(Value::as_i64)
         .map(|s| s / 60)
-        .unwrap_or(0);
+        .filter(|m| *m > 0)?;
     Some(crate::codex_limits::Window {
         used_pct,
         window_minutes,
-        resets_at: v.get("reset_at").and_then(Value::as_i64),
+        resets_at: v.get("reset_at").and_then(Value::as_i64).filter(|t| *t > 0),
     })
 }
 
@@ -162,9 +165,15 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Account> {
         let used_pct: f64 = get(&format!("x-codex-{kind}-used-percent"))?.parse().ok()?;
         // A percent with no window length cannot be placed in a column, and
         // picking one for it is how a weekly number lands in the session gauge.
+        //
+        // Zero is not a length. Codex sends the whole `secondary` set zeroed -
+        // minutes 0, reset-after 0, reset-at empty - on an account that has no
+        // session window, and reading that as a window drew a 5h gauge saying
+        // "100% left" for something that does not exist.
         let window_minutes: i64 = get(&format!("x-codex-{kind}-window-minutes"))?
             .parse()
-            .ok()?;
+            .ok()
+            .filter(|m| *m > 0)?;
         Some(crate::codex_limits::Window {
             used_pct,
             window_minutes,
@@ -179,12 +188,74 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Account> {
     if short.is_none() && long.is_none() {
         return None;
     }
+
+    // Per-model limits ride the same response under their own id:
+    // `x-codex-bengalfox-primary-used-percent` beside the plan's
+    // `x-codex-primary-used-percent`. The ids are discovered rather than
+    // listed, since which models are metered is not ours to know.
+    //
+    // Matching on the `-used-percent` SUFFIX is what keeps
+    // `x-codex-primary-over-secondary-limit-percent` - which also ends in
+    // `percent` and shares the prefix - from inventing a limit on every
+    // response.
+    let mut scoped: Vec<(String, crate::codex_limits::Window)> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    for (name, _) in headers {
+        let lower = name.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("x-codex-") else {
+            continue;
+        };
+        let Some(id) = rest.strip_suffix("-primary-used-percent") else {
+            continue;
+        };
+        if !id.is_empty() && !ids.iter().any(|k| k == id) {
+            ids.push(id.to_string());
+        }
+    }
+    for id in ids {
+        let used_pct: Option<f64> =
+            get(&format!("x-codex-{id}-primary-used-percent")).and_then(|v| v.parse().ok());
+        let minutes: Option<i64> = get(&format!("x-codex-{id}-primary-window-minutes"))
+            .and_then(|v| v.parse().ok())
+            .filter(|m| *m > 0);
+        if let (Some(used_pct), Some(window_minutes)) = (used_pct, minutes) {
+            scoped.push((
+                id.clone(),
+                crate::codex_limits::Window {
+                    used_pct,
+                    window_minutes,
+                    resets_at: get(&format!("x-codex-{id}-primary-reset-at")).and_then(reset_at),
+                },
+            ));
+        }
+    }
+
+    // Codex writes these capitalised, the way Python prints a bool.
+    let yes = |k: &str| get(k).map(|v| v.eq_ignore_ascii_case("true"));
+    let credits = match (
+        yes("x-codex-credits-has-credits"),
+        yes("x-codex-credits-unlimited"),
+    ) {
+        (None, None) => None,
+        (has, unlimited) => Some(Credits {
+            has_credits: has.unwrap_or(false),
+            unlimited: unlimited.unwrap_or(false),
+            // The response has no field for this; silence is not a claim that
+            // the cap is clear, but there is nothing else to put here.
+            overage_limit_reached: false,
+            balance: get("x-codex-credits-balance").map(str::to_string),
+        }),
+    };
+
     Some(Account {
+        plan: get("x-codex-plan-type").map(str::to_string),
         limits: crate::codex_limits::Limits {
             short,
             long,
             observed_at: None,
         },
+        scoped,
+        credits,
         refused,
         ..Default::default()
     })
@@ -239,7 +310,13 @@ pub fn remember(
         seven_d: p.seven_d.map(|w| w.used_pct),
         seven_d_reset: p.seven_d.and_then(|w| w.resets_at),
         at,
-        on_credits: false,
+        // Kept with the numbers on purpose: without it a full window flips the
+        // row back to "spent" between live reads, on an account that is still
+        // answering turns because its credits carry it.
+        on_credits: a
+            .credits
+            .as_ref()
+            .is_some_and(|c| (c.has_credits || c.unlimited) && !c.overage_limit_reached),
     };
     crate::quota_cache::update_for(paths, "codex", &[(serving.to_string(), entry)]);
     true
@@ -502,6 +579,150 @@ mod tests {
         let long = got.limits.long.expect("the weekly window");
         assert_eq!(long.window_minutes, 10080);
         assert_eq!(long.used_pct, 42.5);
+    }
+
+    /// Verbatim from a real response, 2026-08-18. The `secondary` set is
+    /// present but ZEROED - length 0, reset 0, reset-at empty - because this
+    /// account has no session window. A window cannot be zero minutes long, so
+    /// this is a placeholder, and reading it as a window put a 5h gauge on
+    /// screen showing "100% left" for something that does not exist.
+    #[test]
+    fn a_zero_length_window_is_a_placeholder_not_an_empty_one() {
+        let got = from_headers(&h(&[
+            ("x-codex-active-limit", "premium"),
+            ("x-codex-plan-type", "pro"),
+            ("x-codex-primary-used-percent", "40"),
+            ("x-codex-secondary-used-percent", "0"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-secondary-window-minutes", "0"),
+            ("x-codex-primary-reset-after-seconds", "178592"),
+            ("x-codex-secondary-reset-after-seconds", "0"),
+            ("x-codex-primary-reset-at", "1787196937"),
+            ("x-codex-secondary-reset-at", ""),
+        ]))
+        .expect("the primary window is real");
+        let w = got.limits.short.expect("the one real window");
+        assert_eq!(w.window_minutes, 10080);
+        assert_eq!(w.used_pct, 40.0);
+        assert_eq!(w.resets_at, Some(1_787_196_937));
+        // The zeroed half is not reported as a window at 0% used.
+        assert_eq!(got.limits.long, None);
+    }
+
+    /// A response whose windows are ALL placeholders is no reading, not a
+    /// reading of zero - and must not overwrite what is remembered.
+    #[test]
+    fn a_response_of_nothing_but_placeholders_is_not_a_reading() {
+        assert!(from_headers(&h(&[
+            ("x-codex-primary-used-percent", "0"),
+            ("x-codex-primary-window-minutes", "0"),
+            ("x-codex-secondary-used-percent", "0"),
+            ("x-codex-secondary-window-minutes", "0"),
+        ]))
+        .is_none());
+    }
+
+    /// The endpoint states a window in seconds, and the same rule holds there:
+    /// a window of zero length is not a window. Guarding only the header path
+    /// would leave the phantom gauge one payload away from coming back.
+    #[test]
+    fn the_endpoint_rejects_a_zero_length_window_too() {
+        let body = r#"{"rate_limit":{"primary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_at":1787196937},"secondary_window":{"used_percent":0,"limit_window_seconds":0,"reset_at":0}}}"#;
+        let a = parse(body).expect("the primary window is real");
+        assert_eq!(a.limits.short.expect("one window").window_minutes, 10080);
+        assert_eq!(a.limits.long, None);
+    }
+
+    /// Verbatim again: a response carries far more than its windows. The plan,
+    /// the credit balance, and a per-model limit under its own `x-<id>-*`
+    /// names - the shape this module used to say it had never seen.
+    #[test]
+    fn a_response_carries_the_plan_the_credits_and_the_per_model_limits() {
+        let got = from_headers(&h(&[
+            ("x-codex-plan-type", "pro"),
+            ("x-codex-primary-used-percent", "40"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-reset-at", "1787196937"),
+            ("x-codex-primary-over-secondary-limit-percent", "0"),
+            ("x-codex-credits-has-credits", "False"),
+            ("x-codex-credits-balance", "0"),
+            ("x-codex-credits-unlimited", "False"),
+            ("x-codex-bengalfox-primary-used-percent", "12"),
+            ("x-codex-bengalfox-primary-window-minutes", "10080"),
+            ("x-codex-bengalfox-primary-reset-after-seconds", "604800"),
+            ("x-codex-bengalfox-secondary-used-percent", "0"),
+            ("x-codex-bengalfox-secondary-window-minutes", "0"),
+        ]))
+        .expect("a reading");
+
+        assert_eq!(got.plan.as_deref(), Some("pro"));
+
+        // Codex writes booleans capitalised, the way Python prints them.
+        let c = got.credits.expect("the response describes credits");
+        assert!(!c.has_credits);
+        assert!(!c.unlimited);
+        assert_eq!(c.balance.as_deref(), Some("0"));
+
+        // One per-model limit, under the id the header gave it - and NOT the
+        // plan window, which shares the prefix.
+        assert_eq!(got.scoped.len(), 1, "{:?}", got.scoped);
+        assert_eq!(got.scoped[0].0, "bengalfox");
+        assert_eq!(got.scoped[0].1.used_pct, 12.0);
+        assert_eq!(got.scoped[0].1.window_minutes, 10080);
+        // Its zeroed secondary is a placeholder here too.
+        assert_eq!(got.limits.long, None);
+    }
+
+    /// `over-secondary-limit-percent` ends in `-percent` and shares the `codex`
+    /// prefix. Mistaking it for a limit id would invent a per-model window on
+    /// every single response.
+    #[test]
+    fn a_neighbouring_percent_header_is_not_mistaken_for_a_limit() {
+        let got = from_headers(&h(&[
+            ("x-codex-primary-used-percent", "40"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-over-secondary-limit-percent", "0"),
+        ]))
+        .expect("a reading");
+        assert!(got.scoped.is_empty(), "{:?}", got.scoped);
+    }
+
+    /// A response that says the account still has credits must record that
+    /// with the numbers. Without it a full window flips the row back to "spent"
+    /// between live reads, on an account that is answering turns.
+    #[test]
+    fn credits_on_the_response_are_remembered_with_the_numbers() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let base = [
+            ("x-codex-primary-used-percent", "100"),
+            ("x-codex-primary-window-minutes", "10080"),
+        ];
+        let with = |extra: &[(&str, &str)]| {
+            let mut v: Vec<(&str, &str)> = base.to_vec();
+            v.extend_from_slice(extra);
+            h(&v)
+        };
+
+        assert!(remember(
+            &paths,
+            "flush",
+            &with(&[("x-codex-credits-has-credits", "True")]),
+            1_786_600_000
+        ));
+        assert!(crate::quota_cache::load_for(&paths, "codex")["flush"].on_credits);
+
+        assert!(remember(
+            &paths,
+            "dry",
+            &with(&[("x-codex-credits-has-credits", "False")]),
+            1_786_600_000
+        ));
+        assert!(!crate::quota_cache::load_for(&paths, "codex")["dry"].on_credits);
+
+        // A response that said nothing about credits claims nothing.
+        assert!(remember(&paths, "quiet", &with(&[]), 1_786_600_000));
+        assert!(!crate::quota_cache::load_for(&paths, "codex")["quiet"].on_credits);
     }
 
     /// A reset can arrive as a unix integer or as a timestamp string.

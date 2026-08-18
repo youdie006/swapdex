@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.65.0] - 2026-08-18
+
+Codex does send its quota on the response headers. Measured through the proxy
+on a real account, and the verbatim headers are now the fixtures these tests
+run against.
+
+### Fixed
+- **A window of zero minutes is not a window.** Codex sends the whole `secondary` set zeroed on an account that has no session window - `x-codex-secondary-window-minutes: 0`, `-reset-after-seconds: 0`, `-reset-at:` empty - and 0.64.0 read that as a real window at 0% used. It went to disk as `five_h: 0.0` and would have drawn a 5h gauge reading `100% left` for something that does not exist, the moment the endpoint was throttled or the machine offline. Guarded on both paths, header and endpoint, so the phantom cannot return through the other one.
+- **A spent Codex account is still remembered.** The cache discards readings pinned at the ceiling, a rule that exists for one Claude-era bug where `utilization` was misread as a fraction and every account above 1% clamped to exactly 100. Codex never had that bug, and the rule was throwing away the reading you most need - a spent account's - leaving its row blank rather than saying it is out. Scoped to Claude, where the misread happened.
+- **Credits seen on a response are remembered with the numbers.** Without it a full window flipped the row back to "spent" between live reads, on an account that was still answering turns because its credits carried it.
+
+### Added
+- **The response carries more than its windows, and all of it is read now.** `x-codex-plan-type`, the credit flags and balance (`x-codex-credits-has-credits` / `-balance` / `-unlimited`, written capitalised the way Python prints a bool), and **the per-model limits** under their own ids - `x-codex-bengalfox-primary-used-percent` beside the plan's `x-codex-primary-used-percent`. That last shape was documented in 0.64.0 as one this code had never seen and would not guess at; it has now been seen, so it is parsed. Ids are discovered rather than listed, matched on the `-used-percent` suffix so `x-codex-primary-over-secondary-limit-percent` - which also ends in `percent` and shares the prefix - cannot invent a limit on every response.
+
 ## [0.64.0] - 2026-08-18
 
 ### Added

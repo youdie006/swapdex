@@ -56,7 +56,18 @@ pub fn load(paths: &Paths) -> Cache {
 
 /// The same, for one tool.
 pub fn load_for(paths: &Paths, tool: &str) -> Cache {
-    load_file_at(&file_for(paths, tool), now_secs())
+    load_file_at(&file_for(paths, tool), now_secs(), drops_clamped(tool))
+}
+
+/// Whether this tool's cache should discard readings pinned at the ceiling.
+///
+/// The rule exists for one Claude-era bug: `utilization` was read as a
+/// fraction, so every account above 1% clamped to exactly 100 and the wrong
+/// numbers were remembered for hours. Codex never had that bug, and applying
+/// the rule there throws away the reading that matters most - a spent account's
+/// - leaving its row blank instead of saying it is out.
+fn drops_clamped(tool: &str) -> bool {
+    tool == "claude-code"
 }
 
 /// Unix seconds, taken once per load so every window is judged against the same
@@ -89,10 +100,10 @@ fn expire_windows(mut e: Entry, now: i64) -> Entry {
 
 /// `load`, against a given instant, so the expiry is testable.
 fn load_at(paths: &Paths, now: i64) -> Cache {
-    load_file_at(&file(paths), now)
+    load_file_at(&file(paths), now, true)
 }
 
-fn load_file_at(path: &std::path::Path, now: i64) -> Cache {
+fn load_file_at(path: &std::path::Path, now: i64, drop_clamped: bool) -> Cache {
     let mut c: Cache = std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -106,7 +117,9 @@ fn load_file_at(path: &std::path::Path, now: i64) -> Cache {
     // exactly 100 - every account above 1% clamped there - and remembering them
     // would keep showing accounts as spent long after the reading was fixed.
     // A genuine 100 is re-read within minutes, so dropping it costs nothing.
-    c.retain(|_, e| !was_clamped(e));
+    if drop_clamped {
+        c.retain(|_, e| !was_clamped(e));
+    }
     c
 }
 
@@ -129,7 +142,7 @@ pub fn update_for(paths: &Paths, tool: &str, fresh: &[(String, Entry)]) {
         return;
     }
     let path = file_for(paths, tool);
-    let mut c = load_file_at(&path, now_secs());
+    let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
     for (name, e) in fresh {
         c.insert(name.clone(), *e);
     }
@@ -149,6 +162,26 @@ mod tests {
             at,
             ..Default::default()
         }
+    }
+
+    /// The clamp rule belongs to Claude, where the misread happened. Applied to
+    /// Codex it discards a genuinely spent account's reading and leaves its row
+    /// blank - the one row you most need to see.
+    #[test]
+    fn a_spent_codex_account_is_still_remembered() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let full = Entry {
+            seven_d: Some(100.0),
+            at: 1,
+            ..Default::default()
+        };
+        update_for(&paths, "codex", &[("spent".into(), full)]);
+        update_for(&paths, "claude-code", &[("spent".into(), full)]);
+
+        assert_eq!(load_for(&paths, "codex")["spent"].seven_d, Some(100.0));
+        // Claude keeps the rule it needs, unchanged.
+        assert!(!load_for(&paths, "claude-code").contains_key("spent"));
     }
 
     /// Codex accounts are remembered in their own file. Slot names are only
