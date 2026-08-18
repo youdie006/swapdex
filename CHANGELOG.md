@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Added
+- **`swapdex continue` - hand the conversation you were in to an account that still has room.** The proxy already moves a RUNNING session between accounts; this is the other case, where the turn is over and you are out. It picks the account with the most left (never the one you are on - a handoff to yourself changes nothing), carries the conversation into that account's own store, switches to it, and prints the resume command. Under the slot model each account has its own `CLAUDE_CONFIG_DIR` with its own `projects/`, so continuing elsewhere means crossing that boundary; sessionwiki does the carrying, which is why this orchestrates rather than implements. `--account` picks the target by hand, `--dry-run` says what would happen and changes nothing. Nothing is silent: a step that cannot run says so and leaves the account as it was, rather than letting the next step look like it worked. Needs sessionwiki 0.23+ (`migrate --config-dir`), and says so if it is missing. Accounts with no usage reading are not offered - absence is not an offer.
+
 ## [0.65.5] - 2026-08-18
 
 ### Fixed

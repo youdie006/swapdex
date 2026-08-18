@@ -212,6 +212,23 @@ pub fn clear_bench_note(memo: &mut Option<(String, String)>) {
 ///
 /// An observed refusal wins. The endpoint describes a setting; the refusal is
 /// what actually happened to a request.
+/// Where to continue a conversation that has run out of room here.
+///
+/// The account with the MOST left, and never the one you are already on - a
+/// handoff to yourself is not a handoff. Unmeasured accounts are skipped: one
+/// nobody has read might be full or might be spent, and picking it would trade
+/// a known wall for an unknown one.
+///
+/// `usage` is (name, worst-window percent USED). `None` when there is nowhere
+/// better to go, which the caller reports rather than pretending it moved.
+pub fn handoff_target(usage: &[(String, f64)], current: &str) -> Option<String> {
+    usage
+        .iter()
+        .filter(|(n, _)| n != current)
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(n, _)| n.clone())
+}
+
 /// Is this account refusing turns right now?
 ///
 /// Decided from the stamps rather than from the response headers, because the
@@ -1539,5 +1556,38 @@ mod currently_refusing_tests {
     fn an_account_that_never_refused_is_not_refusing() {
         assert!(!currently_refusing(None, Some(500), 1060, 900));
         assert!(!currently_refusing(None, None, 1060, 900));
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    fn u(v: &[(&str, f64)]) -> Vec<(String, f64)> {
+        v.iter().map(|(n, p)| (n.to_string(), *p)).collect()
+    }
+
+    #[test]
+    fn the_account_with_the_most_left_takes_it() {
+        let got = handoff_target(&u(&[("a", 97.0), ("b", 12.0), ("c", 60.0)]), "a");
+        assert_eq!(got.as_deref(), Some("b"));
+    }
+
+    /// Handing a conversation to the account it is already stuck on would look
+    /// like it worked and change nothing.
+    #[test]
+    fn the_account_you_are_on_is_never_the_answer() {
+        assert_eq!(handoff_target(&u(&[("a", 5.0)]), "a"), None);
+        assert_eq!(
+            handoff_target(&u(&[("a", 5.0), ("b", 90.0)]), "a").as_deref(),
+            Some("b"),
+            "even a nearly-spent other account beats staying put"
+        );
+    }
+
+    /// Nowhere to go is an answer the caller has to report, not paper over.
+    #[test]
+    fn nowhere_to_go_says_so() {
+        assert_eq!(handoff_target(&[], "a"), None);
     }
 }

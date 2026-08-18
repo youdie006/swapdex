@@ -211,6 +211,18 @@ enum Cmd {
         #[arg(long)]
         threshold: Option<f64>,
     },
+    /// Hand the conversation you were in to the account with the most left
+    #[command(name = "continue")]
+    Continue {
+        /// Which session (id prefix); omit for this project's most recent one
+        id: Option<String>,
+        /// Hand it to THIS account instead of the roomiest one
+        #[arg(long)]
+        account: Option<String>,
+        /// Say what would happen and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Install a `/sx` slash command for Claude Code (switch without leaving the chat)
     Slash,
     /// Step off an account at this much used (e.g. 0.9 or 90%), or `off`
@@ -435,6 +447,11 @@ fn main() {
         Cmd::FallbackModel { value } => commands::fallback_model(&paths, value.as_deref()),
         Cmd::Strategy { value } => commands::strategy(&paths, value.as_deref()),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
+        Cmd::Continue {
+            id,
+            account,
+            dry_run,
+        } => commands::continue_elsewhere(&paths, id.as_deref(), account.as_deref(), *dry_run),
         Cmd::Slash => commands::install_slash(&paths),
         Cmd::Threshold { value } => commands::threshold(&paths, value.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),

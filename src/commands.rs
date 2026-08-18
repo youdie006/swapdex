@@ -1829,6 +1829,128 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
 /// `slash` - install the in-conversation switcher for both assistants, so an
 /// account change can be typed where you already are rather than in another
 /// terminal. Claude Code reads `~/.claude/commands`, Codex reads `~/.codex/skills`.
+/// Hand the conversation you were just in to an account that still has room.
+///
+/// The proxy already moves a RUNNING session between accounts. This is the
+/// other case: the turn is over, you are out, and the conversation lives in one
+/// account's store. Under swapdex's slot model each account has its own
+/// `CLAUDE_CONFIG_DIR` with its own `projects/`, so continuing elsewhere means
+/// carrying the transcript across that boundary - which is sessionwiki's job,
+/// and why this command orchestrates rather than implements.
+///
+/// Nothing here is silent. Each step says what it did, and a step that could
+/// not run says so rather than letting the next one look like it worked.
+/// This project's most recent Claude session id, as sessionwiki reports it.
+///
+/// `None` when there is none, or when the answer cannot be read - either way
+/// the caller has nothing to hand over and says so, rather than migrating
+/// something the user did not mean.
+fn latest_session_here(cwd: &std::path::Path) -> Option<String> {
+    let out = Command::new("sessionwiki")
+        .args(["list", "-n", "1", "--tool", "claude-code", "--json"])
+        .arg("--project")
+        .arg(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&out.stdout)
+        .ok()?
+        .as_array()?
+        .first()?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
+}
+
+pub fn continue_elsewhere(
+    paths: &Paths,
+    id: Option<&str>,
+    account: Option<&str>,
+    dry_run: bool,
+) -> Result<i32> {
+    if !command_exists("sessionwiki") {
+        anyhow::bail!(
+            "this needs sessionwiki to carry the conversation across accounts - \
+             install it (`brew install youdie006/tap/sessionwiki`) and try again"
+        );
+    }
+    let here = active_slot_name(paths, "claude-code")
+        .ok_or_else(|| anyhow::anyhow!("no active Claude account - `swapdex use <name>` first"))?;
+
+    // Who has room. The WORST window of each account, so one with a spent 7d is
+    // not called roomy because its 5h happens to be fresh. These are the
+    // readings `swapdex quota` took; an account nobody has read is absent, and
+    // absence is not an offer.
+    let usage: Vec<(String, f64)> = crate::quota_cache::load_for(paths, "claude-code")
+        .into_iter()
+        .filter_map(|(name, e)| {
+            crate::proxy::pick::headroom(e.five_h, e.seven_d).map(|worst| (name, worst))
+        })
+        .collect();
+
+    let target = match account {
+        Some(a) => a.to_string(),
+        None => crate::proxy::pick::handoff_target(&usage, &here).ok_or_else(|| {
+            anyhow::anyhow!(
+                "nowhere to hand it to - no other Claude account has a usage reading. \
+                 `swapdex quota` reads them; `--account <name>` picks one anyway"
+            )
+        })?,
+    };
+    if target == here {
+        anyhow::bail!(
+            "'{target}' is the account you are already on - a handoff to yourself changes nothing"
+        );
+    }
+    let dir = slot_dir_named(paths, &target).ok_or_else(|| {
+        anyhow::anyhow!("'{target}' has no slot - `swapdex run {target}` gives it one, then retry")
+    })?;
+
+    let cwd =
+        anyhow::Context::context(std::env::current_dir(), "cannot read the current directory")?;
+    println!("continue on {target}");
+    println!("  carry the conversation into its store: {}", dir.display());
+    if dry_run {
+        println!("  (dry run - nothing changed)");
+        return Ok(0);
+    }
+
+    // Which conversation. Named, or this project's most recent - resolved HERE
+    // rather than with a flag on sessionwiki, so the two tools stay coupled
+    // only by its stable `--json` output.
+    let session = match id.map(str::trim).filter(|i| !i.is_empty()) {
+        Some(i) => i.to_string(),
+        None => latest_session_here(&cwd).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no Claude session found for {} - name one (`swapdex continue <id>`), \
+                 or run this from the project you were working in",
+                cwd.display()
+            )
+        })?,
+    };
+    println!("  session {session}");
+
+    let mut mig = Command::new("sessionwiki");
+    mig.arg("migrate")
+        .arg(&session)
+        .arg(&cwd)
+        .arg("--config-dir")
+        .arg(&dir);
+    let out = anyhow::Context::context(mig.output(), "could not run `sessionwiki migrate`")?;
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    if !out.status.success() {
+        // The switch has NOT happened yet, and saying so is the difference
+        // between "retry this" and "work out what state I am in".
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        anyhow::bail!("could not carry the conversation - the account was left as it was");
+    }
+    use_account(paths, &target, Some(ToolSel::Claude), false, false)?;
+    println!("now on {target} - resume it with the command above");
+    Ok(0)
+}
+
 pub fn install_slash(paths: &Paths) -> Result<i32> {
     let _ = paths; // these dirs belong to the assistants, not swapdex's store
     let Some(home) = dirs::home_dir() else {
