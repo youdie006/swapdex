@@ -9,7 +9,7 @@ use crate::paths::Paths;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub five_h: Option<f64>,
@@ -26,6 +26,13 @@ pub struct Entry {
     /// row back to "spent" between live reads.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub on_credits: bool,
+    /// Why the account is refusing, in the API's own words, when the reading
+    /// carried a reason. Kept with the numbers because it arrived with them:
+    /// Codex states `rate_limit_reached_type` on the same response as the
+    /// windows, and dropping it left the row saying an account was refusing
+    /// with no way to say what would clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// A BTreeMap so the file is stable across writes - a cache that reorders itself
@@ -109,7 +116,7 @@ fn load_file_at(path: &std::path::Path, now: i64, drop_clamped: bool) -> Cache {
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     for e in c.values_mut() {
-        *e = expire_windows(*e, now);
+        *e = expire_windows(std::mem::take(e), now);
     }
     // An entry with nothing left to say is not an entry.
     c.retain(|_, e| e.five_h.is_some() || e.seven_d.is_some());
@@ -144,7 +151,7 @@ pub fn update_for(paths: &Paths, tool: &str, fresh: &[(String, Entry)]) {
     let path = file_for(paths, tool);
     let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
     for (name, e) in fresh {
-        c.insert(name.clone(), *e);
+        c.insert(name.clone(), e.clone());
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
         let _ = std::fs::create_dir_all(paths.store_dir());
@@ -176,7 +183,7 @@ mod tests {
             at: 1,
             ..Default::default()
         };
-        update_for(&paths, "codex", &[("spent".into(), full)]);
+        update_for(&paths, "codex", &[("spent".into(), full.clone())]);
         update_for(&paths, "claude-code", &[("spent".into(), full)]);
 
         assert_eq!(load_for(&paths, "codex")["spent"].seven_d, Some(100.0));
@@ -295,10 +302,10 @@ mod expiry_tests {
             at: 900,
             ..Default::default()
         };
-        let before = expire_windows(e, 999);
+        let before = expire_windows(e.clone(), 999);
         assert_eq!(before.five_h, Some(100.0), "inside the window it stands");
 
-        let after = expire_windows(e, 1_001);
+        let after = expire_windows(e.clone(), 1_001);
         assert_eq!(after.five_h, None, "past the reset it is gone");
         assert_eq!(after.five_h_reset, None, "and so is the reset it described");
         assert_eq!(
@@ -320,7 +327,7 @@ mod expiry_tests {
             at: 900,
             ..Default::default()
         };
-        assert_eq!(expire_windows(e, 9_999_999), e);
+        assert_eq!(expire_windows(e.clone(), 9_999_999), e);
     }
 
     #[test]

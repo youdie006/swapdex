@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.65.5] - 2026-08-18
+
+### Fixed
+- **A 429 now counts as a refusal.** The refusing list was assembled from two witnesses that both miss it: the `anthropic-ratelimit-unified-*-status: rejected` header, which a 429 from this API does not carry, and the sideline set, which holds only 401 and 403. So the commonest refusal there is went unrecorded and its account kept reading as fine. A third witness reads the stamps - when this account last refused, and whether anything has gone through since. It lapses like the window it came from, so one 429 cannot mark an account for the life of the proxy, and a turn that succeeds clears it at once.
+- **A rewritten request that the server calls malformed is retried as the client wrote it.** swapdex changes a request body in two places - it aligns the account identity, and past the wall it may ask for a fallback model instead of the one requested. Both are guesses about what the server will accept, and when the answer is 400 or 422 the rewrite is the first suspect. The client's own body is known-good by construction, being what would have been sent with no proxy at all, so one try is spent on it before handing back a failure. Once only, and only for a refusal about the REQUEST: a 429 is about quota and a 5xx is the server's own trouble, and re-sending either would change nothing while hiding what happened.
+
+### Added
+- **A remembered Codex reading carries why the account is refusing.** Codex states `rate_limit_reached_type` on the same response as its windows and it was being parsed and dropped, leaving a row able to report a refusal but not what would clear it - the whole value of the field. It is stored with the numbers now, in the account's own words including who can act on it, and survives a restart along with them.
+
 ## [0.65.4] - 2026-08-18
 
 ### Fixed

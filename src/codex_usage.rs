@@ -317,6 +317,10 @@ pub fn remember(
             .credits
             .as_ref()
             .is_some_and(|c| (c.has_credits || c.unlimited) && !c.overage_limit_reached),
+        // The response says WHY when it is refusing, on the same line as the
+        // windows. Dropping it left the row able to say an account was
+        // refusing and unable to say what would clear it.
+        refused: a.refused.as_deref().map(refusal_words),
     };
     crate::quota_cache::update_for(paths, "codex", &[(serving.to_string(), entry)]);
     true
@@ -723,6 +727,48 @@ mod tests {
         // A response that said nothing about credits claims nothing.
         assert!(remember(&paths, "quiet", &with(&[]), 1_786_600_000));
         assert!(!crate::quota_cache::load_for(&paths, "codex")["quiet"].on_credits);
+    }
+
+    /// A response that says WHY it is refusing must keep saying it after the
+    /// proxy has gone. Without this the row could report a refusal and not what
+    /// would clear it, which is the whole value of the field.
+    #[test]
+    fn a_refusal_reason_survives_to_the_remembered_reading() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        assert!(remember(
+            &paths,
+            "work",
+            &h(&[
+                ("x-codex-primary-used-percent", "100"),
+                ("x-codex-primary-window-minutes", "10080"),
+                (
+                    "x-codex-rate-limit-reached-type",
+                    "workspace_member_credits_depleted"
+                ),
+            ]),
+            1_786_600_000
+        ));
+        let c = crate::quota_cache::load_for(&paths, "codex");
+        assert_eq!(
+            c["work"].refused.as_deref(),
+            Some("workspace credits spent - its owner has to top them up")
+        );
+
+        // A response with nothing to say about a refusal claims nothing.
+        assert!(remember(
+            &paths,
+            "quiet",
+            &h(&[
+                ("x-codex-primary-used-percent", "10"),
+                ("x-codex-primary-window-minutes", "10080"),
+            ]),
+            1_786_600_000
+        ));
+        assert_eq!(
+            crate::quota_cache::load_for(&paths, "codex")["quiet"].refused,
+            None
+        );
     }
 
     /// A reset can arrive as a unix integer or as a timestamp string.

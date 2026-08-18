@@ -212,6 +212,31 @@ pub fn clear_bench_note(memo: &mut Option<(String, String)>) {
 ///
 /// An observed refusal wins. The endpoint describes a setting; the refusal is
 /// what actually happened to a request.
+/// Is this account refusing turns right now?
+///
+/// Decided from the stamps rather than from the response headers, because the
+/// commonest refusal on this API - a 429 - carries no
+/// `anthropic-ratelimit-unified-*` headers and sidelines nothing, so both of the
+/// other witnesses miss it entirely.
+///
+/// It lapses like the window it came from: one 429 must not mark an account as
+/// refusing for the life of the proxy. And a turn that went through since
+/// settles it, however recent the refusal - the account is plainly serving.
+pub fn currently_refusing(
+    last_refusal: Option<i64>,
+    last_ok: Option<i64>,
+    now: i64,
+    lapse_after: i64,
+) -> bool {
+    let Some(bad) = last_refusal else {
+        return false;
+    };
+    if now - bad > lapse_after {
+        return false;
+    }
+    last_ok.is_none_or(|good| good < bad)
+}
+
 /// Which accounts are known to be refusing, and why.
 ///
 /// Two things know it, and they know different amounts. A response's
@@ -1479,5 +1504,40 @@ mod credits_relevance_tests {
     #[test]
     fn an_unmeasured_account_claims_nothing() {
         assert!(!credits_are_load_bearing(None, None));
+    }
+}
+
+#[cfg(test)]
+mod currently_refusing_tests {
+    use super::*;
+
+    /// A 429 is the commonest refusal on this API and it sidelines nothing, so
+    /// the sideline set alone missed it. What is left is the stamp: when this
+    /// account last refused, and whether anything has gone through since.
+    #[test]
+    fn a_recent_refusal_with_nothing_since_counts() {
+        // refused at 1000, nothing since, 60s later.
+        assert!(currently_refusing(Some(1000), None, 1060, 900));
+    }
+
+    /// It lapses, like the window it came from - otherwise one 429 would mark
+    /// an account as refusing for the life of the proxy.
+    #[test]
+    fn an_old_refusal_stops_counting() {
+        assert!(!currently_refusing(Some(1000), None, 1000 + 901, 900));
+    }
+
+    /// A turn that went through since settles it, however recent the refusal.
+    #[test]
+    fn a_success_since_clears_it() {
+        assert!(!currently_refusing(Some(1000), Some(1001), 1060, 900));
+        // ...but a success BEFORE the refusal does not.
+        assert!(currently_refusing(Some(1000), Some(999), 1060, 900));
+    }
+
+    #[test]
+    fn an_account_that_never_refused_is_not_refusing() {
+        assert!(!currently_refusing(None, Some(500), 1060, 900));
+        assert!(!currently_refusing(None, None, 1060, 900));
     }
 }

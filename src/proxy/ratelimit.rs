@@ -78,6 +78,23 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Quota> {
     seen.then_some(q)
 }
 
+/// Should this turn be tried once more with the body the CLIENT wrote?
+///
+/// swapdex rewrites a request body in two places: it aligns the account
+/// identity in it, and past the wall it may ask for a fallback model instead of
+/// the one requested. Both are guesses about what the server will accept, and
+/// when the server answers "this request is malformed" the rewrite is the first
+/// suspect - the client's own body is known-good by construction, since it is
+/// what would have been sent with no proxy at all.
+///
+/// Only for a refusal ABOUT THE REQUEST. A 429 is about quota and a 5xx is the
+/// server's own trouble; re-sending either changes nothing and hides what
+/// happened. Once only: if the original is refused too, the request is the
+/// problem and repeating it just doubles the wait.
+pub fn retry_unrewritten(status: u16, body_was_rewritten: bool, already_retried: u32) -> bool {
+    body_was_rewritten && already_retried == 0 && matches!(status, 400 | 422)
+}
+
 /// How a 429 should be handled. Observed 2026-07-27 against the real API: a
 /// throttle 429 carries `x-should-retry: true`, a `rate_limit_error` body, and NO
 /// `anthropic-ratelimit-unified-*` headers at all - so "the account is spent" and
@@ -454,5 +471,36 @@ mod evidence_tests {
         let ok = h(&[("anthropic-ratelimit-unified-status", "allowed")]);
         assert!(!proven_spent(&ok, 0));
         assert!(!proven_spent(&ok, 2));
+    }
+}
+
+#[cfg(test)]
+mod rewrite_retry_tests {
+    use super::*;
+
+    /// swapdex rewrites a request body in two places - it aligns the account
+    /// identity, and past the wall it may ask for a fallback model. If the
+    /// server then refuses the request as malformed, the rewrite is the first
+    /// suspect, and what the client actually asked for is still available.
+    #[test]
+    fn a_rejected_rewrite_is_worth_one_try_as_the_client_wrote_it() {
+        assert!(retry_unrewritten(400, true, 0));
+        // Nothing was rewritten - there is nothing to fall back to.
+        assert!(!retry_unrewritten(400, false, 0));
+        // Once only: if the original is refused too, the request is the
+        // problem and repeating it just doubles the wait.
+        assert!(!retry_unrewritten(400, true, 1));
+    }
+
+    /// Only a request-shaped refusal. A 429 is about quota and a 500 is the
+    /// server's own trouble; re-sending either as the client wrote it would
+    /// change nothing and hide what happened.
+    #[test]
+    fn other_failures_are_not_blamed_on_the_rewrite() {
+        for status in [200, 401, 403, 429, 500, 529] {
+            assert!(!retry_unrewritten(status, true, 0), "{status}");
+        }
+        // 422 is the other shape-of-request refusal this API uses.
+        assert!(retry_unrewritten(422, true, 0));
     }
 }

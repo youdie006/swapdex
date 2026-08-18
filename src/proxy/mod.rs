@@ -526,11 +526,25 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // all, so an account that had just refused three turns still printed
         // "(on credits)" - offering a way through that had already failed.
         let now_i = std::time::Instant::now();
+        // Three witnesses, because each misses what the others catch. The
+        // headers name the window but only arrive on some refusals; the
+        // sideline set holds 401/403; and the stamps catch the 429, which is
+        // the commonest of the three and the only one neither other sees.
         let sidelined: Vec<String> = {
             let held = sh.unusable.lock().unwrap();
+            let bad = sh.refused_at.lock().unwrap();
+            let good = sh.ok_at.lock().unwrap();
             slots
                 .iter()
-                .filter(|r| held.contains(&r.name, now_i))
+                .filter(|r| {
+                    held.contains(&r.name, now_i)
+                        || pick::currently_refusing(
+                            bad.get(&r.name).copied(),
+                            good.get(&r.name).copied(),
+                            now_s,
+                            ratelimit::SPENT_FOR_SECS,
+                        )
+                })
                 .map(|r| r.name.clone())
                 .collect()
         };
@@ -680,6 +694,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     seven_d_reset: m.seven_d_reset,
                     at: now_secs(),
                     on_credits: m.credits,
+                    refused: None,
                 },
             )
         })
@@ -1372,10 +1387,32 @@ fn forward_turn(
 
         note_serving_for(paths, &opts.tool, &slot.name);
 
+        // Whether anything above actually CHANGED the client's request. Both
+        // rewrites are guesses about what the server will accept, so if it
+        // then calls the request malformed, they are the first suspect.
+        let rewritten = body != client_body;
+        let mut unrewritten_tries = 0u32;
+
         // A 429 wears two meanings. A THROTTLE ("slow down", x-should-retry) is
         // fixed by waiting and retrying this same account.
         let mut up = loop {
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
+            // The server says the REQUEST is wrong, and swapdex is the only
+            // thing that touched it. What the client wrote is known-good by
+            // construction - it is what would have been sent with no proxy at
+            // all - so spend one try on it rather than hand back a failure the
+            // user cannot act on.
+            if ratelimit::retry_unrewritten(up.status, rewritten, unrewritten_tries) {
+                unrewritten_tries += 1;
+                println!(
+                    "{} {path} -> {} on a request swapdex rewrote - retrying as you wrote it",
+                    slot.name, up.status
+                );
+                std::io::stdout().flush().ok();
+                drop(up);
+                body = client_body.clone();
+                continue;
+            }
             if up.status != 429 {
                 break up;
             }
@@ -1711,6 +1748,7 @@ mod seed_tests {
             seven_d_reset: Some(at + 86400),
             at,
             on_credits: false,
+            refused: None,
         }
     }
 

@@ -2435,7 +2435,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 }
             });
             let transcript = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400);
-            let seen_by_proxy = codex_seen.get(name).copied();
+            let seen_by_proxy = codex_seen.get(name).cloned();
             if let Some(row) = codex_row(
                 name,
                 live.as_ref(),
@@ -4682,6 +4682,11 @@ pub fn codex_row(
                 seven_d: e.seven_d,
                 seven_d_reset: e.seven_d_reset,
                 observed_at: Some(e.at),
+                on_credits: e.on_credits,
+                // What the account said would clear it, when it said. A row
+                // that can report a refusal and not its remedy sends the
+                // reader looking in the wrong place.
+                note: e.refused,
                 ..Default::default()
             },
         )
@@ -6149,6 +6154,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     seven_d_reset: qd.seven_day.and_then(|w| w.resets_at),
                     at: now,
                     on_credits: qd.can_serve_past_windows(),
+                    refused: None,
                 },
             )),
             _ => None,
@@ -6703,6 +6709,24 @@ mod tests {
         assert!(codex_identity(Some("a@example.com"), Some("pro"), None).ends_with("[pro]"));
     }
 
+    /// A reading the proxy took carries the refusal and the credits it came
+    /// with, not just the numbers. Dropping them left a row able to say an
+    /// account was refusing and unable to say what would clear it.
+    #[test]
+    fn a_proxy_reading_brings_its_reason_and_its_credits_along() {
+        let seen = crate::quota_cache::Entry {
+            seven_d: Some(100.0),
+            at: 1_786_590_000,
+            on_credits: true,
+            refused: Some("out of quota".into()),
+            ..Default::default()
+        };
+        let (_, u) =
+            codex_row("work", None, None, Some(seen), None, 1_786_600_000).expect("a reading");
+        assert_eq!(u.note.as_deref(), Some("out of quota"));
+        assert!(u.on_credits);
+    }
+
     /// Three sources can answer, and between the two LOCAL ones the newer wins
     /// rather than a fixed rank. A reading the proxy took off a response is
     /// bound to the account that served the turn; a transcript is bound to the
@@ -6732,7 +6756,7 @@ mod tests {
             "work",
             None,
             None,
-            Some(seen_by_proxy),
+            Some(seen_by_proxy.clone()),
             Some(transcript),
             now,
         )
@@ -6743,16 +6767,23 @@ mod tests {
         // ... and when the transcript is the newer of the two, it answers.
         let older_proxy = crate::quota_cache::Entry {
             at: 1_786_400_000,
-            ..seen_by_proxy
+            ..seen_by_proxy.clone()
         };
-        let (_, u) = codex_row("work", None, None, Some(older_proxy), Some(transcript), now)
-            .expect("a reading");
+        let (_, u) = codex_row(
+            "work",
+            None,
+            None,
+            Some(older_proxy.clone()),
+            Some(transcript),
+            now,
+        )
+        .expect("a reading");
         assert_eq!(u.seven_d, Some(12.0));
 
         // A proxy reading alone still answers - this is the source that works
         // for a home holding no transcripts while the machine is offline.
-        let (_, u) =
-            codex_row("work", None, None, Some(seen_by_proxy), None, now).expect("a reading");
+        let (_, u) = codex_row("work", None, None, Some(seen_by_proxy.clone()), None, now)
+            .expect("a reading");
         assert_eq!(u.seven_d, Some(55.0));
 
         // The live endpoint outranks both, being taken just now.
@@ -6768,7 +6799,7 @@ mod tests {
             "work",
             Some(&live),
             None,
-            Some(seen_by_proxy),
+            Some(seen_by_proxy.clone()),
             Some(transcript),
             now,
         )
