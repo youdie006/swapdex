@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.64.0] - 2026-08-18
 
 ### Added
 - **A Codex account is asked for its own usage instead of being inferred from.** Until now a Codex account's numbers came only from the `rate_limits` blocks Codex happens to write into its transcripts, which meant a home with no transcripts had no row at all - a saved account that has not been driven through this machine was a permanent blank, and one on this machine sat at 16% remaining without ever saying so. `chatgpt.com/backend-api/wham/usage`, asked with the account's own token, answers per CREDENTIAL and names itself: `email`, `plan_type`, the windows, the per-model limits, the credit balance, and `rate_limit_reached_type` when it is refusing. So attribution stops being an inference. The live answer wins where there is one; the transcript still answers when the endpoint is throttled or the machine is offline, and a throttled endpoint falls back rather than blanking the row - it says nothing about the account behind it. Same discipline as `swapdex quota`: read-only, curl with its config on stdin so the token never reaches `ps`, an honest User-Agent, and no HTTP client added to the dependency graph. The `chatgpt-account-id` header is omitted when the saved id is one of Codex's `email_`/`local_` placeholders, which the endpoint rejects outright. Found by reading icoretech/codex-pooler, which uses the same endpoint. Two sibling paths, `/backend-api/codex/usage` and `/api/codex/usage`, answer 403 and are not used.
