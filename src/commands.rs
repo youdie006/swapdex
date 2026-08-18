@@ -2419,6 +2419,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .collect()
                 })
                 .unwrap_or_default();
+        // What the proxy recorded while serving. Windows past their reset are
+        // dropped on load, so a turned-over window never lingers here.
+        let codex_seen = crate::quota_cache::load_for(paths, "codex");
         for (name, dir) in &codex_homes {
             let live = crate::proxy::codex::slot_auth(dir).and_then(|auth| {
                 match crate::codex_usage::fetch(&auth) {
@@ -2430,7 +2433,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 }
             });
             let transcript = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400);
-            if let Some(row) = codex_row(name, live.as_ref(), transcript, now_secs() as i64) {
+            let seen_by_proxy = codex_seen.get(name).copied();
+            if let Some(row) = codex_row(
+                name,
+                live.as_ref(),
+                seen_by_proxy,
+                transcript,
+                now_secs() as i64,
+            ) {
                 claude.push(row);
             }
         }
@@ -4576,28 +4586,55 @@ pub fn serve(
 
 /// One Codex account's row, from whichever source could answer.
 ///
-/// Two can. The account itself answers per CREDENTIAL and names itself, and it
-/// answers for a home holding no transcripts at all - the case where there is
-/// nothing local to read and the row was a permanent blank. Its transcripts
-/// answer for free, with no network, and keep working when the endpoint is
-/// throttled or the machine is offline.
+/// Three can, and they fail in different places, which is why all three exist:
 ///
-/// The live answer wins when there is one, and is stamped with the time it was
-/// taken rather than inheriting the transcript's age. Neither source means no
-/// row: shown at zero, an account nobody has measured reads as a full one.
+/// - The account itself, asked directly. Answers per CREDENTIAL, names itself,
+///   and is the only one that answers for a home holding no transcripts - the
+///   case where there is nothing local to read and the row was a permanent
+///   blank. Needs the network and can be throttled.
+/// - What the proxy read off a response it was already carrying. Free, and
+///   bound to the account that served the turn. Only exists once that account
+///   has served something.
+/// - The home's transcripts. Free and always there, but bound to the home
+///   rather than to a credential, and often hours old.
+///
+/// The live answer wins, being taken just now. Between the two local ones the
+/// NEWER answers rather than a fixed rank: both are honest, and the stale one
+/// is simply older. No source at all means no row - shown at zero, an account
+/// nobody has measured reads as a full one.
 pub fn codex_row(
     home: &str,
     live: Option<&crate::codex_usage::Account>,
+    seen_by_proxy: Option<crate::quota_cache::Entry>,
     transcript: Option<crate::codex_limits::Limits>,
     now: i64,
 ) -> Option<(String, crate::tui::Usage)> {
-    match live {
-        Some(a) => {
-            let mut l = a.limits;
-            l.observed_at = Some(now);
-            Some(codex_usage_row(home, &l))
-        }
-        None => transcript.map(|l| codex_usage_row(home, &l)),
+    if let Some(a) = live {
+        let mut l = a.limits;
+        l.observed_at = Some(now);
+        return Some(codex_usage_row(home, &l));
+    }
+    let from_transcript = transcript.map(|l| codex_usage_row(home, &l));
+    let from_proxy = seen_by_proxy.map(|e| {
+        (
+            home.to_string(),
+            crate::tui::Usage {
+                five_h: e.five_h,
+                five_h_reset: e.five_h_reset,
+                seven_d: e.seven_d,
+                seven_d_reset: e.seven_d_reset,
+                observed_at: Some(e.at),
+                ..Default::default()
+            },
+        )
+    });
+    match (from_proxy, from_transcript) {
+        (Some(p), Some(t)) => Some(if p.1.observed_at >= t.1.observed_at {
+            p
+        } else {
+            t
+        }),
+        (p, t) => p.or(t),
     }
 }
 
@@ -4609,22 +4646,15 @@ pub fn codex_row(
 /// the reading was written, which moved real numbers onto an account that had no
 /// transcripts at all.
 pub fn codex_usage_row(home: &str, l: &crate::codex_limits::Limits) -> (String, crate::tui::Usage) {
-    let mut u = crate::tui::Usage {
+    let p = crate::codex_limits::place(l);
+    let u = crate::tui::Usage {
         observed_at: l.observed_at,
+        five_h: p.five_h.map(|w| w.used_pct),
+        five_h_reset: p.five_h.and_then(|w| w.resets_at),
+        seven_d: p.seven_d.map(|w| w.used_pct),
+        seven_d_reset: p.seven_d.and_then(|w| w.resets_at),
         ..Default::default()
     };
-    // Place each window by its LENGTH, not by the API's primary/secondary
-    // labels: a ~5h window is the session one, anything longer is the weekly
-    // column. Codex often sends only a weekly window, as `primary`.
-    for w in [l.short, l.long].into_iter().flatten() {
-        if w.window_minutes <= 600 {
-            u.five_h = Some(w.used_pct);
-            u.five_h_reset = w.resets_at;
-        } else {
-            u.seven_d = Some(w.used_pct);
-            u.seven_d_reset = w.resets_at;
-        }
-    }
     (home.to_string(), u)
 }
 
@@ -6401,6 +6431,71 @@ mod tests {
         assert_eq!(home_note("work", None), "", "no pointer, nothing to say");
     }
 
+    /// Three sources can answer, and between the two LOCAL ones the newer wins
+    /// rather than a fixed rank. A reading the proxy took off a response is
+    /// bound to the account that served the turn; a transcript is bound to the
+    /// home. Both are honest, and the stale one is simply older.
+    #[test]
+    fn between_two_local_readings_the_newer_one_answers() {
+        let w = |pct: f64| crate::codex_limits::Window {
+            used_pct: pct,
+            window_minutes: 10080,
+            resets_at: Some(1_787_011_538),
+        };
+        let transcript = crate::codex_limits::Limits {
+            short: Some(w(12.0)),
+            long: None,
+            observed_at: Some(1_786_500_000),
+        };
+        let seen_by_proxy = crate::quota_cache::Entry {
+            seven_d: Some(55.0),
+            seven_d_reset: Some(1_787_011_538),
+            at: 1_786_590_000,
+            ..Default::default()
+        };
+        let now = 1_786_600_000;
+
+        // The proxy saw it more recently than the transcript was written.
+        let (_, u) =
+            codex_row("work", None, Some(seen_by_proxy), Some(transcript), now).expect("a reading");
+        assert_eq!(u.seven_d, Some(55.0));
+        assert_eq!(u.observed_at, Some(1_786_590_000));
+
+        // ... and when the transcript is the newer of the two, it answers.
+        let older_proxy = crate::quota_cache::Entry {
+            at: 1_786_400_000,
+            ..seen_by_proxy
+        };
+        let (_, u) =
+            codex_row("work", None, Some(older_proxy), Some(transcript), now).expect("a reading");
+        assert_eq!(u.seven_d, Some(12.0));
+
+        // A proxy reading alone still answers - this is the source that works
+        // for a home holding no transcripts while the machine is offline.
+        let (_, u) = codex_row("work", None, Some(seen_by_proxy), None, now).expect("a reading");
+        assert_eq!(u.seven_d, Some(55.0));
+
+        // The live endpoint outranks both, being taken just now.
+        let live = crate::codex_usage::Account {
+            limits: crate::codex_limits::Limits {
+                short: Some(w(84.0)),
+                long: None,
+                observed_at: None,
+            },
+            ..Default::default()
+        };
+        let (_, u) = codex_row(
+            "work",
+            Some(&live),
+            Some(seen_by_proxy),
+            Some(transcript),
+            now,
+        )
+        .expect("a reading");
+        assert_eq!(u.seven_d, Some(84.0));
+        assert_eq!(u.observed_at, Some(now));
+    }
+
     /// A live answer from the account beats a transcript, and the transcript
     /// still answers when there is no live one. An account with neither is
     /// absent rather than shown at zero - zero is a number, and it would read
@@ -6428,22 +6523,23 @@ mod tests {
         };
         let now = 1_786_600_000;
 
-        let (who, u) = codex_row("work", Some(&live), Some(stale), now).expect("live answers");
+        let (who, u) =
+            codex_row("work", Some(&live), None, Some(stale), now).expect("live answers");
         assert_eq!(who, "work");
         assert_eq!(u.seven_d, Some(84.0));
         // A live answer is stamped now, not left to inherit the transcript age.
         assert_eq!(u.observed_at, Some(now));
 
-        let (_, u) = codex_row("work", None, Some(stale), now).expect("transcript answers");
+        let (_, u) = codex_row("work", None, None, Some(stale), now).expect("transcript answers");
         assert_eq!(u.seven_d, Some(12.0));
         assert_eq!(u.observed_at, Some(1_786_000_000));
 
         // The case this whole change exists for: a home with no transcripts at
         // all, whose account can still answer for itself.
-        let (_, u) = codex_row("work", Some(&live), None, now).expect("live alone answers");
+        let (_, u) = codex_row("work", Some(&live), None, None, now).expect("live alone answers");
         assert_eq!(u.seven_d, Some(84.0));
 
-        assert!(codex_row("work", None, None, now).is_none());
+        assert!(codex_row("work", None, None, None, now).is_none());
     }
 
     /// A Codex reading is keyed by the home it was read from, and by nothing

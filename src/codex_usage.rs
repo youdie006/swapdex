@@ -138,6 +138,94 @@ pub fn parse(body: &str) -> Option<Account> {
     })
 }
 
+/// The same reading, taken off a response the proxy was already carrying.
+///
+/// Free and fresh: no extra request, and bound to the credential that actually
+/// served the turn, so there is nothing to attribute. It only appears when the
+/// user is working, which is why it supplements the endpoint rather than
+/// replacing it - an idle account never sends one.
+///
+/// `None` when the response carried none of these headers, so an unrelated
+/// response never overwrites a known reading with a blank one. Only the plan
+/// windows are read; per-model limits are documented elsewhere as arriving under
+/// their own `x-<limit-id>-*` names, but none has been observed here and a
+/// parser for a shape nobody has seen is a guess.
+pub fn from_headers(headers: &[(String, String)]) -> Option<Account> {
+    let get = |want: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(want))
+            .map(|(_, v)| v.trim())
+            .filter(|v| !v.is_empty())
+    };
+    let window = |kind: &str| {
+        let used_pct: f64 = get(&format!("x-codex-{kind}-used-percent"))?.parse().ok()?;
+        // A percent with no window length cannot be placed in a column, and
+        // picking one for it is how a weekly number lands in the session gauge.
+        let window_minutes: i64 = get(&format!("x-codex-{kind}-window-minutes"))?
+            .parse()
+            .ok()?;
+        Some(crate::codex_limits::Window {
+            used_pct,
+            window_minutes,
+            resets_at: get(&format!("x-codex-{kind}-reset-at")).and_then(reset_at),
+        })
+    };
+    let (short, long) = match (window("primary"), window("secondary")) {
+        (Some(x), Some(y)) if y.window_minutes < x.window_minutes => (Some(y), Some(x)),
+        pair => pair,
+    };
+    let refused = get("x-codex-rate-limit-reached-type").map(str::to_string);
+    if short.is_none() && long.is_none() {
+        return None;
+    }
+    Some(Account {
+        limits: crate::codex_limits::Limits {
+            short,
+            long,
+            observed_at: None,
+        },
+        refused,
+        ..Default::default()
+    })
+}
+
+/// Record what a Codex response said about the account that served it.
+///
+/// Returns whether anything was recorded. A response carrying none of these
+/// headers is not a reading of zero - it is no reading - so it leaves what is
+/// remembered alone. Kept per tool: slot names are unique only within one, and
+/// a Codex `work` must not overwrite a Claude `work`.
+pub fn remember(
+    paths: &crate::paths::Paths,
+    serving: &str,
+    headers: &[(String, String)],
+    at: i64,
+) -> bool {
+    let Some(a) = from_headers(headers) else {
+        return false;
+    };
+    let p = crate::codex_limits::place(&a.limits);
+    let entry = crate::quota_cache::Entry {
+        five_h: p.five_h.map(|w| w.used_pct),
+        five_h_reset: p.five_h.and_then(|w| w.resets_at),
+        seven_d: p.seven_d.map(|w| w.used_pct),
+        seven_d_reset: p.seven_d.and_then(|w| w.resets_at),
+        at,
+        on_credits: false,
+    };
+    crate::quota_cache::update_for(paths, "codex", &[(serving.to_string(), entry)]);
+    true
+}
+
+/// A reset time as either form it arrives in: unix seconds, or a timestamp.
+fn reset_at(v: &str) -> Option<i64> {
+    match v.parse::<i64>() {
+        Ok(n) if n > 0 => Some(n),
+        _ => crate::session_link::rfc3339_to_secs(v),
+    }
+}
+
 /// What one read produced.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fetch {
@@ -354,6 +442,110 @@ mod tests {
             classify(429, String::new()).why_no_number(),
             Some("usage endpoint throttled")
         );
+    }
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    /// The proxy already carries every Codex response. When one names the
+    /// account's windows, that reading is free, fresh, and bound to the
+    /// credential that served the turn.
+    #[test]
+    fn windows_are_read_off_a_response_the_proxy_already_has() {
+        let got = from_headers(&h(&[
+            ("content-type", "text/event-stream"),
+            ("X-Codex-Primary-Used-Percent", "42.5"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-reset-at", "1787196620"),
+            ("x-codex-secondary-used-percent", "7"),
+            ("x-codex-secondary-window-minutes", "300"),
+            ("x-codex-secondary-reset-at", "1786600000"),
+        ]))
+        .expect("these headers are a reading");
+        // Shortest first, whichever label carried it - the 300-minute window is
+        // the session one even though it arrived as `secondary`.
+        let short = got.limits.short.expect("the session window");
+        assert_eq!(short.window_minutes, 300);
+        assert_eq!(short.used_pct, 7.0);
+        assert_eq!(short.resets_at, Some(1_786_600_000));
+        let long = got.limits.long.expect("the weekly window");
+        assert_eq!(long.window_minutes, 10080);
+        assert_eq!(long.used_pct, 42.5);
+    }
+
+    /// A reset can arrive as a unix integer or as a timestamp string.
+    #[test]
+    fn a_reset_time_is_read_in_either_form_it_arrives_in() {
+        let iso = from_headers(&h(&[
+            ("x-codex-primary-used-percent", "10"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-reset-at", "2026-08-18T04:30:20Z"),
+        ]))
+        .expect("a reading");
+        assert_eq!(iso.limits.short.unwrap().resets_at, Some(1_787_027_420));
+    }
+
+    /// Anything that is not this - an error page, a plain SSE response, a
+    /// health check - is no reading at all. Returning an empty one would
+    /// overwrite a good number with a blank on every unrelated response.
+    #[test]
+    fn a_response_without_them_is_not_a_reading() {
+        assert!(from_headers(&h(&[("content-type", "application/json")])).is_none());
+        // A percent with no window length cannot be placed in a column, and
+        // guessing which column it belongs to is how a weekly number lands in
+        // the session gauge.
+        assert!(from_headers(&h(&[("x-codex-primary-used-percent", "42")])).is_none());
+    }
+
+    /// The refusal reason rides along on the same response, and it is the
+    /// difference between "out of quota" and "something else stopped this".
+    #[test]
+    fn a_refusal_reason_on_the_response_is_kept() {
+        let got = from_headers(&h(&[
+            ("x-codex-primary-used-percent", "100"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-rate-limit-reached-type", "usage_limit"),
+        ]))
+        .expect("a reading");
+        assert_eq!(got.refused.as_deref(), Some("usage_limit"));
+    }
+
+    /// A reading taken off a response is remembered under the account that
+    /// SERVED it - the credential the turn actually went out on, which is what
+    /// makes this the one Codex source needing no attribution at all.
+    #[test]
+    fn a_response_reading_is_remembered_under_the_serving_account() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let headers = h(&[
+            ("x-codex-primary-used-percent", "42.5"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-reset-at", "1787196620"),
+        ]);
+        assert!(remember(&paths, "work", &headers, 1_786_600_000));
+
+        let c = crate::quota_cache::load_for(&paths, "codex");
+        let e = c.get("work").expect("the serving account was recorded");
+        // A weekly window fills the weekly column, whatever label carried it.
+        assert_eq!(e.seven_d, Some(42.5));
+        assert_eq!(e.seven_d_reset, Some(1_787_196_620));
+        assert_eq!(e.five_h, None);
+        assert_eq!(e.at, 1_786_600_000);
+
+        // A response carrying none of these headers leaves the reading alone
+        // rather than overwriting it with a blank.
+        assert!(!remember(
+            &paths,
+            "work",
+            &h(&[("content-type", "text/plain")]),
+            1_786_600_900
+        ));
+        let c = crate::quota_cache::load_for(&paths, "codex");
+        assert_eq!(c.get("work").map(|e| e.at), Some(1_786_600_000));
     }
 
     /// Codex writes a placeholder where an account has no workspace. Sending

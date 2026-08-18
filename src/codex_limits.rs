@@ -56,6 +56,30 @@ pub struct Limits {
     pub observed_at: Option<i64>,
 }
 
+/// A window's column, decided by its LENGTH rather than by the label the API
+/// gave it. Codex sends the weekly window as `primary` when it is the only one,
+/// so trusting the label puts a week's usage in the session gauge.
+///
+/// One function because two callers need the same answer - the display and the
+/// proxy's own reading - and a rule copied into both drifts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Placed {
+    pub five_h: Option<Window>,
+    pub seven_d: Option<Window>,
+}
+
+pub fn place(l: &Limits) -> Placed {
+    let mut p = Placed::default();
+    for w in [l.short, l.long].into_iter().flatten() {
+        if w.window_minutes <= 600 {
+            p.five_h = Some(w);
+        } else {
+            p.seven_d = Some(w);
+        }
+    }
+    p
+}
+
 fn window_from(v: &serde_json::Value) -> Option<Window> {
     let used_pct = v.get("used_percent")?.as_f64()?;
     Some(Window {

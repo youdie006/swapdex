@@ -33,13 +33,30 @@ pub struct Entry {
 pub type Cache = BTreeMap<String, Entry>;
 
 fn file(paths: &Paths) -> std::path::PathBuf {
-    paths.store_dir().join("quota-cache.json")
+    file_for(paths, "claude-code")
+}
+
+/// One file per tool. Slot names are unique only WITHIN a tool, so a single
+/// flat cache lets a Codex `work` overwrite a Claude `work` and show one
+/// account's windows under the other's name. Claude keeps the original
+/// filename so an upgrading install does not lose its history.
+fn file_for(paths: &Paths, tool: &str) -> std::path::PathBuf {
+    let name = match tool {
+        "claude-code" => "quota-cache.json".to_string(),
+        t => format!("{t}-quota-cache.json"),
+    };
+    paths.store_dir().join(name)
 }
 
 /// Read the cache. Anything unreadable yields an empty one: a stale-value cache
 /// is a convenience, never a reason to fail a command.
 pub fn load(paths: &Paths) -> Cache {
     load_at(paths, now_secs())
+}
+
+/// The same, for one tool.
+pub fn load_for(paths: &Paths, tool: &str) -> Cache {
+    load_file_at(&file_for(paths, tool), now_secs())
 }
 
 /// Unix seconds, taken once per load so every window is judged against the same
@@ -72,7 +89,11 @@ fn expire_windows(mut e: Entry, now: i64) -> Entry {
 
 /// `load`, against a given instant, so the expiry is testable.
 fn load_at(paths: &Paths, now: i64) -> Cache {
-    let mut c: Cache = std::fs::read(file(paths))
+    load_file_at(&file(paths), now)
+}
+
+fn load_file_at(path: &std::path::Path, now: i64) -> Cache {
+    let mut c: Cache = std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
@@ -99,16 +120,22 @@ fn was_clamped(e: &Entry) -> bool {
 /// Merge fresh readings in and save. Only accounts that were actually read are
 /// touched, so one account's throttled request cannot erase another's history.
 pub fn update(paths: &Paths, fresh: &[(String, Entry)]) {
+    update_for(paths, "claude-code", fresh);
+}
+
+/// The same, for one tool.
+pub fn update_for(paths: &Paths, tool: &str, fresh: &[(String, Entry)]) {
     if fresh.is_empty() {
         return;
     }
-    let mut c = load(paths);
+    let path = file_for(paths, tool);
+    let mut c = load_file_at(&path, now_secs());
     for (name, e) in fresh {
         c.insert(name.clone(), *e);
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
         let _ = std::fs::create_dir_all(paths.store_dir());
-        let _ = crate::atomic::write_secret(&file(paths), &bytes);
+        let _ = crate::atomic::write_secret(&path, &bytes);
     }
 }
 
@@ -122,6 +149,27 @@ mod tests {
             at,
             ..Default::default()
         }
+    }
+
+    /// Codex accounts are remembered in their own file. Slot names are only
+    /// unique within a tool, so one flat cache lets a Codex account named
+    /// `work` overwrite a Claude account named `work` - and the display would
+    /// show one account's windows under the other's name.
+    #[test]
+    fn each_tool_remembers_its_accounts_separately() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        update_for(&paths, "claude-code", &[("work".into(), entry(10.0, 1))]);
+        update_for(&paths, "codex", &[("work".into(), entry(90.0, 1))]);
+
+        assert_eq!(load_for(&paths, "claude-code")["work"].five_h, Some(10.0));
+        assert_eq!(load_for(&paths, "codex")["work"].five_h, Some(90.0));
+        // The Claude file keeps the name it has always had, so an install that
+        // upgrades does not lose its history.
+        assert!(root
+            .path()
+            .join(".local/share/swapdex/quota-cache.json")
+            .exists());
     }
 
     #[test]

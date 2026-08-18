@@ -87,6 +87,11 @@ struct Shared {
     /// The corner already announced, so a fallback that lasts a while does not
     /// repeat one sentence on every turn.
     corner_note: Mutex<Option<pick::Corner>>,
+    /// Said once when a Codex response turns out to state its own windows.
+    /// Whether Codex sends those headers is undocumented and was never checked
+    /// here, so the first arrival is worth seeing - and its absence stays
+    /// visible as the line never appearing.
+    codex_headers_seen: std::sync::atomic::AtomicBool,
     /// The last redirection announced, so a `serve` pointer stuck on a benched
     /// account does not print the same sentence on every turn.
     benched_note: Mutex<Option<(String, String)>>,
@@ -791,6 +796,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
 
     let server = Arc::new(server);
     let sh = Arc::new(Shared {
+        codex_headers_seen: std::sync::atomic::AtomicBool::new(false),
         agent: upstream::agent(),
         base: if opts.tool == "codex" {
             codex::base_url()
@@ -1143,6 +1149,25 @@ fn forward_turn(
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
             println!("  {} {} -> {} [{}]", method, path, up.status, slot.name);
             std::io::stdout().flush().ok();
+            // Codex states its own windows on the response, when it states them
+            // at all. The reading costs nothing - the response is already here -
+            // and it belongs to the account that SERVED this turn, so unlike a
+            // transcript there is nothing to attribute.
+            //
+            // Whether Codex sends these headers is undocumented and had never
+            // been checked here, so the first arrival says so once. Their
+            // absence stays visible as that line never appearing.
+            if crate::codex_usage::remember(paths, &slot.name, &up.headers, now_secs())
+                && !sh
+                    .codex_headers_seen
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                println!(
+                    "  {}: this response stated its own quota windows",
+                    slot.name
+                );
+                std::io::stdout().flush().ok();
+            }
             // A 429 wears two meanings, exactly as it does on the Claude side. A
             // THROTTLE ("slow down", x-should-retry) is fixed by waiting and
             // retrying THIS account; treating it as exhaustion gave the account
@@ -1283,6 +1308,12 @@ fn forward_turn(
         // the account is still serving, and rotating away would drop the
         // prompt cache (which is organization-scoped) for nothing.
         let quota = ratelimit::from_headers(&up.headers);
+        // Codex states its own windows on the response, when it states them at
+        // all. That reading costs nothing - the response is already here - and
+        // it belongs to the account that SERVED this turn, so unlike a
+        // transcript there is nothing to attribute. It only arrives while the
+        // user is working, which is why the endpoint reading still exists for
+        // accounts sitting idle.
         match &quota {
             Some(q) if q.rejected => println!(
                 "{} {path} -> {} ({} spent)",
