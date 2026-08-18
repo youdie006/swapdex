@@ -630,6 +630,8 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
             .map(|(n, m)| {
                 let honest = pick::still_offering_credits(
                     m.credits,
+                    m.five_h,
+                    m.seven_d,
                     sh.refused_at.lock().unwrap().get(n).copied(),
                     sh.ok_at.lock().unwrap().get(n).copied(),
                 );

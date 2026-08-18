@@ -258,10 +258,20 @@ pub fn refusing(
 /// Times are unix seconds. `None` for either means it has never happened.
 pub fn still_offering_credits(
     on_credits: bool,
+    five_h: Option<f64>,
+    seven_d: Option<f64>,
     last_refusal: Option<i64>,
     last_ok: Option<i64>,
 ) -> bool {
     if !on_credits {
+        return false;
+    }
+    // Credits only matter once a window is actually spent. An account with 88%
+    // of both windows left is serving on its plan, and saying "(on credits)"
+    // beside that reads as an account in trouble - or as a bill being run up -
+    // when neither is happening. What the endpoint reports is that extra usage
+    // is ENABLED, which is a setting, not a state.
+    if !credits_are_load_bearing(five_h, seven_d) {
         return false;
     }
     match (last_refusal, last_ok) {
@@ -269,6 +279,22 @@ pub fn still_offering_credits(
         (Some(_), None) => false,
         (Some(bad), Some(good)) => good >= bad,
     }
+}
+
+/// A window this full is spent for the purpose of the credits label - the last
+/// percent is not worth arguing about, and a reading taken a moment ago will
+/// have moved.
+const SPENT: f64 = 99.0;
+
+/// Are credits carrying this account, or merely switched on?
+///
+/// They are load-bearing only once a window is spent. Until then the account is
+/// serving on its plan and credits have not been touched.
+pub fn credits_are_load_bearing(five_h: Option<f64>, seven_d: Option<f64>) -> bool {
+    [five_h, seven_d]
+        .into_iter()
+        .flatten()
+        .any(|used| used >= SPENT)
 }
 
 pub fn credits_note(on_credits: bool, refused: bool) -> &'static str {
@@ -1352,28 +1378,106 @@ mod credit_honesty_tests {
 
     #[test]
     fn an_account_that_has_never_refused_keeps_its_credits_label() {
-        assert!(still_offering_credits(true, None, None));
-        assert!(still_offering_credits(true, None, Some(100)));
+        assert!(still_offering_credits(true, Some(100.0), None, None, None));
+        assert!(still_offering_credits(
+            true,
+            Some(100.0),
+            None,
+            None,
+            Some(100)
+        ));
     }
 
     /// The flicker this exists to stop: the refusal record lapses, and the
     /// label comes back before anything has actually succeeded.
     #[test]
     fn a_lapsed_refusal_does_not_restore_the_promise_on_its_own() {
-        assert!(!still_offering_credits(true, Some(100), None));
-        assert!(!still_offering_credits(true, Some(100), Some(50)));
+        assert!(!still_offering_credits(
+            true,
+            Some(100.0),
+            None,
+            Some(100),
+            None
+        ));
+        assert!(!still_offering_credits(
+            true,
+            Some(100.0),
+            None,
+            Some(100),
+            Some(50)
+        ));
     }
 
     /// A success after the refusal settles it - the account is serving again.
     #[test]
     fn a_turn_that_succeeded_since_settles_it() {
-        assert!(still_offering_credits(true, Some(100), Some(101)));
-        assert!(still_offering_credits(true, Some(100), Some(100)));
+        assert!(still_offering_credits(
+            true,
+            Some(100.0),
+            None,
+            Some(100),
+            Some(101)
+        ));
+        assert!(still_offering_credits(
+            true,
+            Some(100.0),
+            None,
+            Some(100),
+            Some(100)
+        ));
     }
 
     /// No credits means no label, whatever the history.
     #[test]
     fn nothing_is_promised_for_an_account_with_no_credits() {
-        assert!(!still_offering_credits(false, None, Some(999)));
+        assert!(!still_offering_credits(
+            false,
+            Some(100.0),
+            None,
+            None,
+            Some(999)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod credits_relevance_tests {
+    use super::*;
+
+    /// The line that prompted this: an account with 88% of both windows left,
+    /// serving normally, labelled "(on credits)". Nothing is being spent on
+    /// credits there - extra usage is merely switched on, which is a setting.
+    #[test]
+    fn an_account_with_room_is_not_running_on_credits() {
+        assert!(!credits_are_load_bearing(Some(12.0), Some(14.0)));
+        assert!(!still_offering_credits(
+            true,
+            Some(12.0),
+            Some(14.0),
+            None,
+            None
+        ));
+    }
+
+    /// Once a window is spent, credits are what is carrying the account, and
+    /// saying so is the difference between "this one is finished" and "this one
+    /// still works".
+    #[test]
+    fn a_spent_window_makes_credits_the_thing_carrying_it() {
+        assert!(credits_are_load_bearing(Some(100.0), Some(14.0)));
+        assert!(credits_are_load_bearing(Some(12.0), Some(99.5)));
+        assert!(still_offering_credits(
+            true,
+            Some(100.0),
+            Some(14.0),
+            None,
+            None
+        ));
+    }
+
+    /// Nothing measured is not a spent window.
+    #[test]
+    fn an_unmeasured_account_claims_nothing() {
+        assert!(!credits_are_load_bearing(None, None));
     }
 }

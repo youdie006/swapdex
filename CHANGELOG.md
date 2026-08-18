@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.65.4] - 2026-08-18
+
+### Fixed
+- **"(on credits)" is only said when credits are actually carrying the account.** The usage endpoint reports that extra usage is ENABLED - a setting - and that was being printed as though it described what the account was doing. So an account serving normally with 88% of both windows left read `5h 88% left · 7d 86% left (on credits)`, which suggests either an account in trouble or a bill being run up, when neither was happening. Credits become load-bearing only once a window is spent; until then the account is on its plan and they have not been touched. The dashboard already worked this way - this brings the proxy's usage line in line with it.
+
 ## [0.65.3] - 2026-08-18
 
 ### Fixed
