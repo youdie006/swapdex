@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.67.1] - 2026-08-19
+
+### Fixed
+- **`share-history --dry-run` no longer does the thing it is previewing.** The count of conversations to carry was taken by actually copying them, so the preview said "4 conversations" and the real run that followed said "0" - the first had already done the work. A preview that changes what it previews is worse than none: its answer is only true the first time it is asked. It counts and writes nothing now, and gives the same answer however often it runs. Nothing was lost when this fired on a real machine - the files were ones the merge would have copied anyway, and it never overwrites or deletes - but the command did not do what it said.
+
 ## [0.67.0] - 2026-08-19
 
 ### Fixed

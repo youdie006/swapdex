@@ -468,10 +468,16 @@ pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &["config.toml", "AGENTS.md", "se
 /// that one is what every account can see, and a slot's copy of the same
 /// conversation is at best equally good and at worst older.
 ///
+/// `dry_run` counts what WOULD be carried and writes nothing. A preview that
+/// changes the thing it is previewing is worse than no preview: the answer it
+/// gives is only true the first time, and the second run reports zero because
+/// the first one already did the work.
+///
 /// Returns how many were carried.
 pub fn carry_history_into_shared(
     slot_dir: &std::path::Path,
     shared_dir: &std::path::Path,
+    dry_run: bool,
 ) -> std::io::Result<usize> {
     if !slot_dir.is_dir() {
         return Ok(0);
@@ -492,10 +498,12 @@ pub fn carry_history_into_shared(
             if dest.exists() {
                 continue;
             }
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
+            if !dry_run {
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&path, &dest)?;
             }
-            std::fs::copy(&path, &dest)?;
             carried += 1;
         }
     }
@@ -1015,7 +1023,7 @@ mod adopt_history_tests {
         // Same path in both: the shared one wins and is not overwritten.
         write(&slot.join("projA/one.jsonl"), "slot-version");
 
-        let moved = carry_history_into_shared(&slot, &shared).unwrap();
+        let moved = carry_history_into_shared(&slot, &shared, false).unwrap();
         assert_eq!(moved, 2, "two files were only in the slot");
         assert_eq!(
             std::fs::read_to_string(shared.join("projA/one.jsonl")).unwrap(),
@@ -1041,11 +1049,29 @@ mod adopt_history_tests {
         let shared = t.path().join("bare/projects");
         let slot = t.path().join("slot/projects");
         write(&slot.join("p/a.jsonl"), "x");
-        carry_history_into_shared(&slot, &shared).unwrap();
+        carry_history_into_shared(&slot, &shared, false).unwrap();
         assert!(
             slot.join("p/a.jsonl").exists(),
             "originals survive the copy"
         );
+    }
+
+    /// A preview that changes what it previews is worse than none: its answer
+    /// is only true the first time, and the second run reports zero because the
+    /// first already did the work. Caught on a real machine, where `--dry-run`
+    /// said "4 conversations" and then the real run said "0".
+    #[test]
+    fn a_dry_run_counts_and_writes_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let shared = t.path().join("bare/projects");
+        let slot = t.path().join("slot/projects");
+        write(&slot.join("p/a.jsonl"), "x");
+        write(&slot.join("p/b.jsonl"), "y");
+
+        assert_eq!(carry_history_into_shared(&slot, &shared, true).unwrap(), 2);
+        assert!(!shared.exists(), "a dry run creates nothing");
+        // And it is repeatable: the same answer every time it is asked.
+        assert_eq!(carry_history_into_shared(&slot, &shared, true).unwrap(), 2);
     }
 
     #[test]
@@ -1053,7 +1079,7 @@ mod adopt_history_tests {
         let t = tempfile::tempdir().unwrap();
         let shared = t.path().join("bare/projects");
         assert_eq!(
-            carry_history_into_shared(&t.path().join("slot/projects"), &shared).unwrap(),
+            carry_history_into_shared(&t.path().join("slot/projects"), &shared, false).unwrap(),
             0
         );
     }

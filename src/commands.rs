@@ -1909,7 +1909,7 @@ pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
             touched += 1;
             continue;
         }
-        let carried = crate::slots::carry_history_into_shared(&own, &shared)?;
+        let carried = crate::slots::carry_history_into_shared(&own, &shared, dry_run)?;
         println!(
             "  {} - {carried} conversation(s) only it had, carried over",
             r.name
