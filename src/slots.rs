@@ -456,6 +456,29 @@ pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md", "projec
 /// `codex_usage` asks the account directly and no longer depends on that.
 pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &["config.toml", "AGENTS.md", "sessions"];
 
+/// Do this tool's accounts all read one conversation history?
+///
+/// True when every slot's history directory is a link rather than a directory
+/// of its own. Used to decide whether a switch still needs the old warning
+/// about conversations going out of view - a warning that is right for an
+/// un-repaired install and wrong, and misleading, for a repaired one.
+pub fn history_is_shared(paths: &crate::paths::Paths, tool: &str) -> bool {
+    let dir_name = if tool == "codex" {
+        "sessions"
+    } else {
+        "projects"
+    };
+    let Ok(slots) = Slots::open_for(paths, tool) else {
+        return true; // nothing registered: nothing to warn about
+    };
+    slots.list().into_iter().all(|r| {
+        let own = r.config_dir.join(dir_name);
+        // A real directory of its own is the un-shared case. A link, or nothing
+        // at all, is not.
+        !std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_dir())
+    })
+}
+
 /// Copy the conversations a slot holds alone into the shared store.
 ///
 /// Slots made before sharing have their own `projects/`, and those

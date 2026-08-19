@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.68.0] - 2026-08-19
+
+### Removed
+- **`swapdex continue`**, added earlier the same day and made pointless hours later by sharing the history. It carried one conversation at a time into another account'"'"'s store; with every account reading one store there is nothing to carry, and it fails outright on the setup swapdex now creates - `already migrated: ... already exists`. It was the symptom being treated one conversation at a time. Switching accounts is `swapdex use`, and every conversation is already visible from wherever you land.
+
+### Fixed
+- **A switch no longer warns that conversations will go out of view.** That warning was true and useful when each account kept its own history; it is false now, and a warning that has stopped being true is worse than none, because it teaches a rule the tool no longer follows. An account that has NOT been repaired yet still says so, and names `share-history` as the fix - silence there would be the same failure in reverse.
+
 ## [0.67.1] - 2026-08-19
 
 ### Fixed

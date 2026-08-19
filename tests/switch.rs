@@ -3397,7 +3397,7 @@ fn switching_a_codex_slot_repoints_instead_of_copying() {
 #[test]
 fn a_slot_switch_says_whether_anything_running_actually_moved() {
     use swapdex::commands::switch_outcome_line;
-    let without = switch_outcome_line("claude-code", "work", false);
+    let without = switch_outcome_line("claude-code", "work", false, true);
     assert!(
         without.contains("NEXT claude you start"),
         "says when it applies: {without}"
@@ -3415,14 +3415,29 @@ fn a_slot_switch_says_whether_anything_running_actually_moved() {
         "never claims the running session moved: {without}"
     );
 
-    let with = switch_outcome_line("claude-code", "work", true);
+    let with = switch_outcome_line("claude-code", "work", true, true);
     assert!(
         with.contains("serves this session from the next turn"),
         "with a proxy it genuinely does: {with}"
     );
 
+    // Shared history is the normal state now, so the switch says nothing about
+    // conversations going out of view - that warning was true once and would
+    // teach a rule the tool no longer follows.
+    assert!(
+        !without.contains("stay with the account"),
+        "no stale warning once history is shared: {without}"
+    );
+    // An account that has NOT been repaired still loses sight of them, and is
+    // told what fixes it. Silence there would be the older failure in reverse.
+    let unshared = switch_outcome_line("claude-code", "work", false, false);
+    assert!(
+        unshared.contains("share-history"),
+        "an un-repaired account is told how to fix it: {unshared}"
+    );
+
     // Codex names its own proxy flag, so the fix is copy-pasteable.
-    let codex = switch_outcome_line("codex", "work", false);
+    let codex = switch_outcome_line("codex", "work", false, true);
     assert!(codex.contains("NEXT codex you start"), "{codex}");
     assert!(codex.contains("swapdex proxy --tool codex"), "{codex}");
 }

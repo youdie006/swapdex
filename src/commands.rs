@@ -1840,30 +1840,6 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
 ///
 /// Nothing here is silent. Each step says what it did, and a step that could
 /// not run says so rather than letting the next one look like it worked.
-/// This project's most recent Claude session id, as sessionwiki reports it.
-///
-/// `None` when there is none, or when the answer cannot be read - either way
-/// the caller has nothing to hand over and says so, rather than migrating
-/// something the user did not mean.
-fn latest_session_here(cwd: &std::path::Path) -> Option<String> {
-    let out = Command::new("sessionwiki")
-        .args(["list", "-n", "1", "--tool", "claude-code", "--json"])
-        .arg("--project")
-        .arg(cwd)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    serde_json::from_slice::<Value>(&out.stdout)
-        .ok()?
-        .as_array()?
-        .first()?
-        .get("id")?
-        .as_str()
-        .map(str::to_string)
-}
-
 /// Make every conversation reachable from every account.
 ///
 /// Slots created before transcripts were shared keep their own `projects/`, so
@@ -1937,93 +1913,6 @@ pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
     } else {
         println!("done - every conversation is now reachable from every account");
     }
-    Ok(0)
-}
-
-pub fn continue_elsewhere(
-    paths: &Paths,
-    id: Option<&str>,
-    account: Option<&str>,
-    dry_run: bool,
-) -> Result<i32> {
-    if !command_exists("sessionwiki") {
-        anyhow::bail!(
-            "this needs sessionwiki to carry the conversation across accounts - \
-             install it (`brew install youdie006/tap/sessionwiki`) and try again"
-        );
-    }
-    let here = active_slot_name(paths, "claude-code")
-        .ok_or_else(|| anyhow::anyhow!("no active Claude account - `swapdex use <name>` first"))?;
-
-    // Who has room. The WORST window of each account, so one with a spent 7d is
-    // not called roomy because its 5h happens to be fresh. These are the
-    // readings `swapdex quota` took; an account nobody has read is absent, and
-    // absence is not an offer.
-    let usage: Vec<(String, f64)> = crate::quota_cache::load_for(paths, "claude-code")
-        .into_iter()
-        .filter_map(|(name, e)| {
-            crate::proxy::pick::headroom(e.five_h, e.seven_d).map(|worst| (name, worst))
-        })
-        .collect();
-
-    let target = match account {
-        Some(a) => a.to_string(),
-        None => crate::proxy::pick::handoff_target(&usage, &here).ok_or_else(|| {
-            anyhow::anyhow!(
-                "nowhere to hand it to - no other Claude account has a usage reading. \
-                 `swapdex quota` reads them; `--account <name>` picks one anyway"
-            )
-        })?,
-    };
-    if target == here {
-        anyhow::bail!(
-            "'{target}' is the account you are already on - a handoff to yourself changes nothing"
-        );
-    }
-    let dir = slot_dir_named(paths, &target).ok_or_else(|| {
-        anyhow::anyhow!("'{target}' has no slot - `swapdex run {target}` gives it one, then retry")
-    })?;
-
-    let cwd =
-        anyhow::Context::context(std::env::current_dir(), "cannot read the current directory")?;
-    println!("continue on {target}");
-    println!("  carry the conversation into its store: {}", dir.display());
-    if dry_run {
-        println!("  (dry run - nothing changed)");
-        return Ok(0);
-    }
-
-    // Which conversation. Named, or this project's most recent - resolved HERE
-    // rather than with a flag on sessionwiki, so the two tools stay coupled
-    // only by its stable `--json` output.
-    let session = match id.map(str::trim).filter(|i| !i.is_empty()) {
-        Some(i) => i.to_string(),
-        None => latest_session_here(&cwd).ok_or_else(|| {
-            anyhow::anyhow!(
-                "no Claude session found for {} - name one (`swapdex continue <id>`), \
-                 or run this from the project you were working in",
-                cwd.display()
-            )
-        })?,
-    };
-    println!("  session {session}");
-
-    let mut mig = Command::new("sessionwiki");
-    mig.arg("migrate")
-        .arg(&session)
-        .arg(&cwd)
-        .arg("--config-dir")
-        .arg(&dir);
-    let out = anyhow::Context::context(mig.output(), "could not run `sessionwiki migrate`")?;
-    print!("{}", String::from_utf8_lossy(&out.stdout));
-    if !out.status.success() {
-        // The switch has NOT happened yet, and saying so is the difference
-        // between "retry this" and "work out what state I am in".
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
-        anyhow::bail!("could not carry the conversation - the account was left as it was");
-    }
-    use_account(paths, &target, Some(ToolSel::Claude), false, false)?;
-    println!("now on {target} - resume it with the command above");
     Ok(0)
 }
 
@@ -3933,7 +3822,12 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
 /// the change reaches the NEXT launch and nothing that is already running, and
 /// reporting it as "this account now serves you" was simply false - the session
 /// carried on with the old account while the line said otherwise.
-pub fn switch_outcome_line(tool: &str, name: &str, proxy_running: bool) -> String {
+pub fn switch_outcome_line(
+    tool: &str,
+    name: &str,
+    proxy_running: bool,
+    history_shared: bool,
+) -> String {
     let bin = tool_binary(tool);
     if proxy_running {
         format!("{name} serves this session from the next turn ({bin} proxy is running)")
@@ -3946,13 +3840,17 @@ pub fn switch_outcome_line(tool: &str, name: &str, proxy_running: bool) -> Strin
         out.push_str(&format!(
             "  to move one that is already running: swapdex proxy{flag}\n"
         ));
-        // The surprise that costs people the most time: conversations live inside
-        // the store they were started in, so a switch changes which ones -c and
-        // -r can see. They are not gone, they are in the other account.
-        out.push_str(
-            "  note: past conversations stay with the account they were started in - \
-             `swapdex whereis` finds one",
-        );
+        // This used to warn that a switch changed which conversations `-c` and
+        // `-r` could see, which was true and cost people time. Slots share their
+        // history now, so it is no longer true - and a warning that has stopped
+        // being true is worse than none, because it teaches a rule the tool no
+        // longer follows. `share-history` repairs accounts made before that.
+        if !history_shared {
+            out.push_str(
+                "  note: this account keeps its own conversation history - \
+                 `swapdex share-history` makes them all reachable from every account",
+            );
+        }
         out
     }
 }
@@ -3966,7 +3864,15 @@ fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Res
     let slots = crate::slots::Slots::open_for(paths, tool)?;
     slots.set_default(name)?;
     let proxy = crate::proxy::running_proxy_for(paths, tool).is_some();
-    println!("{}", switch_outcome_line(tool, name, proxy));
+    println!(
+        "{}",
+        switch_outcome_line(
+            tool,
+            name,
+            proxy,
+            crate::slots::history_is_shared(paths, tool)
+        )
+    );
     // First-time nudge: without the shim, a plain launch won't follow this.
     if !crate::shim::shim_path_for(paths, tool).exists() {
         println!(
