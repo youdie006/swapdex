@@ -2534,6 +2534,25 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 claude.push(row);
             }
         }
+        // The user asked for an account and the proxy is serving another. Say
+        // so on the row they picked: resolving it silently leaves them looking
+        // at an account they did not choose with no idea why.
+        if let Some(why) = unhonoured_ask(
+            crate::slots::Slots::open_for(paths, "claude-code")
+                .ok()
+                .and_then(|sl| {
+                    sl.serving_dir()
+                        .and_then(|d| sl.list().into_iter().find(|r| r.config_dir == d))
+                        .map(|r| r.name)
+                })
+                .as_deref(),
+            crate::proxy::serving_account_for(paths, "claude-code").as_deref(),
+            proxy_acted_since_ask(paths, "claude-code"),
+        ) {
+            if let Some((_, u)) = claude.iter_mut().find(|(n, _)| why.contains(n.as_str())) {
+                u.note = Some(why);
+            }
+        }
         claude
     }
     impl crate::tui::TuiCtx for Ctx<'_> {
@@ -4489,7 +4508,31 @@ pub fn active_slot_name(paths: &Paths, tool: &str) -> Option<String> {
         slots.serving_dir().and_then(&name_of),
         crate::proxy::serving_account_for(paths, tool),
         slots.default_dir().and_then(&name_of),
+        proxy_acted_since_ask(paths, tool),
     )
+}
+
+/// Has the proxy served a turn SINCE the account was chosen?
+///
+/// Both records are files, and their timestamps answer it: the ask is written
+/// when the user picks, the proxy's record when it forwards. If the proxy's is
+/// the newer of the two, it has had its say about the choice.
+///
+/// False when either is missing - no ask cannot be thwarted, and a proxy that
+/// has never served has not contradicted anything.
+fn proxy_acted_since_ask(paths: &Paths, tool: &str) -> bool {
+    let asked = crate::slots::Slots::open_for(paths, tool)
+        .ok()
+        .map(|s| s.serving_pointer_file());
+    let did = crate::proxy::serving_record_file(paths, tool);
+    let stamp = |p: Option<std::path::PathBuf>| {
+        p.and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+    };
+    match (stamp(asked), stamp(Some(did))) {
+        (Some(a), Some(d)) => d > a,
+        _ => false,
+    }
 }
 
 /// The order of authority behind that mark: what was ASKED FOR, then what
@@ -4506,8 +4549,42 @@ pub fn pick_active(
     asked_for: Option<String>,
     proxy_did: Option<String>,
     default: Option<String>,
+    proxy_acted_since_ask: bool,
 ) -> Option<String> {
+    // The ask wins until the proxy has served someone ELSE since it was made.
+    // At that point the ask demonstrably did not take, and going on naming it
+    // tells the user their key worked when it did not - seen on a real machine,
+    // where an account asked for at 13:45 was still marked active half an hour
+    // later while every turn went elsewhere because it refuses on overage.
+    if proxy_acted_since_ask {
+        if let (Some(a), Some(d)) = (asked_for.as_deref(), proxy_did.as_deref()) {
+            if a != d {
+                return proxy_did;
+            }
+        }
+    }
     asked_for.or(proxy_did).or(default)
+}
+
+/// An ask the proxy is not honouring, in words - or `None` when there is none.
+///
+/// Resolving the disagreement silently would leave the user staring at an
+/// account they did not choose with no idea why. They asked for something; the
+/// screen owes them the reason it is not happening.
+pub fn unhonoured_ask(
+    asked_for: Option<&str>,
+    proxy_did: Option<&str>,
+    proxy_acted_since_ask: bool,
+) -> Option<String> {
+    if !proxy_acted_since_ask {
+        return None;
+    }
+    match (asked_for, proxy_did) {
+        (Some(a), Some(d)) if a != d => Some(format!(
+            "asked for {a} - it cannot serve, so turns are going to {d}"
+        )),
+        _ => None,
+    }
 }
 
 /// What a screen should call the account paying the next turn.
@@ -6623,7 +6700,7 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 mod tests {
     use super::{
         codex_identity, codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
-        payer_line, row_needs_login, win_line,
+        payer_line, pick_active, row_needs_login, unhonoured_ask, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -6774,6 +6851,62 @@ mod tests {
         assert!(out.contains("no windows"), "{out}");
         // Nothing was said about credits, so nothing is claimed about them.
         assert!(!out.contains("credits"), "{out}");
+    }
+
+    /// Asking for an account and getting it are different things. The ask wins
+    /// at first, so pressing Enter shows the choice immediately instead of
+    /// lagging a turn behind. But when the proxy has SERVED someone else since
+    /// the ask, the ask did not take - and a row that goes on naming it is
+    /// telling the user their key worked when it did not.
+    ///
+    /// Seen on a real machine: `rnd` was asked for at 13:45, every turn after
+    /// went to `bsgong` because rnd refuses on overage, and the dashboard said
+    /// `rnd active 95% left` for half an hour.
+    #[test]
+    fn reality_outranks_the_ask_once_the_proxy_has_acted_on_it() {
+        let ask = || Some("rnd".to_string());
+        let did = || Some("bsgong".to_string());
+
+        // Just asked, proxy has not served since: show the choice.
+        assert_eq!(
+            pick_active(ask(), did(), None, false).as_deref(),
+            Some("rnd")
+        );
+        // The proxy served someone else AFTER the ask: that is what is happening.
+        assert_eq!(
+            pick_active(ask(), did(), None, true).as_deref(),
+            Some("bsgong")
+        );
+        // Agreement needs no adjudication.
+        assert_eq!(
+            pick_active(ask(), ask(), None, true).as_deref(),
+            Some("rnd")
+        );
+        // Nobody asked: the proxy's own record is the only answer there is.
+        assert_eq!(
+            pick_active(None, did(), Some("x".into()), false).as_deref(),
+            Some("bsgong")
+        );
+        // Nothing anywhere: fall back to where sessions start.
+        assert_eq!(
+            pick_active(None, None, Some("x".into()), false).as_deref(),
+            Some("x")
+        );
+    }
+
+    /// And the divergence is stated, not merely resolved silently: the user
+    /// asked for something and needs to know it is not happening, and why the
+    /// screen names a different account than the one they picked.
+    #[test]
+    fn a_thwarted_ask_is_said_out_loud() {
+        assert_eq!(
+            unhonoured_ask(Some("rnd"), Some("bsgong"), true).as_deref(),
+            Some("asked for rnd - it cannot serve, so turns are going to bsgong")
+        );
+        // Honoured, or not yet acted on: nothing to say.
+        assert_eq!(unhonoured_ask(Some("rnd"), Some("bsgong"), false), None);
+        assert_eq!(unhonoured_ask(Some("rnd"), Some("rnd"), true), None);
+        assert_eq!(unhonoured_ask(None, Some("bsgong"), true), None);
     }
 
     /// The endpoint says whose token this is; the local `id_token` says whose

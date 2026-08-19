@@ -382,6 +382,12 @@ impl Slots {
     /// nominally directed at a home no account owns - and the one this was found
     /// on had no login in it. An answer here is a claim about who pays, so it is
     /// only given for an account that still exists.
+    /// The file recording which account was ASKED to serve. Its timestamp is
+    /// how a caller tells whether the proxy has had its say since.
+    pub fn serving_pointer_file(&self) -> PathBuf {
+        self.serving_file()
+    }
+
     pub fn serving_dir(&self) -> Option<PathBuf> {
         let s = std::fs::read_to_string(self.serving_file()).ok()?;
         let dir = PathBuf::from(s.trim());

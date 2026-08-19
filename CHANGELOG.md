@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.69.0] - 2026-08-19
+
+### Fixed
+- **The dashboard marks the account that is actually paying, not the one you asked for.** Pressing Enter records a choice; whether it takes is a separate question, and with auto on the proxy sends each turn to whichever account can serve. On a real machine `rnd` was chosen at 13:45 and every turn afterwards went to `bsgong` - because rnd refuses on overage despite 95% of its windows being free - while the row said `rnd active 95% left` for half an hour. The ask still wins at first, so the key feels immediate instead of lagging a turn; but once the proxy has served someone ELSE since the ask, the ask demonstrably did not take and the mark follows what is happening. Decided from the two records timestamps: the ask is written when you pick, the proxy writes when it forwards.
+- **And it says why.** The chosen account row now carries `asked for rnd - it cannot serve, so turns are going to bsgong`. Resolving the disagreement silently would leave you looking at an account you did not pick with no idea how it got there.
+
 ## [0.68.0] - 2026-08-19
 
 ### Removed

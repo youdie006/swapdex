@@ -2283,21 +2283,28 @@ mod an_instruction_outranks_what_already_happened {
         let n = |s: &str| Some(s.to_string());
         use swapdex::commands::pick_active;
         assert_eq!(
-            pick_active(n("rnd"), n("bsgong"), n("bsgong")),
+            pick_active(n("rnd"), n("bsgong"), n("bsgong"), false),
             n("rnd"),
             "the instruction wins even though the proxy has not caught up"
         );
         assert_eq!(
-            pick_active(None, n("spare"), n("bsgong")),
+            pick_active(None, n("spare"), n("bsgong"), false),
             n("spare"),
             "nobody asked, so a rotation is the only thing that knows"
         );
         assert_eq!(
-            pick_active(None, None, n("bsgong")),
+            pick_active(None, None, n("bsgong"), false),
             n("bsgong"),
             "and otherwise, where sessions start"
         );
-        assert_eq!(pick_active(None, None, None), None);
+        assert_eq!(pick_active(None, None, None, false), None);
+        // ...but once the proxy has served someone else since the ask, the ask
+        // is demonstrably not being honoured and reality is what to show.
+        assert_eq!(
+            pick_active(n("rnd"), n("bsgong"), n("bsgong"), true),
+            n("bsgong"),
+            "an ask the proxy has already refused is not what is happening"
+        );
     }
 }
 

@@ -1625,6 +1625,12 @@ pub fn serving_account(paths: &Paths) -> Option<String> {
 }
 
 /// The same, for one tool's proxy.
+/// Where the proxy records the account it LAST served. Its timestamp is how a
+/// caller tells whether the proxy has acted since the user asked for one.
+pub fn serving_record_file(paths: &Paths, tool: &str) -> std::path::PathBuf {
+    serving_file_for(paths, tool)
+}
+
 pub fn serving_account_for(paths: &Paths, tool: &str) -> Option<String> {
     running_proxy_for(paths, tool)?;
     std::fs::read_to_string(serving_file_for(paths, tool))
