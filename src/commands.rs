@@ -6428,6 +6428,50 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The Codex login held in a saved snapshot, for accounts with no slot.
+///
+/// A snapshot is a copy, so its token can be older than the account's live one
+/// and the endpoint may refuse it - which is reported as a refusal rather than
+/// as an account with no numbers.
+fn snapshot_codex_auth(paths: &Paths, name: &str) -> Option<crate::proxy::codex::Auth> {
+    let snap = Store::open(paths).ok()?.load(name, "codex").ok()??;
+    let v: Value = serde_json::from_slice(snap.part("auth")?.expose()).ok()?;
+    let token = v["tokens"]["access_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let id = v["tokens"]["account_id"].as_str().unwrap_or_default();
+    Some(crate::proxy::codex::Auth {
+        token: crate::secret::Secret::new(token.as_bytes().to_vec()),
+        account_id: id.to_string(),
+    })
+}
+
+/// Every Codex account this machine knows, and where to read it from.
+///
+/// An account can be a SLOT (its own directory, the live login) or a saved
+/// SNAPSHOT (a copy in swapdex's store). The report walked slots only, so a
+/// machine that keeps its accounts as snapshots got no Codex section at all and
+/// not a word saying why - found on a real one, where `ls` listed three Codex
+/// accounts and `quota` printed nothing about any of them.
+///
+/// `Some(dir)` is a slot and is preferred where an account is held both ways:
+/// the slot is what the tool refreshes, the snapshot a copy that goes stale.
+pub fn codex_account_sources(
+    slots: &[(String, std::path::PathBuf)],
+    snapshots: &[String],
+) -> Vec<(String, Option<std::path::PathBuf>)> {
+    let mut out: Vec<(String, Option<std::path::PathBuf>)> = slots
+        .iter()
+        .map(|(n, d)| (n.clone(), Some(d.clone())))
+        .collect();
+    for n in snapshots {
+        if !out.iter().any(|(have, _)| have == n) {
+            out.push((n.clone(), None));
+        }
+    }
+    out
+}
+
 /// The Codex half of `swapdex quota`.
 ///
 /// Kept as its own pass rather than folded into the Claude loop above: the two
@@ -6435,29 +6479,49 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
 /// share is how a window is drawn. Silent when there are no Codex accounts, so
 /// a Claude-only machine sees no empty heading.
 fn print_codex_quota(paths: &Paths, now: i64) {
-    let slots: Vec<crate::slots::SlotRecord> = crate::slots::Slots::open_for(paths, "codex")
-        .map(|s| s.list())
+    let slots: Vec<(String, std::path::PathBuf)> = crate::slots::Slots::open_for(paths, "codex")
+        .map(|s| {
+            s.list()
+                .into_iter()
+                .map(|r| (r.name, r.config_dir))
+                .collect()
+        })
         .unwrap_or_default();
-    if slots.is_empty() {
+    let snapshots: Vec<String> = Store::open(paths)
+        .map(|st| {
+            st.list()
+                .into_iter()
+                .filter(|p| p.tools.iter().any(|t| t == "codex"))
+                .map(|p| p.name)
+                .collect()
+        })
+        .unwrap_or_default();
+    let accounts = codex_account_sources(&slots, &snapshots);
+    if accounts.is_empty() {
         return;
     }
     println!("codex - remaining on your Codex accounts");
     println!("live from ChatGPT's usage endpoint; opt-in network, spends 0 message quota.\n");
-    for r in &slots {
-        let saved = codex_slot_email(&r.config_dir);
-        match crate::proxy::codex::slot_auth(&r.config_dir) {
+    for (name, dir) in &accounts {
+        let saved = dir.as_deref().and_then(codex_slot_email);
+        // A slot reads from its own directory; a snapshot from the copy in the
+        // store. Reading only the first left snapshot-only machines with an
+        // empty section and no reason for it.
+        let auth = match dir {
+            Some(d) => crate::proxy::codex::slot_auth(d),
+            None => snapshot_codex_auth(paths, name),
+        };
+        match auth {
             None => {
-                println!("{}", r.name);
+                println!("{name}");
                 println!(
-                    "  no Codex login here yet - `swapdex run {} --tool codex` once signs it in",
-                    r.name
+                    "  no readable Codex login - `swapdex run {name} --tool codex` once signs it in"
                 );
             }
             Some(auth) => match crate::codex_usage::fetch(&auth) {
                 crate::codex_usage::Fetch::Ok(a) => {
                     println!(
-                        "{}   {}",
-                        r.name,
+                        "{name}   {}",
                         codex_identity(a.email.as_deref(), a.plan.as_deref(), saved.as_deref())
                     );
                     for line in codex_quota_lines(&a, now) {
@@ -6468,7 +6532,7 @@ fn print_codex_quota(paths: &Paths, now: i64) {
                 // the Claude side: a busy endpoint and a dead login are different
                 // news, and one silence for both hides whichever matters.
                 f => {
-                    println!("{}   {}", r.name, saved.unwrap_or_default());
+                    println!("{name}   {}", saved.unwrap_or_default());
                     println!("  {}", f.why_no_number().unwrap_or("no reading"));
                 }
             },
@@ -6699,8 +6763,9 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_identity, codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
-        payer_line, pick_active, row_needs_login, unhonoured_ask, win_line,
+        codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
+        home_note, keychain_verdict, payer_line, pick_active, row_needs_login, unhonoured_ask,
+        win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -6791,6 +6856,36 @@ mod tests {
             "nothing to disambiguate when they agree"
         );
         assert_eq!(home_note("work", None), "", "no pointer, nothing to say");
+    }
+
+    /// A Codex account can be a slot OR a saved snapshot, and the report used
+    /// to walk slots only - so a machine that keeps its accounts as snapshots
+    /// got no Codex section at all, and not a word saying why. Found on a real
+    /// one: `swapdex ls` listed three Codex accounts and `swapdex quota`
+    /// printed nothing about any of them.
+    #[test]
+    fn codex_accounts_are_gathered_from_slots_and_snapshots_alike() {
+        let got = codex_account_sources(
+            &[("live".into(), std::path::PathBuf::from("/slots/live"))],
+            &["saved".into(), "live".into()],
+        );
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"live"), "{names:?}");
+        assert!(
+            names.contains(&"saved"),
+            "a snapshot is an account too: {names:?}"
+        );
+        // An account held both ways is one account, listed once - and the slot
+        // is the live copy, so it wins.
+        assert_eq!(names.iter().filter(|n| **n == "live").count(), 1);
+        assert!(
+            got.iter().any(|(n, src)| n == "live" && src.is_some()),
+            "the slot keeps its directory: {got:?}"
+        );
+        assert!(
+            got.iter().any(|(n, src)| n == "saved" && src.is_none()),
+            "a snapshot has no directory to read: {got:?}"
+        );
     }
 
     /// Everything the endpoint says that a one-line row has no room for: the

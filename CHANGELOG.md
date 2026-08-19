@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.70.0] - 2026-08-19
+
+### Fixed
+- **A window the server never reports is no longer called unused.** Codex publishes only a weekly window - `secondary_window` comes back null every time - and the empty session column said `not started`, which is a CLAIM: the window exists and you have not touched it. True for Claude, whose 5h window begins on first use; false for Codex, where it read as room beside an account the owner had just watched run out in Codex itself. It says `not reported` there now. swapdex still cannot see that limit; it no longer pretends the silence means anything good.
+- **Codex accounts kept as snapshots are read too.** `swapdex quota` walked slots only, so a machine whose accounts are saved snapshots got no Codex section at all - not a number, not a heading, no reason. Found on one where `swapdex ls` listed three Codex accounts and `quota` said nothing about any of them. Each account is now read from wherever it lives, and one that cannot be read says why.
+
 ## [0.69.0] - 2026-08-19
 
 ### Fixed

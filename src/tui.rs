@@ -338,6 +338,39 @@ mod live_identity_tests {
 /// either way, and says why it is empty rather than leaving a hole.
 ///
 /// A slot too narrow for the phrase pads instead of truncating it into nonsense.
+/// What an empty window column should say, given whether the source publishes
+/// that window at all.
+///
+/// "not started" is a CLAIM: the window exists and has not been touched. True
+/// for Claude, whose 5h window begins on first use. False for Codex, whose
+/// server never sends a session window - and there the phrase reads as "you
+/// have room" beside an account the user has just been told is out.
+pub fn empty_window_phrase(source_publishes: bool) -> &'static str {
+    if source_publishes {
+        "not started"
+    } else {
+        "not reported"
+    }
+}
+
+/// `reset_slot`, told whether the source publishes this window.
+pub fn reset_slot_reason(
+    reset: Option<&str>,
+    word: bool,
+    width: usize,
+    source_publishes: bool,
+) -> String {
+    let phrase = empty_window_phrase(source_publishes);
+    let body = match reset {
+        Some(r) if word => format!("resets {r}"),
+        Some(r) => r.to_string(),
+        None if width >= phrase.chars().count() => phrase.to_string(),
+        None => String::new(),
+    };
+    let pad = width.saturating_sub(body.chars().count());
+    format!("{body}{}", " ".repeat(pad))
+}
+
 pub fn reset_slot(reset: Option<&str>, word: bool, width: usize) -> String {
     const UNSTARTED: &str = "not started";
     let body = match reset {
@@ -362,7 +395,11 @@ pub fn reset_slot_width(resets: &[Option<String>], word: bool) -> usize {
     if longest == 0 {
         0
     } else {
-        longest.max("not started".len())
+        // Sized for whichever phrase can appear, so rows saying different
+        // things still line up.
+        longest
+            .max(empty_window_phrase(true).len())
+            .max(empty_window_phrase(false).len())
     }
 }
 
@@ -1292,12 +1329,17 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 // it; and a row whose window has no reset must
                                 // still hold the column, or everything after it
                                 // slides left on that row alone.
+                                // Codex's server never publishes a session
+                                // window, so an empty 5h cell there means "not
+                                // reported", not "not started" - the latter
+                                // reads as room the account may not have.
+                                let publishes_5h = r.tools != "codex";
                                 let slot = |r: &str, word: bool, w: usize| -> String {
                                     if w == 0 {
                                         String::new()
                                     } else {
                                         let v = (!r.is_empty()).then_some(r);
-                                        format!("  {}", reset_slot(v, word, w))
+                                        format!("  {}", reset_slot_reason(v, word, w, publishes_5h))
                                     }
                                 };
                                 let (t5, t7) = {
@@ -3423,5 +3465,37 @@ mod tests {
                 "key {k:?} needs a label that explains it: {label:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_window_tests {
+    use super::*;
+
+    /// "not started" is a claim: the window exists and you have not touched it.
+    /// True for Claude, where the 5h window begins on first use. False for
+    /// Codex, whose server never publishes a session window at all - there the
+    /// phrase reads as "you have room" beside an account the user has just been
+    /// told is out, which is the reverse of the truth.
+    #[test]
+    fn an_unpublished_window_is_not_called_unused() {
+        assert_eq!(empty_window_phrase(true), "not started");
+        assert_eq!(empty_window_phrase(false), "not reported");
+        assert_ne!(
+            empty_window_phrase(false),
+            "not started",
+            "silence from the server must not be reported as an unused window"
+        );
+    }
+
+    /// The column is sized for whichever phrase can appear, so a row saying one
+    /// and a row saying the other still line up.
+    #[test]
+    fn the_column_fits_either_phrase() {
+        let w = reset_slot_width(&[Some("1:00pm".to_string())], false);
+        assert!(w >= empty_window_phrase(false).len(), "width {w}");
+        let cell = reset_slot_reason(None, false, w, false);
+        assert!(cell.starts_with("not reported"), "{cell:?}");
+        assert_eq!(cell.chars().count(), w, "padded to the column: {cell:?}");
     }
 }
