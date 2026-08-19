@@ -3441,3 +3441,31 @@ fn a_slot_switch_says_whether_anything_running_actually_moved() {
     assert!(codex.contains("NEXT codex you start"), "{codex}");
     assert!(codex.contains("swapdex proxy --tool codex"), "{codex}");
 }
+
+/// Renaming an account must rename it everywhere it is registered, whatever
+/// tool it belongs to. It looked in Claude's registry only, so a Codex slot was
+/// never found: the snapshot was renamed and the slot kept its old name, and
+/// the machine then had one account answering to two - `ls` saying one thing
+/// and the registry another.
+#[test]
+fn renaming_a_codex_slot_actually_renames_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = swapdex::paths::Paths::rooted(dir.path());
+    let mut slots = swapdex::slots::Slots::open_for(&paths, "codex").unwrap();
+    slots.create("A").unwrap();
+
+    assert_eq!(
+        swapdex::commands::rename(&paths, "A", "codex-main").unwrap(),
+        0
+    );
+
+    let after = swapdex::slots::Slots::open_for(&paths, "codex").unwrap();
+    assert!(
+        after.get("codex-main").is_some(),
+        "the slot took the new name"
+    );
+    assert!(
+        after.get("A").is_none(),
+        "and does not answer to the old one"
+    );
+}

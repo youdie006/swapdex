@@ -539,6 +539,22 @@ pub fn carry_history_into_shared(
     Ok(carried)
 }
 
+/// Find a slot by name across EVERY tool, and say which tool it belongs to.
+///
+/// Callers that act on "an account" by name - rename, remove - must not assume
+/// Claude. Looking only there meant a Codex slot was never found: its snapshot
+/// was renamed and the slot kept its old name, so one account answered to two.
+pub fn find_any_tool(paths: &crate::paths::Paths, name: &str) -> Option<(String, SlotRecord)> {
+    for tool in ["claude-code", "codex", "gemini", "antigravity"] {
+        if let Ok(s) = Slots::open_for(paths, tool) {
+            if let Some(r) = s.get(name) {
+                return Some((tool.to_string(), r));
+            }
+        }
+    }
+    None
+}
+
 /// The files `tool` shares across its accounts.
 pub fn shared_files(tool: &str) -> &'static [&'static str] {
     match tool {
@@ -1110,6 +1126,42 @@ mod adopt_history_tests {
         assert_eq!(
             carry_history_into_shared(&t.path().join("slot/projects"), &shared, false).unwrap(),
             0
+        );
+    }
+}
+
+#[cfg(test)]
+mod rename_any_tool_tests {
+    use super::*;
+    use crate::paths::Paths;
+
+    /// Renaming looked the account up in the CLAUDE registry only, so a Codex
+    /// slot was never found: the snapshot was renamed and the slot kept its old
+    /// name. Seen on a real machine, where `ls` said `codex` and the registry
+    /// still said `A`.
+    #[test]
+    fn a_slot_of_any_tool_can_be_found_by_name() {
+        let t = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(t.path());
+        let mut codex = Slots::open_for(&paths, "codex").unwrap();
+        codex.create("A").unwrap();
+
+        assert!(
+            find_any_tool(&paths, "A").is_some(),
+            "a codex slot must be findable without naming its tool"
+        );
+        assert!(find_any_tool(&paths, "nope").is_none());
+
+        let mut claude = Slots::open_for(&paths, "claude-code").unwrap();
+        claude.create("bsgong").unwrap();
+        assert_eq!(
+            find_any_tool(&paths, "bsgong").map(|(t, _)| t),
+            Some("claude-code".to_string()),
+            "and a claude slot still resolves to its own tool"
+        );
+        assert_eq!(
+            find_any_tool(&paths, "A").map(|(t, _)| t),
+            Some("codex".to_string())
         );
     }
 }

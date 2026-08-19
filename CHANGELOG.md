@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.71.0] - 2026-08-19
+
+### Fixed
+- **Renaming a Codex account actually renames it.** `rename` looked the account up in Claude'"'"'s registry only, so a Codex slot was never found: the saved snapshot took the new name and the slot kept the old one. The machine then had one account answering to two - `swapdex ls` saying `codex` while the registry still said `A` - and anything reading the registry went on using a name the user had already changed. It searches every tool now. `rm` had been fixed for the same reason and `rename` had not.
+
 ## [0.70.0] - 2026-08-19
 
 ### Fixed

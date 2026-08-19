@@ -3769,8 +3769,13 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     }
     // A slot account renames by mapping only: its directory (and so its Keychain
     // item, and so its login) must not move.
-    if let Ok(mut slots) = crate::slots::Slots::open(paths) {
-        if slots.get(old).is_some() {
+    //
+    // Across every tool, not Claude's registry alone. Looking only there left a
+    // Codex slot unfound: the snapshot was renamed and the slot kept its old
+    // name, so one account answered to two - `ls` said one thing and the
+    // registry another. `rm` already had this fix; rename did not.
+    if let Some((tool, _)) = crate::slots::find_any_tool(paths, old) {
+        if let Ok(mut slots) = crate::slots::Slots::open_for(paths, &tool) {
             return match slots.rename(old, new) {
                 Ok(true) => {
                     println!("renamed account '{old}' to '{new}'");
