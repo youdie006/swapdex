@@ -432,19 +432,75 @@ impl Slots {
     }
 }
 
-/// The shared, account-agnostic config files symlinked from the bare home dir
-/// into a freshly-created slot, so switching accounts does not change the user's
-/// tooling. The token, history, and the file holding account identity stay
-/// per-slot and are NOT linked. (For Claude, MCP config lives inside
-/// `.claude.json`, which is per-account; sharing it needs the resolution noted
-/// in the design's open questions, so it is intentionally left per-slot.)
-pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md"];
+/// The account-agnostic things symlinked from the bare home dir into a
+/// freshly-created slot, so switching accounts changes who PAYS and nothing
+/// else. The token and the file holding account identity stay per-slot and are
+/// never linked. (For Claude, MCP config lives inside `.claude.json`, which is
+/// per-account; sharing it needs the resolution noted in the design's open
+/// questions, so it is intentionally left per-slot.)
+///
+/// `projects/` - the conversations - is shared, and that is the point of the
+/// whole tool. A transcript carries no account or organisation identifier
+/// anywhere in it, so it belongs to the person, not to whichever account
+/// happened to pay for those turns. Kept per-slot, `swapdex use B` made every
+/// conversation started on A vanish from `claude --resume`: not lost, but
+/// invisible, which for a resume list is the same thing.
+pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md", "projects"];
 
 /// Codex keeps its settings in `config.toml` and its project instructions in
 /// `AGENTS.md`; its credential lives apart in `auth.json`, which is what makes
-/// the same split work. `sessions/` stays per-slot - it is that account's
-/// history, and it is also where Codex records the rate limits swapdex reads.
-pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &["config.toml", "AGENTS.md"];
+/// the same split work. `sessions/` is shared for the same reason Claude's
+/// `projects/` is - a conversation is not the property of the account that
+/// funded it. Note swapdex also READS rate limits out of there, and sharing
+/// means a reading found in one slot describes whichever account wrote it;
+/// `codex_usage` asks the account directly and no longer depends on that.
+pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &["config.toml", "AGENTS.md", "sessions"];
+
+/// Copy the conversations a slot holds alone into the shared store.
+///
+/// Slots made before sharing have their own `projects/`, and those
+/// conversations exist nowhere else. Before a slot can point at the shared
+/// store they have to be carried over, or switching accounts would hide them -
+/// which is the very thing sharing is meant to end.
+///
+/// COPIES, never moves: a half-finished merge must leave every original
+/// readable. And an entry already in the shared store is never overwritten -
+/// that one is what every account can see, and a slot's copy of the same
+/// conversation is at best equally good and at worst older.
+///
+/// Returns how many were carried.
+pub fn carry_history_into_shared(
+    slot_dir: &std::path::Path,
+    shared_dir: &std::path::Path,
+) -> std::io::Result<usize> {
+    if !slot_dir.is_dir() {
+        return Ok(0);
+    }
+    let mut carried = 0;
+    let mut stack = vec![slot_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(slot_dir) else {
+                continue;
+            };
+            let dest = shared_dir.join(rel);
+            if dest.exists() {
+                continue;
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &dest)?;
+            carried += 1;
+        }
+    }
+    Ok(carried)
+}
 
 /// The files `tool` shares across its accounts.
 pub fn shared_files(tool: &str) -> &'static [&'static str] {
@@ -474,6 +530,46 @@ pub fn link_shared_config(
         }
     }
     linked
+}
+
+#[cfg(test)]
+mod shared_history_tests {
+    use super::*;
+
+    /// A conversation is not the property of the account that paid for it. The
+    /// transcripts carry no account or organisation identifier at all - checked
+    /// on a real machine, seven keys, zero hits - and the whole point of running
+    /// the proxy is that the account is a payment method, not a filing cabinet.
+    ///
+    /// Left per-slot, `swapdex use B` made every conversation started on A
+    /// vanish from `claude --resume`. They were not lost, but they were
+    /// invisible, which for a resume list is the same thing.
+    #[test]
+    fn a_conversation_is_reachable_from_every_account() {
+        assert!(
+            shared_files("claude-code").contains(&"projects"),
+            "Claude's transcripts must be shared across slots"
+        );
+        assert!(
+            shared_files("codex").contains(&"sessions"),
+            "Codex's transcripts must be shared across slots"
+        );
+    }
+
+    /// What must NOT be shared: the credential, and the file naming who the
+    /// account is. Sharing either is how one account starts answering as
+    /// another.
+    #[test]
+    fn identity_and_credentials_stay_with_their_account() {
+        for tool in ["claude-code", "codex"] {
+            for private in [".credentials.json", ".claude.json", "auth.json"] {
+                assert!(
+                    !shared_files(tool).contains(&private),
+                    "{tool} must not share {private}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -892,5 +988,73 @@ mod tests {
         assert!(existing.is_dir(), "the existing dir is left in place");
         // A non-existent dir is refused.
         assert!(s.adopt("nope", &root.path().join("absent")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod adopt_history_tests {
+    use super::*;
+
+    fn write(p: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// Turning an isolated history into a shared one must not lose a
+    /// conversation. Anything the slot has and the shared store does not is
+    /// carried over; anything already there is left alone, because the shared
+    /// copy is the one every account can see.
+    #[test]
+    fn conversations_only_the_slot_had_are_carried_over() {
+        let t = tempfile::tempdir().unwrap();
+        let shared = t.path().join("bare/projects");
+        let slot = t.path().join("slot/projects");
+        write(&shared.join("projA/one.jsonl"), "shared-one");
+        write(&slot.join("projA/two.jsonl"), "slot-two");
+        write(&slot.join("projB/three.jsonl"), "slot-three");
+        // Same path in both: the shared one wins and is not overwritten.
+        write(&slot.join("projA/one.jsonl"), "slot-version");
+
+        let moved = carry_history_into_shared(&slot, &shared).unwrap();
+        assert_eq!(moved, 2, "two files were only in the slot");
+        assert_eq!(
+            std::fs::read_to_string(shared.join("projA/one.jsonl")).unwrap(),
+            "shared-one",
+            "an existing shared conversation is never overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared.join("projA/two.jsonl")).unwrap(),
+            "slot-two"
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared.join("projB/three.jsonl")).unwrap(),
+            "slot-three"
+        );
+    }
+
+    /// The slot's own copies stay where they are. Nothing is deleted by this
+    /// step - the caller decides what to do with the directory afterwards, and
+    /// a half-finished merge must leave the originals readable.
+    #[test]
+    fn the_slots_own_copies_are_left_in_place() {
+        let t = tempfile::tempdir().unwrap();
+        let shared = t.path().join("bare/projects");
+        let slot = t.path().join("slot/projects");
+        write(&slot.join("p/a.jsonl"), "x");
+        carry_history_into_shared(&slot, &shared).unwrap();
+        assert!(
+            slot.join("p/a.jsonl").exists(),
+            "originals survive the copy"
+        );
+    }
+
+    #[test]
+    fn a_slot_with_no_history_carries_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let shared = t.path().join("bare/projects");
+        assert_eq!(
+            carry_history_into_shared(&t.path().join("slot/projects"), &shared).unwrap(),
+            0
+        );
     }
 }

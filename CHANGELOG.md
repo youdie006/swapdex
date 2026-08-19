@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.67.0] - 2026-08-19
+
+### Fixed
+- **Every conversation is reachable from every account.** A transcript carries no account or organisation identifier anywhere in it - so it belongs to the person, not to whichever account happened to pay for those turns. Slots kept their own `projects/` (Codex: `sessions/`), so `swapdex use B` made every conversation started on A vanish from `claude --resume`: not lost, but invisible, which for a resume list is the same thing. That defeats the point of the tool, where switching accounts is meant to change who PAYS and nothing else. Transcripts are shared across slots now, alongside settings. The credential and the file naming the account stay per-slot, as they must.
+- **`swapdex share-history`** repairs accounts made before this. It carries over the conversations a slot held alone, then points it at the shared store. Nothing is deleted: an entry already shared is never overwritten, the copies are copies rather than moves so a half-finished merge leaves every original readable, and the slot own directory is renamed aside rather than removed. `--dry-run` says what it would touch.
+
 ## [0.66.0] - 2026-08-19
 
 ### Added

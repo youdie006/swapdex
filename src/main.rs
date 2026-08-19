@@ -223,6 +223,15 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Make every conversation reachable from every account (one-time repair)
+    ShareHistory {
+        /// Which tool (default: claude)
+        #[arg(long, value_enum)]
+        tool: Option<ToolSel>,
+        /// Say what would happen and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Install a `/sx` slash command for Claude Code (switch without leaving the chat)
     Slash,
     /// Step off an account at this much used (e.g. 0.9 or 90%), or `off`
@@ -452,6 +461,14 @@ fn main() {
             account,
             dry_run,
         } => commands::continue_elsewhere(&paths, id.as_deref(), account.as_deref(), *dry_run),
+        Cmd::ShareHistory { tool, dry_run } => commands::share_history(
+            &paths,
+            match tool {
+                Some(ToolSel::Codex) => "codex",
+                _ => "claude-code",
+            },
+            *dry_run,
+        ),
         Cmd::Slash => commands::install_slash(&paths),
         Cmd::Threshold { value } => commands::threshold(&paths, value.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),

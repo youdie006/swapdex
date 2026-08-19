@@ -1864,6 +1864,82 @@ fn latest_session_here(cwd: &std::path::Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Make every conversation reachable from every account.
+///
+/// Slots created before transcripts were shared keep their own `projects/`, so
+/// a conversation started on one account is invisible from the others. This
+/// carries those conversations into the shared store and points the slot at it.
+///
+/// Nothing is deleted. The slot's old directory is renamed aside, not removed,
+/// because it holds real conversations and a rename is undoable while a delete
+/// is not.
+pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
+    let bare = match tool {
+        "codex" => paths.codex_dir().to_path_buf(),
+        _ => paths.claude_dir().to_path_buf(),
+    };
+    let dir_name = if tool == "codex" {
+        "sessions"
+    } else {
+        "projects"
+    };
+    let shared = bare.join(dir_name);
+
+    let slots = crate::slots::Slots::open_for(paths, tool)
+        .map(|s| s.list())
+        .unwrap_or_default();
+    let mut touched = 0;
+    for r in slots {
+        let own = r.config_dir.join(dir_name);
+        if own == shared {
+            continue;
+        }
+        if std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_symlink()) {
+            continue; // already shared
+        }
+        if !own.is_dir() {
+            // Never linked and nothing of its own: just point it at the shared
+            // store so the next session lands somewhere everyone can see.
+            if !dry_run {
+                std::fs::create_dir_all(&shared)?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&shared, &own).ok();
+            }
+            println!("  {} - linked to the shared history", r.name);
+            touched += 1;
+            continue;
+        }
+        let carried = crate::slots::carry_history_into_shared(&own, &shared)?;
+        println!(
+            "  {} - {carried} conversation(s) only it had, carried over",
+            r.name
+        );
+        if !dry_run {
+            let aside = r.config_dir.join(format!("{dir_name}.before-sharing"));
+            if aside.exists() {
+                anyhow::bail!(
+                    "{} already has {} - move it away first; nothing was changed for this account",
+                    r.name,
+                    aside.display()
+                );
+            }
+            std::fs::rename(&own, &aside)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&shared, &own).ok();
+            println!("    its old copy kept at {}", aside.display());
+        }
+        touched += 1;
+    }
+    if touched == 0 {
+        println!("every account already shares its history - nothing to do");
+    } else if dry_run {
+        println!("(dry run - nothing changed)");
+    } else {
+        println!("done - every conversation is now reachable from every account");
+    }
+    Ok(0)
+}
+
 pub fn continue_elsewhere(
     paths: &Paths,
     id: Option<&str>,
