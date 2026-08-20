@@ -1298,6 +1298,24 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
     out
 }
 
+/// Who pays, when that is not who the tool is signed in as.
+///
+/// `ls` marks the account Claude holds a login for. When a proxy is paying with
+/// a different one, that mark is true and misleading at once: the owner
+/// switched to bsgong, the proxy served every turn from bsgong, and the list
+/// went on starring kong because that is whose login sits on disk. Both facts
+/// are real; showing only one reads as the switch having failed.
+///
+/// `None` when there is nothing to disambiguate - same account, or nothing
+/// paying - because an extra note on the common case is just noise.
+pub fn payer_note(signed_in: Option<&str>, paying: Option<&str>) -> Option<String> {
+    let paying = paying?;
+    if signed_in == Some(paying) {
+        return None;
+    }
+    Some(format!("{paying} pays"))
+}
+
 /// The staleness note for a profile, naming the tools it is about.
 ///
 /// One tool going stale is not the account going stale. A profile holding four
@@ -3769,7 +3787,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
-pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
+pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i32> {
     if let Some(c) = reject_bad_name(name) {
         return Ok(c);
     }
@@ -3864,6 +3882,17 @@ pub fn rm(paths: &Paths, name: &str, yes: bool) -> Result<i32> {
             return Ok(4);
         }
     };
+    // One tool, not the whole profile. `add` defaults to every tool, so signing
+    // into one sweeps in whatever else was logged in; without this the only way
+    // to stop carrying a tool you never asked for was to delete the profile.
+    if let Some(t) = tool {
+        if !store.drop_tool(name, t)? {
+            eprintln!("swapdex: profile '{name}' has no {t} login");
+            return Ok(5);
+        }
+        println!("dropped {t} from '{name}' (its live login keeps running, now unsaved)");
+        return Ok(0);
+    }
     if !store.remove(name)? {
         eprintln!("swapdex: no profile named '{name}'");
         return Ok(5);
@@ -6911,8 +6940,8 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 mod tests {
     use super::{
         codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
-        home_note, keychain_verdict, payer_line, pick_active, row_needs_login, stale_hint,
-        stale_marker, unhonoured_ask, win_line,
+        home_note, keychain_verdict, payer_line, payer_note, pick_active, row_needs_login,
+        stale_hint, stale_marker, unhonoured_ask, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7032,6 +7061,30 @@ mod tests {
         assert!(
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
+        );
+    }
+
+    /// `ls` marks the account Claude is signed in AS. When a proxy is paying
+    /// with a different one, that mark is true and misleading at once: the
+    /// owner switched to bsgong, the proxy served every turn from bsgong, and
+    /// the list went on starring kong because that is whose login the tool
+    /// holds locally. Both facts are real; showing only one reads as the switch
+    /// having failed.
+    #[test]
+    fn the_list_separates_who_is_signed_in_from_who_pays() {
+        // Different accounts: both are named, and which is which is explicit.
+        assert_eq!(
+            payer_note(Some("kong"), Some("bsgong")).as_deref(),
+            Some("bsgong pays")
+        );
+        // The same account: nothing to disambiguate, so nothing is added.
+        assert_eq!(payer_note(Some("kong"), Some("kong")), None);
+        // No proxy paying: the login is the whole story.
+        assert_eq!(payer_note(Some("kong"), None), None);
+        // Signed into nothing, but a proxy is paying - still worth saying.
+        assert_eq!(
+            payer_note(None, Some("bsgong")).as_deref(),
+            Some("bsgong pays")
         );
     }
 

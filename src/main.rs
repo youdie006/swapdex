@@ -155,6 +155,9 @@ enum Cmd {
         /// Confirm the deletion
         #[arg(long)]
         yes: bool,
+        /// Drop only this tool's login, keeping the rest of the profile
+        #[arg(long)]
+        tool: Option<String>,
     },
     /// Guided first-time setup: save your logins, add more, learn to switch
     Setup,
@@ -414,7 +417,7 @@ fn main() {
         Cmd::SyncMcp => commands::sync_mcp(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
-        Cmd::Rm { name, yes } => commands::rm(&paths, name, *yes),
+        Cmd::Rm { name, yes, tool } => commands::rm(&paths, name, *yes, tool.as_deref()),
         Cmd::Setup => commands::setup(&paths),
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),
         Cmd::Rename { old, new } => commands::rename(&paths, old, new),

@@ -273,6 +273,27 @@ impl Store {
 
     /// Rename a profile. Returns false if `old` does not exist; errors if `new`
     /// already exists.
+    /// Drop ONE tool from a profile, leaving the rest of it alone.
+    ///
+    /// `add` defaults to every tool, so signing into one sweeps in whatever else
+    /// happens to be logged in - and until now there was no way to take one back
+    /// out short of deleting the whole profile. A profile ended up carrying
+    /// Gemini and Antigravity logins its owner never asked swapdex to manage,
+    /// which then went stale and nagged about tools he does not use.
+    ///
+    /// Returns false when that profile has no such tool: asking to remove
+    /// something already absent is the outcome the caller wanted, not an error.
+    pub fn drop_tool(&self, name: &str, tool: &str) -> Result<bool> {
+        let d = self.dir.join("accounts").join(name).join(tool);
+        if !d.exists() {
+            return Ok(false);
+        }
+        // Same treatment as `remove`: these are credential bytes.
+        overwrite_tree(&d);
+        fs::remove_dir_all(&d).with_context(|| format!("drop {tool} from profile {name}"))?;
+        Ok(true)
+    }
+
     /// Whether ANY directory (even a ghost one hidden from `list()`) claims
     /// this name - the collision test for rename targets.
     pub fn profile_dir_exists(&self, name: &str) -> bool {
@@ -765,5 +786,50 @@ mod tests {
         let s = Store::open(&p).unwrap();
         let _g = s.lock().unwrap();
         assert!(s.lock().is_err(), "second lock must fail while held");
+    }
+}
+
+#[cfg(test)]
+mod drop_tool_tests {
+    use super::*;
+
+    /// `add` defaults to every tool, so signing into Codex sweeps in whatever
+    /// else happens to be logged in - and there was no way to take one back
+    /// out. A profile ended up carrying Gemini and Antigravity logins its owner
+    /// never asked swapdex to manage, which then went stale and nagged about
+    /// tools he does not use.
+    #[test]
+    fn a_tool_can_be_dropped_without_taking_the_profile_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let store = Store::open(&paths).unwrap();
+        let base = paths.store_dir().join("accounts").join("kong");
+        for (tool, part) in [
+            ("claude-code", "credentials"),
+            ("gemini", "oauth"),
+            ("antigravity", "token"),
+        ] {
+            let d = base.join(tool);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(part), b"x").unwrap();
+        }
+        let tools_now = |s: &Store| {
+            s.list()
+                .into_iter()
+                .find(|p| p.name == "kong")
+                .map(|p| p.tools)
+                .unwrap_or_default()
+        };
+        assert_eq!(tools_now(&store).len(), 3);
+
+        assert!(store.drop_tool("kong", "gemini").unwrap());
+        let left = tools_now(&store);
+        assert!(!left.iter().any(|t| t == "gemini"), "{left:?}");
+        assert!(left.iter().any(|t| t == "claude-code"), "{left:?}");
+
+        // Dropping something that is not there is not an error, just nothing.
+        assert!(!store.drop_tool("kong", "gemini").unwrap());
+        // The other tools are untouched, so the profile is plainly still there.
+        assert!(base.exists());
     }
 }

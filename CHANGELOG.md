@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.76.0] - 2026-08-20
+
+### Added
+- **`swapdex rm <name> --tool <tool>` drops one login from a profile, keeping the rest.** `add` defaults to every tool, so signing into Codex sweeps in whatever else happens to be logged in - and there was no way to take one back out short of deleting the whole profile. A profile ended up carrying Gemini and Antigravity logins its owner never asked swapdex to manage, which then went stale and nagged about tools he does not use. Dropping a tool that is not there is reported plainly rather than treated as an error.
+
+### Fixed
+- `ls` can now say who PAYS when that is not who the tool is signed in as. The mark showed the account whose login sits on disk, so after switching the payer the list went on starring the old one - true and misleading at once, and it read as the switch having failed.
+
 ## [0.75.0] - 2026-08-20
 
 ### Fixed
