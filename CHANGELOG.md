@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.78.0] - 2026-08-21
+
+### Changed
+- **`swapdex shim` pins the proxy address in `~/.claude/settings.json`, so reaching it no longer depends on winning the PATH.** The shim only fires when its directory comes first, and on a real machine another `claude` sat ahead of it - so the proxy went unused and `serve` silently changed nothing, on two machines, for a day. Every competing proxy-based switcher (cc-switch, claude-code-router, codex-pooler) writes the base URL into the tool's own config instead, which no PATH ordering can undo; swapdex was the outlier in trusting the PATH. Verified end to end by switching three accounts through the real `claude` binary with the shim deliberately bypassed.
+- It refuses to pin when no service keeps the proxy alive, and says so: a pinned address with nothing behind it stops `claude` from starting, which is worse than switching being a no-op. Existing settings are copied to `settings.json.swapdex-bak` and rewritten atomically - that file holds the user's model, hooks and permissions.
+
 ## [0.77.0] - 2026-08-20
 
 ### Fixed

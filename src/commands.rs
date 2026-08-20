@@ -4057,6 +4057,30 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
     // Codex switches by pointer too, so a plain `codex` needs the same wrapper.
     // Not having Codex installed is not a failure - there is simply nothing to
     // wrap - so it is reported either way and never aborts the claude shim.
+    // Reaching the proxy must not depend on winning the PATH. The shim only
+    // fires when it does, and on a real machine another `claude` sat ahead of
+    // it - so the proxy went unused and `serve` silently changed nothing for a
+    // day, on two machines. Pinning the address in the tool's own settings is
+    // what every competing proxy switcher does, and no PATH ordering undoes it.
+    let svc = dirs::home_dir().is_some_and(|h| {
+        if cfg!(target_os = "macos") {
+            crate::service::launchd_path(&h, "claude-code").exists()
+        } else {
+            crate::service::systemd_path(&h, "claude-code").exists()
+        }
+    });
+    match crate::shim::pin_base_url(paths, 8787, svc)? {
+        Some(f) => println!(
+            "  pinned the proxy address in {} - a plain `claude` reaches it \
+             however it is started",
+            crate::util::redact_path(&f.display().to_string())
+        ),
+        None => println!(
+            "  not pinning the proxy address: no service keeps the proxy alive, and a \
+             pinned address with nothing behind it would stop `claude` from starting.\n\
+             \x20     run `swapdex service install --tool claude-code` first"
+        ),
+    }
     match crate::shim::install_codex(paths)? {
         Some(p) => println!("installed the codex shim at {}", p.display()),
         None => println!("  (no `codex` on PATH - skipped its shim)"),
