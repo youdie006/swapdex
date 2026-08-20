@@ -498,7 +498,7 @@ const ALL_KEYS: &[KeyHint] = &[
 /// fleet line both ask the question and two copies would drift.
 const SPENT: f64 = 99.0;
 
-fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
+fn account_status<'a>(r: &'a Row, u: Option<&Usage>) -> (&'a str, Color) {
     if r.disabled {
         // Out of rotation is a deliberate state, so it is said plainly and not
         // dressed as a problem.
@@ -513,7 +513,7 @@ fn account_status(r: &Row, u: Option<&Usage>) -> (&'static str, Color) {
         // quota says - and the row's own note explains which kind of stale.
         return ("expired", Color::Rgb(200, 150, 90));
     }
-    if let Some(w) = r.warn {
+    if let Some(w) = r.warn.as_deref() {
         // A snapshot problem outranks quota: the account cannot serve at all.
         return (w, Color::Rgb(200, 150, 90));
     }
@@ -686,7 +686,7 @@ pub struct Row {
     pub ident: String,
     pub tools: String,
     pub active: bool,
-    pub warn: Option<&'static str>,
+    pub warn: Option<String>,
     /// Kept out of automatic rotation (still switchable by hand).
     pub disabled: bool,
     /// A slot account with no readable login yet - it cannot serve a turn until
@@ -2979,12 +2979,12 @@ mod tests {
             "an exhausted window outranks being active"
         );
         assert_eq!(
-            account_status(&mk(true, Some("stale"), false), Some(&fresh)).0,
+            account_status(&mk(true, Some("stale".to_string()), false), Some(&fresh)).0,
             "stale",
             "an unusable snapshot outranks quota"
         );
         assert_eq!(
-            account_status(&mk(true, Some("stale"), true), Some(&spent)).0,
+            account_status(&mk(true, Some("stale".to_string()), true), Some(&spent)).0,
             "paused",
             "a deliberate pause is stated plainly, not as a problem"
         );

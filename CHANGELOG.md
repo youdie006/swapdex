@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.72.0] - 2026-08-20
+
+### Fixed
+- **A stale login names the tool it belongs to, instead of condemning the account.** A profile holding four logins was marked `(stale)` whole because its Gemini token had not been refreshed in 37 days - while the Codex login added minutes earlier answered the server perfectly well at 92% used. The row said "unusable" about an account that worked, and its owner reasonably read it as the add having failed. It now says which: `(gemini stale)`, or `(gemini stale, codex expired)` when there is more than one. One tool going stale is not the account going stale.
+
 ## [0.71.0] - 2026-08-19
 
 ### Fixed

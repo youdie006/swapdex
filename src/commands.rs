@@ -1267,6 +1267,23 @@ fn profile_detail(
     }
 }
 
+/// The staleness note for a profile, naming the tools it is about.
+///
+/// One tool going stale is not the account going stale. A profile holding four
+/// logins was marked `(stale)` whole because gemini had not been refreshed in
+/// 37 days, while the Codex login added minutes earlier answered the server
+/// perfectly well - so the row said "unusable" about an account that worked,
+/// and the owner reasonably read it as the add having failed.
+///
+/// `None` when nothing is wrong, which is the common case and needs no words.
+pub fn stale_marker(per_tool: &[(&str, Option<&str>)]) -> Option<String> {
+    let named: Vec<String> = per_tool
+        .iter()
+        .filter_map(|(tool, m)| m.map(|m| format!("{tool} {m}")))
+        .collect();
+    (!named.is_empty()).then(|| named.join(", "))
+}
+
 /// Summarize a profile across ALL its tools (not just the first): a marker if
 /// ANY tool is stale/expired, and the first non-empty email/tier. `p.tools` is
 /// alphabetical, so inspecting only the first would always be "claude-code" and
@@ -1275,10 +1292,10 @@ fn profile_summary(
     store: &Store,
     name: &str,
     tools: &[String],
-) -> (Option<String>, Option<String>, Option<&'static str>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let mut email = None;
     let mut tier = None;
-    let mut marker = None;
+    let mut per_tool: Vec<(&str, Option<&str>)> = Vec::new();
     // Adapter order (Claude first), NOT the store's alphabetical order:
     // antigravity sorts first alphabetically and its auth_method ("consumer")
     // would mask claude's real plan tier ("max") on multi-tool profiles.
@@ -1290,10 +1307,12 @@ fn profile_summary(
         if let Some((e, ti, m)) = profile_detail(store, name, t) {
             email = email.or(e);
             tier = tier.or(ti);
-            marker = marker.or(m);
+            // Recorded per tool, so the note can say WHICH login is stale
+            // rather than condemning the account.
+            per_tool.push((t, m));
         }
     }
-    (email, tier, marker)
+    (email, tier, stale_marker(&per_tool))
 }
 
 /// Which profile is the LIVE account for each tool (from live identity, A2).
@@ -1397,7 +1416,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         name: String,
         ident: String,
         tools: String,
-        warn: Option<&'static str>,
+        warn: Option<String>,
         active: bool,
     }
     let rows: Vec<Row> = profiles
@@ -1445,9 +1464,18 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     let mut saw_unreadable = false;
     for r in &rows {
         let mark = if r.active { "* " } else { "  " };
-        let warn = r.warn.map(|m| format!("  ({m})")).unwrap_or_default();
-        saw_unreadable |= r.warn == Some("unreadable");
-        saw_refreshable |= matches!(r.warn, Some("expired") | Some("stale"));
+        let warn = r
+            .warn
+            .as_deref()
+            .map(|m| format!("  ({m})"))
+            .unwrap_or_default();
+        saw_unreadable |= r.warn.as_deref() == Some("unreadable");
+        // The note now names the tool ("gemini stale"), so match on the
+        // word rather than the whole string.
+        saw_refreshable |= r
+            .warn
+            .as_deref()
+            .is_some_and(|w| w.contains("expired") || w.contains("stale"));
         println!(
             "{mark}{} {} [{}]{warn}",
             fit(&r.name, name_w),
@@ -6769,8 +6797,8 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 mod tests {
     use super::{
         codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
-        home_note, keychain_verdict, payer_line, pick_active, row_needs_login, unhonoured_ask,
-        win_line,
+        home_note, keychain_verdict, payer_line, pick_active, row_needs_login, stale_marker,
+        unhonoured_ask, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -6891,6 +6919,33 @@ mod tests {
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
         );
+    }
+
+    /// One tool going stale is not the account going stale. A profile holding
+    /// four logins was marked `(stale)` whole because gemini had not been
+    /// refreshed in 37 days, while the Codex login added minutes earlier
+    /// answered the server perfectly well - so the row said "unusable" about an
+    /// account that was working.
+    #[test]
+    fn a_stale_marker_names_the_tool_it_belongs_to() {
+        assert_eq!(
+            stale_marker(&[("claude-code", None), ("gemini", Some("stale"))]).as_deref(),
+            Some("gemini stale"),
+            "name the one that is stale, not the account"
+        );
+        // Several: named together, so the reader knows the whole extent.
+        assert_eq!(
+            stale_marker(&[("gemini", Some("stale")), ("codex", Some("expired"))]).as_deref(),
+            Some("gemini stale, codex expired")
+        );
+        // Every tool stale IS the account being stale, and says so plainly.
+        assert_eq!(
+            stale_marker(&[("gemini", Some("stale")), ("codex", Some("stale"))]).as_deref(),
+            Some("gemini stale, codex stale")
+        );
+        // Nothing wrong: nothing said.
+        assert_eq!(stale_marker(&[("claude-code", None)]), None);
+        assert_eq!(stale_marker(&[]), None);
     }
 
     /// Everything the endpoint says that a one-line row has no room for: the

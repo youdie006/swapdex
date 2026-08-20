@@ -438,9 +438,11 @@ fn ls_shows_stale_codex_in_a_both_tool_profile() {
     run(root.path(), &["add", "work"]); // both tools
     let (o, _e, c) = run(root.path(), &["ls"]);
     assert_eq!(c, 0);
+    // The note names the tool it is about: one stale login among several is
+    // not the account being stale.
     assert!(
-        o.contains("(stale)"),
-        "codex staleness must surface in a both-tool profile: {o}"
+        o.contains("codex stale"),
+        "codex staleness must surface, and say it is codex: {o}"
     );
 }
 
@@ -481,8 +483,8 @@ fn ls_marks_a_stale_codex_profile() {
     let (o, _e, c) = run(root.path(), &["ls"]);
     assert_eq!(c, 0);
     assert!(
-        o.contains("(stale)"),
-        "old codex login should be flagged stale: {o}"
+        o.contains("codex stale"),
+        "old codex login should be flagged, and named: {o}"
     );
 }
 
