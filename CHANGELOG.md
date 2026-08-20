@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.77.0] - 2026-08-20
+
+### Fixed
+- **`rm --tool` no longer unregisters the whole account.** The slot branch ran before the flag was read, so on a name that is BOTH a slot and a profile - the normal case - `rm kong --tool gemini --yes` stopped managing `kong` entirely instead of dropping one login. The opposite of what was asked, and destructive. Naming a tool now means "drop that tool", whatever else the name refers to. Caught on the first real use of the feature, one command after shipping it.
+
 ## [0.76.0] - 2026-08-20
 
 ### Added

@@ -789,6 +789,51 @@ mod tests {
     }
 }
 
+/// What `rm` was actually asked to do.
+#[derive(Debug, PartialEq)]
+pub enum Intent {
+    /// Drop one tool's login, keeping the rest of the profile.
+    DropTool,
+    /// Stop managing a slot account (its login and folder stay).
+    UnregisterSlot,
+    /// Delete a saved profile.
+    RemoveProfile,
+}
+
+/// Naming a tool means "drop that tool", whatever else the name refers to.
+///
+/// The slot branch used to run first, so on a name that was BOTH a slot and a
+/// profile the tool flag was silently ignored and the whole account was
+/// unregistered instead - the opposite of what was asked, and destructive.
+pub fn rm_intent(tool: Option<&str>, is_slot: bool) -> Intent {
+    if tool.is_some() {
+        return Intent::DropTool;
+    }
+    if is_slot {
+        Intent::UnregisterSlot
+    } else {
+        Intent::RemoveProfile
+    }
+}
+
+#[cfg(test)]
+mod drop_tool_routing_tests {
+    use super::*;
+
+    /// `rm <name> --tool X` must mean "drop that tool", whatever else the name
+    /// also refers to. The slot branch ran first, so on a profile that also had
+    /// a slot the tool flag was ignored and the whole account was unregistered
+    /// instead - the opposite of what was asked, and destructive.
+    #[test]
+    fn a_tool_flag_is_never_treated_as_unregistering_the_account() {
+        assert_eq!(rm_intent(Some("gemini"), true), Intent::DropTool);
+        assert_eq!(rm_intent(Some("gemini"), false), Intent::DropTool);
+        // No tool named: the existing behaviour is untouched.
+        assert_eq!(rm_intent(None, true), Intent::UnregisterSlot);
+        assert_eq!(rm_intent(None, false), Intent::RemoveProfile);
+    }
+}
+
 #[cfg(test)]
 mod drop_tool_tests {
     use super::*;

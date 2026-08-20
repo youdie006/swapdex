@@ -3809,6 +3809,18 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i3
         eprintln!("swapdex: no account named '{name}'");
         return Ok(5);
     }
+    // Naming a tool means "drop that tool", whatever else the name refers to.
+    // The slot branch below used to run first, so on a name that was BOTH a
+    // slot and a profile the flag was ignored and the whole account was
+    // unregistered - the opposite of what was asked, and destructive.
+    if let Some(t) = tool {
+        if !store.drop_tool(name, t)? {
+            eprintln!("swapdex: profile '{name}' has no {t} login");
+            return Ok(5);
+        }
+        println!("dropped {t} from '{name}' (its live login keeps running, now unsaved)");
+        return Ok(0);
+    }
     if is_slot {
         if !yes {
             use std::io::IsTerminal;
@@ -3882,17 +3894,6 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i3
             return Ok(4);
         }
     };
-    // One tool, not the whole profile. `add` defaults to every tool, so signing
-    // into one sweeps in whatever else was logged in; without this the only way
-    // to stop carrying a tool you never asked for was to delete the profile.
-    if let Some(t) = tool {
-        if !store.drop_tool(name, t)? {
-            eprintln!("swapdex: profile '{name}' has no {t} login");
-            return Ok(5);
-        }
-        println!("dropped {t} from '{name}' (its live login keeps running, now unsaved)");
-        return Ok(0);
-    }
     if !store.remove(name)? {
         eprintln!("swapdex: no profile named '{name}'");
         return Ok(5);
