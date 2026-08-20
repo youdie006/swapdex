@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.74.0] - 2026-08-20
+
+### Fixed
+- **The stale hint says what to do, and that the account still works.** It used to read "re-run `swapdex add --update <name>` while logged in to refresh" - which re-saves a profile FROM a live login, and is no help when the login itself is what lapsed. The tool has to be signed into, and which tool depends on which one is stale. It now names them and says so: `(antigravity, gemini: run that tool once and sign in ...)`. And it adds the part that was missing entirely - `(the account still serves claude-code, codex - a stale tool does not hold the others back)` - because a lone marker beside an account reads as "this account is broken" when its other tools are working perfectly well, which is exactly the confusion it caused.
+
 ## [0.73.0] - 2026-08-20
 
 ### Fixed

@@ -1267,6 +1267,37 @@ fn profile_detail(
     }
 }
 
+/// What to DO about the stale tools, and what still works despite them.
+///
+/// Naming the stale tool was half the job. The old hint said to re-run
+/// `add --update`, which re-saves a snapshot FROM a live login - no help when
+/// the login itself is what lapsed. The tool has to be signed into first, and
+/// that is per-tool.
+///
+/// It also says which tools still serve. A lone marker beside an account reads
+/// as "this account is broken" when Claude and Codex are working perfectly
+/// well - which was the actual confusion it caused.
+///
+/// Empty when nothing is stale. When EVERYTHING is stale it promises nothing,
+/// because there is nothing to reassure anyone about.
+pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
+    if stale.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "  ({}: run that tool once and sign in - re-saving the profile cannot \
+         refresh a login that has already lapsed)",
+        stale.join(", ")
+    );
+    if !healthy.is_empty() {
+        out.push_str(&format!(
+            "\n  (the account still serves {} - a stale tool does not hold the others back)",
+            healthy.join(", ")
+        ));
+    }
+    out
+}
+
 /// The staleness note for a profile, naming the tools it is about.
 ///
 /// One tool going stale is not the account going stale. A profile holding four
@@ -1462,6 +1493,10 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         .clamp(0, 40);
     let mut saw_refreshable = false;
     let mut saw_unreadable = false;
+    // Which tools are stale, and which of that account's tools still serve.
+    // A lone marker reads as "this account is broken" when the others work.
+    let mut stale_tools: Vec<String> = Vec::new();
+    let mut healthy_tools: Vec<String> = Vec::new();
     for r in &rows {
         let mark = if r.active { "* " } else { "  " };
         let warn = r
@@ -1476,6 +1511,23 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             .warn
             .as_deref()
             .is_some_and(|w| w.contains("expired") || w.contains("stale"));
+        if let Some(w) = r.warn.as_deref() {
+            for t in r.tools.split(',').map(|t| t.trim().trim_end_matches('*')) {
+                if t.is_empty() {
+                    continue;
+                }
+                // The note already names the tools ("gemini stale"), so it is
+                // the authority on which side each one falls.
+                let bucket = if w.contains(t) {
+                    &mut stale_tools
+                } else {
+                    &mut healthy_tools
+                };
+                if !bucket.iter().any(|x| x == t) {
+                    bucket.push(t.to_string());
+                }
+            }
+        }
         println!(
             "{mark}{} {} [{}]{warn}",
             fit(&r.name, name_w),
@@ -1484,9 +1536,17 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         );
     }
     if saw_refreshable {
-        println!(
-            "  (expired/stale: re-run `swapdex add --update <name>` while logged in to refresh)"
-        );
+        let stale: Vec<&str> = stale_tools.iter().map(String::as_str).collect();
+        let healthy: Vec<&str> = healthy_tools.iter().map(String::as_str).collect();
+        let hint = stale_hint(&stale, &healthy);
+        if hint.is_empty() {
+            println!(
+                "  (expired/stale: run that tool once and sign in - re-saving the profile \
+                 cannot refresh a login that has already lapsed)"
+            );
+        } else {
+            println!("{hint}");
+        }
     }
     if saw_unreadable {
         println!(
@@ -6827,8 +6887,8 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 mod tests {
     use super::{
         codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
-        home_note, keychain_verdict, payer_line, pick_active, row_needs_login, stale_marker,
-        unhonoured_ask, win_line,
+        home_note, keychain_verdict, payer_line, pick_active, row_needs_login, stale_hint,
+        stale_marker, unhonoured_ask, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -6949,6 +7009,46 @@ mod tests {
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
         );
+    }
+
+    /// Naming the stale tool was half the job: the reader still has to know
+    /// what to DO. `add --update` re-saves a snapshot from a live login, which
+    /// is no help when the login itself is what has lapsed - the tool has to be
+    /// signed into first, and that is per-tool.
+    ///
+    /// It also has to say the account is still usable for its OTHER tools,
+    /// because a lone marker beside an account reads as "this account is
+    /// broken" when Claude and Codex are working perfectly well.
+    #[test]
+    fn a_stale_hint_says_what_to_do_per_tool_and_what_still_works() {
+        let h = stale_hint(&["gemini", "antigravity"], &["claude-code", "codex"]);
+        assert!(h.contains("gemini"), "{h}");
+        assert!(h.contains("antigravity"), "{h}");
+        // The fix is signing that tool in, not re-saving a snapshot.
+        assert!(
+            !h.contains("add --update"),
+            "add --update cannot refresh a login that has lapsed: {h}"
+        );
+        // And it says the account still serves its healthy tools.
+        assert!(
+            h.contains("claude-code") && h.contains("codex"),
+            "must say what still works: {h}"
+        );
+    }
+
+    /// Nothing stale, nothing said.
+    #[test]
+    fn no_stale_tool_means_no_hint() {
+        assert!(stale_hint(&[], &["claude-code"]).is_empty());
+    }
+
+    /// Every tool stale: there is nothing to reassure the reader about, and
+    /// claiming otherwise would be the opposite failure.
+    #[test]
+    fn all_tools_stale_promises_nothing() {
+        let h = stale_hint(&["gemini"], &[]);
+        assert!(h.contains("gemini"), "{h}");
+        assert!(!h.contains("still"), "nothing is still working: {h}");
     }
 
     /// One tool going stale is not the account going stale. A profile holding
