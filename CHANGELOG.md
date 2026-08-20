@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.73.0] - 2026-08-20
+
+### Fixed
+- **A restart no longer freezes the proxy on whatever it last rotated to.** The choice to prefer an explicit `serve` over a leftover rotation only applied once the proxy had ALREADY seen that pointer, so the first request after a restart handed the turn to the stale rotation - and every request after it, because the pointer never "changed" again. On a real machine `serving` named one account for half an hour while every single turn went to another, which reads exactly like switching accounts being broken. A pointer this proxy has never seen now counts as new.
+- **`swapdex shim` says when it is being shadowed.** It checked only whether its directory was ON the PATH and reported "a plain `claude` goes through it" - while an earlier entry held the name, so the shim never ran, the proxy was never used, and `swapdex serve` silently changed nothing. The install claiming success is why nobody suspected the PATH. It now names the directory that wins and prints the export that fixes it.
+- A test pinned a reset time as a fixed future stamp; that time arrived, the cache correctly dropped the expired window, and the test failed on no defect at all. It is relative to now.
+
 ## [0.72.0] - 2026-08-20
 
 ### Fixed

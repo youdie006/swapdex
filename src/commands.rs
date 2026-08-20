@@ -3952,7 +3952,37 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
     // reads, and the switch appears to work while changing nothing.
     match crate::shim::ensure_on_path(&shim_dir)? {
         crate::shim::PathSetup::AlreadyThere => {
-            println!("  it is already on your PATH - a plain `claude` goes through it");
+            // On the PATH is not the same as WINNING it. Reporting membership as
+            // success is how the shim ends up installed and never reached: the
+            // proxy is never used and `serve` silently does nothing, while the
+            // install says everything is fine. Say which entry holds the name.
+            let entries: Vec<String> = std::env::var("PATH")
+                .unwrap_or_default()
+                .split(':')
+                .map(str::to_string)
+                .collect();
+            let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+            match crate::shim::path_verdict(&shim_dir, &refs) {
+                crate::shim::PathVerdict::Wins => {
+                    println!("  it is already on your PATH - a plain `claude` goes through it");
+                }
+                crate::shim::PathVerdict::Shadowed(winner) => {
+                    println!(
+                        "  it is on your PATH but {} comes first and holds `claude`, so the \
+                         shim never runs - `swapdex serve` would change nothing.\n\
+                         \x20     put the shim ahead of it:  export PATH=\"{}:$PATH\"",
+                        crate::util::redact_path(&winner),
+                        shim_dir.display()
+                    );
+                }
+                crate::shim::PathVerdict::Absent => {
+                    println!(
+                        "  add this to your shell profile so it wins over the real claude:\n\
+                         \x20     export PATH=\"{}:$PATH\"",
+                        shim_dir.display()
+                    );
+                }
+            }
         }
         crate::shim::PathSetup::Added(profile) => {
             println!(

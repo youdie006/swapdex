@@ -815,20 +815,28 @@ mod tests {
     fn a_response_reading_is_remembered_under_the_serving_account() {
         let root = tempfile::tempdir().unwrap();
         let paths = crate::paths::Paths::rooted(root.path());
+        // Relative to NOW, not a fixed stamp. A hardcoded future reset simply
+        // becomes a past one, and the cache drops a window whose reset has
+        // passed - so this test rotted rather than failing on a real defect.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let resets = now + 3 * 86_400;
         let headers = h(&[
             ("x-codex-primary-used-percent", "42.5"),
             ("x-codex-primary-window-minutes", "10080"),
-            ("x-codex-primary-reset-at", "1787196620"),
+            ("x-codex-primary-reset-at", &resets.to_string()),
         ]);
-        assert!(remember(&paths, "work", &headers, 1_786_600_000));
+        assert!(remember(&paths, "work", &headers, now));
 
         let c = crate::quota_cache::load_for(&paths, "codex");
         let e = c.get("work").expect("the serving account was recorded");
         // A weekly window fills the weekly column, whatever label carried it.
         assert_eq!(e.seven_d, Some(42.5));
-        assert_eq!(e.seven_d_reset, Some(1_787_196_620));
+        assert_eq!(e.seven_d_reset, Some(resets));
         assert_eq!(e.five_h, None);
-        assert_eq!(e.at, 1_786_600_000);
+        assert_eq!(e.at, now);
 
         // A response carrying none of these headers leaves the reading alone
         // rather than overwriting it with a blank.
@@ -836,10 +844,10 @@ mod tests {
             &paths,
             "work",
             &h(&[("content-type", "text/plain")]),
-            1_786_600_900
+            now + 900
         ));
         let c = crate::quota_cache::load_for(&paths, "codex");
-        assert_eq!(c.get("work").map(|e| e.at), Some(1_786_600_000));
+        assert_eq!(c.get("work").map(|e| e.at), Some(now));
     }
 
     /// A refusal reason is worth showing only if it says something a person can

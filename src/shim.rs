@@ -360,6 +360,53 @@ pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
     Ok(PathSetup::Added(profile))
 }
 
+/// Where the shim stands in the PATH race.
+#[derive(Debug, PartialEq)]
+pub enum PathVerdict {
+    /// The shim's directory is the first one holding this tool: it will run.
+    Wins,
+    /// On the PATH, but an earlier directory holds the same name and wins.
+    Shadowed(String),
+    /// Not on the PATH at all.
+    Absent,
+}
+
+/// Does the shim actually WIN the PATH, or merely appear on it?
+///
+/// swapdex used to check membership only and report "a plain `claude` goes
+/// through it" - while an earlier entry held the name, so the shim never fired,
+/// the proxy was never used, and `swapdex serve` silently did nothing. The
+/// install said everything was fine, which is why nobody suspected the PATH.
+pub fn path_verdict(shim_dir: &std::path::Path, entries: &[&str]) -> PathVerdict {
+    path_verdict_with(shim_dir, entries, &|d| {
+        std::path::Path::new(d).join("claude").exists()
+    })
+}
+
+/// The same, with the "does this directory hold the tool" test injected so the
+/// ordering logic is testable without touching the filesystem.
+pub fn path_verdict_with(
+    shim_dir: &std::path::Path,
+    entries: &[&str],
+    holds_tool: &dyn Fn(&str) -> bool,
+) -> PathVerdict {
+    let shim = shim_dir.to_string_lossy();
+    if !entries.iter().any(|e| *e == shim) {
+        return PathVerdict::Absent;
+    }
+    for e in entries {
+        if *e == shim {
+            return PathVerdict::Wins;
+        }
+        // Only a directory that actually holds the tool can shadow it; naming
+        // an empty earlier entry would send the reader to fix the wrong thing.
+        if holds_tool(e) {
+            return PathVerdict::Shadowed((*e).to_string());
+        }
+    }
+    PathVerdict::Absent
+}
+
 /// Install (or refresh) the shim. Returns (shim_path, shim_dir) so the caller
 /// can print PATH guidance.
 pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
@@ -870,5 +917,52 @@ mod real_tool_tests {
                 found.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+
+    /// Being ON the PATH is not the same as WINNING it. swapdex checked only
+    /// membership and reported "a plain `claude` goes through it" while another
+    /// entry earlier in the PATH was the one actually run - so the shim never
+    /// fired, the proxy was never used, and `swapdex serve` silently did
+    /// nothing. Found on a real machine after three wrong diagnoses.
+    #[test]
+    fn a_shim_that_loses_the_path_is_reported_as_shadowed() {
+        let shim = std::path::Path::new("/home/u/.local/share/swapdex/bin");
+        // The shim's directory comes first: it wins.
+        assert_eq!(
+            path_verdict(shim, &["/home/u/.local/share/swapdex/bin", "/usr/bin"]),
+            PathVerdict::Wins
+        );
+        // Present, but something earlier holds the name. The "holds it" test is
+        // injected so the ordering rule is proven without a real filesystem.
+        assert_eq!(
+            path_verdict_with(
+                shim,
+                &["/home/u/.local/bin", "/home/u/.local/share/swapdex/bin"],
+                &|d| d == "/home/u/.local/bin"
+            ),
+            PathVerdict::Shadowed("/home/u/.local/bin".into())
+        );
+        // Not on the PATH at all - a different problem with a different fix.
+        assert_eq!(
+            path_verdict(shim, &["/usr/bin", "/bin"]),
+            PathVerdict::Absent
+        );
+    }
+
+    /// Only a directory that actually HOLDS a `claude` can shadow one. An
+    /// earlier PATH entry with no such file is irrelevant, and naming it would
+    /// send the reader to fix the wrong thing.
+    #[test]
+    fn an_earlier_directory_without_the_tool_does_not_shadow() {
+        let shim = std::path::Path::new("/shim/bin");
+        assert_eq!(
+            path_verdict_with(shim, &["/empty", "/shim/bin"], &|d| d != "/empty"),
+            PathVerdict::Wins
+        );
     }
 }

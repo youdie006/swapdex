@@ -24,7 +24,13 @@ impl Chooser {
         slots: &[SlotRecord],
     ) -> Option<SlotRecord> {
         let now = pointer.map(Path::to_path_buf);
-        let changed = self.seen_once && now != self.last_pointer;
+        // A pointer this chooser has never seen counts as new. It used to
+        // require a PREVIOUS sighting, so on the first request after a restart
+        // an explicit `serve` lost to a rotation left over from before - and
+        // went on losing, because the pointer never "changed" again. On a real
+        // machine `serving` named one account for half an hour while every turn
+        // went to another.
+        let changed = now != self.last_pointer;
         self.last_pointer = now;
         self.seen_once = true;
         let by_pointer = pointer.and_then(|p| slots.iter().find(|r| r.config_dir == p));
@@ -1589,5 +1595,60 @@ mod handoff_tests {
     #[test]
     fn nowhere_to_go_says_so() {
         assert_eq!(handoff_target(&[], "a"), None);
+    }
+}
+
+#[cfg(test)]
+mod first_sight_tests {
+    use super::*;
+
+    fn slot(name: &str, dir: &str) -> SlotRecord {
+        SlotRecord {
+            name: name.into(),
+            id: name.into(),
+            config_dir: std::path::PathBuf::from(dir),
+            adopted: false,
+            tool: "claude-code".into(),
+        }
+    }
+
+    /// A restart must not freeze whatever the proxy last rotated to.
+    ///
+    /// `changed` was only true once the proxy had ALREADY seen a pointer, so on
+    /// the first request after a restart the explicit `serve` choice lost to a
+    /// stale rotation - and went on losing, because the pointer never "changed"
+    /// again. On a real machine `serving` named one account for half an hour
+    /// while every turn went to another.
+    #[test]
+    fn an_explicit_choice_wins_on_the_very_first_request() {
+        let slots = vec![slot("rnd", "/s/rnd"), slot("kong", "/s/kong")];
+        let mut c = Chooser::default();
+        let got = c.choose(Some(std::path::Path::new("/s/kong")), Some("rnd"), &slots);
+        assert_eq!(
+            got.map(|r| r.name),
+            Some("kong".to_string()),
+            "the pointer names kong; a rotation from before the restart must not win"
+        );
+    }
+
+    /// And a rotation still works when nobody has asked for anything: that is
+    /// the case it exists for.
+    #[test]
+    fn a_rotation_still_wins_when_the_pointer_agrees_with_it() {
+        let slots = vec![slot("rnd", "/s/rnd"), slot("kong", "/s/kong")];
+        let mut c = Chooser::default();
+        // Pointer and rotation name the same account - nothing to arbitrate.
+        assert_eq!(
+            c.choose(Some(std::path::Path::new("/s/rnd")), Some("rnd"), &slots)
+                .map(|r| r.name),
+            Some("rnd".to_string())
+        );
+        // Pointer unchanged since, rotation moved on: the rotation is the only
+        // thing that knows, so it wins.
+        assert_eq!(
+            c.choose(Some(std::path::Path::new("/s/rnd")), Some("kong"), &slots)
+                .map(|r| r.name),
+            Some("kong".to_string())
+        );
     }
 }
