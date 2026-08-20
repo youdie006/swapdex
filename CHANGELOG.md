@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.75.0] - 2026-08-20
+
+### Fixed
+- **A proxy started in the background keeps a log.** It sent stdout and stderr to `/dev/null`, so on a machine where the shim starts it - the normal case - nothing recorded which account served which turn, or why the proxy failed to start at all. That silence is what made a real switching bug undiagnosable: three wrong conclusions before a log was added by hand. Each tool writes to `logs/proxy-<tool>.log` under the store now; a log that cannot be opened still lets the proxy start, because being unable to record is bad and being unable to serve is worse.
+
 ## [0.74.0] - 2026-08-20
 
 ### Fixed

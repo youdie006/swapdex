@@ -1778,9 +1778,33 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
         .arg(port.to_string())
         .arg("--tool")
         .arg(tool)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+    // Send its voice to a file rather than /dev/null. Discarding it meant that
+    // on a machine where the shim starts the proxy, nothing recorded which
+    // account served which turn - and that silence made a real switching bug
+    // undiagnosable: three wrong conclusions before the log was added by hand.
+    let log = paths.proxy_log(tool);
+    let piped = std::fs::create_dir_all(log.parent().unwrap_or(&log))
+        .ok()
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .ok()
+        });
+    // A log we cannot open must not stop the proxy from starting: being unable
+    // to record is bad, being unable to serve is worse.
+    match piped.and_then(|f| f.try_clone().ok().map(|e| (f, e))) {
+        Some((out, err)) => {
+            cmd.stdout(std::process::Stdio::from(out))
+                .stderr(std::process::Stdio::from(err));
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
     // Detach: the proxy must outlive this short-lived helper and the shell that
     // started it, and must never take the terminal (it would fight `claude` for
     // stdin) or die with the session.

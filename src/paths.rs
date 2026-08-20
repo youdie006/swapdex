@@ -88,6 +88,22 @@ impl Paths {
             .join("antigravity-cli")
             .join("antigravity-oauth-token")
     }
+    /// Where a backgrounded proxy writes what it says.
+    ///
+    /// One per tool. A proxy started by the shim used to discard its output, so
+    /// on a machine where that is how it starts there was no record of which
+    /// account served which turn - the single question these lines exist to
+    /// answer, and three wrong diagnoses came out of not having it.
+    pub fn proxy_log(&self, tool: &str) -> PathBuf {
+        let name = match tool {
+            "codex" => "proxy-codex.log",
+            "gemini" => "proxy-gemini.log",
+            "antigravity" => "proxy-antigravity.log",
+            _ => "proxy-claude.log",
+        };
+        self.data.join("logs").join(name)
+    }
+
     pub fn store_dir(&self) -> PathBuf {
         self.data.clone()
     }
@@ -155,5 +171,26 @@ mod tests {
         assert!(p
             .claude_credentials()
             .starts_with(dir.path().join(".claude")));
+    }
+}
+
+#[cfg(test)]
+mod log_path_tests {
+    use super::*;
+
+    /// A proxy started in the background used to throw its output away, so on a
+    /// machine where the shim starts it there was no record of which account
+    /// served which turn - the one question these logs exist to answer. Three
+    /// wrong diagnoses came out of that silence.
+    #[test]
+    fn a_backgrounded_proxy_has_somewhere_to_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(dir.path());
+        let a = p.proxy_log("claude-code");
+        let b = p.proxy_log("codex");
+        assert_ne!(a, b, "each tool keeps its own log");
+        // Under the store, so it travels with the rest of swapdex's state.
+        assert!(a.starts_with(p.store_dir()), "{a:?}");
+        assert!(a.to_string_lossy().contains("log"), "named as a log: {a:?}");
     }
 }
