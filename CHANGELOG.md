@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.79.0] - 2026-08-21
+
+### Fixed
+- **A refusal is retired when the credential that earned it is replaced.** A recorded 401/403/429 was cleared two ways - enough time passing, or a later success - and neither covers the thing that actually resolves an auth refusal: the token being refreshed. The old refusal outlived the credential it was about, so an account that had just been re-authorized went on being skipped for a reason that no longer existed, until the lapse timer happened to run out.
+- **A 429 that is about to be retried on the same account no longer marks that account as refusing** (Codex path). `note_outcome` ran inside the retry loop, so a momentary throttle stamped the account before the retry had even happened. A successful retry overwrote the stamp, but a round ending any other way left an account sidelined for having been briefly slow. Only the verdict that ends the round is about the account. The Claude path already recorded after the loop and was correct.
+
+Both were found by taking the fixes another multi-account proxy had been making (jung-wan-kim/teamclaude, 134 commits of nothing but `fix` over its upstream) and checking each one against this code. Eight of its ten lessons did not apply or were already handled here - notably its `_403Strikes` counter class of bug, where concurrent requests count one blip N times into a permanent park, cannot arise from a single timestamp.
+
 ## [0.78.0] - 2026-08-21
 
 ### Changed

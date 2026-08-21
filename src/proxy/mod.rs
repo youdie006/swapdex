@@ -93,6 +93,10 @@ struct Shared {
     /// come back with it before anything has actually gone through.
     refused_at: Mutex<HashMap<String, i64>>,
     ok_at: Mutex<HashMap<String, i64>>,
+    /// When each account's credential was last replaced. A refusal belongs to
+    /// the credential that earned it, so a token refresh retires it - without
+    /// this, a re-authorized account stayed sidelined for a dead reason.
+    replaced_at: Mutex<HashMap<String, i64>>,
     /// Said once when a Codex response turns out to state its own windows.
     /// Whether Codex sends those headers is undocumented and was never checked
     /// here, so the first arrival is worth seeing - and its absence stays
@@ -171,6 +175,20 @@ fn skip_header(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "host" | "connection" | "content-length" | "transfer-encoding" | "accept-encoding"
     )
+}
+
+/// Whether this response is the account REFUSING, or just a moment mid-round.
+///
+/// `note_outcome` runs inside the retry loop, so a momentary throttle used to
+/// stamp the account as refusing before the retry had even run. A successful
+/// retry overwrote the stamp, but a round that ended any other way left the
+/// account sidelined for having been briefly slow. Only the verdict that ENDS
+/// the round is about the account - "count refusal rounds, not responses".
+pub fn records_refusal(status: u16, will_retry_same_account: bool) -> bool {
+    if will_retry_same_account {
+        return false;
+    }
+    ratelimit::account_cannot_serve(status)
 }
 
 /// Remember what this account's last answer actually was.
@@ -534,16 +552,25 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
             let held = sh.unusable.lock().unwrap();
             let bad = sh.refused_at.lock().unwrap();
             let good = sh.ok_at.lock().unwrap();
+            let fresh = sh.replaced_at.lock().unwrap();
             slots
                 .iter()
                 .filter(|r| {
                     held.contains(&r.name, now_i)
-                        || pick::currently_refusing(
+                        // A refusal belongs to the credential that earned it: a
+                        // token refreshed since then retires it, so a
+                        // re-authorized account is not held out for a dead
+                        // reason until the lapse timer happens to expire.
+                        || (pick::refusal_survives(
+                            bad.get(&r.name).copied(),
+                            good.get(&r.name).copied(),
+                            fresh.get(&r.name).copied(),
+                        ) && pick::currently_refusing(
                             bad.get(&r.name).copied(),
                             good.get(&r.name).copied(),
                             now_s,
                             ratelimit::SPENT_FOR_SECS,
-                        )
+                        ))
                 })
                 .map(|r| r.name.clone())
                 .collect()
@@ -895,6 +922,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         codex_headers_seen: std::sync::atomic::AtomicBool::new(false),
         refused_at: Mutex::new(HashMap::new()),
         ok_at: Mutex::new(HashMap::new()),
+        replaced_at: Mutex::new(HashMap::new()),
         agent: upstream::agent(),
         base: if opts.tool == "codex" {
             codex::base_url()
@@ -1203,7 +1231,15 @@ fn forward_turn(
         // refresh's module note.
         if creds::slot_token_expired(&slot.config_dir, now_ms()) {
             match crate::refresh::refresh_slot(&slot.config_dir, now_ms()) {
-                Ok(()) => println!("  {}: renewed its login", slot.name),
+                Ok(()) => {
+                    // A new credential: any refusal the OLD one earned is not
+                    // about this one, so record when it was replaced.
+                    sh.replaced_at
+                        .lock()
+                        .unwrap()
+                        .insert(slot.name.clone(), now_secs());
+                    println!("  {}: renewed its login", slot.name)
+                }
                 Err(why) => println!("  {}", why.remedy(&slot.name)),
             }
             std::io::stdout().flush().ok();
@@ -1245,7 +1281,17 @@ fn forward_turn(
             // Retries of THIS account for a throttle, counted so a wall is not
             // mistaken for a pause and retried forever.
             let mut up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
-            note_outcome(sh, &slot.name, up.status);
+            // Decide the retry BEFORE recording anything: a 429 that is about
+            // to be retried on this same account is not the account refusing,
+            // and stamping it as one sidelined accounts for being briefly slow.
+            let will_retry = up.status == 429
+                && matches!(
+                    ratelimit::classify_429(&up.headers, attempt),
+                    ratelimit::Throttle::RetryAfter(_)
+                );
+            if records_refusal(up.status, will_retry) || (200..300).contains(&up.status) {
+                note_outcome(sh, &slot.name, up.status);
+            }
             match upstream::explain_failure(&mut up) {
                 // Same reasoning as the Claude path: the API says why, and
                 // three digits alone leave the user with nothing to act on.
@@ -1906,5 +1952,34 @@ mod response_header_tests {
     #[test]
     fn a_request_body_keeps_its_own_encoding() {
         assert!(!skip_header("content-encoding"));
+    }
+}
+
+#[cfg(test)]
+mod refusal_recording_tests {
+    use super::*;
+
+    /// A 429 that is about to be RETRIED on the same account is not that
+    /// account refusing to serve.
+    ///
+    /// `note_outcome` is called inside the retry loop, so a momentary throttle
+    /// stamped the account as refusing before the retry had even run. When a
+    /// retry then succeeded the stamp was overwritten, but when the round ended
+    /// any other way the account stayed sidelined for being briefly slow -
+    /// exactly the "count refusal rounds, not responses" mistake.
+    ///
+    /// Only the verdict that ends the round is about the account.
+    #[test]
+    fn a_throttle_that_will_be_retried_is_not_a_refusal() {
+        // Mid-round: the proxy is going to try this same account again.
+        assert!(!records_refusal(429, true));
+        // Final: retries are spent, or the response was never retryable.
+        assert!(records_refusal(429, false));
+        // Entitlement refusals are never retried on the same account, so they
+        // are always the end of the round.
+        assert!(records_refusal(403, false));
+        assert!(records_refusal(401, false));
+        // A success is a success whenever it lands.
+        assert!(!records_refusal(200, false));
     }
 }

@@ -245,6 +245,33 @@ pub fn handoff_target(usage: &[(String, f64)], current: &str) -> Option<String> 
 /// It lapses like the window it came from: one 429 must not mark an account as
 /// refusing for the life of the proxy. And a turn that went through since
 /// settles it, however recent the refusal - the account is plainly serving.
+/// Does a recorded refusal still say anything about this account?
+///
+/// A refusal belongs to the CREDENTIAL that earned it. `currently_refusing`
+/// retires one two ways - enough time passing, or a later success - and neither
+/// covers the thing that actually resolves a 401 or 403: the token being
+/// refreshed. The old refusal outlived the credential it was about, so a
+/// freshly re-authorized account went on being skipped for a reason that no
+/// longer existed, until the lapse timer happened to run out.
+///
+/// `replaced` is when this account's credential was last written.
+pub fn refusal_survives(
+    last_refusal: Option<i64>,
+    last_ok: Option<i64>,
+    replaced: Option<i64>,
+) -> bool {
+    let Some(bad) = last_refusal else {
+        return false;
+    };
+    if last_ok.is_some_and(|good| good > bad) {
+        return false;
+    }
+    // A credential written AFTER the refusal is a different credential; the
+    // refusal is not about it. Written before, and the refusal is about this
+    // one and stands.
+    !replaced.is_some_and(|at| at > bad)
+}
+
 pub fn currently_refusing(
     last_refusal: Option<i64>,
     last_ok: Option<i64>,
@@ -1650,5 +1677,33 @@ mod first_sight_tests {
                 .map(|r| r.name),
             Some("kong".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod fresh_credential_tests {
+    use super::*;
+
+    /// A refusal is about the credential that earned it, not about the account
+    /// forever.
+    ///
+    /// `currently_refusing` cleared a refusal two ways: enough time passing, or
+    /// a LATER success. Neither covers the case that actually resolves a 401 or
+    /// 403 - the token being refreshed. The old refusal outlived the credential
+    /// it was about, so a freshly re-authorized account went on being skipped
+    /// until the lapse timer ran out, for a reason that no longer existed.
+    #[test]
+    fn a_refreshed_credential_retires_the_refusal_it_earned() {
+        // Refused at 100, credential replaced at 150: the refusal is stale.
+        assert!(!refusal_survives(Some(100), None, Some(150)));
+        // Replaced BEFORE the refusal: that refusal is about the new
+        // credential, so it stands.
+        assert!(refusal_survives(Some(100), None, Some(50)));
+        // No replacement recorded at all: unchanged behaviour.
+        assert!(refusal_survives(Some(100), None, None));
+        // A later success already retires it, whatever the credential did.
+        assert!(!refusal_survives(Some(100), Some(120), None));
+        // Nothing was ever refused.
+        assert!(!refusal_survives(None, None, Some(150)));
     }
 }
