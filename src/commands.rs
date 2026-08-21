@@ -1298,6 +1298,63 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
     out
 }
 
+/// What to say when a name matches no account.
+///
+/// A typo answered "no account named 'alicee' - `swapdex ui` lists them",
+/// sending the user to open another screen to read four words. The list is
+/// right here; and when one candidate is an obvious near-miss, naming it is the
+/// whole answer.
+pub fn unknown_account(asked: &str, known: &[&str]) -> String {
+    if known.is_empty() {
+        return "no accounts saved yet - `swapdex add <name>` saves the login you are on"
+            .to_string();
+    }
+    // A near-miss is a typo: one edit away, or one is a prefix of the other.
+    let near = known.iter().find(|k| {
+        let (a, b) = (asked.to_lowercase(), k.to_lowercase());
+        a != b && (a.starts_with(&b) || b.starts_with(&a)) && a.len().abs_diff(b.len()) <= 2
+    });
+    match near {
+        Some(hit) => {
+            let others: Vec<&str> = known.iter().copied().filter(|k| k != hit).collect();
+            if others.is_empty() {
+                format!("no account named '{asked}' - did you mean '{hit}'?")
+            } else {
+                format!(
+                    "no account named '{asked}' - did you mean '{hit}'? (also: {})",
+                    others.join(", ")
+                )
+            }
+        }
+        None => format!(
+            "no account named '{asked}' - you have: {}",
+            known.join(", ")
+        ),
+    }
+}
+
+/// One line confirming a switch: who is paying now, and what they have left.
+///
+/// `serve` printed the destination and two lines of explanation, and said
+/// nothing about the account itself - so every switch was followed by `ls` to
+/// see whether it took, and by `usage` to see whether that account had any
+/// room. Both answers belong in the switch that prompted them.
+///
+/// What is unknown is left unsaid: an account whose window has never been read
+/// gets its name and nothing more, rather than a percentage nobody measured.
+pub fn switch_line(name: &str, email: Option<&str>, week_left_pct: Option<f64>) -> String {
+    let who = match email {
+        Some(e) => format!("now {name} ({e})"),
+        None => format!("now {name}"),
+    };
+    match week_left_pct {
+        // Spent reads worse as "0% left" than as plain words.
+        Some(p) if p < 0.5 => format!("{who} - no week left"),
+        Some(p) => format!("{who} - {:.0}% of the week left", p),
+        None => who,
+    }
+}
+
 /// Whose account this row is, preferring what the snapshot recorded.
 ///
 /// Identity was read from the saved snapshot only, so an account that exists as
@@ -5030,7 +5087,13 @@ pub fn serve(
         return Ok(0);
     };
     let Some(rec) = slots.get(name) else {
-        eprintln!("swapdex: no account named '{name}' - `swapdex ui` lists them");
+        // Name the accounts here rather than sending the reader to another
+        // screen to read four words.
+        let known: Vec<String> = crate::slots::Slots::open_for(paths, tool)
+            .map(|sl| sl.list().into_iter().map(|r| r.name).collect())
+            .unwrap_or_default();
+        let refs: Vec<&str> = known.iter().map(String::as_str).collect();
+        eprintln!("swapdex: {}", unknown_account(name, &refs));
         return Ok(5);
     };
     // Handing turns to an account with no login does not fail loudly: the proxy
@@ -5067,7 +5130,20 @@ pub fn serve(
         let _ = proxy_ensure(paths, DEFAULT_PROXY_PORT, tool);
     }
     let live = crate::proxy::running_proxy_for(paths, tool).is_some();
-    println!("turns -> {name}");
+    // Confirm the switch here rather than making the user run `ls` to see
+    // whether it took and `usage` to see whether that account has room. What is
+    // unknown stays unsaid - a window nobody has read gets no percentage.
+    {
+        let email = crate::slots::Slots::open_for(paths, tool)
+            .ok()
+            .and_then(|sl| sl.get(name).map(|r| r.config_dir.clone()))
+            .and_then(|d| crate::proxy::creds::slot_email(&d));
+        let left = crate::quota_cache::load_for(paths, tool)
+            .get(name)
+            .and_then(|e| e.seven_d)
+            .map(|used| (100.0 - used).clamp(0.0, 100.0));
+        println!("{}", switch_line(name, email.as_deref(), left));
+    }
     if live {
         println!("  the session you have open moves from its next turn");
         // Codex reads its provider label once, at launch. The turn is billed to
@@ -5487,7 +5563,11 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
         Some(n) => match slots.get(n) {
             Some(r) => vec![r],
             None => {
-                eprintln!("swapdex: no account named '{n}' - `swapdex ui` lists them");
+                // Name them here rather than sending the reader to another
+                // screen to read four words.
+                let known: Vec<String> = slots.list().into_iter().map(|r| r.name).collect();
+                let refs: Vec<&str> = known.iter().map(String::as_str).collect();
+                eprintln!("swapdex: {}", unknown_account(n, &refs));
                 return Ok(5);
             }
         },
@@ -7085,8 +7165,8 @@ mod tests {
     use super::{
         best_identity, codex_account_sources, codex_identity, codex_quota_lines, codex_row,
         codex_usage_row, home_note, keychain_verdict, listable, payer_line, payer_note,
-        pick_active, row_needs_login, row_suffix, stale_hint, stale_marker, unhonoured_ask,
-        win_line,
+        pick_active, row_needs_login, row_suffix, stale_hint, stale_marker, switch_line,
+        unhonoured_ask, unknown_account, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7206,6 +7286,63 @@ mod tests {
         assert!(
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
+        );
+    }
+
+    /// A name that does not match should show the names that do.
+    ///
+    /// A typo answered "no account named 'alicee' - `swapdex ui` lists them",
+    /// sending the user to open another screen to read four words. The list is
+    /// right there; and when one candidate is an obvious near-miss, saying so
+    /// is the whole answer.
+    #[test]
+    fn a_wrong_name_is_answered_with_the_right_ones() {
+        // Near-miss: name it, because that is almost certainly the intent.
+        assert_eq!(
+            unknown_account("alicee", &["alice", "bob"]),
+            "no account named 'alicee' - did you mean 'alice'? (also: bob)"
+        );
+        // No near-miss: just list them.
+        assert_eq!(
+            unknown_account("zzz", &["alice", "bob"]),
+            "no account named 'zzz' - you have: alice, bob"
+        );
+        // Nothing saved at all: say that, not an empty list.
+        assert_eq!(
+            unknown_account("alice", &[]),
+            "no accounts saved yet - `swapdex add <name>` saves the login you are on"
+        );
+    }
+
+    /// Switching should not need a second command to confirm it.
+    ///
+    /// `serve rnd` printed "turns -> rnd" and two lines of explanation, and
+    /// said nothing about the account itself - so every switch was followed by
+    /// `ls` to see whether it took, and by `usage` to see whether that account
+    /// had any room. The confirmation belongs in the switch.
+    #[test]
+    fn a_switch_confirms_itself_with_the_account_it_moved_to() {
+        // Identity and room both known: one line carries both.
+        assert_eq!(
+            switch_line("rnd", Some("rnd@x.com"), Some(68.0)),
+            "now rnd (rnd@x.com) - 68% of the week left"
+        );
+        // Room unknown - never measured, or the window has not been read.
+        // Say the identity and stay silent about what is not known.
+        assert_eq!(
+            switch_line("rnd", Some("rnd@x.com"), None),
+            "now rnd (rnd@x.com)"
+        );
+        // A slot with no config to name it: the name is all there is.
+        assert_eq!(
+            switch_line("bsgong", None, Some(12.0)),
+            "now bsgong - 12% of the week left"
+        );
+        assert_eq!(switch_line("bsgong", None, None), "now bsgong");
+        // Spent: worth saying plainly rather than printing "0% left".
+        assert_eq!(
+            switch_line("kong", Some("k@x.com"), Some(0.0)),
+            "now kong (k@x.com) - no week left"
         );
     }
 

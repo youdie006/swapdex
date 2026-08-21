@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.83.0] - 2026-08-21
+
+### Changed
+- **A switch confirms itself.** `serve rnd` printed the destination and two lines of explanation and said nothing about the account, so every switch was followed by `ls` to see whether it took and `usage` to see whether that account had room. It now answers both at once: `now rnd (rnd@polarisai.co.kr) - 68% of the week left`. A window nobody has read stays unmentioned rather than being reported as a number, and a spent account reads `no week left` instead of `0% left`.
+- **A name that matches nothing shows the names that do.** A typo answered "no account named 'alicee' - `swapdex ui` lists them", sending the reader to open another screen to read four words. It now says `did you mean 'alice'? (also: bob)` for a near-miss, `you have: alice, bob` otherwise, and points at `swapdex add` when nothing is saved at all.
+
 ## [0.82.0] - 2026-08-21
 
 ### Fixed
