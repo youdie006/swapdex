@@ -475,10 +475,14 @@ impl Store {
         inv: u128,
     ) -> Result<()> {
         let path = self.dir.join("timeline.jsonl");
+        // Who asked. Without this, a paying account that changed without anyone
+        // meaning to gave no way to tell which of twenty live sessions did it -
+        // only a process hunt that had to catch it in the act.
+        let by = caller_label(parent_cmdline().as_deref());
         let line = if inv > 0 {
-            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action, "inv": inv.to_string()})
+            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action, "by": by, "inv": inv.to_string()})
         } else {
-            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action})
+            serde_json::json!({"ts": ts, "tool": tool, "account": account, "action": action, "by": by})
         };
         let mut buf = if path.exists() {
             {
@@ -789,6 +793,61 @@ mod tests {
     }
 }
 
+/// The command line of this process's parent, when the OS will say.
+///
+/// Linux and macOS differ, and neither is essential: an unreadable parent
+/// yields `None` and the entry records "unknown" rather than failing a switch
+/// over bookkeeping.
+fn parent_cmdline() -> Option<String> {
+    let ppid = std::os::unix::process::parent_id();
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{ppid}/cmdline")).ok()?;
+        let s: String = String::from_utf8_lossy(&raw).replace('\0', " ");
+        Some(s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "command=", "-p", &ppid.to_string()])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Some(s).filter(|s| !s.is_empty())
+    }
+}
+
+/// A short name for the process that asked for a switch.
+///
+/// The timeline recorded `serve kong` and nothing about the caller, so when the
+/// paying account changed without anyone meaning to, there was no way to tell
+/// which of twenty live sessions had done it - only a process hunt that had to
+/// catch it in the act. The command's own name is enough to tell them apart.
+pub fn caller_label(cmdline: Option<&str>) -> String {
+    let raw = cmdline.unwrap_or("").trim();
+    if raw.is_empty() {
+        return "unknown".to_string();
+    }
+    // The interesting word is the executable's file name. A wrapper like
+    // `node .../bin/codex` names the wrapper first, so skip interpreters.
+    const WRAPPERS: &[&str] = &["node", "python", "python3", "sh", "env"];
+    for word in raw.split_whitespace() {
+        if word.starts_with('-') {
+            continue;
+        }
+        let base = word.rsplit('/').next().unwrap_or(word);
+        if base.is_empty() || WRAPPERS.contains(&base) {
+            continue;
+        }
+        return base.to_string();
+    }
+    // Everything was a wrapper: name the first one rather than nothing.
+    raw.split_whitespace()
+        .next()
+        .map(|w| w.rsplit('/').next().unwrap_or(w).to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// What `rm` was actually asked to do.
 #[derive(Debug, PartialEq)]
 pub enum Intent {
@@ -876,5 +935,31 @@ mod drop_tool_tests {
         assert!(!store.drop_tool("kong", "gemini").unwrap());
         // The other tools are untouched, so the profile is plainly still there.
         assert!(base.exists());
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    /// An account switch should say who asked for it.
+    ///
+    /// The timeline recorded `serve kong` and nothing about the caller, so when
+    /// the paying account changed without anyone meaning to, there was no way
+    /// to tell which of twenty live sessions had done it - only a process hunt
+    /// that had to catch it in the act. The entry names its caller now.
+    #[test]
+    fn a_switch_records_who_asked_for_it() {
+        // A parent worth naming: keep the command, drop the path noise.
+        assert_eq!(caller_label(Some("/home/u/.local/bin/claude -r")), "claude");
+        assert_eq!(
+            caller_label(Some("node /usr/lib/node_modules/x/bin/codex --yolo")),
+            "codex"
+        );
+        assert_eq!(caller_label(Some("/bin/bash -c source ...")), "bash");
+        // Nothing readable: say so plainly rather than invent a name.
+        assert_eq!(caller_label(None), "unknown");
+        assert_eq!(caller_label(Some("")), "unknown");
+        assert_eq!(caller_label(Some("   ")), "unknown");
     }
 }

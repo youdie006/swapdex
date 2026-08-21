@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.85.0] - 2026-08-21
+
+### Added
+- **A switch records who asked for it.** The timeline held `serve kong` and nothing about the caller, so when the paying account changed without anyone meaning to there was no way to tell which of twenty live sessions had done it - only a process hunt that had to catch it in the act. Entries now carry `"by"`: the calling command's own name (`claude`, `codex`, `bash`), with interpreter wrappers skipped so `node .../bin/codex` reads as `codex`. An unreadable parent records `unknown` rather than failing the switch over bookkeeping.
+
 ## [0.84.0] - 2026-08-21
 
 ### Added
