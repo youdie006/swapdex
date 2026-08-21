@@ -177,6 +177,21 @@ fn skip_header(name: &str) -> bool {
     )
 }
 
+/// Should this turn re-read the accounts' quota windows?
+///
+/// Reading the quota and rotating on it are different jobs. The refresh used to
+/// sit inside `if auto`, so with rotation off nothing ever re-read the windows:
+/// the cache aged, its readings expired at their reset times, and the usage
+/// vanished from every screen. Turning rotation off should cost the rotation,
+/// not the numbers.
+///
+/// Codex is excluded whatever the setting says: it has no zero-spend usage
+/// endpoint of this kind, and asking one API about another's account is not a
+/// reading.
+pub fn should_measure(_auto: bool, tool: &str) -> bool {
+    tool != "codex"
+}
+
 /// How long to wait before retrying an overloaded server, if at all.
 ///
 /// 529 is Anthropic being overloaded, not this account being spent. It was
@@ -278,6 +293,13 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
     // still served by that account (rotating mid-turn would drop the prompt cache
     // for nothing), which is why the check belongs here and not there.
     let (auto, live_threshold) = live(paths, opts);
+    // Read the windows whether or not rotation is on. This used to live inside
+    // `if auto`, so with rotation off nothing re-read them: the cache aged, its
+    // readings expired at their reset times, and the usage vanished from every
+    // screen. Turning rotation off should cost the rotation, not the numbers.
+    if should_measure(auto, &opts.tool) {
+        refresh_measured(paths, &list, sh);
+    }
     if auto {
         // Stepping off BEFORE the wall needs a reading, and the only zero-spend
         // reading that exists is Anthropic's usage endpoint. Codex has none, so
@@ -2055,5 +2077,28 @@ mod overloaded_tests {
     #[test]
     fn an_overloaded_server_does_not_sideline_the_account() {
         assert!(!ratelimit::account_cannot_serve(529));
+    }
+}
+
+#[cfg(test)]
+mod measure_without_auto_tests {
+    use super::*;
+
+    /// Reading the quota and rotating on it are different jobs.
+    ///
+    /// The refresh sat inside `if auto`, so with rotation off nothing ever
+    /// re-read the windows: the cache aged, its readings expired at their reset
+    /// times, and the usage simply vanished from every screen. Turning
+    /// rotation off should cost the rotation, not the numbers.
+    #[test]
+    fn the_quota_is_refreshed_even_with_rotation_off() {
+        // Rotation on: measured, as before.
+        assert!(should_measure(true, "claude-code"));
+        // Rotation off: still measured - the display needs it.
+        assert!(should_measure(false, "claude-code"));
+        // Codex has no zero-spend usage endpoint of this kind, so it is never
+        // measured this way whatever the rotation setting says.
+        assert!(!should_measure(true, "codex"));
+        assert!(!should_measure(false, "codex"));
     }
 }

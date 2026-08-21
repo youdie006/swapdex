@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.87.0] - 2026-08-21
+
+### Fixed
+- **The quota is re-read even with rotation off, so the usage stops vanishing.** The refresh sat inside the `auto` branch, so with rotation off nothing ever re-read the windows: the cache aged, each reading expired at its own reset time, and the usage disappeared from the status bar and every other screen - correctly, since by then nothing was known, but for no good reason. Turning rotation off should cost the rotation, not the numbers. Codex stays excluded whatever the setting says: it has no zero-spend usage endpoint of this kind.
+
 ## [0.86.0] - 2026-08-21
 
 ### Fixed
