@@ -177,6 +177,24 @@ fn skip_header(name: &str) -> bool {
     )
 }
 
+/// How long to wait before retrying an overloaded server, if at all.
+///
+/// 529 is Anthropic being overloaded, not this account being spent. It was
+/// passed straight through, so the turn died and the user saw a connection
+/// drop, 54 of them in one day's log. Waiting briefly usually clears it, and
+/// switching accounts cannot: every account talks to the same server, so
+/// rotating would drop the prompt cache for nothing.
+///
+/// Bounded at three tries: a server that stays down has to surface as an error
+/// rather than hold the turn open indefinitely.
+pub fn overload_retry(status: u16, attempt: u32) -> Option<std::time::Duration> {
+    const MAX: u32 = 3;
+    if status != 529 || attempt >= MAX {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(1u64 << attempt))
+}
+
 /// Whether this response is the account REFUSING, or just a moment mid-round.
 ///
 /// `note_outcome` runs inside the retry loop, so a momentary throttle used to
@@ -1459,6 +1477,22 @@ fn forward_turn(
                 body = client_body.clone();
                 continue;
             }
+            // 529 is the SERVER overloaded, not this account. Passing it
+            // through killed the turn and read as a connection drop; waiting
+            // briefly usually clears it, and rotating cannot - every account
+            // talks to the same server.
+            if let Some(wait) = overload_retry(up.status, attempt) {
+                println!(
+                    "{} {path} -> 529 overloaded, retrying in {}s",
+                    slot.name,
+                    wait.as_secs()
+                );
+                std::io::stdout().flush().ok();
+                drop(up);
+                attempt += 1;
+                std::thread::sleep(wait);
+                continue;
+            }
             if up.status != 429 {
                 break up;
             }
@@ -1981,5 +2015,45 @@ mod refusal_recording_tests {
         assert!(records_refusal(401, false));
         // A success is a success whenever it lands.
         assert!(!records_refusal(200, false));
+    }
+}
+
+#[cfg(test)]
+mod overloaded_tests {
+    use super::*;
+
+    /// 529 is the SERVER being overloaded, not this account being spent.
+    ///
+    /// It was passed straight through, so the turn died and the user saw a
+    /// connection drop, 54 of them in one day's log. Waiting briefly usually
+    /// clears it, and switching accounts cannot: every account talks to the
+    /// same overloaded server, so rotating would only drop the prompt cache.
+    #[test]
+    fn an_overloaded_server_is_retried_on_the_same_account() {
+        assert_eq!(
+            overload_retry(529, 0),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            overload_retry(529, 1),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            overload_retry(529, 2),
+            Some(std::time::Duration::from_secs(4))
+        );
+        // Bounded: a server that stays down must surface, not loop forever.
+        assert_eq!(overload_retry(529, 3), None);
+        // Everything else is somebody else's decision.
+        assert_eq!(overload_retry(200, 0), None);
+        assert_eq!(overload_retry(429, 0), None);
+        assert_eq!(overload_retry(500, 0), None);
+    }
+
+    /// And it is never mistaken for the account refusing: sidelining an account
+    /// over the server's own load would take a healthy login out of rotation.
+    #[test]
+    fn an_overloaded_server_does_not_sideline_the_account() {
+        assert!(!ratelimit::account_cannot_serve(529));
     }
 }

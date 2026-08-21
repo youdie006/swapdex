@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.86.0] - 2026-08-21
+
+### Fixed
+- **An overloaded server is retried instead of killing the turn.** A 529 means Anthropic is overloaded, not that the account is spent, but it was passed straight through - so the turn died and the user saw a connection drop. One day's proxy log held 54 of them. It now waits 1s, 2s, 4s on the SAME account and gives up after three tries: rotating cannot help, because every account talks to the same server, and switching would drop the prompt cache for nothing. A 529 also never marks the account as refusing, which would have taken a healthy login out of rotation over the server's own load.
+
 ## [0.85.0] - 2026-08-21
 
 ### Added
