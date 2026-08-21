@@ -1324,6 +1324,29 @@ pub fn quota_brief(five_h_used: Option<f64>, seven_d_used: Option<f64>) -> Strin
 /// sending the user to open another screen to read four words. The list is
 /// right here; and when one candidate is an obvious near-miss, naming it is the
 /// whole answer.
+pub fn unknown_account_or_unservable(asked: &str, servable: &[&str], saved: &[&str]) -> String {
+    // A name that IS saved but cannot serve is a different problem, and saying
+    // "no account named X - you have: X" is worse than useless. Serving reads a
+    // slot's own credential directory; a snapshot has none until it is run once.
+    if saved.contains(&asked) && !servable.contains(&asked) {
+        return format!(
+            "'{asked}' is saved but has never been signed in on this machine, so it \
+             cannot pay for turns - `swapdex run {asked}` signs it in once"
+        );
+    }
+    // Nothing can serve, but something IS saved: "no accounts saved yet" would
+    // be a plain untruth about accounts `ls` is showing. Name them and say what
+    // they still need.
+    if servable.is_empty() && !saved.is_empty() {
+        return format!(
+            "no account named '{asked}'. Saved, but not yet signed in on this machine: \
+             {} - `swapdex run <name>` signs one in",
+            saved.join(", ")
+        );
+    }
+    unknown_account(asked, servable)
+}
+
 pub fn unknown_account(asked: &str, known: &[&str]) -> String {
     if known.is_empty() {
         return "no accounts saved yet - `swapdex add <name>` saves the login you are on"
@@ -4112,23 +4135,31 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     // Codex slot unfound: the snapshot was renamed and the slot kept its old
     // name, so one account answered to two - `ls` said one thing and the
     // registry another. `rm` already had this fix; rename did not.
+    // An account can be BOTH a slot and a snapshot. Renaming the slot and
+    // returning left the snapshot under the old name, so one account showed as
+    // two rows - `after` and `before` side by side, each half of the same
+    // login. Rename every kind that answers to this name.
+    let mut slot_renamed = false;
     if let Some((tool, _)) = crate::slots::find_any_tool(paths, old) {
         if let Ok(mut slots) = crate::slots::Slots::open_for(paths, &tool) {
-            return match slots.rename(old, new) {
-                Ok(true) => {
-                    println!("renamed account '{old}' to '{new}'");
-                    Ok(0)
-                }
-                Ok(false) => {
-                    eprintln!("swapdex: no account named '{old}'");
-                    Ok(5)
-                }
+            match slots.rename(old, new) {
+                Ok(true) => slot_renamed = true,
+                Ok(false) => {}
                 Err(e) => {
                     eprintln!("swapdex: {e}");
-                    Ok(6)
+                    return Ok(6);
                 }
-            };
+            }
         }
+    }
+    // No snapshot to move as well: the slot rename was the whole job.
+    if slot_renamed
+        && Store::open(paths)
+            .map(|st| !st.list().iter().any(|p| p.name == old))
+            .unwrap_or(true)
+    {
+        println!("renamed account '{old}' to '{new}'");
+        return Ok(0);
     }
     let store = Store::open(paths)?;
     // Take the switch lock like every other store mutation, and make the
@@ -5126,12 +5157,20 @@ pub fn serve(
     };
     let Some(rec) = slots.get(name) else {
         // Name the accounts here rather than sending the reader to another
-        // screen to read four words.
-        let known: Vec<String> = crate::slots::Slots::open_for(paths, tool)
+        // screen to read four words - and name BOTH kinds. Listing only slots
+        // answered "no accounts saved yet" about a profile `add` had just
+        // saved and `ls` was already showing.
+        let mut servable: Vec<String> = crate::slots::Slots::open_for(paths, tool)
             .map(|sl| sl.list().into_iter().map(|r| r.name).collect())
             .unwrap_or_default();
-        let refs: Vec<&str> = known.iter().map(String::as_str).collect();
-        eprintln!("swapdex: {}", unknown_account(name, &refs));
+        servable.sort();
+        let mut saved: Vec<String> = Store::open(paths)
+            .map(|st| st.list().into_iter().map(|p| p.name).collect())
+            .unwrap_or_default();
+        saved.sort();
+        let sv: Vec<&str> = servable.iter().map(String::as_str).collect();
+        let sa: Vec<&str> = saved.iter().map(String::as_str).collect();
+        eprintln!("swapdex: {}", unknown_account_or_unservable(name, &sv, &sa));
         return Ok(5);
     };
     // Handing turns to an account with no login does not fail loudly: the proxy

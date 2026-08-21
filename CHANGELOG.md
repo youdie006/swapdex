@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.88.0] - 2026-08-21
+
+### Added
+- **Agreement tests: run one command, then ask a different command whether it agrees.** Fifteen defects shipped past 599 unit tests in a day, and not one was a function computing the wrong answer - they were the joins between functions: a helper built and never wired to the screen that needed it, a refresh trapped inside an `if`, a record written inside the retry loop it was meant to summarise, a listing that read snapshots and not slots. Unit tests cannot see those, because each unit passes. Eight scenario tests now walk real command sequences and check every screen against the state underneath it. They found three live defects on their first run.
+
+### Fixed
+- **`rename` moved half an account.** An account can be both a slot and a snapshot; renaming the slot returned early, leaving the snapshot under the old name - so `ls` showed `after` and `before` side by side, each half of one login. Both are renamed now.
+- **`serve` said "no account named X - you have: X".** It accepts slots only, but the name list it printed included snapshots, so the error contradicted itself. A saved-but-never-signed-in account is now told what it actually needs: `'alpha' is saved but has never been signed in on this machine ... `swapdex run alpha` signs it in once`.
+- **"no accounts saved yet" was said with accounts saved.** When nothing was servable but snapshots existed, the message denied the existence of accounts `ls` was displaying. It names them and says what they still need.
+
 ## [0.87.0] - 2026-08-21
 
 ### Fixed
