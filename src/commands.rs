@@ -1298,6 +1298,26 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
     out
 }
 
+/// Every account that can be switched to, snapshots and slots together.
+///
+/// `ls` listed saved snapshots only. On a machine whose accounts live as SLOTS,
+/// `serve personal` moved the turns correctly and the list had no row for
+/// `personal` at all - so the mark saying who pays had nowhere to appear, and
+/// two of three switches looked like they did nothing.
+///
+/// Sorted and de-duplicated: an account with both a slot and a snapshot is one
+/// account, and a stable order keeps the table from reshuffling between runs.
+pub fn listable(snapshots: &[&str], slots: &[&str]) -> Vec<String> {
+    let mut all: Vec<String> = snapshots
+        .iter()
+        .chain(slots.iter())
+        .map(|s| s.to_string())
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
 /// The mark a single row gets for paying, if any.
 ///
 /// `serve rnd` says "turns -> rnd", and then `ls` starred a different account -
@@ -1455,7 +1475,29 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             .collect()
     };
 
-    let profiles = store.list();
+    let mut profiles = store.list();
+    // Slots are switchable too. `ls` listed saved snapshots only, so on a
+    // machine whose accounts live as slots, `serve personal` moved the turns
+    // correctly and there was no row for `personal` to mark - two of three
+    // switches looked like they did nothing.
+    for tool in ["claude-code", "codex"] {
+        if let Ok(sl) = crate::slots::Slots::open_for(paths, tool) {
+            for r in sl.list() {
+                match profiles.iter_mut().find(|p| p.name == r.name) {
+                    Some(p) => {
+                        if !p.tools.iter().any(|t| t == tool) {
+                            p.tools.push(tool.to_string());
+                        }
+                    }
+                    None => profiles.push(crate::store::ProfileInfo {
+                        name: r.name.clone(),
+                        tools: vec![tool.to_string()],
+                    }),
+                }
+            }
+        }
+    }
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
     if json {
         let rows: Vec<Value> = profiles
             .iter()
@@ -7003,8 +7045,8 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 mod tests {
     use super::{
         codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
-        home_note, keychain_verdict, payer_line, payer_note, pick_active, row_needs_login,
-        row_suffix, stale_hint, stale_marker, unhonoured_ask, win_line,
+        home_note, keychain_verdict, listable, payer_line, payer_note, pick_active,
+        row_needs_login, row_suffix, stale_hint, stale_marker, unhonoured_ask, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7125,6 +7167,26 @@ mod tests {
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
         );
+    }
+
+    /// Every switchable account needs a row, or a switch to it shows nothing.
+    ///
+    /// `ls` listed saved snapshots only. On a machine whose accounts live as
+    /// SLOTS, `serve personal` moved the turns correctly and the list had no
+    /// row for `personal` at all - so the mark saying who pays had nowhere to
+    /// appear, and two of three switches looked like they did nothing.
+    #[test]
+    fn every_switchable_account_gets_a_row() {
+        // Snapshots and slots are merged, and neither is listed twice.
+        assert_eq!(
+            listable(&["claude", "rnd", "work"], &["rnd", "personal", "bsgong"]),
+            vec!["bsgong", "claude", "personal", "rnd", "work"]
+        );
+        // Slots only: still a full list.
+        assert_eq!(listable(&[], &["personal"]), vec!["personal"]);
+        // Snapshots only: unchanged from before.
+        assert_eq!(listable(&["claude"], &[]), vec!["claude"]);
+        assert!(listable(&[], &[]).is_empty());
     }
 
     /// The list must show the switch that was just made.

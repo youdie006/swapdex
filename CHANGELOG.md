@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.81.0] - 2026-08-21
+
+### Fixed
+- **`ls` lists slot accounts too, so every switchable account has a row.** It listed saved snapshots only. On a machine whose accounts live as slots, `serve personal` moved the turns correctly and there was no row for `personal` at all - so the mark naming the payer had nowhere to appear, and two of three switches looked like they did nothing. Verified against that machine's real store layout: `bsgong`, `personal` and `codex-main` were missing from the listing and are there now.
+
 ## [0.80.0] - 2026-08-21
 
 ### Changed
