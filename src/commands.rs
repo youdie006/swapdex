@@ -1298,6 +1298,26 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
     out
 }
 
+/// The mark a single row gets for paying, if any.
+///
+/// `serve rnd` says "turns -> rnd", and then `ls` starred a different account -
+/// the one holding the login on disk - with the paying account named nowhere.
+/// Switching looked like it had not taken, which is what its owner concluded,
+/// repeatedly, over a day.
+///
+/// `None` when there is nothing to disambiguate: same account, or nothing
+/// paying. An extra mark on the common case is noise.
+pub fn row_suffix(
+    row: &str,
+    _signed_in: Option<&str>,
+    paying: Option<&str>,
+) -> Option<&'static str> {
+    // Marked even when the payer also holds the login. Suppressing it there
+    // meant that of three accounts, switching to one produced no visible
+    // change at all, which reads as that one switch having failed.
+    (row == paying?).then_some("pays")
+}
+
 /// Who pays, when that is not who the tool is signed in as.
 ///
 /// `ls` marks the account Claude holds a login for. When a proxy is paying with
@@ -1467,7 +1487,20 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         tools: String,
         warn: Option<String>,
         active: bool,
+        /// Set when this row is the account PAYING and a different one holds
+        /// the login. `serve` said "turns -> rnd" and the list starred another
+        /// name, so the switch read as not having taken.
+        pays: bool,
     }
+    // Same resolution the proxy performs, so what this screen claims and what
+    // the proxy does cannot drift apart.
+    let paying = crate::slots::Slots::open_for(paths, "claude-code")
+        .ok()
+        .and_then(|s| s.payer());
+    let signed_in = active_by_tool(&store, paths)
+        .into_iter()
+        .find(|(t, _)| *t == "claude-code")
+        .map(|(_, n)| n);
     let rows: Vec<Row> = profiles
         .iter()
         .map(|p| {
@@ -1486,6 +1519,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 .collect::<Vec<_>>()
                 .join(", ");
             Row {
+                pays: row_suffix(&p.name, signed_in.as_deref(), paying.as_deref()).is_some(),
                 name: p.name.clone(),
                 ident: identity_column(email, tier),
                 tools,
@@ -1546,8 +1580,12 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 }
             }
         }
+        // The paying account is named on its own row: `serve` moved the turns
+        // there, and without this the list starred a different name and the
+        // switch read as not having taken.
+        let pays = if r.pays { "  <- pays" } else { "" };
         println!(
-            "{mark}{} {} [{}]{warn}",
+            "{mark}{} {} [{}]{warn}{pays}",
             fit(&r.name, name_w),
             fit(&r.ident, ident_w),
             r.tools
@@ -6966,7 +7004,7 @@ mod tests {
     use super::{
         codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
         home_note, keychain_verdict, payer_line, payer_note, pick_active, row_needs_login,
-        stale_hint, stale_marker, unhonoured_ask, win_line,
+        row_suffix, stale_hint, stale_marker, unhonoured_ask, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7087,6 +7125,28 @@ mod tests {
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
         );
+    }
+
+    /// The list must show the switch that was just made.
+    ///
+    /// `serve rnd` says "turns -> rnd", and then `ls` starred a different
+    /// account - the one holding the login on disk - with the paying account
+    /// named nowhere. Switching looked like it had not taken, which is exactly
+    /// what its owner concluded, repeatedly.
+    #[test]
+    fn the_list_shows_which_account_pays() {
+        // Signed in as kong, paying with rnd: the row for rnd says so.
+        assert_eq!(row_suffix("rnd", Some("kong"), Some("rnd")), Some("pays"));
+        // ...and the row for kong is not marked as paying.
+        assert_eq!(row_suffix("kong", Some("kong"), Some("rnd")), None);
+        // The payer is marked EVEN WHEN it also holds the login. Suppressing
+        // it there meant that of three accounts, switching to one of them
+        // produced no visible change at all - reading as that switch failing.
+        assert_eq!(row_suffix("kong", Some("kong"), Some("kong")), Some("pays"));
+        // Nothing paying (no proxy): nothing to say.
+        assert_eq!(row_suffix("kong", Some("kong"), None), None);
+        // A row that is neither is never marked.
+        assert_eq!(row_suffix("bsgong", Some("kong"), Some("rnd")), None);
     }
 
     /// `ls` marks the account Claude is signed in AS. When a proxy is paying

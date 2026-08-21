@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.80.0] - 2026-08-21
+
+### Changed
+- **`ls` names the account that PAYS, so a switch is visible where it is checked.** `serve rnd` said "turns -> rnd" and then `ls` starred a different account - the one holding the login on disk - with the paying account named nowhere. Both facts were true and only one was shown, so switching read as not having taken, which is what its owner concluded repeatedly over a day. The paying row now ends in `<- pays`, and the star keeps meaning what it always did: which account the tool is signed in as.
+- The mark appears even when the payer is also the signed-in account. Suppressing it there meant that of three accounts, switching to one of them produced no visible change at all - which reads as that one switch failing.
+
 ## [0.79.0] - 2026-08-21
 
 ### Fixed
