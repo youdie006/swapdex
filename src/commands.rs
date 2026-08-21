@@ -1298,6 +1298,19 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
     out
 }
 
+/// Whose account this row is, preferring what the snapshot recorded.
+///
+/// Identity was read from the saved snapshot only, so an account that exists as
+/// a slot and was never snapshotted had an empty name column - the row was
+/// there and switching worked, but nothing said which login it was. The slot's
+/// own `.claude.json` answers when the snapshot cannot.
+///
+/// The snapshot wins when both speak: it is what this profile was SAVED as,
+/// and a slot's config can be overwritten by whatever last ran in it.
+pub fn best_identity(from_snapshot: Option<String>, from_slot: Option<String>) -> Option<String> {
+    from_snapshot.or(from_slot)
+}
+
 /// Every account that can be switched to, snapshots and slots together.
 ///
 /// `ls` listed saved snapshots only. On a machine whose accounts live as SLOTS,
@@ -1476,6 +1489,8 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     };
 
     let mut profiles = store.list();
+    let mut slot_dirs: std::collections::HashMap<String, std::path::PathBuf> =
+        std::collections::HashMap::new();
     // Slots are switchable too. `ls` listed saved snapshots only, so on a
     // machine whose accounts live as slots, `serve personal` moved the turns
     // correctly and there was no row for `personal` to mark - two of three
@@ -1494,6 +1509,12 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                         tools: vec![tool.to_string()],
                     }),
                 }
+                // Remember where this slot lives, so a row with no snapshot can
+                // still say whose login it is - the slot's own .claude.json
+                // knows, and an empty name column left switching unverifiable.
+                slot_dirs
+                    .entry(r.name.clone())
+                    .or_insert_with(|| r.config_dir.clone());
             }
         }
     }
@@ -1503,6 +1524,15 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             .iter()
             .map(|p| {
                 let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+                // A slot-only account has no snapshot to name it; its own config
+                // does. Without this the row appeared with an empty name column, so
+                // a switch to it could not be checked against anything.
+                let email = best_identity(
+                    email,
+                    slot_dirs
+                        .get(&p.name)
+                        .and_then(|d| crate::proxy::creds::slot_email(d)),
+                );
                 serde_json::json!({
                     "name": p.name,
                     "tools": p.tools,
@@ -1547,6 +1577,15 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         .iter()
         .map(|p| {
             let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+            // A slot-only account has no snapshot to name it; its own config
+            // does. Without this the row appeared with an empty name column, so
+            // a switch to it could not be checked against anything.
+            let email = best_identity(
+                email,
+                slot_dirs
+                    .get(&p.name)
+                    .and_then(|d| crate::proxy::creds::slot_email(d)),
+            );
             let at = active_tools_for(&p.name);
             let tools = p
                 .tools
@@ -7044,9 +7083,10 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_account_sources, codex_identity, codex_quota_lines, codex_row, codex_usage_row,
-        home_note, keychain_verdict, listable, payer_line, payer_note, pick_active,
-        row_needs_login, row_suffix, stale_hint, stale_marker, unhonoured_ask, win_line,
+        best_identity, codex_account_sources, codex_identity, codex_quota_lines, codex_row,
+        codex_usage_row, home_note, keychain_verdict, listable, payer_line, payer_note,
+        pick_active, row_needs_login, row_suffix, stale_hint, stale_marker, unhonoured_ask,
+        win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7167,6 +7207,28 @@ mod tests {
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
         );
+    }
+
+    /// An account listed from its slot still shows whose it is.
+    ///
+    /// Identity was read from the saved snapshot only, so an account that
+    /// exists as a slot and was never snapshotted had an empty name column -
+    /// the row was there and switching worked, but there was no way to tell
+    /// which login it was. The slot's own `.claude.json` says.
+    #[test]
+    fn a_slot_only_account_still_shows_its_email() {
+        // Snapshot knows: that answer stands.
+        assert_eq!(
+            best_identity(Some("snap@x.com".into()), Some("slot@x.com".into())).as_deref(),
+            Some("snap@x.com")
+        );
+        // Snapshot silent, slot knows: use the slot.
+        assert_eq!(
+            best_identity(None, Some("slot@x.com".into())).as_deref(),
+            Some("slot@x.com")
+        );
+        // Neither knows: still nothing, rather than a guess.
+        assert_eq!(best_identity(None, None), None);
     }
 
     /// Every switchable account needs a row, or a switch to it shows nothing.

@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.82.0] - 2026-08-21
+
+### Fixed
+- **A slot-only account shows whose login it is.** Identity was read from the saved snapshot only, so an account that exists as a slot and was never snapshotted listed with an empty name column - the row was there and switching worked, but nothing said which login it was, leaving a switch to it impossible to verify. Its own `.claude.json` answers when no snapshot does; the snapshot still wins when both speak, since that is what the profile was saved as. A slot holding no config at all still shows blank rather than a guess. Verified against a real machine's store: `personal` was blank on 0.81.0 and reads `youdie006@gmail.com` now.
+
 ## [0.81.0] - 2026-08-21
 
 ### Fixed
