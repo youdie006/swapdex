@@ -1298,6 +1298,26 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
     out
 }
 
+/// The payer's remaining quota, short enough for a status bar.
+///
+/// Going through the proxy costs the tool its own `rate_limits` block, so a
+/// status line that reads them prints "weekly N/A | 5h N/A" while swapdex holds
+/// a reading from a minute ago. This renders that reading from cache: a bar
+/// redraws constantly and cannot wait on a request.
+///
+/// Takes USED percentages and reports what is LEFT. Empty when nothing has been
+/// measured, so the bar can omit the segment rather than print a placeholder
+/// that looks like a reading.
+pub fn quota_brief(five_h_used: Option<f64>, seven_d_used: Option<f64>) -> String {
+    let left = |u: f64| (100.0 - u).clamp(0.0, 100.0);
+    match (five_h_used, seven_d_used) {
+        (Some(a), Some(b)) => format!("5h {:.0}% | 7d {:.0}%", left(a), left(b)),
+        (Some(a), None) => format!("5h {:.0}%", left(a)),
+        (None, Some(b)) => format!("7d {:.0}%", left(b)),
+        (None, None) => String::new(),
+    }
+}
+
 /// What to say when a name matches no account.
 ///
 /// A typo answered "no account named 'alicee' - `swapdex ui` lists them",
@@ -5060,7 +5080,25 @@ pub fn serve(
     // all, which is a real answer and not a failure, so it still exits 0.
     if quiet {
         if let Some(label) = payer_label(paths, tool) {
-            print!("{label}");
+            // Append what that account has left, from cache. Going through the
+            // proxy costs the tool its own rate_limits block, so a status line
+            // reading those prints "N/A" while swapdex holds a reading from a
+            // minute ago. No request is made: a bar redraws constantly.
+            let who = label
+                .split_whitespace()
+                .next()
+                .unwrap_or(&label)
+                .to_string();
+            let cache = crate::quota_cache::load_for(paths, tool);
+            let brief = cache
+                .get(&who)
+                .map(|e| quota_brief(e.five_h, e.seven_d))
+                .unwrap_or_default();
+            if brief.is_empty() {
+                print!("{label}");
+            } else {
+                print!("{label} - {brief}");
+            }
         }
         return Ok(0);
     }
@@ -7165,8 +7203,8 @@ mod tests {
     use super::{
         best_identity, codex_account_sources, codex_identity, codex_quota_lines, codex_row,
         codex_usage_row, home_note, keychain_verdict, listable, payer_line, payer_note,
-        pick_active, row_needs_login, row_suffix, stale_hint, stale_marker, switch_line,
-        unhonoured_ask, unknown_account, win_line,
+        pick_active, quota_brief, row_needs_login, row_suffix, stale_hint, stale_marker,
+        switch_line, unhonoured_ask, unknown_account, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7287,6 +7325,23 @@ mod tests {
             got.iter().any(|(n, src)| n == "saved" && src.is_none()),
             "a snapshot has no directory to read: {got:?}"
         );
+    }
+
+    /// The status bar needs the payer's remaining quota without a network call.
+    ///
+    /// Going through the proxy costs the tool its own `rate_limits` block, so a
+    /// status line that reads them prints "weekly N/A | 5h N/A" while swapdex
+    /// holds a reading from a minute ago. That reading should be available
+    /// instantly - a bar redraws constantly and cannot wait on a request.
+    #[test]
+    fn the_payer_quota_renders_from_cache_without_a_request() {
+        assert_eq!(quota_brief(Some(17.0), Some(98.0)), "5h 83% | 7d 2%");
+        // One window unknown: report the one that is known.
+        assert_eq!(quota_brief(None, Some(50.0)), "7d 50%");
+        assert_eq!(quota_brief(Some(0.0), None), "5h 100%");
+        // Nothing measured: empty, so the bar can omit the segment entirely
+        // rather than print a placeholder that looks like a reading.
+        assert_eq!(quota_brief(None, None), "");
     }
 
     /// A name that does not match should show the names that do.

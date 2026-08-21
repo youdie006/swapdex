@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.84.0] - 2026-08-21
+
+### Added
+- **`serve --quiet` reports what the paying account has left, from cache.** Going through the proxy costs the tool its own `rate_limits` block, so a status line reading those prints `weekly N/A | 5h N/A` while swapdex holds a reading from a minute ago - the usage disappears exactly when the proxy starts carrying the turns. It now emits `kong (youdie006@gmail.com) - 5h 83% | 7d 2%`. No request is made; a status bar redraws constantly and cannot wait on one. A window nobody has measured is omitted rather than shown as a placeholder.
+
 ## [0.83.0] - 2026-08-21
 
 ### Changed
