@@ -1318,29 +1318,55 @@ pub fn quota_brief(five_h_used: Option<f64>, seven_d_used: Option<f64>) -> Strin
     }
 }
 
+/// How to sign an account in, naming the tool it is about.
+///
+/// A Codex account that could not serve was told to run `swapdex run
+/// codex-test`, and `run` defaults to Claude - so following the instruction
+/// launched Claude for a Codex profile. Advice that names the wrong tool is
+/// worse than none.
+pub fn sign_in_remedy(name: &str, tool: &str) -> String {
+    // Claude is `run`'s default; naming it would be noise.
+    let flag = match tool {
+        "claude-code" | "claude" => String::new(),
+        other => format!(" --tool {other}"),
+    };
+    format!("`swapdex run {name}{flag}` signs it in once")
+}
+
 /// What to say when a name matches no account.
 ///
 /// A typo answered "no account named 'alicee' - `swapdex ui` lists them",
 /// sending the user to open another screen to read four words. The list is
 /// right here; and when one candidate is an obvious near-miss, naming it is the
 /// whole answer.
-pub fn unknown_account_or_unservable(asked: &str, servable: &[&str], saved: &[&str]) -> String {
+pub fn unknown_account_or_unservable(
+    asked: &str,
+    servable: &[&str],
+    saved: &[&str],
+    tool: &str,
+) -> String {
     // A name that IS saved but cannot serve is a different problem, and saying
     // "no account named X - you have: X" is worse than useless. Serving reads a
     // slot's own credential directory; a snapshot has none until it is run once.
     if saved.contains(&asked) && !servable.contains(&asked) {
         return format!(
             "'{asked}' is saved but has never been signed in on this machine, so it \
-             cannot pay for turns - `swapdex run {asked}` signs it in once"
+             cannot pay for turns - {}",
+            sign_in_remedy(asked, tool)
         );
     }
     // Nothing can serve, but something IS saved: "no accounts saved yet" would
     // be a plain untruth about accounts `ls` is showing. Name them and say what
     // they still need.
     if servable.is_empty() && !saved.is_empty() {
+        let flag = if tool == "claude-code" {
+            String::new()
+        } else {
+            format!(" --tool {tool}")
+        };
         return format!(
             "no account named '{asked}'. Saved, but not yet signed in on this machine: \
-             {} - `swapdex run <name>` signs one in",
+             {} - `swapdex run <name>{flag}` signs one in",
             saved.join(", ")
         );
     }
@@ -1429,6 +1455,23 @@ pub fn listable(snapshots: &[&str], slots: &[&str]) -> Vec<String> {
     all.sort();
     all.dedup();
     all
+}
+
+/// Who is paying, across tools.
+///
+/// `ls` asked Claude's registry alone, so serving a Codex account moved the
+/// turns correctly and the listing marked nobody - the same "the switch did
+/// nothing" appearance fixed for Claude in 0.80.0, still live on the Codex
+/// side. Claude wins when both have a payer: one mark can only carry one name,
+/// and Claude is the tool the rest of the row is about.
+pub fn payer_of_any(per_tool: &[(&str, Option<&str>)]) -> Option<String> {
+    let pick = |want: &str| {
+        per_tool
+            .iter()
+            .find(|(t, _)| *t == want)
+            .and_then(|(_, p)| p.map(str::to_string))
+    };
+    pick("claude-code").or_else(|| per_tool.iter().find_map(|(_, p)| p.map(str::to_string)))
 }
 
 /// The mark a single row gets for paying, if any.
@@ -1631,7 +1674,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                     email,
                     slot_dirs
                         .get(&p.name)
-                        .and_then(|d| crate::proxy::creds::slot_email(d)),
+                        .and_then(|d| crate::proxy::creds::any_slot_email(d)),
                 );
                 serde_json::json!({
                     "name": p.name,
@@ -1666,9 +1709,22 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     }
     // Same resolution the proxy performs, so what this screen claims and what
     // the proxy does cannot drift apart.
-    let paying = crate::slots::Slots::open_for(paths, "claude-code")
-        .ok()
-        .and_then(|s| s.payer());
+    // Ask EVERY tool who pays. Asking Claude's registry alone meant serving a
+    // Codex account moved the turns and the listing marked nobody - the same
+    // "the switch did nothing" appearance fixed for Claude in 0.80.0.
+    let payers: Vec<(&str, Option<String>)> = ["claude-code", "codex"]
+        .into_iter()
+        .map(|t| {
+            (
+                t,
+                crate::slots::Slots::open_for(paths, t)
+                    .ok()
+                    .and_then(|s| s.payer()),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, Option<&str>)> = payers.iter().map(|(t, p)| (*t, p.as_deref())).collect();
+    let paying = payer_of_any(&refs);
     let signed_in = active_by_tool(&store, paths)
         .into_iter()
         .find(|(t, _)| *t == "claude-code")
@@ -1684,7 +1740,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 email,
                 slot_dirs
                     .get(&p.name)
-                    .and_then(|d| crate::proxy::creds::slot_email(d)),
+                    .and_then(|d| crate::proxy::creds::any_slot_email(d)),
             );
             let at = active_tools_for(&p.name);
             let tools = p
@@ -5170,7 +5226,10 @@ pub fn serve(
         saved.sort();
         let sv: Vec<&str> = servable.iter().map(String::as_str).collect();
         let sa: Vec<&str> = saved.iter().map(String::as_str).collect();
-        eprintln!("swapdex: {}", unknown_account_or_unservable(name, &sv, &sa));
+        eprintln!(
+            "swapdex: {}",
+            unknown_account_or_unservable(name, &sv, &sa, tool)
+        );
         return Ok(5);
     };
     // Handing turns to an account with no login does not fail loudly: the proxy
@@ -7242,8 +7301,8 @@ mod tests {
     use super::{
         best_identity, codex_account_sources, codex_identity, codex_quota_lines, codex_row,
         codex_usage_row, home_note, keychain_verdict, listable, payer_line, payer_note,
-        pick_active, quota_brief, row_needs_login, row_suffix, stale_hint, stale_marker,
-        switch_line, unhonoured_ask, unknown_account, win_line,
+        payer_of_any, pick_active, quota_brief, row_needs_login, row_suffix, sign_in_remedy,
+        stale_hint, stale_marker, switch_line, unhonoured_ask, unknown_account, win_line,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -7381,6 +7440,61 @@ mod tests {
         // Nothing measured: empty, so the bar can omit the segment entirely
         // rather than print a placeholder that looks like a reading.
         assert_eq!(quota_brief(None, None), "");
+    }
+
+    /// Whoever pays for ANY tool gets marked, not just Claude's payer.
+    ///
+    /// `ls` asked `Slots::open_for(paths, "claude-code")` who pays, so serving a
+    /// Codex account moved the turns correctly and the listing marked nobody -
+    /// the same "the switch did nothing" appearance that was fixed for Claude in
+    /// 0.80.0, still live on the Codex side.
+    #[test]
+    fn a_payer_of_any_tool_is_marked() {
+        // Claude pays: as before.
+        assert_eq!(
+            payer_of_any(&[("claude-code", Some("alpha")), ("codex", None)]).as_deref(),
+            Some("alpha")
+        );
+        // Only Codex has a payer: it gets marked.
+        assert_eq!(
+            payer_of_any(&[("claude-code", None), ("codex", Some("cx"))]).as_deref(),
+            Some("cx")
+        );
+        // Both: Claude's answer is the one a single mark can carry, and it is
+        // the tool `ls` is otherwise about.
+        assert_eq!(
+            payer_of_any(&[("claude-code", Some("alpha")), ("codex", Some("cx"))]).as_deref(),
+            Some("alpha")
+        );
+        // Nobody: nothing marked.
+        assert_eq!(
+            payer_of_any(&[("claude-code", None), ("codex", None)]),
+            None
+        );
+        assert_eq!(payer_of_any(&[]), None);
+    }
+
+    /// The remedy must name the TOOL, or it sends the reader to the wrong one.
+    ///
+    /// A Codex account that could not serve was told to run `swapdex run
+    /// codex-test`, and `run` defaults to Claude - so following the instruction
+    /// launched Claude for a Codex profile. The advice has to carry the tool it
+    /// is about.
+    #[test]
+    fn the_sign_in_remedy_names_the_tool() {
+        assert_eq!(
+            sign_in_remedy("codex-test", "codex"),
+            "`swapdex run codex-test --tool codex` signs it in once"
+        );
+        // Claude is the default, so naming it would be noise.
+        assert_eq!(
+            sign_in_remedy("alpha", "claude-code"),
+            "`swapdex run alpha` signs it in once"
+        );
+        assert_eq!(
+            sign_in_remedy("g", "gemini"),
+            "`swapdex run g --tool gemini` signs it in once"
+        );
     }
 
     /// A name that does not match should show the names that do.

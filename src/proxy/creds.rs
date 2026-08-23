@@ -132,6 +132,22 @@ pub fn slot_email(dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// This slot's email, whatever tool wrote it.
+///
+/// `slot_email` reads `.claude.json` only, so a Codex slot listed with an empty
+/// name column - the same defect fixed for Claude in 0.82.0, still live on the
+/// other side because Codex keeps its identity inside an id_token in
+/// `auth.json` instead. A caller that just wants "whose login is this" should
+/// not have to know which tool the slot belongs to.
+pub fn any_slot_email(dir: &Path) -> Option<String> {
+    if let Some(e) = slot_email(dir) {
+        return Some(e);
+    }
+    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    crate::adapters::codex::decode_email_from_id_token(v["tokens"]["id_token"].as_str())
+}
+
 /// Does the identity recorded for this slot disagree with the login it holds?
 ///
 /// The name beside an account comes from `.claude.json`, the numbers come from
@@ -395,5 +411,42 @@ mod startup_refusal_tests {
     #[test]
     fn an_empty_registry_is_left_to_the_caller() {
         assert!(startup_refusal(&[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod any_tool_email_tests {
+    use super::*;
+
+    /// A slot's email must be readable whatever tool wrote it.
+    ///
+    /// `slot_email` read `.claude.json` only, so a Codex slot listed with an
+    /// empty name column - the same defect fixed for Claude in 0.82.0, still
+    /// live on the other side because Codex keeps its identity inside an
+    /// id_token in `auth.json` instead.
+    #[test]
+    fn a_codex_slot_email_is_read_from_its_auth() {
+        let d = tempfile::tempdir().unwrap();
+        // Claude shape: unchanged.
+        std::fs::write(
+            d.path().join(".claude.json"),
+            br#"{"oauthAccount":{"emailAddress":"c@x.com"}}"#,
+        )
+        .unwrap();
+        assert_eq!(any_slot_email(d.path()).as_deref(), Some("c@x.com"));
+
+        // Codex shape, in a directory with no .claude.json at all.
+        let e = tempfile::tempdir().unwrap();
+        let tok = crate::adapters::codex::test_id_token("k@x.com");
+        std::fs::write(
+            e.path().join("auth.json"),
+            serde_json::to_vec(&serde_json::json!({"tokens":{"id_token":tok}})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(any_slot_email(e.path()).as_deref(), Some("k@x.com"));
+
+        // Neither: nothing, rather than a guess.
+        let f = tempfile::tempdir().unwrap();
+        assert_eq!(any_slot_email(f.path()), None);
     }
 }

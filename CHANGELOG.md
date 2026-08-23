@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.89.0] - 2026-08-24
+
+### Fixed
+- **Serving a Codex account showed up nowhere.** `ls` asked Claude's registry alone who pays, so a Codex switch moved the turns correctly and the listing marked nobody - the same "the switch did nothing" appearance that was fixed for Claude in 0.80.0, still live on the other side. Every tool is asked now.
+- **A Codex account listed with an empty name column.** Identity came from `.claude.json` only, and Codex keeps its own inside an id_token in `auth.json` - so the row was there, switching worked, and nothing said whose login it was. Same defect as 0.82.0, same other side.
+- **A sign-in remedy named the wrong tool.** A Codex account that could not serve was told to run `swapdex run <name>`, and `run` defaults to Claude - so following the instruction launched Claude for a Codex profile. It carries `--tool codex` now.
+
+### Added
+- Agreement tests extended to Codex. Every screen and command was built and fixed against Claude first, and Codex takes its own branch in the proxy with its own registry entries, so a defect fixed on one side could sit live on the other - which is exactly what all three of the above were. Four more scenario tests walk the Codex sequence; they found all three on their first run.
+
 ## [0.88.0] - 2026-08-21
 
 ### Added

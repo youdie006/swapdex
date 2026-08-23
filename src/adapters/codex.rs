@@ -60,6 +60,24 @@ impl AuthTool for Codex {
 
 /// Extract only the `email` claim from a JWT id_token payload - never keep the
 /// token. Best-effort; None on any decode failure.
+/// Build an id_token carrying this email, for tests that need a Codex identity.
+#[cfg(test)]
+pub(crate) fn test_id_token(email: &str) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let body = format!(r#"{{"email":"{email}"}}"#);
+    let b = body.as_bytes();
+    let mut o = String::new();
+    for c in b.chunks(3) {
+        let n = ((c[0] as u32) << 16)
+            | ((*c.get(1).unwrap_or(&0) as u32) << 8)
+            | (*c.get(2).unwrap_or(&0) as u32);
+        for i in 0..(c.len() + 1) {
+            o.push(T[((n >> (18 - i * 6)) & 63) as usize] as char);
+        }
+    }
+    format!("h.{o}.s")
+}
+
 pub(crate) fn decode_email_from_id_token(id_token: Option<&str>) -> Option<String> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let payload = id_token?.split('.').nth(1)?;

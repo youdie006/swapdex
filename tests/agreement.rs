@@ -328,3 +328,170 @@ fn every_listed_account_says_whose_login_it_is() {
         "the row does not name the login it holds:\n{row}"
     );
 }
+
+/// A row must not claim a login it does not hold.
+///
+/// `ls` marked a freshly created Codex slot as the active account (`codex*`)
+/// while `serve` refused it for having no codex login - the slot directory held
+/// config and sessions but no `auth.json`. One screen asserted what the other
+/// denied, and the assertion was the false one.
+#[test]
+fn a_slot_without_a_credential_is_not_reported_as_active() {
+    let t = fixture();
+    let root = t.path();
+
+    // A registered codex slot with everything EXCEPT its credential.
+    let dir = root.join(".local/share/swapdex/slots/codexish");
+    std::fs::create_dir_all(dir.join("sessions")).unwrap();
+    std::fs::write(dir.join("config.toml"), b"# nothing\n").unwrap();
+    let reg = root.join(".local/share/swapdex/slots.json");
+    std::fs::write(
+        &reg,
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "name": "codexish", "id": "codexish",
+            "config_dir": dir.to_string_lossy(), "adopted": false, "tool": "codex"}]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (listing, _, _) = run(root, &["ls"]);
+    let row = listing
+        .lines()
+        .find(|l| l.contains("codexish"))
+        .unwrap_or_default();
+    let (_, err, code) = run(root, &["serve", "codexish", "--tool", "codex"]);
+
+    // Whatever they say, they must not contradict each other: a row cannot be
+    // starred as the live account for a tool that refuses to serve it.
+    if code == 5 || err.contains("no codex login") {
+        assert!(
+            !row.contains("codex*"),
+            "listing stars a tool whose login serve says is missing:\n{row}\n{err}"
+        );
+    }
+}
+
+/// A registered CODEX slot: the shape that can actually pay for Codex turns.
+fn seed_codex_slot(root: &Path, name: &str, email: &str) {
+    let dir = root.join(".local/share/swapdex/slots").join(name);
+    std::fs::create_dir_all(dir.join("sessions")).unwrap();
+    // A minimal id_token whose payload carries the email, the way Codex stores it.
+    let payload = serde_json::json!({"email": email});
+    let b64 = |b: &[u8]| {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut o = String::new();
+        for c in b.chunks(3) {
+            let n = ((c[0] as u32) << 16)
+                | ((*c.get(1).unwrap_or(&0) as u32) << 8)
+                | (*c.get(2).unwrap_or(&0) as u32);
+            for i in 0..(c.len() + 1) {
+                o.push(T[((n >> (18 - i * 6)) & 63) as usize] as char);
+            }
+        }
+        o
+    };
+    let tok = format!(
+        "h.{}.s",
+        b64(serde_json::to_string(&payload).unwrap().as_bytes())
+    );
+    std::fs::write(
+        dir.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-08-20T00:00:00Z",
+            "tokens": {"id_token": tok, "access_token": "AT", "refresh_token": "RT",
+                       "account_id": "acct-1"}}))
+        .unwrap(),
+    )
+    .unwrap();
+    chmod600(&dir.join("auth.json"));
+
+    let reg = root.join(".local/share/swapdex/slots.json");
+    let mut rows: Vec<serde_json::Value> = std::fs::read(&reg)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    rows.push(serde_json::json!({
+        "name": name, "id": name, "config_dir": dir.to_string_lossy(),
+        "adopted": false, "tool": "codex"}));
+    std::fs::write(&reg, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+}
+
+/// Codex accounts must switch the same way Claude ones do.
+///
+/// Every screen and command was built and fixed against Claude first; Codex
+/// took its own branch in the proxy and its own registry entries, so a defect
+/// fixed on one side could easily still be live on the other. This walks the
+/// same sequence for Codex.
+#[test]
+fn a_codex_switch_is_visible_and_agrees_across_commands() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx-one", "one@example.com");
+    seed_codex_slot(root, "cx-two", "two@example.com");
+
+    for name in ["cx-one", "cx-two", "cx-one"] {
+        let (_, err, code) = run(root, &["serve", name, "--tool", "codex"]);
+        assert_eq!(code, 0, "serve {name} --tool codex failed: {err}");
+
+        // The listing must mark exactly this one as paying.
+        let (listing, _, _) = run(root, &["ls"]);
+        let marked: Vec<&str> = listing.lines().filter(|l| l.contains("pays")).collect();
+        assert_eq!(
+            marked.len(),
+            1,
+            "after serving {name} exactly one row should pay:\n{listing}"
+        );
+        assert!(
+            marked[0].contains(name),
+            "the paying row names someone else after serving {name}:\n{}",
+            marked[0]
+        );
+
+        // And the status-bar source must agree.
+        let (quiet, _, _) = run(root, &["serve", "--quiet", "--tool", "codex"]);
+        assert!(
+            quiet.starts_with(name),
+            "status bar says '{}' after serving {name}",
+            quiet.trim()
+        );
+    }
+}
+
+/// A Codex account listed must say whose login it is.
+#[test]
+fn a_codex_row_names_its_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx-one", "one@example.com");
+
+    let (listing, _, _) = run(root, &["ls"]);
+    let row = listing
+        .lines()
+        .find(|l| l.contains("cx-one"))
+        .unwrap_or_default();
+    assert!(
+        row.contains("one@example.com"),
+        "the codex row does not name its login:\n{row}"
+    );
+}
+
+/// Renaming a Codex account must move it everywhere too.
+#[test]
+fn renaming_a_codex_account_moves_it_everywhere() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx-before", "one@example.com");
+
+    let (_, err, code) = run(root, &["rename", "cx-before", "cx-after"]);
+    assert_eq!(code, 0, "rename failed: {err}");
+
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(listing.contains("cx-after"), "new name missing:\n{listing}");
+    assert!(
+        !listing.contains("cx-before"),
+        "old name survived:\n{listing}"
+    );
+    let (_, err, code) = run(root, &["serve", "cx-after", "--tool", "codex"]);
+    assert_eq!(code, 0, "serve does not know the new codex name: {err}");
+}
