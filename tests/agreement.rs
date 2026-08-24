@@ -495,3 +495,110 @@ fn renaming_a_codex_account_moves_it_everywhere() {
     let (_, err, code) = run(root, &["serve", "cx-after", "--tool", "codex"]);
     assert_eq!(code, 0, "serve does not know the new codex name: {err}");
 }
+
+/// A rename must move EVERY tool's slot, not the first one it finds.
+///
+/// `find_any_tool` returns one tool, and rename renamed that tool's registry
+/// entry only. An account holding both a Claude and a Codex slot came out split
+/// in two: `cxtest [codex*, claude-code]` beside `codex-test [codex]`, one
+/// login under two names. 0.88.0 fixed the slot-vs-snapshot half of this; the
+/// slot-vs-slot half was still live.
+#[test]
+fn a_rename_moves_every_tool_slot() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "both", "b@example.com");
+    seed_codex_slot(root, "both", "b@example.com");
+
+    let (_, err, code) = run(root, &["rename", "both", "moved"]);
+    assert_eq!(code, 0, "rename failed: {err}");
+
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(
+        !listing.contains("both"),
+        "the old name survived on some tool:\n{listing}"
+    );
+    // One account, one row - not one row per tool that got left behind.
+    let rows = listing.lines().filter(|l| l.contains("moved")).count();
+    assert_eq!(rows, 1, "the account came out split in two:\n{listing}");
+
+    // And both tools answer to the new name.
+    for tool in ["claude-code", "codex"] {
+        let (_, err, code) = run(root, &["serve", "moved", "--tool", tool]);
+        assert_eq!(code, 0, "serve --tool {tool} does not know 'moved': {err}");
+    }
+}
+
+/// `rm --tool` must be able to drop a SLOT, not just a snapshot.
+///
+/// It looked in the snapshot store only, so a tool that existed as a slot
+/// answered "profile 'X' has no codex login" about a slot the listing was
+/// showing - and the only way to remove it was editing slots.json by hand.
+#[test]
+fn dropping_a_tool_removes_its_slot_too() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "both", "b@example.com");
+    seed_codex_slot(root, "both", "b@example.com");
+
+    let (out, err, code) = run(root, &["rm", "both", "--tool", "codex", "--yes"]);
+    assert_eq!(code, 0, "dropping the codex slot failed: {err}{out}");
+
+    // The claude side survives...
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(listing.contains("both"), "the account vanished:\n{listing}");
+    assert!(
+        listing.contains("claude-code"),
+        "the claude slot was taken too:\n{listing}"
+    );
+    // ...and the codex side is gone.
+    let (_, err, code) = run(root, &["serve", "both", "--tool", "codex"]);
+    assert_ne!(code, 0, "codex still serves after being dropped: {err}");
+}
+
+/// `ls` must say what the TUI says: an expired slot cannot serve.
+///
+/// The TUI marked bsgong "expired" and the proxy log agreed - "its login has
+/// expired - passing your own login through" - while `ls` showed the row with
+/// no note at all. A list that presents an unusable account as fine is the
+/// worse of the two, because `ls` is what a script and a glance both read.
+#[test]
+fn ls_marks_a_slot_whose_token_has_expired() {
+    let t = fixture();
+    let root = t.path();
+    // A slot whose access token lapsed weeks ago.
+    let dir = root.join(".local/share/swapdex/slots/old");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(".credentials.json"),
+        serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+            "accessToken":"AT","refreshToken":"RT",
+            "expiresAt": 1_600_000_000_000i64, "subscriptionType":"max"}}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".claude.json"),
+        br#"{"oauthAccount":{"emailAddress":"old@example.com"}}"#,
+    )
+    .unwrap();
+    chmod600(&dir.join(".credentials.json"));
+    std::fs::write(
+        root.join(".local/share/swapdex/slots.json"),
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "name": "old", "id": "old", "config_dir": dir.to_string_lossy(),
+            "adopted": false, "tool": "claude-code"}]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (listing, _, _) = run(root, &["ls"]);
+    let row = listing
+        .lines()
+        .find(|l| l.contains("old"))
+        .unwrap_or_default();
+    assert!(
+        row.contains("expired") || row.contains("stale") || row.contains("no login"),
+        "an expired slot is listed as if it were fine:\n{row}"
+    );
+}

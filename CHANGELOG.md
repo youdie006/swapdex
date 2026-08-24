@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.90.0] - 2026-08-24
+
+### Fixed
+- **`ls` marks a slot whose login has expired.** The TUI called it `expired` and the proxy said so at the time - "its login has expired - passing your own login through" - while `ls` showed the row with no note at all, presenting an unusable account as fine. `ls` is what a script and a glance both read, so it was the worse of the two screens to be silent.
+- **A rename moved only one tool's slot.** `find_any_tool` returns a single tool and rename renamed that registry alone, so an account holding both a Claude and a Codex slot came out split in two - `cxtest [codex*, claude-code]` beside `codex-test [codex]`, one login under two names. 0.88.0 fixed the slot-vs-snapshot half of this; this is the slot-vs-slot half.
+- **`rm --tool` could not drop a slot.** It looked in the snapshot store only, so a tool that existed as a slot answered "profile 'X' has no codex login" about a slot the listing was showing - and removing it meant editing `slots.json` by hand.
+
 ## [0.89.0] - 2026-08-24
 
 ### Fixed

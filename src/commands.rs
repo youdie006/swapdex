@@ -1755,6 +1755,19 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            // An expired slot cannot serve, and the proxy says so at the time
+            // ("its login has expired - passing your own login through"). The
+            // TUI marked it; this listing showed the row with no note at all,
+            // presenting an unusable account as fine - and `ls` is what a
+            // script and a glance both read.
+            let expired = slot_dirs
+                .get(&p.name)
+                .is_some_and(|d| crate::proxy::creds::slot_token_expired(d, now_ms()));
+            let marker = match (marker, expired) {
+                (Some(m), _) => Some(m),
+                (None, true) => Some("expired".to_string()),
+                (None, false) => None,
+            };
             Row {
                 pays: row_suffix(&p.name, signed_in.as_deref(), paying.as_deref()).is_some(),
                 name: p.name.clone(),
@@ -4089,7 +4102,15 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i3
     // slot and a profile the flag was ignored and the whole account was
     // unregistered - the opposite of what was asked, and destructive.
     if let Some(t) = tool {
-        if !store.drop_tool(name, t)? {
+        // Both kinds: a tool can exist as a saved snapshot, as a registered
+        // slot, or both. Looking only at snapshots answered "has no {t} login"
+        // about a slot the listing was showing, and left no way to remove it
+        // short of editing slots.json by hand.
+        let dropped_snapshot = store.drop_tool(name, t)?;
+        let dropped_slot = crate::slots::Slots::open_for(paths, t)
+            .and_then(|mut sl| sl.remove(name))
+            .unwrap_or(false);
+        if !dropped_snapshot && !dropped_slot {
             eprintln!("swapdex: profile '{name}' has no {t} login");
             return Ok(5);
         }
@@ -4195,9 +4216,14 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     // returning left the snapshot under the old name, so one account showed as
     // two rows - `after` and `before` side by side, each half of the same
     // login. Rename every kind that answers to this name.
+    // EVERY tool's registry, not the first one `find_any_tool` happens to
+    // name. Renaming one left the others behind, so an account holding both a
+    // Claude and a Codex slot came out split in two - one login under two
+    // names. 0.88.0 fixed the slot-vs-snapshot half of this; this is the
+    // slot-vs-slot half.
     let mut slot_renamed = false;
-    if let Some((tool, _)) = crate::slots::find_any_tool(paths, old) {
-        if let Ok(mut slots) = crate::slots::Slots::open_for(paths, &tool) {
+    for tool in adapters::all().iter().map(|a| a.name()) {
+        if let Ok(mut slots) = crate::slots::Slots::open_for(paths, tool) {
             match slots.rename(old, new) {
                 Ok(true) => slot_renamed = true,
                 Ok(false) => {}
