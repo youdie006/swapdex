@@ -95,18 +95,44 @@ mod unavailable_tests {
 /// token, not one the proxy injected - so an expired slot must be stepped over
 /// rather than tried. `false` when the expiry cannot be read (macOS keeps the
 /// credential in the Keychain): unknown is not the same as expired.
+/// A minute of slack: a token about to lapse mid-flight is already useless.
+const SLACK_MS: i64 = 60_000;
+
+/// The verdict, given what each store says the expiry is.
+///
+/// Two stores can both hold a credential, and they disagree: on macOS
+/// `.credentials.json` is a LEFTOVER - Claude Code keeps the real one in the
+/// Keychain - so reading the file first reported a slot signed in minutes ago
+/// as expired on the strength of a file three days old. The owner logged in,
+/// `ls` still said `(expired)`, and nothing they did could change it.
+///
+/// Whichever blob expires LATER is the one that would actually authenticate, so
+/// that is the one the verdict follows. Neither speaking means nothing is
+/// known, and nothing is claimed.
+pub fn expired_from(from_file: Option<i64>, from_keychain: Option<i64>, now_ms: i64) -> bool {
+    match from_file.into_iter().chain(from_keychain).max() {
+        Some(exp) => exp - now_ms <= SLACK_MS,
+        None => false,
+    }
+}
+
 pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
-    // A minute of slack: a token about to lapse mid-flight is already useless.
-    const SLACK_MS: i64 = 60_000;
-    // The expiry lives inside the credential blob, wherever that blob is kept -
-    // a file on Linux/WSL, the Keychain on macOS. Reading only the file meant
-    // every macOS slot looked fresh and its lapsed token was sent anyway.
-    let blob = std::fs::read(dir.join(".credentials.json"))
+    let expiry_of = |b: Vec<u8>| -> Option<i64> {
+        serde_json::from_slice::<serde_json::Value>(&b)
+            .ok()?
+            .get("claudeAiOauth")?
+            .get("expiresAt")?
+            .as_i64()
+    };
+    // Ask BOTH stores. Asking the file first and the Keychain only when the
+    // file was absent let a leftover outvote the credential in use.
+    let from_file = std::fs::read(dir.join(".credentials.json"))
         .ok()
-        .or_else(|| crate::adapters::claude::slot_keychain_read_detail(dir).ok());
-    blob.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64())
-        .is_some_and(|exp| exp - now_ms <= SLACK_MS)
+        .and_then(expiry_of);
+    let from_keychain = crate::adapters::claude::slot_keychain_read_detail(dir)
+        .ok()
+        .and_then(expiry_of);
+    expired_from(from_file, from_keychain, now_ms)
 }
 
 /// This slot's own account UUID, from its `.claude.json` `oauthAccount` - the
@@ -448,5 +474,38 @@ mod any_tool_email_tests {
         // Neither: nothing, rather than a guess.
         let f = tempfile::tempdir().unwrap();
         assert_eq!(any_slot_email(f.path()), None);
+    }
+}
+
+#[cfg(test)]
+mod stale_file_vs_keychain_tests {
+    use super::*;
+
+    /// A leftover file must not outvote a live credential.
+    ///
+    /// `slot_token_expired` read `.credentials.json` first and consulted the
+    /// Keychain only when that file was ABSENT. On macOS the file is a
+    /// leftover, since Claude Code keeps the real credential in the Keychain,
+    /// so a slot signed in minutes ago was reported expired on the strength of
+    /// a file three days old. The owner logged in, `ls` still said
+    /// `(expired)`, and nothing they could do would change it.
+    ///
+    /// Whichever blob expires LATER is the one that would actually
+    /// authenticate, so that is the one the verdict follows.
+    #[test]
+    fn the_later_expiry_wins_between_file_and_keychain() {
+        // now = 1000. File lapsed long ago, keychain is good for another hour.
+        assert!(!expired_from(Some(0), Some(3_600_000), 1000));
+        // The reverse: a fresh file and a stale keychain entry.
+        assert!(!expired_from(Some(3_600_000), Some(0), 1000));
+        // Both lapsed: expired, which is the whole point of the check.
+        assert!(expired_from(Some(0), Some(0), 1000));
+        // Only one source says anything: it decides.
+        assert!(expired_from(Some(0), None, 1000));
+        assert!(!expired_from(None, Some(3_600_000), 1000));
+        // Neither: nothing is known, so nothing is claimed.
+        assert!(!expired_from(None, None, 1000));
+        // The minute of slack still applies to whichever wins.
+        assert!(expired_from(None, Some(1_030_000), 1_000_000));
     }
 }

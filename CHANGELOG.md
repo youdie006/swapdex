@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.91.0] - 2026-08-24
+
+### Fixed
+- **A leftover credential file no longer outvotes the one actually in use.** `slot_token_expired` read `.credentials.json` first and consulted the macOS Keychain only when that file was ABSENT - but on macOS the file is a leftover, since Claude Code keeps the real credential in the Keychain. So a slot signed in minutes earlier was reported `(expired)` on the strength of a file three days old: the owner logged in, the marker stayed, and nothing they could do would clear it. Both stores are asked now, and whichever expires LATER decides - that is the credential that would actually authenticate. Neither store speaking still means nothing is claimed.
+
 ## [0.90.0] - 2026-08-24
 
 ### Fixed
