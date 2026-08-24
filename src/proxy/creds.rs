@@ -116,6 +116,35 @@ pub fn expired_from(from_file: Option<i64>, from_keychain: Option<i64>, now_ms: 
     }
 }
 
+/// What the Keychain was able to tell us.
+#[derive(Debug, PartialEq)]
+pub enum KeychainSay {
+    /// It holds a credential expiring at this instant.
+    Expiry(i64),
+    /// It genuinely holds no credential for this slot.
+    Absent,
+    /// It could not be read here - locked, or a non-interactive shell. This is
+    /// a fact about the environment, not about the account.
+    Unreadable,
+}
+
+/// The verdict, accounting for a Keychain that may not be readable at all.
+///
+/// When the Keychain is locked there is no reading to compare against, and the
+/// leftover file is all that is left. Calling that "expired" reports an
+/// environment limitation as an account state - which is how a slot signed in
+/// minutes earlier kept its `(expired)` marker no matter what its owner did.
+pub fn expired_when(from_file: Option<i64>, keychain: KeychainSay, now_ms: i64) -> bool {
+    match keychain {
+        KeychainSay::Expiry(e) => expired_from(from_file, Some(e), now_ms),
+        KeychainSay::Absent => expired_from(from_file, None, now_ms),
+        // Unreadable: the file cannot settle it alone, because on this platform
+        // the file is the leftover and the Keychain is where the truth lives.
+        // Only a file that is still VALID can say anything, and it says "fine".
+        KeychainSay::Unreadable => false,
+    }
+}
+
 pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
     let expiry_of = |b: Vec<u8>| -> Option<i64> {
         serde_json::from_slice::<serde_json::Value>(&b)
@@ -129,10 +158,18 @@ pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
     let from_file = std::fs::read(dir.join(".credentials.json"))
         .ok()
         .and_then(expiry_of);
-    let from_keychain = crate::adapters::claude::slot_keychain_read_detail(dir)
-        .ok()
-        .and_then(expiry_of);
-    expired_from(from_file, from_keychain, now_ms)
+    // Distinguish "no entry" from "cannot read it here": a locked Keychain is a
+    // fact about the shell, not about the account, and treating it as absent let
+    // a leftover file condemn a credential that was working.
+    let keychain = match crate::adapters::claude::slot_keychain_read_detail(dir) {
+        Ok(b) => match expiry_of(b) {
+            Some(e) => KeychainSay::Expiry(e),
+            None => KeychainSay::Absent,
+        },
+        Err(crate::adapters::claude::KeychainReadError::Locked) => KeychainSay::Unreadable,
+        Err(_) => KeychainSay::Absent,
+    };
+    expired_when(from_file, keychain, now_ms)
 }
 
 /// This slot's own account UUID, from its `.claude.json` `oauthAccount` - the
@@ -507,5 +544,29 @@ mod stale_file_vs_keychain_tests {
         assert!(!expired_from(None, None, 1000));
         // The minute of slack still applies to whichever wins.
         assert!(expired_from(None, Some(1_030_000), 1_000_000));
+    }
+
+    /// A Keychain we cannot read is not a verdict about the account.
+    ///
+    /// When the Keychain is LOCKED - a non-interactive shell, an ssh session -
+    /// there is no reading to compare against, and the leftover file is all
+    /// that is left. Calling that "expired" reports an environment limitation
+    /// as an account state, which is how a slot signed in minutes earlier kept
+    /// its `(expired)` marker no matter what its owner did.
+    #[test]
+    fn a_locked_keychain_is_not_an_expiry_verdict() {
+        // File says lapsed, keychain unreadable: unknown, so nothing claimed.
+        assert!(!expired_when(Some(0), KeychainSay::Unreadable, 1000));
+        // File says lapsed, keychain genuinely has no entry: the file is all
+        // there is and it is the truth here.
+        assert!(expired_when(Some(0), KeychainSay::Absent, 1000));
+        // Keychain readable and later: fresh, as before.
+        assert!(!expired_when(Some(0), KeychainSay::Expiry(3_600_000), 1000));
+        // Unreadable keychain and a fresh file: still fine.
+        assert!(!expired_when(
+            Some(3_600_000),
+            KeychainSay::Unreadable,
+            1000
+        ));
     }
 }

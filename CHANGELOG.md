@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.92.0] - 2026-08-24
+
+### Fixed
+- **A Keychain that cannot be read is no longer reported as an expired account.** After 0.91.0 asked both credential stores, a LOCKED Keychain - a non-interactive shell, an ssh session - still left the leftover file as the only voice, so a slot signed in minutes earlier kept its `(expired)` marker no matter what its owner did. "Cannot read it here" is a fact about the shell, not about the account. `Locked` is now distinguished from `Missing`: a genuinely absent entry lets the file decide, an unreadable one means nothing is claimed.
+
 ## [0.91.0] - 2026-08-24
 
 ### Fixed
