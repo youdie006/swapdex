@@ -985,6 +985,23 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         )),
         last_preempt: Mutex::new(None),
     });
+
+    // Keep the readings current on a timer, not only when a request happens to
+    // arrive. Measurement used to ride along with traffic, so a quiet stretch
+    // froze every number on screen at whatever it was when the last turn ran -
+    // the status bar showed a reading fifteen minutes old and looked broken.
+    if should_measure(true, &opts.tool) {
+        let paths_m = paths.clone();
+        let sh_m = Arc::clone(&sh);
+        let tool_m = opts.tool.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(MEASURE_EVERY);
+            if let Ok(sl) = crate::slots::Slots::open_for(&paths_m, &tool_m) {
+                refresh_measured(&paths_m, &sl.list(), &sh_m);
+            }
+        });
+    }
+
     loop {
         let rq = match server.recv() {
             Ok(r) => r,

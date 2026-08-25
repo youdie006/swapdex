@@ -108,6 +108,52 @@ pub fn load(paths: &Paths) -> Settings {
         .unwrap_or_default()
 }
 
+/// Read, modify and write the settings as ONE operation.
+///
+/// Every caller used to do load -> modify -> save on its own, with nothing
+/// between them, so two overlapping changes each read the same file and the
+/// second write erased the first. teamclaude hit this as "concurrent
+/// token-refresh loss": a freshly refreshed token clobbered by an unrelated
+/// preference write seconds later.
+///
+/// The store's own lock serialises it. A lock that cannot be taken is not worth
+/// failing a preference over - the write still happens, exactly as it did
+/// before, so this is never worse than the old behaviour.
+pub fn update(paths: &Paths, edit: impl FnOnce(&mut Settings)) -> Result<()> {
+    // The store's own lock. If it cannot be taken the write still happens -
+    // never worse than before - but say so rather than lose a change in
+    // silence, since that silence is what made this hard to see at all.
+    // The store's own lock, waited for rather than skipped. Contention here is
+    // brief - a read, an edit, an atomic write - and giving up on the first
+    // `Busy` is what let one change silently erase another.
+    let store = crate::store::Store::open(paths);
+    let mut _guard = None;
+    if let Ok(s) = &store {
+        for attempt in 0..50 {
+            match s.lock() {
+                Ok(g) => {
+                    _guard = Some(g);
+                    break;
+                }
+                Err(crate::store::LockError::Busy) => {
+                    if attempt == 49 {
+                        eprintln!(
+                            "swapdex: settings stayed locked - a concurrent change may be lost"
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                // An unwritable store is not contention: waiting cannot help,
+                // and the write below will report the real problem.
+                Err(_) => break,
+            }
+        }
+    }
+    let mut cfg = load(paths);
+    edit(&mut cfg);
+    save(paths, &cfg)
+}
+
 /// Write the settings atomically, so a crash mid-write cannot leave a half file
 /// that then reads as "no preferences".
 pub fn save(paths: &Paths, s: &Settings) -> Result<()> {
@@ -219,5 +265,45 @@ mod tests {
         std::fs::create_dir_all(paths.store_dir()).unwrap();
         std::fs::write(super::file(&paths), b"{ not json").unwrap();
         assert_eq!(load(&paths), Settings::default());
+    }
+}
+
+#[cfg(test)]
+mod concurrent_update_tests {
+    use super::*;
+
+    /// Two settings changes at once must not lose one of them.
+    ///
+    /// Every caller did load -> modify -> save on its own, with nothing between
+    /// them. Two overlapping changes each read the same file and the second
+    /// write erased the first - the pattern teamclaude hit as "concurrent
+    /// token-refresh loss", where a refreshed token was clobbered by an
+    /// unrelated preference write seconds later.
+    #[test]
+    fn overlapping_updates_both_survive() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(d.path());
+        save(&paths, &Settings::default()).unwrap();
+
+        // Two writers, each changing a DIFFERENT field, interleaved the way two
+        // processes would.
+        let a = std::thread::spawn({
+            let p = paths.clone();
+            move || update(&p, |s| s.hold_seconds = Some(111)).unwrap()
+        });
+        let b = std::thread::spawn({
+            let p = paths.clone();
+            move || update(&p, |s| s.proxy_auto = Some(true)).unwrap()
+        });
+        a.join().unwrap();
+        b.join().unwrap();
+
+        let got = load(&paths);
+        assert_eq!(got.hold_seconds, Some(111), "one writer's change was lost");
+        assert_eq!(
+            got.proxy_auto,
+            Some(true),
+            "the other writer's change was lost"
+        );
     }
 }

@@ -85,6 +85,27 @@ pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("read {}", path.display()))
 }
 
+/// A temp path beside `dest` that no other writer will pick.
+///
+/// The name used to come from the destination alone, so two writers chose the
+/// SAME path - and each began by removing it. One deleted the other's
+/// half-written file and the rename that followed failed with ENOENT.
+/// Credentials go through this writer too, so the loser did not merely lose a
+/// preference.
+///
+/// Process id and a monotonic counter are enough: within a process the counter
+/// separates them, across processes the pid does. It stays beside the
+/// destination so the rename remains same-filesystem, and stays hidden and
+/// marked so a stray file is identifiable.
+pub fn tmp_path_for(dest: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = dest.parent().unwrap_or(Path::new("."));
+    let base = dest.file_name().and_then(|n| n.to_str()).unwrap_or("cred");
+    dir.join(format!(".{base}.swapdex.{}.{n}.tmp", std::process::id()))
+}
+
 /// Write bytes to `dest` atomically at mode 0600. The temp file is created in
 /// the destination's OWN directory (so rename is same-filesystem) with mode
 /// 0600 at creation (no create-then-chmod world-readable window).
@@ -98,11 +119,7 @@ pub fn write_secret(dest: &Path, bytes: &[u8]) -> Result<()> {
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     refuse_insecure_parent(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.swapdex.tmp",
-        dest.file_name().and_then(|n| n.to_str()).unwrap_or("cred")
-    ));
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = tmp_path_for(dest);
     {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -168,5 +185,32 @@ mod tests {
         let link = dir.path().join("l");
         symlink(&target, &link).unwrap();
         assert!(read_regular(&link).is_err());
+    }
+}
+
+#[cfg(test)]
+mod unique_tmp_tests {
+    use super::*;
+
+    /// Two atomic writes to the same destination must not collide.
+    ///
+    /// The temp name was derived from the destination alone, so two writers
+    /// picked the SAME path - and each began by removing it. One deleted the
+    /// other's half-written file and the rename that followed failed with
+    /// ENOENT. Credentials go through this writer too, so the loser did not
+    /// merely lose a preference.
+    #[test]
+    fn concurrent_writers_do_not_share_a_temp_path() {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("thing.json");
+        let a = tmp_path_for(&dest);
+        let b = tmp_path_for(&dest);
+        assert_ne!(a, b, "two writers picked the same temp path");
+        // Still beside the destination, so the rename stays same-filesystem.
+        assert_eq!(a.parent(), dest.parent());
+        // Still hidden and still marked as ours, so a stray file is identifiable.
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with('.'), "{name}");
+        assert!(name.contains("swapdex"), "{name}");
     }
 }

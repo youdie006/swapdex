@@ -1139,14 +1139,15 @@ mod tests {
         seed_claude(&pb, "uuid-B", "b@y.com");
         let orig_creds = std::fs::read(pb.claude_credentials()).unwrap();
 
-        // Block the config write: plant a directory at its atomic temp path so
-        // the write fails AFTER the credentials have already been swapped.
+        // Block the config write so it fails AFTER the credentials have already
+        // been swapped. Planting a directory at the atomic temp path used to
+        // work, but that path now carries a pid and a counter so two writers
+        // cannot collide - and a test that knows the temp name is testing the
+        // name. Make the DESTINATION unwritable instead, which is what the
+        // rollback is actually about.
         let cfg = pb.claude_config_json();
-        let tmp = cfg.parent().unwrap().join(format!(
-            ".{}.swapdex.tmp",
-            cfg.file_name().unwrap().to_str().unwrap()
-        ));
-        std::fs::create_dir(&tmp).unwrap();
+        std::fs::remove_file(&cfg).ok();
+        std::fs::create_dir(&cfg).unwrap();
 
         assert!(Claude.apply(&pb, &snap).is_err(), "config write must fail");
         assert_eq!(

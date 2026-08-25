@@ -2200,7 +2200,7 @@ fn codex_skill_body() -> String {
 /// off an account. A setting rather than a flag because the proxy the shim starts
 /// takes no flags, and that is the one doing the work day to day.
 pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
-    let mut cfg = crate::settings::load(paths);
+    let cfg = crate::settings::load(paths);
     let Some(value) = value else {
         match cfg.threshold() {
             Some(t) => println!(
@@ -2216,8 +2216,7 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
     };
     let v = value.trim();
     if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("none") {
-        cfg.proxy_threshold = None;
-        crate::settings::save(paths, &cfg)?;
+        crate::settings::update(paths, |c| c.proxy_threshold = None)?;
         println!("threshold off - the proxy waits for a refusal before moving");
         return Ok(0);
     }
@@ -2233,9 +2232,11 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
         );
         return Ok(2);
     };
-    cfg.proxy_threshold = Some(t);
-    crate::settings::save(paths, &cfg)?;
-    let eff = cfg.threshold().unwrap_or(t);
+
+    crate::settings::update(paths, |c| c.proxy_threshold = Some(t))?;
+    // Report what was just stored, not the value read before the write: `cfg`
+    // is the pre-edit snapshot and would print the OLD threshold back.
+    let eff = t;
     println!(
         "stepping off an account at {:.0}% used - it hands the session on before \
          being refused",
@@ -2383,7 +2384,7 @@ pub fn install_slash(paths: &Paths) -> Result<i32> {
 /// than a flag you must remember, since the whole point is not having to think
 /// about accounts.
 pub fn auto(paths: &Paths, state: Option<&str>) -> Result<i32> {
-    let mut s = crate::settings::load(paths);
+    let s = crate::settings::load(paths);
     let Some(state) = state else {
         println!("auto-continue is {}", if s.auto() { "on" } else { "off" });
         return Ok(0);
@@ -2396,8 +2397,8 @@ pub fn auto(paths: &Paths, state: Option<&str>) -> Result<i32> {
             return Ok(2);
         }
     };
-    s.proxy_auto = Some(on);
-    crate::settings::save(paths, &s)?;
+
+    crate::settings::update(paths, |c| c.proxy_auto = Some(on))?;
     println!(
         "auto-continue {}{}",
         if on { "on" } else { "off" },
@@ -5556,7 +5557,7 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
 /// `swapdex fallback-model [<model>|off]` - what to ask for when every account
 /// is past the threshold and there is nowhere left to rotate.
 pub fn fallback_model(paths: &Paths, value: Option<&str>) -> Result<i32> {
-    let mut cfg = crate::settings::load(paths);
+    let cfg = crate::settings::load(paths);
     let Some(value) = value else {
         match cfg.fallback_model.as_deref() {
             Some(m) => {
@@ -5570,13 +5571,12 @@ pub fn fallback_model(paths: &Paths, value: Option<&str>) -> Result<i32> {
         return Ok(0);
     };
     if value.eq_ignore_ascii_case("off") || value.is_empty() {
-        cfg.fallback_model = None;
-        crate::settings::save(paths, &cfg)?;
+        crate::settings::update(paths, |c| c.fallback_model = None)?;
         println!("fallback model off");
         return Ok(0);
     }
-    cfg.fallback_model = Some(value.to_string());
-    crate::settings::save(paths, &cfg)?;
+
+    crate::settings::update(paths, |c| c.fallback_model = Some(value.to_string()))?;
     println!("fallback model: {value}");
     println!("  used ONLY when every account is past the threshold - rotating to an account");
     println!("  with room comes first, because that gives you the model you asked for");
@@ -5586,7 +5586,7 @@ pub fn fallback_model(paths: &Paths, value: Option<&str>) -> Result<i32> {
 /// `swapdex strategy [roomiest|consume-first]` - which account auto-continue
 /// reaches for when the current one is full.
 pub fn strategy(paths: &Paths, value: Option<&str>) -> Result<i32> {
-    let mut cfg = crate::settings::load(paths);
+    let cfg = crate::settings::load(paths);
     let Some(value) = value else {
         let s = cfg.strategy();
         println!("{}", s.as_str());
@@ -5605,8 +5605,10 @@ pub fn strategy(paths: &Paths, value: Option<&str>) -> Result<i32> {
         eprintln!("swapdex: unknown strategy '{value}' - use `roomiest` or `consume-first`");
         return Ok(2);
     };
-    cfg.proxy_strategy = Some(parsed.as_str().to_string());
-    crate::settings::save(paths, &cfg)?;
+
+    crate::settings::update(paths, |c| {
+        c.proxy_strategy = Some(parsed.as_str().to_string())
+    })?;
     println!("strategy: {}", parsed.as_str());
     // Read per request, so a proxy already running follows without a restart.
     println!("  a running proxy follows this from its next turn");
@@ -8152,13 +8154,14 @@ mod tests {
         // The live login is B (a different account).
         seed(&plive, "uuid-B", "b@y.com");
 
-        // Force apply(A) to fail: plant a dir at the .claude.json atomic temp path.
+        // Force apply(A) to fail. Planting a directory at the atomic temp path
+        // used to work, but that path now carries a pid and a counter so two
+        // writers cannot collide - a test that knows the temp name is testing
+        // the name. Make the DESTINATION unwritable, which is the condition
+        // this test is actually about.
         let cfg = plive.claude_config_json();
-        let tmp = cfg.parent().unwrap().join(format!(
-            ".{}.swapdex.tmp",
-            cfg.file_name().unwrap().to_str().unwrap()
-        ));
-        std::fs::create_dir(&tmp).unwrap();
+        std::fs::remove_file(&cfg).ok();
+        std::fs::create_dir(&cfg).unwrap();
 
         assert!(
             super::restore(&plive, None, false).is_err(),

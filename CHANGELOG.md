@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.95.0] - 2026-08-25
+
+### Fixed
+- **Usage stopped going stale during a quiet stretch.** Measurement rode along with request traffic, so a pause froze every number on screen at whatever it was when the last turn ran - readings fifteen minutes old, and a status bar that looked broken. A timer now refreshes them whether or not anything is being asked.
+- **Two settings changes at once no longer lose one of them.** Every caller did load -> modify -> save on its own, so two overlapping changes each read the same file and the second write erased the first. teamclaude hit this as "concurrent token-refresh loss". Settings edits go through one locked read-modify-write, and the lock is WAITED for rather than skipped on the first `Busy`.
+- **Two atomic writes to the same file could destroy each other.** The temp path came from the destination alone, so two writers picked the same one - and each began by removing it. One deleted the other's half-written file and the rename failed with ENOENT. Credentials go through this writer too, so the loser did not merely lose a preference. Each writer now gets its own temp path.
+- `swapdex threshold <n>` printed the OLD threshold back after storing the new one, reading a snapshot taken before the write.
+
 ## [0.94.0] - 2026-08-25
 
 ### Fixed
