@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.102.0
+
+- The proxy's usage block says "nothing read yet" instead of printing a bare
+  "usage:" header with no rows. A header with nothing under it looks the same
+  whether no reading has landed or the whole thing has broken, and that log is
+  what made a real outage take an hour to name.
+- `status --short` names which kind of nothing it found. It printed a blank line
+  both when no tool was signed in and when the logins could not be read from
+  this shell - a locked macOS Keychain over SSH produces the second, and reading
+  it as the first is how a working account gets reported as signed out.
+
 ## 0.101.0
 
 - The status bar no longer goes blank about usage without saying so. With no

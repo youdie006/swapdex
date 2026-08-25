@@ -1879,6 +1879,20 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
 /// One compact line for shell prompts / statuslines: `claude:work codex:personal`.
 /// The value per tool is the matched profile name, falling back to the email.
 /// None when nothing is logged in (or nothing is readable).
+/// What to say when `short_line` had nothing to report.
+///
+/// "Nothing is signed in" and "the logins cannot be read from here" are
+/// different news, and a blank line says neither. A locked macOS Keychain over
+/// SSH produces the second, and reporting it as the first is how a working
+/// account gets called signed out.
+fn absence_reason(any_unreadable: bool) -> &'static str {
+    if any_unreadable {
+        "logins unreadable from this shell"
+    } else {
+        "not signed in to any tool"
+    }
+}
+
 pub fn short_line(paths: &Paths) -> Option<String> {
     let store = Store::open(paths).ok()?;
     let parts: Vec<String> = adapters::all()
@@ -1904,7 +1918,13 @@ pub fn short_line(paths: &Paths) -> Option<String> {
 
 pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     if short {
-        println!("{}", short_line(paths).unwrap_or_default());
+        println!(
+            "{}",
+            short_line(paths).unwrap_or_else(|| {
+                let unreadable = adapters::all().iter().any(|a| a.identity(paths).is_err());
+                absence_reason(unreadable).to_string()
+            })
+        );
         return Ok(0);
     }
     let store = Store::open(paths)?;
@@ -8228,5 +8248,23 @@ mod tests {
             keychain_verdict(&s(&["Claude Code-credentials-5953ba74"]), Some(BARE), BARE).unwrap();
         assert!(!ok);
         assert!(msg.contains("re-run"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod short_absence_tests {
+    use super::*;
+
+    /// An empty short status must say which kind of nothing it is.
+    ///
+    /// `short_line` returns None both when no tool is signed in and when the
+    /// logins cannot be read from this shell, and the caller printed a blank
+    /// line for both. A locked macOS Keychain over SSH produces the second, and
+    /// reading that as the first is exactly how a working account gets reported
+    /// as signed out.
+    #[test]
+    fn an_empty_short_status_distinguishes_unreadable_from_signed_out() {
+        assert_eq!(absence_reason(true), "logins unreadable from this shell");
+        assert_eq!(absence_reason(false), "not signed in to any tool");
     }
 }

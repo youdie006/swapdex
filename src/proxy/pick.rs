@@ -102,6 +102,13 @@ pub fn usage_block(
         .collect();
     rest.sort();
     out.extend(rest);
+    // A bare "usage:" header with no rows under it is what a reader sees both
+    // when no reading has landed yet and when the whole thing has broken. Those
+    // are not the same news, and the log that showed only the header is what
+    // made a real outage take an hour to name.
+    if out.is_empty() {
+        return vec!["nothing read yet".to_string()];
+    }
     out
 }
 
@@ -1766,5 +1773,24 @@ mod hold_until_reset_tests {
         );
         // Disabled: never wait, whatever the resets say.
         assert_eq!(hold_for(&[Some(500)], 100, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod empty_usage_tests {
+    use super::*;
+
+    /// A usage block with nothing in it must still say something.
+    ///
+    /// The proxy printed the "usage:" header and then no rows at all, which is
+    /// what a reader sees both when no reading has landed yet and when the
+    /// whole feature has broken. Those two need to look different: the log with
+    /// the bare header is what made a real outage take an hour to name.
+    #[test]
+    fn a_block_with_no_readings_says_so_instead_of_printing_a_bare_header() {
+        assert_eq!(
+            usage_block(&[], &[], &[]),
+            vec!["nothing read yet".to_string()]
+        );
     }
 }
