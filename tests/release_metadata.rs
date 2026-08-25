@@ -33,3 +33,42 @@ fn the_npm_manifest_carries_the_version_cargo_declares() {
          does not reproduce the release it names"
     );
 }
+
+/// The pinned platform packages must carry that version too.
+///
+/// `optionalDependencies` decides which binary an `npm i` actually fetches, so
+/// it matters more than the version field beside it - and it was TWO releases
+/// behind in the committed tree while the version field was one. A tag whose
+/// manifest pins old platform packages installs an old swapdex no matter what
+/// the version says.
+#[test]
+fn the_pinned_platform_packages_carry_that_version_too() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let cargo = toml
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|l| l.split('"').next())
+        .expect("Cargo.toml declares a version");
+
+    let pkg = std::fs::read_to_string(root.join("npm/package.json")).unwrap();
+    let pinned: Vec<(&str, &str)> = pkg
+        .lines()
+        .filter(|l| l.contains("@youdie006/swapdex-"))
+        .filter_map(|l| {
+            let mut q = l.split('"').filter(|p| !p.trim().is_empty() && *p != ": ");
+            let name = q.next()?;
+            let ver = l.rsplit('"').nth(1)?;
+            Some((name, ver))
+        })
+        .collect();
+
+    assert!(!pinned.is_empty(), "no platform packages found to check");
+    for (name, ver) in pinned {
+        assert_eq!(
+            ver, cargo,
+            "{name} is pinned at {ver} while this release is {cargo} - an npm \
+             install from this tag fetches the wrong binary"
+        );
+    }
+}

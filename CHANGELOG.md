@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.105.0
+
+- The platform packages a tag pins are checked too. `optionalDependencies`
+  decides which binary `npm i` actually fetches, and it sat TWO releases behind
+  in the committed tree while the version field beside it was one behind - so a
+  tag could name the right version and still install an old swapdex. Both are now
+  asserted against Cargo.toml.
+
 ## 0.104.0
 
 - A release tag now reproduces the release it names. `npm/publish.mjs` rewrites
