@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.100.0
+
+- One panicking background thread no longer disables the proxy for every request
+  after it. A thread that dies while holding a Mutex poisons it, and every later
+  `.lock().unwrap()` panicked too - so the proxy went on listening, systemctl went
+  on reporting active, and every request failed. The locks here guard caches,
+  counters and notes, never an invariant a half-finished update could corrupt, so
+  the value is now recovered instead. Stale numbers are the better failure.
+
 ## 0.99.0
 
 - The account picker refuses a delete confirmation that arrives too fast to have

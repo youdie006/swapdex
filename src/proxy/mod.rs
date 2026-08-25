@@ -16,6 +16,23 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+/// Take a lock, recovering the value if a previous holder panicked.
+///
+/// Every Mutex in this proxy guards a cache, a counter, or a note - never an
+/// invariant that a half-finished update could leave unsafe. A thread that
+/// panics while holding one poisons it forever, and `.unwrap()` on the other
+/// side would turn a single dead background thread into a proxy that listens
+/// happily and fails every request. Stale numbers are the better failure.
+trait Held<T> {
+    fn held(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> Held<T> for std::sync::Mutex<T> {
+    fn held(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// Everything the request threads share: the upstream client, where upstream is,
 /// the per-account quota state, and the account-choice state. One struct so a
 /// request handler keeps a small signature as the proxy grows.
@@ -303,9 +320,9 @@ pub fn records_refusal(status: u16, will_retry_same_account: bool) -> bool {
 fn note_outcome(sh: &Shared, name: &str, status: u16) {
     let at = now_secs();
     if ratelimit::account_cannot_serve(status) {
-        sh.refused_at.lock().unwrap().insert(name.to_string(), at);
+        sh.refused_at.held().insert(name.to_string(), at);
     } else if (200..300).contains(&status) {
-        sh.ok_at.lock().unwrap().insert(name.to_string(), at);
+        sh.ok_at.held().insert(name.to_string(), at);
     }
 }
 
@@ -350,11 +367,10 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
     // hands turns to an account without moving where sessions start, so a
     // conversation keeps living where it began while another account pays.
     let pointer = slots.serving_dir().or_else(|| slots.default_dir());
-    let rotated = sh.rotated.lock().unwrap().clone();
+    let rotated = sh.rotated.held().clone();
     let chosen = sh
         .chooser
-        .lock()
-        .unwrap()
+        .held()
         .choose(pointer.as_deref(), rotated.as_deref(), &list)
         .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))?;
     // With --auto, an account already known to be out of quota should not serve
@@ -379,8 +395,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             refresh_measured(paths, &list, sh);
             let full = sh
                 .measured
-                .lock()
-                .unwrap()
+                .held()
                 .1
                 .get(&chosen.name)
                 .is_some_and(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits));
@@ -388,8 +403,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
             // side of the line trade the session back and forth.
             let cooling = sh
                 .last_preempt
-                .lock()
-                .unwrap()
+                .held()
                 .is_some_and(|t| t.elapsed() < PREEMPT_COOLDOWN);
             if full && !cooling {
                 match usable_under_threshold(paths, sh, &chosen.name, t) {
@@ -399,9 +413,9 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                             chosen.name, better.name
                         );
                         std::io::stdout().flush().ok();
-                        *sh.cornered.lock().unwrap() = None;
-                        *sh.rotated.lock().unwrap() = Some(better.name.clone());
-                        *sh.last_preempt.lock().unwrap() = Some(std::time::Instant::now());
+                        *sh.cornered.held() = None;
+                        *sh.rotated.held() = Some(better.name.clone());
+                        *sh.last_preempt.held() = Some(std::time::Instant::now());
                         return Ok(better);
                     }
                     // Staying put on a full account is the right call when every
@@ -415,7 +429,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                         // near its limit, and saying it is sends the reader to
                         // a quota page where nothing is wrong.
                         let over: Vec<bool> = {
-                            let m = sh.measured.lock().unwrap();
+                            let m = sh.measured.held();
                             list.iter()
                                 .filter(|r| r.name != chosen.name)
                                 .filter_map(|r| m.1.get(&r.name))
@@ -432,21 +446,19 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                         // turn hit the wall - the LAST thing swapdex tries,
                         // never the first, because rotating gives the user what
                         // they asked for and this does not.
-                        *sh.cornered.lock().unwrap() = Some(corner);
+                        *sh.cornered.held() = Some(corner);
                     }
                 }
             }
         }
         let known_spent = sh
             .quota
-            .lock()
-            .unwrap()
+            .held()
             .get(&chosen.name)
             .is_some_and(|(q, at)| q.still_spent_since(*at, now_secs()))
             || sh
                 .unusable
-                .lock()
-                .unwrap()
+                .held()
                 .contains(&chosen.name, std::time::Instant::now())
             // A lapsed token cannot serve and cannot be refreshed from here, so
             // treat it the same as spent when choosing where to start.
@@ -454,7 +466,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
         if !known_spent {
             // Served without redirection: the episode is over, so its return is
             // worth announcing again.
-            pick::clear_bench_note(&mut sh.benched_note.lock().unwrap());
+            pick::clear_bench_note(&mut sh.benched_note.held());
         }
         if known_spent {
             if let Some(better) = next_account(paths, sh, std::slice::from_ref(&chosen.name)) {
@@ -464,11 +476,7 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                 // turn after turn with no reason given. Saying it on EVERY turn
                 // was the opposite mistake: a `serve` pointer stuck on a benched
                 // account repeated one sentence until nobody read any of them.
-                if pick::announce_bench(
-                    &mut sh.benched_note.lock().unwrap(),
-                    &chosen.name,
-                    &better.name,
-                ) {
+                if pick::announce_bench(&mut sh.benched_note.held(), &chosen.name, &better.name) {
                     println!(
                         "{} is benched - turns go to {} until it comes back",
                         chosen.name, better.name
@@ -543,7 +551,7 @@ const PREEMPT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300
 /// each account's own token; it spends no message quota.
 fn refresh_measured(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
     let first = {
-        let mut m = sh.measured.lock().unwrap();
+        let mut m = sh.measured.held();
         match m.0 {
             Some(t) if t.elapsed() < MEASURE_EVERY => return,
             // Claim the slot BEFORE the work starts, so concurrent turns do not
@@ -616,7 +624,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     // clock asks the fresh ones for an answer that has not changed, and it is
     // what got the usage endpoint to rate-limit us.
     let mut out: HashMap<String, Measurement> = {
-        let m = sh.measured.lock().unwrap();
+        let m = sh.measured.held();
         m.1.clone()
     };
     let now = std::time::Instant::now();
@@ -632,7 +640,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     // ("overage-status"), and an account refusing with 90% of its windows left
     // is a contradiction until the reader is told the block is not about quota.
     let refused: Vec<(String, String)> = {
-        let q = sh.quota.lock().unwrap();
+        let q = sh.quota.held();
         let now_s = now_secs();
         let by_headers: Vec<(String, String)> = slots
             .iter()
@@ -659,10 +667,10 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // sideline set holds 401/403; and the stamps catch the 429, which is
         // the commonest of the three and the only one neither other sees.
         let sidelined: Vec<String> = {
-            let held = sh.unusable.lock().unwrap();
-            let bad = sh.refused_at.lock().unwrap();
-            let good = sh.ok_at.lock().unwrap();
-            let fresh = sh.replaced_at.lock().unwrap();
+            let held = sh.unusable.held();
+            let bad = sh.refused_at.held();
+            let good = sh.ok_at.held();
+            let fresh = sh.replaced_at.held();
             slots
                 .iter()
                 .filter(|r| {
@@ -783,8 +791,8 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     m.credits,
                     m.five_h,
                     m.seven_d,
-                    sh.refused_at.lock().unwrap().get(n).copied(),
-                    sh.ok_at.lock().unwrap().get(n).copied(),
+                    sh.refused_at.held().get(n).copied(),
+                    sh.ok_at.held().get(n).copied(),
                 );
                 let via = pick::credits_note(honest, refused.iter().any(|(r, _)| r == n));
                 let parts: Vec<String> = [
@@ -839,7 +847,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     if !fresh.is_empty() {
         crate::quota_cache::update(paths, &fresh);
     }
-    let mut m = sh.measured.lock().unwrap();
+    let mut m = sh.measured.held();
     *m = (Some(std::time::Instant::now()), out);
 }
 
@@ -852,9 +860,9 @@ fn usable_under_threshold(
 ) -> Option<crate::slots::SlotRecord> {
     let mut slots = crate::slots::Slots::open(paths).map(|s| s.list()).ok()?;
     let cfg = crate::settings::load(paths);
-    let measured = sh.measured.lock().unwrap();
-    let spent = sh.quota.lock().unwrap();
-    let unusable = sh.unusable.lock().unwrap();
+    let measured = sh.measured.held();
+    let spent = sh.quota.held();
+    let unusable = sh.unusable.held();
     let now = std::time::Instant::now();
     let now_s = now_secs();
     // Ordered by the chosen strategy, so the session lands somewhere it can stay -
@@ -1146,7 +1154,7 @@ fn next_account_in(
     // then most room left - handing the session to whichever account happened to
     // be listed next tends to land on one that is nearly spent too.
     {
-        let measured = sh.measured.lock().unwrap();
+        let measured = sh.measured.held();
         pick::by_headroom(
             &mut slots,
             |r| cfg.rank(&r.name),
@@ -1158,8 +1166,8 @@ fn next_account_in(
             },
         );
     }
-    let spent = sh.quota.lock().unwrap();
-    let unusable = sh.unusable.lock().unwrap();
+    let spent = sh.quota.held();
+    let unusable = sh.unusable.held();
     let now = std::time::Instant::now();
     let now_s = now_secs();
     // Reduce each slot to the facts the choice turns on, then let pick decide.
@@ -1385,10 +1393,7 @@ fn forward_turn(
                 Ok(()) => {
                     // A new credential: any refusal the OLD one earned is not
                     // about this one, so record when it was replaced.
-                    sh.replaced_at
-                        .lock()
-                        .unwrap()
-                        .insert(slot.name.clone(), now_secs());
+                    sh.replaced_at.held().insert(slot.name.clone(), now_secs());
                     println!("  {}: renewed its login", slot.name)
                 }
                 Err(why) => println!("  {}", why.remedy(&slot.name)),
@@ -1526,14 +1531,13 @@ fn forward_turn(
                 tried.push(slot.name.clone());
                 if up.status == 401 || up.status == 403 {
                     sh.unusable
-                        .lock()
-                        .unwrap()
+                        .held()
                         .mark(&slot.name, std::time::Instant::now());
                 } else if ratelimit::proven_spent(&up.headers, attempt) {
                     // Moving the turn along needs only a refusal; holding the
                     // account out of the rotation for a quarter of an hour needs
                     // the response to say WHY, or to keep saying no.
-                    let mut spent = sh.quota.lock().unwrap();
+                    let mut spent = sh.quota.held();
                     let e = spent.entry(slot.name.clone()).or_default();
                     e.0.rejected = true;
                     e.1 = now_secs();
@@ -1541,7 +1545,7 @@ fn forward_turn(
                 if let Some(next) = next_account_for(paths, opts, sh, &tried) {
                     println!("  {} is out - continuing on {}", slot.name, next.name);
                     std::io::stdout().flush().ok();
-                    *sh.rotated.lock().unwrap() = Some(next.name.clone());
+                    *sh.rotated.held() = Some(next.name.clone());
                     note_serving_for(paths, &opts.tool, &next.name);
                     slot = next;
                     continue;
@@ -1581,14 +1585,14 @@ fn forward_turn(
         // configured fallback model is the last thing to try before the turn
         // walks into the wall, and it is announced, because the user asked for a
         // different model and is getting this one.
-        let corner = *sh.cornered.lock().unwrap();
+        let corner = *sh.cornered.held();
         if let Some(corner) = corner {
             if let Some(m) = crate::settings::load(paths).fallback_model.as_deref() {
                 if let Some(swapped) = identity::swap_model(&body, m) {
                     // Once per episode, and naming the corner it actually is.
                     // Repeating it every turn buried the lines above that said
                     // what the accounts had left.
-                    let mut note = sh.corner_note.lock().unwrap();
+                    let mut note = sh.corner_note.held();
                     if *note != Some(corner) {
                         *note = Some(corner);
                         println!("  {} - asking for {m} instead", corner.describe());
@@ -1598,7 +1602,7 @@ fn forward_turn(
                 }
             }
         } else {
-            *sh.corner_note.lock().unwrap() = None;
+            *sh.corner_note.held() = None;
         }
         if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
             if let Some(aligned) = identity::align_account(&body, &known_uuids, &serving) {
@@ -1727,10 +1731,7 @@ fn forward_turn(
         }
         std::io::stdout().flush().ok();
         if let Some(q) = quota {
-            sh.quota
-                .lock()
-                .unwrap()
-                .insert(slot.name.clone(), (q, now_secs()));
+            sh.quota.held().insert(slot.name.clone(), (q, now_secs()));
         }
         if up.status == 403 {
             println!(
@@ -1738,8 +1739,7 @@ fn forward_turn(
                 slot.name
             );
             sh.unusable
-                .lock()
-                .unwrap()
+                .held()
                 .mark(&slot.name, std::time::Instant::now());
         }
         if up.status == 401 {
@@ -1748,8 +1748,7 @@ fn forward_turn(
                 slot.name, slot.name
             );
             sh.unusable
-                .lock()
-                .unwrap()
+                .held()
                 .mark(&slot.name, std::time::Instant::now());
         }
         if !ratelimit::account_cannot_serve(up.status) {
@@ -1761,7 +1760,7 @@ fn forward_turn(
         // elsewhere" has to mean. Without --auto, or with nothing left to try,
         // the client gets the real response.
         if up.status == 429 && ratelimit::proven_spent(&up.headers, attempt) {
-            let mut spent = sh.quota.lock().unwrap();
+            let mut spent = sh.quota.held();
             let e = spent.entry(slot.name.clone()).or_default();
             e.0.rejected = true;
             e.1 = now_secs();
@@ -1773,7 +1772,7 @@ fn forward_turn(
         tried.push(slot.name.clone());
         // Cornered by refusal rather than by measurement: every account has now
         // said no to THIS turn. Same corner, and it needs no usage reading.
-        *sh.cornered.lock().unwrap() = next_account(paths, sh, &tried)
+        *sh.cornered.held() = next_account(paths, sh, &tried)
             .is_none()
             .then_some(pick::Corner::AllRefused);
         match next_account(paths, sh, &tried) {
@@ -1783,7 +1782,7 @@ fn forward_turn(
                     slot.name, next.name
                 );
                 std::io::stdout().flush().ok();
-                *sh.rotated.lock().unwrap() = Some(next.name.clone());
+                *sh.rotated.held() = Some(next.name.clone());
                 drop(up); // discard the failed response; the retry replaces it
                 slot = next;
             }
@@ -1809,11 +1808,7 @@ fn forward_turn(
                 let names: Vec<String> = crate::slots::Slots::open(paths)
                     .map(|s| s.list().into_iter().map(|r| r.name).collect())
                     .unwrap_or_default();
-                let held_out = sh
-                    .unusable
-                    .lock()
-                    .unwrap()
-                    .active(std::time::Instant::now());
+                let held_out = sh.unusable.held().active(std::time::Instant::now());
                 if held_out > 0 && held_out >= names.len().max(1) {
                     let first = names.first().cloned().unwrap_or_else(|| "<name>".into());
                     return Err(anyhow!(
@@ -2338,5 +2333,36 @@ mod accept_failure_tests {
         assert_eq!(g.take_suppressed(), 2);
         // And the counter resets after being reported.
         assert_eq!(g.take_suppressed(), 0);
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// One dead thread must not disable the proxy for every request after it.
+    ///
+    /// A thread that panics while holding a Mutex poisons it, and `.lock()`
+    /// returns Err from then on. With `.unwrap()` on the other side, every
+    /// later request panics too - so the proxy keeps listening, systemctl
+    /// keeps saying active, and every request fails. That failure is invisible
+    /// from the outside, which is what makes it dangerous.
+    #[test]
+    fn a_thread_that_dies_holding_a_lock_does_not_disable_it_for_everyone_else() {
+        let m = Arc::new(Mutex::new(vec!["rnd".to_string()]));
+        let other = Arc::clone(&m);
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _g = other.lock().unwrap();
+            panic!("a background thread died while holding the lock");
+        })
+        .join();
+        std::panic::set_hook(prev);
+
+        assert!(m.lock().is_err(), "the lock really is poisoned");
+        assert_eq!(m.held().len(), 1, "the proxy must still be able to read it");
     }
 }
