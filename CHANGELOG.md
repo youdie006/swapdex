@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.108.0
+
+- A usage reading says how old it is once it stops being current. An account
+  showed "5h 100% left" while it was in fact spent: the number had been read
+  before the window filled, and nothing on the line distinguished it from one
+  measured a second ago. The rate-limit headers refusing the turn were right the
+  whole time, and the percentage beside them was what looked wrong. Readings
+  under five minutes old are unchanged - a note on every line is noise.
+
 ## 0.107.0
 
 - Usage numbers come back as soon as a window turns over, instead of after the

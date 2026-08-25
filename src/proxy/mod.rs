@@ -831,10 +831,19 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                 .into_iter()
                 .flatten()
                 .collect();
+                // Say how old the number is once it stops being current. An
+                // account read before its window filled showed "5h 100% left"
+                // while it was in fact spent, and the line looked exactly like
+                // one measured a second ago.
+                let age = m
+                    .taken
+                    .and_then(|t| pick::reading_age_note(t.elapsed().as_secs()))
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default();
                 let value = if parts.is_empty() {
                     "?".to_string()
                 } else {
-                    format!("{}{via}", parts.join(" · "))
+                    format!("{}{via}{age}", parts.join(" · "))
                 };
                 (n.clone(), value)
             })

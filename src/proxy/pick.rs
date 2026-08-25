@@ -416,6 +416,28 @@ pub fn credits_note(on_credits: bool, refused: bool) -> &'static str {
 ///
 /// `used_pct` is what the endpoint reports; the conversion happens here, at the
 /// edge, so every decision inside still reasons about usage.
+/// How long ago a reading was taken, when that is long enough to matter.
+///
+/// A reading is a measurement with a time on it. An account showed "5h 100%
+/// left" while it was in fact spent - the number had been read before the
+/// window filled, and nothing on the line said so. The headers refusing the
+/// turn were right the whole time; the percentage beside them was what looked
+/// wrong. Dropping the time is what turns a stale number into a false one.
+///
+/// `None` under five minutes: a fresh reading needs no apology, and a note on
+/// every line would be noise that teaches the reader to skip it.
+pub fn reading_age_note(age_secs: u64) -> Option<String> {
+    if age_secs < 300 {
+        return None;
+    }
+    let m = age_secs / 60;
+    Some(if m < 60 {
+        format!("read {m}m ago")
+    } else {
+        format!("read {}h{}m ago", m / 60, m % 60)
+    })
+}
+
 pub fn window_left(label: &str, used_pct: f64, resets: Option<String>) -> String {
     let left = (100.0 - used_pct).clamp(0.0, 100.0);
     match resets {
@@ -1847,5 +1869,28 @@ mod window_expiry_tests {
         ));
         // A reading that carries no reset times cannot have outlived one.
         assert!(!reading_outlived_its_window(None, None, now));
+    }
+}
+
+#[cfg(test)]
+mod reading_age_tests {
+    use super::*;
+
+    /// A reading that is hours old must not read like one taken just now.
+    ///
+    /// An account showed "5h 100% left" while it was in fact spent: the number
+    /// was read before the window filled and nothing on the line said so. The
+    /// headers refusing the turn were right the whole time, and the percentage
+    /// beside them was the thing that looked wrong. A reading is a measurement
+    /// with a time on it, and dropping the time is what turned a stale number
+    /// into a false one.
+    #[test]
+    fn an_old_reading_carries_its_age_and_a_fresh_one_does_not() {
+        assert_eq!(reading_age_note(0), None);
+        assert_eq!(reading_age_note(60), None);
+        assert_eq!(reading_age_note(299), None);
+        assert_eq!(reading_age_note(300), Some("read 5m ago".to_string()));
+        assert_eq!(reading_age_note(3_600), Some("read 1h0m ago".to_string()));
+        assert_eq!(reading_age_note(9_000), Some("read 2h30m ago".to_string()));
     }
 }
