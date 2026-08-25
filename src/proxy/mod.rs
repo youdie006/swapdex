@@ -196,6 +196,24 @@ pub fn should_measure(_auto: bool, tool: &str) -> bool {
     tool != "codex"
 }
 
+/// Should a TRANSPORT failure be retried, and after how long?
+///
+/// A 529 was retried but a dropped connection was not: `forward` returned an
+/// error and it went straight up, so an ECONNRESET mid-flight surfaced to the
+/// user as "API error" even though the very next attempt usually succeeds.
+/// These are the same event seen from different layers - the server shedding
+/// load - and both deserve the same patience.
+///
+/// Shorter than the 529 budget: a reset is answered immediately by the network
+/// rather than after a server-side wait, so the retries can come faster.
+pub fn transport_retry(attempt: u32) -> Option<std::time::Duration> {
+    const MAX: u32 = 4;
+    if attempt >= MAX {
+        return None;
+    }
+    Some(std::time::Duration::from_millis(250u64 << attempt))
+}
+
 /// How long to wait before retrying an overloaded server, if at all.
 ///
 /// 529 is Anthropic being overloaded, not this account being spent. It was
@@ -207,11 +225,19 @@ pub fn should_measure(_auto: bool, tool: &str) -> bool {
 /// Bounded at three tries: a server that stays down has to surface as an error
 /// rather than hold the turn open indefinitely.
 pub fn overload_retry(status: u16, attempt: u32) -> Option<std::time::Duration> {
-    const MAX: u32 = 3;
+    // Sized against real logs rather than a textbook curve: a 529 spell on this
+    // API runs for about a MINUTE - eighteen of them inside one minute - so the
+    // old 1s+2s+4s budget gave up seven seconds in and handed the user an error
+    // while the wave was still passing. Eight tries backing off to a 15s
+    // ceiling covers roughly a minute, and still ends rather than looping.
+    const MAX: u32 = 8;
+    const CEILING_SECS: u64 = 15;
     if status != 529 || attempt >= MAX {
         return None;
     }
-    Some(std::time::Duration::from_secs(1u64 << attempt))
+    Some(std::time::Duration::from_secs(
+        (1u64 << attempt).min(CEILING_SECS),
+    ))
 }
 
 /// Whether this response is the account REFUSING, or just a moment mid-round.
@@ -1349,7 +1375,31 @@ fn forward_turn(
             note_serving_for(paths, &opts.tool, &slot.name);
             // Retries of THIS account for a throttle, counted so a wall is not
             // mistaken for a pause and retried forever.
-            let mut up = upstream::forward(&sh.agent, &method, &url, &headers, &client_body)?;
+            // A dropped connection is the same event as a 529 seen one layer
+            // down - the server shedding load - and the next attempt usually
+            // succeeds. Returning the error straight up is what reached the
+            // user as "API error"/ECONNRESET.
+            let mut up = {
+                let mut t = 0u32;
+                loop {
+                    match upstream::forward(&sh.agent, &method, &url, &headers, &client_body) {
+                        Ok(u) => break u,
+                        Err(e) => match transport_retry(t) {
+                            Some(wait) => {
+                                println!(
+                                    "{} {path} -> connection lost, retrying in {}ms",
+                                    slot.name,
+                                    wait.as_millis()
+                                );
+                                std::io::stdout().flush().ok();
+                                t += 1;
+                                std::thread::sleep(wait);
+                            }
+                            None => return Err(e),
+                        },
+                    }
+                }
+            };
             // Decide the retry BEFORE recording anything: a 429 that is about
             // to be retried on this same account is not the account refusing,
             // and stamping it as one sidelined accounts for being briefly slow.
@@ -2121,8 +2171,24 @@ mod overloaded_tests {
             overload_retry(529, 2),
             Some(std::time::Duration::from_secs(4))
         );
-        // Bounded: a server that stays down must surface, not loop forever.
-        assert_eq!(overload_retry(529, 3), None);
+        // The budget has to outlast a REAL overload, not a textbook one. This
+        // machine's logs show a 529 spell running for a minute at a time -
+        // eighteen in one minute - so a 7-second budget surfaced the error to
+        // the user while the wave was still passing.
+        assert_eq!(
+            overload_retry(529, 3),
+            Some(std::time::Duration::from_secs(8))
+        );
+        assert_eq!(
+            overload_retry(529, 4),
+            Some(std::time::Duration::from_secs(15))
+        );
+        assert_eq!(
+            overload_retry(529, 5),
+            Some(std::time::Duration::from_secs(15))
+        );
+        // Still bounded: a server that stays down must surface, not loop forever.
+        assert_eq!(overload_retry(529, 8), None);
         // Everything else is somebody else's decision.
         assert_eq!(overload_retry(200, 0), None);
         assert_eq!(overload_retry(429, 0), None);
@@ -2157,5 +2223,34 @@ mod measure_without_auto_tests {
         // measured this way whatever the rotation setting says.
         assert!(!should_measure(true, "codex"));
         assert!(!should_measure(false, "codex"));
+    }
+}
+
+#[cfg(test)]
+mod transport_retry_tests {
+    use super::*;
+
+    /// A dropped connection deserves the same patience as a 529.
+    ///
+    /// `forward` returned its error straight up, so an ECONNRESET mid-flight
+    /// reached the user as "API error" - while the identical condition
+    /// expressed as a 529 status was retried politely. The next attempt
+    /// usually succeeds.
+    #[test]
+    fn a_dropped_connection_is_retried_briefly() {
+        assert_eq!(
+            transport_retry(0),
+            Some(std::time::Duration::from_millis(250))
+        );
+        assert_eq!(
+            transport_retry(1),
+            Some(std::time::Duration::from_millis(500))
+        );
+        assert_eq!(
+            transport_retry(3),
+            Some(std::time::Duration::from_millis(2000))
+        );
+        // Bounded: a network that stays down has to surface.
+        assert_eq!(transport_retry(4), None);
     }
 }

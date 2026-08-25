@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.97.0] - 2026-08-25
+
+### Fixed
+- **A dropped connection is retried instead of surfacing as "API error".** A 529 was retried politely while an ECONNRESET mid-flight went straight up to the user - the same event, the server shedding load, seen one layer down. Four quick attempts backing off from 250ms; a network that stays down still surfaces.
+- **The 529 budget now outlasts a real overload.** 1s+2s+4s gave up seven seconds in, but this machine's logs show a 529 spell running about a MINUTE - eighteen inside one minute - so the error reached the user while the wave was still passing. Eight tries backing off to a 15s ceiling covers roughly that minute.
+- **Homebrew installs have been failing since 0.75.0.** The release script rewrote the formula's `sha256` lines and its bare `version` string, but never the `v0.75.0` inside each download URL - the leading `v` fell outside the pattern. Every install downloaded 0.75.0 and checked it against the current release's checksum, so brew refused all of them for 21 releases: `Error: Formula reports different checksum`. Repaired, and verified with `brew fetch` on a real machine.
+
 ## [0.96.0] - 2026-08-25
 
 ### Fixed
