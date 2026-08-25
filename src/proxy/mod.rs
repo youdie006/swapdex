@@ -619,6 +619,17 @@ fn seed_from_cache(cache: &crate::quota_cache::Cache, now: i64) -> HashMap<Strin
 
 /// The read itself. Records when it finished, not when it began, so a slow read
 /// is not immediately due again.
+/// Did a reading actually land this round?
+///
+/// The write-back restamps an account's stored value with the current time, and
+/// its own comment says only what was READ may be restamped. The account was
+/// being marked as read BEFORE the fetch, so a refused or offline round wrote
+/// the previous number back looking brand new. An old number shown as current
+/// is worse than an old number shown as old.
+fn reading_landed(fetched: &crate::quota::Fetch) -> bool {
+    matches!(fetched, crate::quota::Fetch::Ok(_))
+}
+
 fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     // Carry forward what is still fresh enough. Reading every account on one
     // clock asks the fresh ones for an answer that has not changed, and it is
@@ -698,10 +709,21 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
     };
     for r in slots {
         if let Some(prev) = out.get(&r.name) {
-            let due = prev.taken.is_none_or(|t| {
-                now.duration_since(t)
-                    >= pick::measure_after(pick::headroom(prev.five_h, prev.seven_d))
-            });
+            // A reading whose window has turned over describes a window that no
+            // longer exists: the cache drops it on load and the screen goes
+            // blank. Waiting out the headroom interval - fifteen minutes for an
+            // account with plenty left - is what makes the numbers disappear
+            // for a stretch after every reset.
+            let outlived = pick::reading_outlived_its_window(
+                prev.five_h_reset,
+                prev.seven_d_reset,
+                now_secs(),
+            );
+            let due = outlived
+                || prev.taken.is_none_or(|t| {
+                    now.duration_since(t)
+                        >= pick::measure_after(pick::headroom(prev.five_h, prev.seven_d))
+                });
             if !due {
                 continue;
             }
@@ -730,8 +752,15 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
             continue;
         }
         crate::quota::pace_between_accounts();
-        just_read.insert(r.name.clone());
         let fetched = crate::quota::fetch_with_retry(&token);
+        // Count the account as read only when a reading actually LANDED. This
+        // was inserted before the fetch, so a failed round wrote the previous
+        // value back stamped with the current time - the one thing the
+        // write-back comment says must not happen. An old number shown as
+        // current is worse than an old number shown as old.
+        if reading_landed(&fetched) {
+            just_read.insert(r.name.clone());
+        }
         if let Some(why) = fetched.why_no_number().map(str::to_string) {
             // Say WHY. A dropped read used to make the account vanish from the
             // usage line, and an account with no measurement cannot be held to
@@ -2400,5 +2429,29 @@ mod pointer_tests {
             before, after,
             "the pointer was overwritten in place - a reader can see half a name"
         );
+    }
+}
+
+#[cfg(test)]
+mod write_back_tests {
+    use super::*;
+
+    /// A round that read nothing must not restamp the old number as current.
+    #[test]
+    fn only_a_landed_reading_counts_as_read() {
+        assert!(!reading_landed(&crate::quota::Fetch::Unauthorized));
+        assert!(!reading_landed(&crate::quota::Fetch::Unexpected(
+            429,
+            "rate limited".into()
+        )));
+        assert!(!reading_landed(&crate::quota::Fetch::Offline(
+            "could not resolve host".into()
+        )));
+        let q = crate::quota::parse(
+            r#"{"five_hour":{"utilization":0.04,"resets_at":"2026-08-26T12:00:00Z"}}"#,
+        );
+        if let Some(q) = q {
+            assert!(reading_landed(&crate::quota::Fetch::Ok(q)));
+        }
     }
 }

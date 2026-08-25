@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.107.0
+
+- Usage numbers come back as soon as a window turns over, instead of after the
+  next scheduled read. A reading only describes the window it was taken in, and
+  the cache drops it once that window's reset passes - but an account with plenty
+  of headroom was not due for another read for fifteen minutes, so the status bar
+  showed nothing in between. Restarting the proxy appeared to cure it only because
+  a restart has no previous reading to skip. A reading past its reset is now due
+  immediately.
+- A round that read nothing no longer restamps the previous number as current.
+  The account was marked as read BEFORE the fetch, so a refused or offline round
+  wrote the old value back looking brand new - the one thing the write-back's own
+  comment says must not happen.
+
 ## 0.106.0
 
 - A damaged account registry is no longer reported as an empty one. `slots.json`

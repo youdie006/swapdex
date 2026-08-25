@@ -1350,6 +1350,22 @@ mod hysteresis_tests {
 /// the usage endpoint to rate-limit us during a survey.
 ///
 /// So the interval follows how close the account is to mattering.
+/// Has this reading outlived the window it describes?
+///
+/// A reading is only about the window it was taken in. Once that window's reset
+/// passes the number is not stale, it is about a window that no longer exists -
+/// `quota_cache` drops it on load, and the screen has nothing until the next
+/// read lands. With plenty of headroom the next read is fifteen minutes away,
+/// which is the blank a status bar shows after a long uptime. A restart appears
+/// to cure it only because a restart has no previous reading to skip.
+pub fn reading_outlived_its_window(
+    five_h_reset: Option<i64>,
+    seven_d_reset: Option<i64>,
+    now_secs: i64,
+) -> bool {
+    five_h_reset.is_some_and(|r| now_secs >= r) || seven_d_reset.is_some_and(|r| now_secs >= r)
+}
+
 pub fn measure_after(headroom: Option<f64>) -> std::time::Duration {
     let secs = match headroom {
         // Never measured: find out soon, because a threshold cannot apply to an
@@ -1792,5 +1808,44 @@ mod empty_usage_tests {
             usage_block(&[], &[], &[]),
             vec!["nothing read yet".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod window_expiry_tests {
+    use super::*;
+
+    /// A reading whose window has turned over must be re-read at once.
+    ///
+    /// A reading only describes the window it was taken in. Once that window's
+    /// reset passes, the number is not merely stale - it is about a window that
+    /// no longer exists, and the cache drops it on load. The screen then has
+    /// nothing to show, and an account with plenty of headroom is not due for
+    /// another read for fifteen minutes. That is the blank the status bar shows
+    /// after a long uptime, and why restarting the proxy appears to fix it: a
+    /// restart has no previous reading, so everything is due immediately.
+    #[test]
+    fn a_reading_past_its_window_reset_is_due_now() {
+        let now = 1_800_000_000i64;
+        // The five-hour window turned over a minute ago.
+        assert!(reading_outlived_its_window(
+            Some(now - 60),
+            Some(now + 86_400),
+            now
+        ));
+        // The seven-day window turned over.
+        assert!(reading_outlived_its_window(
+            Some(now + 3_600),
+            Some(now - 1),
+            now
+        ));
+        // Both windows are still open - nothing to hurry for.
+        assert!(!reading_outlived_its_window(
+            Some(now + 3_600),
+            Some(now + 86_400),
+            now
+        ));
+        // A reading that carries no reset times cannot have outlived one.
+        assert!(!reading_outlived_its_window(None, None, now));
     }
 }
