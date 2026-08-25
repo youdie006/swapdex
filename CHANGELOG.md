@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.104.0
+
+- A release tag now reproduces the release it names. `npm/publish.mjs` rewrites
+  `npm/package.json` from Cargo.toml at publish time, which happens after the
+  commit and tag, so every tag carried the PREVIOUS release's npm metadata -
+  checking out v0.103.0 gave a tree that would publish 0.102.0. Five tags in a
+  row were off by one. A test now asserts the two versions agree, and it runs in
+  CI on the tag.
+
 ## 0.103.0
 
 - The account registry and the serving/active pointers are replaced by rename
