@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.106.0
+
+- A damaged account registry is no longer reported as an empty one. `slots.json`
+  holds every account on the machine, and until 0.103.0 it was written with a
+  plain truncate-then-write, so an interrupted write could leave it unparseable.
+  `Slots::open_for` said "slots.json is corrupt" but eight callers discarded it,
+  and `ls` printed "No accounts saved yet" with setup advice - telling someone
+  whose credentials are all still on disk that they never had an account, and
+  inviting them to start over on top of it. `export` skipped it silently too and
+  handed back a manifest that looked complete.
+
 ## 0.105.0
 
 - The platform packages a tag pins are checked too. `optionalDependencies`

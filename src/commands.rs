@@ -1642,7 +1642,16 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // machine whose accounts live as slots, `serve personal` moved the turns
     // correctly and there was no row for `personal` to mark - two of three
     // switches looked like they did nothing.
+    // A registry that will not parse is not an empty one. Until 0.103.0 this
+    // file was written with a plain truncate-then-write, so an interrupted
+    // write could leave it unreadable - and reporting that as "no accounts"
+    // tells someone whose credentials are all still on disk to start over.
+    let mut unreadable_registry: Vec<&str> = Vec::new();
     for tool in crate::adapters::names() {
+        if let Err(e) = crate::slots::Slots::open_for(paths, tool) {
+            let _ = e;
+            unreadable_registry.push(tool);
+        }
         if let Ok(sl) = crate::slots::Slots::open_for(paths, tool) {
             for r in sl.list() {
                 match profiles.iter_mut().find(|p| p.name == r.name) {
@@ -1693,10 +1702,21 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         println!("{}", serde_json::to_string(&rows)?);
         return Ok(0);
     }
+    if !unreadable_registry.is_empty() {
+        eprintln!(
+            "swapdex: the account registry could not be read ({}) - \
+             ~/.local/share/swapdex/slots.json is damaged, so accounts are missing \
+             from this listing. The slot directories still hold their logins; \
+             restore the file from a backup or re-register with `swapdex adopt`.",
+            unreadable_registry.join(", ")
+        );
+    }
     if profiles.is_empty() {
-        println!("No accounts saved yet.");
-        println!("  guided setup:  swapdex setup");
-        println!("  or add one:    swapdex login <name>");
+        if unreadable_registry.is_empty() {
+            println!("No accounts saved yet.");
+            println!("  guided setup:  swapdex setup");
+            println!("  or add one:    swapdex login <name>");
+        }
         return Ok(0);
     }
     // Two-pass so columns fit the actual content (with a sane cap).
@@ -5510,7 +5530,15 @@ pub fn row_needs_login(tool: &str, dir: Option<&std::path::Path>) -> bool {
 /// secret in it.
 pub fn export(paths: &Paths, out: Option<&std::path::Path>) -> Result<i32> {
     use anyhow::Context;
-    let text = serde_json::to_string_pretty(&crate::portable::export(paths))?;
+    let portable = crate::portable::export(paths);
+    if !portable.unreadable.is_empty() {
+        eprintln!(
+            "swapdex: the account registry could not be read ({}) - this export is \
+             INCOMPLETE and does not list every account.",
+            portable.unreadable.join(", ")
+        );
+    }
+    let text = serde_json::to_string_pretty(&portable)?;
     match out {
         Some(p) => {
             std::fs::write(p, format!("{text}\n"))

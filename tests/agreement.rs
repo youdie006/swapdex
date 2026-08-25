@@ -674,3 +674,31 @@ fn the_status_bar_says_when_it_has_no_usage_reading() {
         "the bar went silent about usage instead of saying it had no reading:\n{out:?}"
     );
 }
+
+/// A damaged registry must never be reported as "no accounts".
+///
+/// `slots.json` holds every account on the machine, and until 0.103.0 it was
+/// written with a plain truncate-then-write - so an interrupted write could
+/// leave it unparseable. `Slots::open_for` says "slots.json is corrupt", but
+/// eight callers discard that, and `ls` then printed "No accounts saved yet"
+/// with setup advice. That tells a user who still has every credential on disk
+/// that they never had an account, and invites them to start over on top of it.
+#[test]
+fn a_damaged_registry_is_not_reported_as_having_no_accounts() {
+    let td = fixture();
+    let root = td.path();
+    let reg = root.join(".local/share/swapdex/slots.json");
+    std::fs::create_dir_all(reg.parent().unwrap()).unwrap();
+    std::fs::write(&reg, b"[{\"name\":\"rnd\",").unwrap();
+
+    let (out, err, _) = run(root, &["ls"]);
+    let all = format!("{out}{err}").to_lowercase();
+    assert!(
+        !all.contains("no accounts saved yet"),
+        "a damaged registry was reported as an empty one:\n{out}{err}"
+    );
+    assert!(
+        all.contains("registry") || all.contains("corrupt") || all.contains("could not be read"),
+        "nothing said the registry could not be read:\n{out}{err}"
+    );
+}

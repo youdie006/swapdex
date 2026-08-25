@@ -28,6 +28,10 @@ pub struct Portable {
     /// Bumped only if the shape changes in a way an older swapdex would misread.
     pub version: u32,
     pub accounts: Vec<PortableAccount>,
+    /// Tools whose registry could not be read, so this manifest is incomplete.
+    /// Absent when everything was readable, so an older reader is unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<crate::settings::Settings>,
 }
@@ -37,7 +41,14 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Gather what can safely leave this machine.
 pub fn export(paths: &Paths) -> Portable {
     let mut accounts = Vec::new();
+    // A registry that will not parse is not an empty one. Skipping it silently
+    // hands back a manifest that looks complete and is not, which is the one
+    // thing an export must never do.
+    let mut unreadable = Vec::new();
     for tool in crate::adapters::names() {
+        if crate::slots::Slots::open_for(paths, tool).is_err() {
+            unreadable.push(tool.to_string());
+        }
         if let Ok(s) = crate::slots::Slots::open_for(paths, tool) {
             for r in s.list() {
                 accounts.push(PortableAccount {
@@ -49,6 +60,7 @@ pub fn export(paths: &Paths) -> Portable {
     }
     Portable {
         version: FORMAT_VERSION,
+        unreadable,
         accounts,
         settings: Some(crate::settings::load(paths)),
     }
@@ -129,6 +141,7 @@ mod tests {
     #[test]
     fn an_account_that_already_exists_is_left_alone() {
         let incoming = Portable {
+            unreadable: Vec::new(),
             version: FORMAT_VERSION,
             accounts: vec![
                 PortableAccount {
