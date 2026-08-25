@@ -1912,7 +1912,11 @@ fn note_serving_for(paths: &Paths, tool: &str, name: &str) {
     if std::fs::read_to_string(&f).is_ok_and(|c| c.trim() == name) {
         return;
     }
-    let _ = std::fs::write(&f, name);
+    // Read from the request path by `ls`, the status bar and the shim. A plain
+    // write truncates first, so a reader landing in that window sees an empty
+    // file or half a name and reports the wrong payer. The next request rewrites
+    // it if this one fails, so a discarded error is self-correcting.
+    let _ = crate::atomic::write_secret(&f, name.as_bytes());
 }
 
 /// The port a running `swapdex proxy` announced, or `None` when none is up. The
@@ -2364,5 +2368,37 @@ mod poison_tests {
 
         assert!(m.lock().is_err(), "the lock really is poisoned");
         assert_eq!(m.held().len(), 1, "the proxy must still be able to read it");
+    }
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    /// The serving pointer is read while it is being written.
+    ///
+    /// This file records who pays and is rewritten from the request path; `ls`,
+    /// the status bar and the shim all read it, constantly. A plain write
+    /// truncates first, so a reader landing in that window sees an empty file
+    /// or half a name and reports the wrong payer. Replacing the file by rename
+    /// leaves no such window - and the inode changes because the file was
+    /// replaced rather than overwritten in place.
+    #[test]
+    fn the_serving_pointer_is_replaced_rather_than_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let f = serving_file_for(&paths, "claude-code");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+
+        note_serving_for(&paths, "claude-code", "alpha");
+        let before = std::fs::metadata(&f).unwrap().ino();
+        note_serving_for(&paths, "claude-code", "beta");
+        let after = std::fs::metadata(&f).unwrap().ino();
+
+        assert_ne!(
+            before, after,
+            "the pointer was overwritten in place - a reader can see half a name"
+        );
     }
 }

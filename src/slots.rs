@@ -259,7 +259,11 @@ impl Slots {
             .collect();
         out.extend(self.records.iter().cloned());
         let bytes = serde_json::to_vec_pretty(&out)?;
-        std::fs::write(&self.file, bytes).context("write slots.json")?;
+        // One file holds every account on the machine. A plain write truncates
+        // the destination first, so a crash, a full disk, or a kill in that
+        // window leaves an empty registry and every account is gone. Write a
+        // temp file and rename it over: there is no window.
+        crate::atomic::write_secret(&self.file, &bytes).context("write slots.json")?;
         self.all = out;
         Ok(())
     }
@@ -341,7 +345,7 @@ impl Slots {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).context("create store dir")?;
         }
-        std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
+        crate::atomic::write_secret(&p, rec.config_dir.to_string_lossy().as_bytes())
             .with_context(|| format!("write {} serving pointer", self.tool))
     }
 
@@ -422,7 +426,7 @@ impl Slots {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).context("create store dir")?;
         }
-        std::fs::write(&p, rec.config_dir.to_string_lossy().as_bytes())
+        crate::atomic::write_secret(&p, rec.config_dir.to_string_lossy().as_bytes())
             .with_context(|| format!("write {} pointer", self.tool))?;
         // Starting somewhere new settles who pays for it too, so the two answers
         // cannot drift into a combination nobody asked for.
@@ -1162,6 +1166,43 @@ mod rename_any_tool_tests {
         assert_eq!(
             find_any_tool(&paths, "A").map(|(t, _)| t),
             Some("codex".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod registry_durability_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    /// The account registry must be replaced, never truncated in place.
+    ///
+    /// One file holds every tool's slots. `fs::write` truncates the destination
+    /// and then writes into it, so a crash, a full disk, or a kill in that
+    /// window leaves an empty or half-written registry - and every account on
+    /// the machine is gone. Writing a temp file and renaming it over the
+    /// destination has no such window; the inode changes because the file was
+    /// replaced rather than overwritten.
+    #[test]
+    fn saving_the_registry_replaces_the_file_instead_of_truncating_it() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let file = {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.create("company").unwrap();
+            s.file.clone()
+        };
+        let before = std::fs::metadata(&file).unwrap().ino();
+
+        {
+            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            s.create("second").unwrap();
+        }
+        let after = std::fs::metadata(&file).unwrap().ino();
+
+        assert_ne!(
+            before, after,
+            "slots.json was overwritten in place - a crash mid-write loses every account"
         );
     }
 }

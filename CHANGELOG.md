@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.103.0
+
+- The account registry and the serving/active pointers are replaced by rename
+  instead of being overwritten in place. One file holds every account on the
+  machine and was written with a plain truncate-then-write, so a crash, a full
+  disk, or a kill in that window left an empty registry. The serving pointer has
+  the same hole and is rewritten from the request path while `ls`, the status bar
+  and the shim read it, so a reader could see half a name and report the wrong
+  payer.
+
 ## 0.102.0
 
 - The proxy's usage block says "nothing read yet" instead of printing a bare
