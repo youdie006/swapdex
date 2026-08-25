@@ -79,6 +79,19 @@ fn logo_lines() -> Vec<Line<'static>> {
 /// Keep a list selection in bounds after the row count changes (a switch,
 /// delete, or a concurrent `swapdex rm`), so the highlight never points past
 /// the end and no later `rows[i]` can panic.
+/// How long after the delete prompt opens a `y` is treated as pasted, not typed.
+///
+/// Nobody reads "delete rnd? y/n" and answers inside a quarter second. Text
+/// that arrives as a block - a terminal paste, or a harness driving this pane
+/// because a stale window still looks like an agent - lands in under a
+/// millisecond. Two ordinary letters are not a decision to delete an account.
+const PASTE_GAP_MS: u64 = 250;
+
+/// Whether a confirmation keypress came from a person rather than a paste.
+fn confirm_is_deliberate(prompt_opened_ms: u64, key_arrived_ms: u64) -> bool {
+    key_arrived_ms.saturating_sub(prompt_opened_ms) >= PASTE_GAP_MS
+}
+
 fn clamp_selection(state: &mut ListState, len: usize) {
     match (state.selected(), len) {
         (_, 0) => state.select(None),
@@ -1142,7 +1155,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     state.select(Some(rows.iter().position(|r| r.active).unwrap_or(0)));
     let mut open_state = ListState::default();
     let mut status = String::new();
-    let mut confirm_delete: Option<usize> = None;
+    let mut confirm_delete: Option<(usize, std::time::Instant)> = None;
     // Checked once: drives the "install sessionwiki for more" hint in the
     // native session menu.
     let wiki_present = ctx.sessionwiki_present();
@@ -1504,7 +1517,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .highlight_style(Style::default().add_modifier(Modifier::BOLD));
                         f.render_stateful_widget(list, body, &mut state);
                     }
-                    let foot_line = if let Some(i) = confirm_delete {
+                    let foot_line = if let Some((i, _)) = confirm_delete {
                         // Say what this actually does. "Delete" over an account
                         // whose folder and login both survive invites someone to
                         // decline a harmless action - or to expect a folder gone
@@ -2001,8 +2014,17 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         }
         match &mut screen {
             Screen::Main => {
-                if let Some(i) = confirm_delete {
+                if let Some((i, opened)) = confirm_delete {
                     if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                        // A `y` that lands in the same instant as the `d` that
+                        // opened this prompt was not typed - refuse it and leave
+                        // the account alone.
+                        if !confirm_is_deliberate(0, opened.elapsed().as_millis() as u64) {
+                            status =
+                                "that arrived too fast to be typed - nothing was deleted".into();
+                            confirm_delete = None;
+                            continue;
+                        }
                         if let Some(row) = rows.get(i) {
                             status = ctx.delete(&row.name);
                             rows = ctx.rows();
@@ -2180,7 +2202,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         }
                     }
                     KeyCode::Char('d') if !rows.is_empty() => {
-                        confirm_delete = state.selected();
+                        confirm_delete = state.selected().map(|i| (i, std::time::Instant::now()));
                     }
                     KeyCode::Char('?') => {
                         screen = Screen::Doctor {
@@ -3497,5 +3519,29 @@ mod empty_window_tests {
         let cell = reset_slot_reason(None, false, w, false);
         assert!(cell.starts_with("not reported"), "{cell:?}");
         assert_eq!(cell.chars().count(), w, "padded to the column: {cell:?}");
+    }
+}
+
+#[cfg(test)]
+mod paste_guard_tests {
+    use super::*;
+
+    /// A destructive confirmation must not be satisfiable by pasted text.
+    ///
+    /// `d` opens the delete prompt and `y` completes it, so any text arriving
+    /// as keystrokes with a `d` followed by a `y` deletes an account. A stale
+    /// pane can receive injected text - a harness driving a sibling session, a
+    /// terminal paste - and two ordinary letters are not a decision.
+    ///
+    /// Keys typed by a person arrive with human gaps between them. Two keys in
+    /// the same instant are a paste, and a paste never confirms a deletion.
+    #[test]
+    fn a_confirmation_arriving_instantly_after_the_prompt_is_refused() {
+        // Typed: the prompt opened, then a human took a moment to answer.
+        assert!(confirm_is_deliberate(0, PASTE_GAP_MS));
+        assert!(confirm_is_deliberate(0, 5_000));
+        // Pasted: both keys landed in the same instant.
+        assert!(!confirm_is_deliberate(0, 0));
+        assert!(!confirm_is_deliberate(0, PASTE_GAP_MS - 1));
     }
 }

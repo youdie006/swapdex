@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.99.0
+
+- The account picker refuses a delete confirmation that arrives too fast to have
+  been typed. `d` opens the prompt and `y` completes it, so any text delivered as
+  keystrokes containing `d` followed by `y` used to delete an account. A stale
+  terminal pane can receive injected text - a paste, or a tool driving the window
+  because it still looks like an agent session - and two ordinary letters are not
+  a decision. A `y` landing within 250ms of the prompt opening is refused and the
+  account is left alone.
+
 ## [0.98.0] - 2026-08-25
 
 ### Fixed
