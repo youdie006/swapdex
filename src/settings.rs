@@ -13,6 +13,15 @@ pub struct Settings {
     /// one run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_auto: Option<bool>,
+    /// Seconds a turn may be HELD when every account is spent, waiting for the
+    /// earliest window to reset instead of failing with a 429.
+    ///
+    /// The turn used to die there and an unattended run ended with it, even
+    /// though the windows state their own reset times - the wall's length was
+    /// known and simply not used. 0 or unset means never hold, because a caller
+    /// that would rather see the error than wait must be able to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_seconds: Option<i64>,
     /// Accounts kept OUT of automatic rotation. They can still be switched to by
     /// hand - this only says "do not pick this one for me", which is the useful
     /// meaning when an account is shared, billed elsewhere, or being saved.

@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.93.0] - 2026-08-25
+
+### Added
+- **`hold_seconds`: when every account is spent, wait for the earliest window instead of failing.** The turn died with a 429 and an unattended run ended there - even though the windows state their own reset times, so the wall's length was known and simply not used. Setting `hold_seconds` in the store's `settings.json` holds the turn until the soonest reset, so an overnight run finishes on its own. Off unless set: a caller that would rather see the error than wait must be able to. A wait longer than the ceiling is refused rather than shortened, because waking early would only meet the same wall. Taken from teamclaude, which has had this for a while.
+
+### Notes
+- Surveyed every feature in teamclaude, cc-switch, claude-code-router and codex-pooler against this codebase. Most do not apply: cc-switch is a desktop GUI managing eight tools, codex-pooler is a multi-tenant self-hosted server with pools and invites. Prompt-cache affinity was considered and NOT built - it exists to keep a pooled server from scattering one conversation across accounts, and this proxy never rotates off an account that still has quota, so the code would do nothing. Third-party API fallback (DeepSeek/GLM) and per-pool request compression are out of scope for a personal switcher.
+
 ## [0.92.0] - 2026-08-24
 
 ### Fixed

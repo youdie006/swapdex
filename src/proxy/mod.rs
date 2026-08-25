@@ -1530,7 +1530,38 @@ fn forward_turn(
                     attempt += 1;
                     std::thread::sleep(wait);
                 }
-                ratelimit::Throttle::Exhausted => break up,
+                ratelimit::Throttle::Exhausted => {
+                    // Every account spent is a wall whose LENGTH is known: the
+                    // windows state their own reset times. Failing here ended
+                    // an unattended run at the first wall; holding until the
+                    // earliest reset lets it finish on its own. Off unless
+                    // `hold_seconds` is set - a caller that would rather see
+                    // the error than wait must be able to.
+                    let cap = crate::settings::load(paths).hold_seconds.unwrap_or(0);
+                    let resets: Vec<Option<i64>> = crate::quota_cache::load(paths)
+                        .values()
+                        .map(|e| match (e.five_h_reset, e.seven_d_reset) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        })
+                        .collect();
+                    match pick::hold_for(&resets, now_secs(), cap) {
+                        Some(wait) => {
+                            println!(
+                                "{} {path} -> every account is spent; holding {}s for the \
+                                 earliest window to reset",
+                                slot.name,
+                                wait.as_secs()
+                            );
+                            std::io::stdout().flush().ok();
+                            drop(up);
+                            std::thread::sleep(wait);
+                            attempt = 0;
+                            continue;
+                        }
+                        None => break up,
+                    }
+                }
             }
         };
 

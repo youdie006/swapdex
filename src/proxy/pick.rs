@@ -245,6 +245,25 @@ pub fn handoff_target(usage: &[(String, f64)], current: &str) -> Option<String> 
 /// It lapses like the window it came from: one 429 must not mark an account as
 /// refusing for the life of the proxy. And a turn that went through since
 /// settles it, however recent the refusal - the account is plainly serving.
+/// How long to hold a turn when every account is spent, if at all.
+///
+/// The turn died with a 429 and an unattended run ended there - even though the
+/// windows carry their own reset times, so the proxy knew exactly how long the
+/// wall lasted. Holding until the EARLIEST reset lets an overnight run finish
+/// on its own instead of stopping at the first wall.
+///
+/// `max_secs` is the ceiling and doubles as the switch: 0 means never hold. A
+/// wait longer than the ceiling is refused rather than shortened, because
+/// waking early would just meet the same wall.
+pub fn hold_for(resets: &[Option<i64>], now: i64, max_secs: i64) -> Option<std::time::Duration> {
+    if max_secs <= 0 {
+        return None;
+    }
+    let soonest = resets.iter().flatten().copied().min()?;
+    let wait = soonest - now;
+    (wait > 0 && wait <= max_secs).then(|| std::time::Duration::from_secs(wait as u64))
+}
+
 /// Does a recorded refusal still say anything about this account?
 ///
 /// A refusal belongs to the CREDENTIAL that earned it. `currently_refusing`
@@ -1705,5 +1724,47 @@ mod fresh_credential_tests {
         assert!(!refusal_survives(Some(100), Some(120), None));
         // Nothing was ever refused.
         assert!(!refusal_survives(None, None, Some(150)));
+    }
+}
+
+#[cfg(test)]
+mod hold_until_reset_tests {
+    use super::*;
+
+    /// When every account is spent, waiting beats failing.
+    ///
+    /// The turn died with a 429 and an unattended run ended there - even though
+    /// the windows carry their own reset times, so the proxy knew exactly how
+    /// long the wall lasted. Holding the request until the earliest reset lets
+    /// an overnight run finish on its own.
+    ///
+    /// Bounded, and off by default: a caller that would rather see the error
+    /// than wait an hour must be able to.
+    #[test]
+    fn a_spent_fleet_waits_for_the_earliest_reset() {
+        // Two accounts, resets at 500 and 900; now is 100. Wait for 500.
+        assert_eq!(
+            hold_for(&[Some(500), Some(900)], 100, 3600),
+            Some(std::time::Duration::from_secs(400))
+        );
+        // An account whose reset is unknown cannot be waited for, but a known
+        // one still can.
+        assert_eq!(
+            hold_for(&[None, Some(900)], 100, 3600),
+            Some(std::time::Duration::from_secs(800))
+        );
+        // Nothing known: there is no wall to wait out, so do not wait.
+        assert_eq!(hold_for(&[None, None], 100, 3600), None);
+        // Already past: no wait needed.
+        assert_eq!(hold_for(&[Some(50)], 100, 3600), None);
+        // Longer than the cap: refuse rather than hold a request for hours.
+        assert_eq!(hold_for(&[Some(100_000)], 100, 3600), None);
+        // Exactly at the cap is still allowed.
+        assert_eq!(
+            hold_for(&[Some(3700)], 100, 3600),
+            Some(std::time::Duration::from_secs(3600))
+        );
+        // Disabled: never wait, whatever the resets say.
+        assert_eq!(hold_for(&[Some(500)], 100, 0), None);
     }
 }
