@@ -1314,7 +1314,11 @@ pub fn quota_brief(five_h_used: Option<f64>, seven_d_used: Option<f64>) -> Strin
         (Some(a), Some(b)) => format!("5h {:.0}% | 7d {:.0}%", left(a), left(b)),
         (Some(a), None) => format!("5h {:.0}%", left(a)),
         (None, Some(b)) => format!("7d {:.0}%", left(b)),
-        (None, None) => String::new(),
+        // Saying nothing is indistinguishable from a broken status bar. The
+        // numbers vanish for two ordinary reasons - nothing measured yet, and a
+        // window that passed its reset before a fresh read landed - and in both
+        // the honest answer is that there is no reading, not blank space.
+        (None, None) => "usage unread".to_string(),
     }
 }
 
@@ -1638,7 +1642,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // machine whose accounts live as slots, `serve personal` moved the turns
     // correctly and there was no row for `personal` to mark - two of three
     // switches looked like they did nothing.
-    for tool in ["claude-code", "codex"] {
+    for tool in crate::adapters::names() {
         if let Ok(sl) = crate::slots::Slots::open_for(paths, tool) {
             for r in sl.list() {
                 match profiles.iter_mut().find(|p| p.name == r.name) {
@@ -1712,7 +1716,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // Ask EVERY tool who pays. Asking Claude's registry alone meant serving a
     // Codex account moved the turns and the listing marked nobody - the same
     // "the switch did nothing" appearance fixed for Claude in 0.80.0.
-    let payers: Vec<(&str, Option<String>)> = ["claude-code", "codex"]
+    let payers: Vec<(&str, Option<String>)> = crate::adapters::names()
         .into_iter()
         .map(|t| {
             (
@@ -3370,7 +3374,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         // meant a slot-only install - which is every install now - could not open
         // its own dashboard until something happened to be signed in, and the
         // dashboard is where you go to sign in.
-        let has_slots = ["claude-code", "codex"].iter().any(|t| {
+        let has_slots = crate::adapters::names().iter().any(|t| {
             crate::slots::Slots::open_for(paths, t)
                 .map(|s| !s.list().is_empty())
                 .unwrap_or(false)
@@ -3646,7 +3650,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         if let Ok(me) = std::env::current_exe() {
             let me = std::fs::canonicalize(&me).unwrap_or(me);
             let mut stale: Vec<(String, std::path::PathBuf)> = Vec::new();
-            for tool in ["claude-code", "codex"] {
+            for tool in crate::adapters::names() {
                 let f = crate::shim::shim_path_for(paths, tool);
                 let Ok(text) = std::fs::read_to_string(&f) else {
                     continue;
@@ -3790,7 +3794,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             // for one account is a fair thing to do), so it is stated rather
             // than counted as a problem.
             {
-                let named: Vec<(String, Option<String>)> = ["claude-code", "codex"]
+                let named: Vec<(String, Option<String>)> = crate::adapters::names()
                     .into_iter()
                     .flat_map(|t| {
                         crate::slots::Slots::open_for(paths, t)
@@ -4087,7 +4091,7 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i3
     // Both tools keep accounts here. Looking only in Claude's registry meant a
     // Codex account could not be removed at all, and the dashboard - which lists
     // both - reported "no account named X" for something it was showing.
-    let slot_tool = ["claude-code", "codex"].into_iter().find(|t| {
+    let slot_tool = crate::adapters::names().into_iter().find(|t| {
         crate::slots::Slots::open_for(paths, t)
             .map(|s| s.get(name).is_some())
             .unwrap_or(false)
@@ -4823,17 +4827,23 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
 /// assumed, because that is what an unqualified account was before Codex had
 /// accounts at all.
 pub(crate) fn tool_of_account(paths: &Paths, name: &str) -> &'static str {
-    const TOOLS: [&str; 2] = ["claude-code", "codex"];
+    let tools = crate::adapters::names();
     if let Some(t) = Store::open(paths).ok().and_then(|st| {
         st.list()
             .into_iter()
             .find(|p| p.name == name)
-            .and_then(|p| TOOLS.into_iter().find(|t| p.tools.iter().any(|x| x == t)))
+            .and_then(|p| {
+                tools
+                    .iter()
+                    .copied()
+                    .find(|t| p.tools.iter().any(|x| x == t))
+            })
     }) {
         return t;
     }
-    TOOLS
-        .into_iter()
+    tools
+        .iter()
+        .copied()
         .find(|t| {
             crate::slots::Slots::open_for(paths, t)
                 .map(|s| s.get(name).is_some())
@@ -4992,7 +5002,7 @@ pub fn has_any_account(paths: &Paths) -> bool {
     {
         return true;
     }
-    ["claude-code", "codex"].into_iter().any(|t| {
+    crate::adapters::names().into_iter().any(|t| {
         crate::slots::Slots::open_for(paths, t)
             .map(|s| !s.list().is_empty())
             .unwrap_or(false)
@@ -5207,7 +5217,8 @@ pub fn serve(
             let brief = cache
                 .get(&who)
                 .map(|e| quota_brief(e.five_h, e.seven_d))
-                .unwrap_or_default();
+                // No entry at all is the same news as an entry with no numbers.
+                .unwrap_or_else(|| quota_brief(None, None));
             if brief.is_empty() {
                 print!("{label}");
             } else {
@@ -5507,7 +5518,7 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
         );
         return Ok(2);
     }
-    let here: Vec<(String, String)> = ["claude-code", "codex"]
+    let here: Vec<(String, String)> = crate::adapters::names()
         .into_iter()
         .flat_map(|t| {
             crate::slots::Slots::open_for(paths, t)
@@ -5767,7 +5778,7 @@ pub fn list_slots(paths: &Paths) -> Result<i32> {
     // Both tools, each under its own heading. Listing only Claude's hid half the
     // accounts from the command whose whole job is to show them.
     let mut any = false;
-    for tool in ["claude-code", "codex"] {
+    for tool in crate::adapters::names() {
         let list = crate::slots::Slots::open_for(paths, tool)?.list();
         if list.is_empty() {
             continue;
@@ -7467,7 +7478,9 @@ mod tests {
         assert_eq!(quota_brief(Some(0.0), None), "5h 100%");
         // Nothing measured: empty, so the bar can omit the segment entirely
         // rather than print a placeholder that looks like a reading.
-        assert_eq!(quota_brief(None, None), "");
+        // Silence here is indistinguishable from a broken status bar - which is
+        // exactly how it read when the numbers stopped appearing.
+        assert_eq!(quota_brief(None, None), "usage unread");
     }
 
     /// Whoever pays for ANY tool gets marked, not just Claude's payer.

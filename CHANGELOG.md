@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.101.0
+
+- The status bar no longer goes blank about usage without saying so. With no
+  reading in the cache it printed the account and stopped, so the two ordinary
+  causes - nothing measured yet, and a window that passed its reset before a
+  fresh read landed - were indistinguishable from a broken bar. It now says
+  "usage unread".
+- Commands walk every adapter instead of a hardcoded Claude/Codex pair. Four
+  adapters exist, so an account living only as a Gemini or Antigravity slot had
+  no row in `ls`, could not be found by `rm`, and was left out of `export`. The
+  list now lives in one place.
+
 ## 0.100.0
 
 - One panicking background thread no longer disables the proxy for every request

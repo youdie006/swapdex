@@ -57,6 +57,17 @@ pub fn all() -> Vec<Box<dyn AuthTool>> {
     ]
 }
 
+/// Every tool swapdex can hold an account for.
+///
+/// This pair was written out by hand in a dozen places while four adapters
+/// existed, so an account living only as a Gemini or Antigravity slot was
+/// invisible to `ls`, unreachable by `rm`, and silently left out of `export`.
+/// One list, one place, so adding an adapter cannot leave half the commands
+/// behind again.
+pub fn names() -> Vec<&'static str> {
+    all().iter().map(|a| a.name()).collect()
+}
+
 pub fn by_name(name: &str) -> Option<Box<dyn AuthTool>> {
     all().into_iter().find(|a| a.name() == name)
 }

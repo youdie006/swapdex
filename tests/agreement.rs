@@ -602,3 +602,75 @@ fn ls_marks_a_slot_whose_token_has_expired() {
         "an expired slot is listed as if it were fine:\n{row}"
     );
 }
+
+/// `ls` must show an account no matter which tool its slot belongs to.
+///
+/// The listing walked a hardcoded pair of tools while four adapters exist, so
+/// an account living only as a Gemini or Antigravity slot had no row at all -
+/// switching to it worked and the listing showed nothing, the same "the switch
+/// did nothing" appearance already fixed once for Claude and once for Codex.
+#[test]
+fn ls_lists_an_account_that_lives_only_as_a_gemini_slot() {
+    let td = fixture();
+    let root = td.path();
+    seed_gemini_slot(root, "kong", "kong@example.com");
+
+    let (out, err, code) = run(root, &["ls"]);
+    assert_eq!(code, 0, "ls failed: {err}");
+    assert!(
+        out.contains("kong"),
+        "a Gemini-only account is missing from the listing:\n{out}"
+    );
+}
+
+fn seed_gemini_slot(root: &Path, name: &str, email: &str) {
+    let dir = root.join(".local/share/swapdex/slots").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("oauth_creds.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "access_token": "AT", "refresh_token": "RT",
+            "expiry_date": 9999999999999i64}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("google_accounts.json"),
+        serde_json::to_vec(&serde_json::json!({"active": email, "old": []})).unwrap(),
+    )
+    .unwrap();
+    chmod600(&dir.join("oauth_creds.json"));
+
+    let reg = root.join(".local/share/swapdex/slots.json");
+    let mut rows: Vec<serde_json::Value> = std::fs::read(&reg)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    rows.push(serde_json::json!({
+        "name": name, "id": name, "config_dir": dir.to_string_lossy(),
+        "adopted": false, "tool": "gemini"}));
+    std::fs::write(&reg, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+}
+
+/// The status bar must never go blank about usage without saying so.
+///
+/// With no reading in the cache the bar printed the account and stopped. The
+/// numbers had been there the day before, so their absence read as a broken
+/// status bar - and the two ordinary causes, nothing measured yet and a window
+/// that passed its reset before a fresh read landed, both looked identical to
+/// a failure.
+#[test]
+fn the_status_bar_says_when_it_has_no_usage_reading() {
+    let td = fixture();
+    let root = td.path();
+    seed_slot(root, "rnd", "rnd@example.com");
+    let (_, err, code) = run(root, &["serve", "rnd"]);
+    assert_eq!(code, 0, "serve failed: {err}");
+
+    let (out, err, code) = run(root, &["serve", "--quiet"]);
+    assert_eq!(code, 0, "serve --quiet failed: {err}");
+    assert!(
+        out.contains("usage unread"),
+        "the bar went silent about usage instead of saying it had no reading:\n{out:?}"
+    );
+}

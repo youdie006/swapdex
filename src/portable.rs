@@ -37,7 +37,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Gather what can safely leave this machine.
 pub fn export(paths: &Paths) -> Portable {
     let mut accounts = Vec::new();
-    for tool in ["claude-code", "codex"] {
+    for tool in crate::adapters::names() {
         if let Ok(s) = crate::slots::Slots::open_for(paths, tool) {
             for r in s.list() {
                 accounts.push(PortableAccount {
