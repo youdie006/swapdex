@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.96.0] - 2026-08-25
+
+### Fixed
+- **A burst of 401s no longer renews the same slot once per request.** Refresh tokens rotate: each use mints a new one and retires the old, so N concurrent turns each renewing the same account spend the same token N times and every result but one is already invalid when it lands - the account logs itself out by its own renewal. One refresh per slot per 30s burst now; a caller that stands down simply uses the credential the winner is about to write. Per-slot, so one account's burst never blocks another's genuine refresh. From teamclaude's "don't rotate the token family once per 401 in a burst".
+
+### Notes
+- Read 600 commits and 117 issues across teamclaude, cc-switch, claude-code-router, codex-pooler and clauth. Three of their fixes do not apply here: cc-switch's SSE multi-byte corruption cannot arise because conversation bodies are streamed through as bytes and never transformed (that one would have mangled Korean); its "settings merge restores a cleared value" cannot arise because settings are written whole rather than merged; and handing the client a 403 meant for the proxy's own account is already avoided - every account failing auth returns an explanation of what to do, not the upstream's refusal. On-demand quota refresh was already `swapdex quota`.
+
 ## [0.95.0] - 2026-08-25
 
 ### Fixed

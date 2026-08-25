@@ -127,6 +127,39 @@ pub fn request_body(refresh_token: &str) -> String {
 
 /// Renew this slot's credential in place. `Ok` carries nothing: the point is the
 /// side effect, and returning the token would invite logging it.
+/// How close together two refreshes count as the same burst.
+pub const BURST_SECS: i64 = 30;
+
+/// Lets ONE refresh through per slot per burst.
+///
+/// Refresh tokens rotate: each use mints a new one and retires the old. So N
+/// concurrent turns each refreshing the same slot spend the same token N times,
+/// and every result but one is already invalid when it lands - the account ends
+/// up logged out by its own renewal. teamclaude hit this as "don't rotate the
+/// token family once per 401 in a burst".
+///
+/// Per-slot, so one account's burst never blocks another's genuine refresh, and
+/// time-bounded, so a refresh minutes later is a new event rather than the same
+/// burst still being suppressed.
+#[derive(Default)]
+pub struct RefreshGate {
+    last: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, i64>>,
+}
+
+impl RefreshGate {
+    /// True when this caller should go ahead; false when another already is.
+    pub fn claim(&self, dir: &Path, now_secs: i64) -> bool {
+        let mut m = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        match m.get(dir) {
+            Some(&t) if now_secs - t <= BURST_SECS => false,
+            _ => {
+                m.insert(dir.to_path_buf(), now_secs);
+                true
+            }
+        }
+    }
+}
+
 pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
     // A slot the tool is using is never touched - see the module note.
     if slot_in_use(dir) {
@@ -443,4 +476,35 @@ pub fn keep_alive_sweep(
         }
     }
     (renewed, failed)
+}
+
+#[cfg(test)]
+mod one_refresh_per_burst_tests {
+    use super::*;
+
+    /// A burst of 401s must produce ONE refresh, not one per request.
+    ///
+    /// Refresh tokens rotate: each use mints a new one and retires the old. So
+    /// N concurrent turns each refreshing the same slot spend the same token N
+    /// times, and every result but one is already invalid when it lands - the
+    /// account ends up logged out by its own renewal. teamclaude hit this as
+    /// "don't rotate the token family once per 401 in a burst".
+    ///
+    /// The gate is per-slot and time-bounded: a second refresh moments later is
+    /// the burst, a refresh minutes later is a new event.
+    #[test]
+    fn a_burst_of_refreshes_collapses_to_one() {
+        let g = RefreshGate::default();
+        let dir = std::path::Path::new("/s/a");
+        // First caller in: proceeds.
+        assert!(g.claim(dir, 1_000));
+        // Everyone else in the same burst: stands down.
+        assert!(!g.claim(dir, 1_000));
+        assert!(!g.claim(dir, 1_002));
+        // A different slot is unaffected - one account's burst must not block
+        // another's genuine refresh.
+        assert!(g.claim(std::path::Path::new("/s/b"), 1_000));
+        // Long enough later, it is a new event rather than the same burst.
+        assert!(g.claim(dir, 1_000 + BURST_SECS + 1));
+    }
 }

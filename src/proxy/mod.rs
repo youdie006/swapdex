@@ -93,6 +93,10 @@ struct Shared {
     /// come back with it before anything has actually gone through.
     refused_at: Mutex<HashMap<String, i64>>,
     ok_at: Mutex<HashMap<String, i64>>,
+    /// One refresh per slot per burst. Refresh tokens rotate, so N concurrent
+    /// 401s each renewing the same slot spend the same token N times and all
+    /// but one result is stale on arrival - the account logs itself out.
+    refresh_gate: crate::refresh::RefreshGate,
     /// When each account's credential was last replaced. A refusal belongs to
     /// the credential that earned it, so a token refresh retires it - without
     /// this, a re-authorized account stayed sidelined for a dead reason.
@@ -962,6 +966,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         codex_headers_seen: std::sync::atomic::AtomicBool::new(false),
         refused_at: Mutex::new(HashMap::new()),
         ok_at: Mutex::new(HashMap::new()),
+        refresh_gate: crate::refresh::RefreshGate::default(),
         replaced_at: Mutex::new(HashMap::new()),
         agent: upstream::agent(),
         base: if opts.tool == "codex" {
@@ -1286,7 +1291,14 @@ fn forward_turn(
         // stepped over - which retired the accounts with the most quota left.
         // Renewing is skipped when the tool is running in that slot: see
         // refresh's module note.
-        if creds::slot_token_expired(&slot.config_dir, now_ms()) {
+        // One renewal per slot per burst. Refresh tokens rotate, so N concurrent
+        // turns each renewing this slot spend the same token N times and all but
+        // one result is stale on arrival - the account logs itself out by its own
+        // renewal. A caller that stands down here simply uses the credential the
+        // winner is about to write.
+        if creds::slot_token_expired(&slot.config_dir, now_ms())
+            && sh.refresh_gate.claim(&slot.config_dir, now_secs())
+        {
             match crate::refresh::refresh_slot(&slot.config_dir, now_ms()) {
                 Ok(()) => {
                     // A new credential: any refusal the OLD one earned is not
