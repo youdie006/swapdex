@@ -2626,3 +2626,65 @@ fn a_second_proxy_for_the_same_tool_takes_the_port_rather_than_failing() {
         "the second proxy should hold the port and the first should be gone"
     );
 }
+
+/// A spent fleet actually WAITS, rather than the setting merely parsing.
+///
+/// `hold_seconds` is only worth anything if the turn is really held, so this
+/// drives a proxy against an upstream that answers 429 forever and measures the
+/// wall clock. The reset is seconds away and the ceiling is generous, so the
+/// proxy should sleep and try again rather than return at once.
+#[test]
+fn hold_seconds_actually_delays_a_spent_turn() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    std::fs::create_dir_all(root.join(".local/share/swapdex")).unwrap();
+    seed_slot(root, "acct", "uuid-a", "AT", true);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let d = root.join(".local/share/swapdex");
+    std::fs::write(
+        d.join("settings.json"),
+        // A ceiling of 5s: enough to prove the wait happens, short enough that
+        // a wrong reset cannot hold the suite for a quarter of an hour.
+        serde_json::to_vec(&serde_json::json!({"hold_seconds": 5})).unwrap(),
+    )
+    .unwrap();
+    // Spent, and the soonest window reopens in 3 seconds.
+    std::fs::write(
+        d.join("quota-cache.json"),
+        serde_json::to_vec(&serde_json::json!({"acct": {
+            "five_h": 100.0, "five_h_reset": now + 3,
+            "seven_d": 100.0, "seven_d_reset": now + 900, "at": now}}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // An upstream that is always out of quota.
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for rq in server.incoming_requests() {
+            let body = br#"{"type":"error","error":{"type":"rate_limit_error"}}"#;
+            let _ = rq.respond(tiny_http::Response::from_data(body.to_vec()).with_status_code(429));
+        }
+    });
+    let upstream = format!("http://127.0.0.1:{port}");
+    let (mut child, pport) = start_proxy(root, &upstream, &[]);
+
+    let started = std::time::Instant::now();
+    let _ = post_through(pport, r#"{"model":"claude-sonnet-5","messages":[]}"#);
+    let waited = started.elapsed();
+    let _ = child.kill();
+
+    assert!(
+        waited >= std::time::Duration::from_secs(2),
+        "the turn came back in {waited:?} - it did not wait for the reset"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(60),
+        "the turn was held {waited:?} - far past the reset it was waiting for"
+    );
+}

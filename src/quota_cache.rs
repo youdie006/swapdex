@@ -61,6 +61,23 @@ pub fn load(paths: &Paths) -> Cache {
     load_at(paths, now_secs())
 }
 
+/// Every account's reset times, INCLUDING accounts pinned at 100%.
+///
+/// `load` drops a clamped entry, because a reading stuck at the ceiling is not
+/// a measurement. But its reset time is still a fact, and it is the only fact a
+/// "wait for the wall to lift" decision can use - so dropping it made the data
+/// vanish precisely when it was needed. A window whose reset has already passed
+/// is still dropped: that one says nothing about the future.
+pub fn resets_for(paths: &Paths, tool: &str) -> Vec<Option<i64>> {
+    load_file_at(&file_for(paths, tool), now_secs(), false)
+        .values()
+        .map(|e| match (e.five_h_reset, e.seven_d_reset) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        })
+        .collect()
+}
+
 /// The same, for one tool.
 pub fn load_for(paths: &Paths, tool: &str) -> Cache {
     load_file_at(&file_for(paths, tool), now_secs(), drops_clamped(tool))
@@ -357,5 +374,42 @@ mod expiry_tests {
             load_at(&paths, 999).contains_key("spent"),
             "and it was there while the window ran"
         );
+    }
+}
+
+#[cfg(test)]
+mod resets_survive_tests {
+    use super::*;
+
+    /// The reset time of a SPENT account is exactly what a hold needs.
+    ///
+    /// `load` drops entries pinned at 100% - they read as clamped, and a
+    /// clamped reading is not a measurement. But the reset time on such an
+    /// entry is still a fact, and it is the only fact a "wait for the wall to
+    /// lift" decision can use. Dropping it meant the data vanished precisely
+    /// when it was needed.
+    #[test]
+    fn a_spent_account_still_reports_when_it_reopens() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("q.json");
+        std::fs::write(
+            &f,
+            serde_json::to_vec(&serde_json::json!({"acct": {
+                "five_h": 100.0, "five_h_reset": 5_000,
+                "seven_d": 100.0, "seven_d_reset": 9_000, "at": 1}}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // The ordinary read hides it: a clamped reading is not a measurement.
+        assert!(load_file_at(&f, 1_000, true).is_empty());
+        // The reset-only read keeps it, because the reset is still a fact.
+        let keep = load_file_at(&f, 1_000, false);
+        assert_eq!(keep["acct"].five_h_reset, Some(5_000));
+        // A window whose reset has PASSED is still dropped either way: that one
+        // is not a fact about the future.
+        let gone = load_file_at(&f, 6_000, false);
+        assert_eq!(gone["acct"].five_h_reset, None);
+        assert_eq!(gone["acct"].seven_d_reset, Some(9_000));
     }
 }

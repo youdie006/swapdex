@@ -1538,13 +1538,10 @@ fn forward_turn(
                     // `hold_seconds` is set - a caller that would rather see
                     // the error than wait must be able to.
                     let cap = crate::settings::load(paths).hold_seconds.unwrap_or(0);
-                    let resets: Vec<Option<i64>> = crate::quota_cache::load(paths)
-                        .values()
-                        .map(|e| match (e.five_h_reset, e.seven_d_reset) {
-                            (Some(a), Some(b)) => Some(a.min(b)),
-                            (a, b) => a.or(b),
-                        })
-                        .collect();
+                    // Reset times specifically, not readings: `load` drops an
+                    // account pinned at 100%, which is exactly the account a
+                    // hold is about, so the data vanished when it was needed.
+                    let resets = crate::quota_cache::resets_for(paths, &opts.tool);
                     match pick::hold_for(&resets, now_secs(), cap) {
                         Some(wait) => {
                             println!(

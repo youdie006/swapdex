@@ -4,6 +4,12 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.94.0] - 2026-08-25
+
+### Fixed
+- **`hold_seconds` did nothing, because the data it needed was being thrown away.** The setting parsed and the branch was reached, but the reset times came from `quota_cache::load`, which drops any account pinned at 100% - a reading stuck at the ceiling is not a measurement. That is exactly the account a hold is about, so the wall's length vanished at the moment it was needed and every turn returned at once. Reset times are now read on their own, keeping clamped entries; a window whose reset has already passed is still dropped, since that one says nothing about the future.
+- Proven by driving a proxy against an upstream that answers 429 forever: the turn came back in 472ms before, and waits for the reset now.
+
 ## [0.93.0] - 2026-08-25
 
 ### Added
