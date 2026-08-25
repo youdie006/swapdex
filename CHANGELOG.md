@@ -4,6 +4,11 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## [0.98.0] - 2026-08-25
+
+### Fixed
+- **A client connection that dies before the proxy can read it is now reported.** `server.recv()` errors were swallowed with `continue`, so those failures left no trace anywhere - the log showed an unbroken run of 200s while the user watched "API error" repeatedly, and nothing could tell the two apart. Rate-limited to once per 30s with a count of what it swallowed, because a broken client can fail hundreds of times a second and a log that floods is as unreadable as one that says nothing.
+
 ## [0.97.0] - 2026-08-25
 
 ### Fixed

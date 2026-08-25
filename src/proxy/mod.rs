@@ -196,6 +196,46 @@ pub fn should_measure(_auto: bool, tool: &str) -> bool {
     tool != "codex"
 }
 
+/// How often a run of accept failures may speak.
+pub const ACCEPT_REPORT_SECS: i64 = 30;
+
+/// Counts connections that died before the proxy could read them.
+///
+/// `server.recv()` errors were swallowed with `continue`, so a client whose
+/// connection dropped mid-request left no trace at all - the log showed only
+/// successes while the user watched "API error" repeatedly, and nothing
+/// anywhere told the two apart. A failure nobody can see is the hardest kind
+/// to fix.
+///
+/// Rate-limited, because a broken client can fail hundreds of times a second
+/// and a log that floods is as unreadable as one that says nothing.
+#[derive(Default)]
+pub struct AcceptFailures {
+    last_reported: Option<i64>,
+    suppressed: u64,
+}
+
+impl AcceptFailures {
+    /// True when this failure should be printed rather than counted silently.
+    pub fn should_report(&mut self, now_secs: i64) -> bool {
+        match self.last_reported {
+            Some(t) if now_secs - t < ACCEPT_REPORT_SECS => {
+                self.suppressed += 1;
+                false
+            }
+            _ => {
+                self.last_reported = Some(now_secs);
+                true
+            }
+        }
+    }
+
+    /// How many were swallowed since the last report, and reset.
+    pub fn take_suppressed(&mut self) -> u64 {
+        std::mem::take(&mut self.suppressed)
+    }
+}
+
 /// Should a TRANSPORT failure be retried, and after how long?
 ///
 /// A 529 was retried but a dropped connection was not: `forward` returned an
@@ -1033,10 +1073,26 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         });
     }
 
+    let mut accept_failures = AcceptFailures::default();
     loop {
         let rq = match server.recv() {
             Ok(r) => r,
-            Err(_) => continue,
+            // A connection that died before it could be read used to vanish
+            // here. The log then showed only successes while the user watched
+            // "API error" repeatedly, with nothing anywhere to tell the two
+            // apart. Rate-limited so a broken client cannot flood it.
+            Err(e) => {
+                if accept_failures.should_report(now_secs()) {
+                    let also = accept_failures.take_suppressed();
+                    if also > 0 {
+                        println!("  a client connection dropped before it could be read ({e}) - and {also} more since the last note");
+                    } else {
+                        println!("  a client connection dropped before it could be read ({e})");
+                    }
+                    std::io::stdout().flush().ok();
+                }
+                continue;
+            }
         };
         let paths = paths.clone();
         let sh = sh.clone();
@@ -2252,5 +2308,35 @@ mod transport_retry_tests {
         );
         // Bounded: a network that stays down has to surface.
         assert_eq!(transport_retry(4), None);
+    }
+}
+
+#[cfg(test)]
+mod accept_failure_tests {
+    use super::*;
+
+    /// A connection that dies before the proxy can read it must be RECORDED.
+    ///
+    /// `server.recv()` errors were swallowed with `continue`, so a client whose
+    /// connection dropped mid-request left no trace at all - the proxy's log
+    /// showed only successes while the user watched "API error" repeatedly, and
+    /// there was nothing anywhere to tell the two apart. A failure nobody can
+    /// see is the hardest kind to fix.
+    ///
+    /// Rate-limited: a broken client can fail hundreds of times a second, and a
+    /// log that floods is as unreadable as one that says nothing.
+    #[test]
+    fn a_dropped_client_connection_is_reported_but_not_flooded() {
+        let mut g = AcceptFailures::default();
+        // First one speaks.
+        assert!(g.should_report(1_000));
+        // The flood behind it does not.
+        assert!(!g.should_report(1_000));
+        assert!(!g.should_report(1_005));
+        // Once the window passes, it speaks again - with the count it swallowed.
+        assert!(g.should_report(1_000 + ACCEPT_REPORT_SECS));
+        assert_eq!(g.take_suppressed(), 2);
+        // And the counter resets after being reported.
+        assert_eq!(g.take_suppressed(), 0);
     }
 }
