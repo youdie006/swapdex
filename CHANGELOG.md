@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.109.0
+
+- The status bar marks a number that stopped being refreshed. It reads the cache,
+  which records when each reading was taken, and threw that away - so a reading
+  taken before an account's window filled sat in the bar saying "5h 100%" while
+  the account refused every turn. Anything past ten minutes now carries its age
+  (`5h 96% | 7d 79% · 2h old`); below that the bar is unchanged.
+
 ## 0.108.0
 
 - A usage reading says how old it is once it stops being current. An account

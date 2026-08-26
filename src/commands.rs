@@ -1308,6 +1308,25 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
 /// Takes USED percentages and reports what is LEFT. Empty when nothing has been
 /// measured, so the bar can omit the segment rather than print a placeholder
 /// that looks like a reading.
+/// How stale the status bar's number is, in the fewest characters that say it.
+///
+/// The bar reads the cache, which records when each number was taken, and threw
+/// that away - so a reading taken before an account's window filled sat there
+/// saying "5h 100%" while the account was refusing every turn. The bar is
+/// refreshed about once a minute, so past ten minutes the readings have stopped
+/// arriving, and that is worth a few characters.
+fn bar_age(age_secs: i64) -> Option<String> {
+    if age_secs < 600 {
+        return None;
+    }
+    let m = age_secs / 60;
+    Some(if m < 60 {
+        format!(" · {m}m old")
+    } else {
+        format!(" · {}h old", m / 60)
+    })
+}
+
 pub fn quota_brief(five_h_used: Option<f64>, seven_d_used: Option<f64>) -> String {
     let left = |u: f64| (100.0 - u).clamp(0.0, 100.0);
     match (five_h_used, seven_d_used) {
@@ -5256,7 +5275,12 @@ pub fn serve(
             let cache = crate::quota_cache::load_for(paths, tool);
             let brief = cache
                 .get(&who)
-                .map(|e| quota_brief(e.five_h, e.seven_d))
+                .map(|e| {
+                    // Carry the number's age. Without it the bar showed a
+                    // reading taken hours earlier exactly like one taken now.
+                    let age = bar_age((now_secs() as i64).saturating_sub(e.at)).unwrap_or_default();
+                    format!("{}{age}", quota_brief(e.five_h, e.seven_d))
+                })
                 // No entry at all is the same news as an entry with no numbers.
                 .unwrap_or_else(|| quota_brief(None, None));
             if brief.is_empty() {
@@ -8294,5 +8318,27 @@ mod short_absence_tests {
     fn an_empty_short_status_distinguishes_unreadable_from_signed_out() {
         assert_eq!(absence_reason(true), "logins unreadable from this shell");
         assert_eq!(absence_reason(false), "not signed in to any tool");
+    }
+}
+
+#[cfg(test)]
+mod bar_age_tests {
+    use super::*;
+
+    /// The status bar must not present an old number as the current one.
+    ///
+    /// The bar reads the cache, which carries the moment each number was taken,
+    /// and threw that away. An account read before its window filled showed
+    /// "5h 100%" for hours - the same shape as the reading that made a spent
+    /// account look fine. The bar refreshes about once a minute, so anything
+    /// past ten minutes means the readings stopped arriving, which is the one
+    /// thing worth a few characters.
+    #[test]
+    fn the_bar_marks_a_number_that_stopped_being_refreshed() {
+        assert_eq!(bar_age(0), None);
+        assert_eq!(bar_age(599), None);
+        assert_eq!(bar_age(600), Some(" · 10m old".to_string()));
+        assert_eq!(bar_age(3_600), Some(" · 1h old".to_string()));
+        assert_eq!(bar_age(9_000), Some(" · 2h old".to_string()));
     }
 }
