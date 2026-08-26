@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.110.0
+
+- The status bar's staleness marker no longer fires while everything is working.
+  0.109.0 used a flat ten minutes, but an account with plenty of quota left is
+  re-read every fifteen BY DESIGN - so a healthy account carried "14m old" for a
+  third of every cycle, and a warning that shows when nothing is wrong is one the
+  reader learns to skip. Late now means late for that account's own schedule:
+  twice its refresh interval, never sooner than ten minutes.
+
 ## 0.109.0
 
 - The status bar marks a number that stopped being refreshed. It reads the cache,

@@ -1315,8 +1315,15 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
 /// saying "5h 100%" while the account was refusing every turn. The bar is
 /// refreshed about once a minute, so past ten minutes the readings have stopped
 /// arriving, and that is worth a few characters.
-fn bar_age(age_secs: i64) -> Option<String> {
-    if age_secs < 600 {
+fn bar_age(age_secs: i64, refresh_secs: i64) -> Option<String> {
+    // Late means late for THIS account's own schedule. An account with plenty
+    // left is re-read every fifteen minutes by design, so a flat ten-minute
+    // threshold flagged it while everything was working - and a warning that
+    // shows when nothing is wrong is one the reader learns to skip. Twice its
+    // own interval means a refresh was due and did not come; the ten-minute
+    // floor keeps a once-a-minute account from being nagged about at two.
+    let overdue = refresh_secs.saturating_mul(2).max(600);
+    if age_secs < overdue {
         return None;
     }
     let m = age_secs / 60;
@@ -5278,7 +5285,12 @@ pub fn serve(
                 .map(|e| {
                     // Carry the number's age. Without it the bar showed a
                     // reading taken hours earlier exactly like one taken now.
-                    let age = bar_age((now_secs() as i64).saturating_sub(e.at)).unwrap_or_default();
+                    let refresh = crate::proxy::pick::measure_after(crate::proxy::pick::headroom(
+                        e.five_h, e.seven_d,
+                    ))
+                    .as_secs() as i64;
+                    let age = bar_age((now_secs() as i64).saturating_sub(e.at), refresh)
+                        .unwrap_or_default();
                     format!("{}{age}", quota_brief(e.five_h, e.seven_d))
                 })
                 // No entry at all is the same news as an entry with no numbers.
@@ -8335,10 +8347,24 @@ mod bar_age_tests {
     /// thing worth a few characters.
     #[test]
     fn the_bar_marks_a_number_that_stopped_being_refreshed() {
-        assert_eq!(bar_age(0), None);
-        assert_eq!(bar_age(599), None);
-        assert_eq!(bar_age(600), Some(" · 10m old".to_string()));
-        assert_eq!(bar_age(3_600), Some(" · 1h old".to_string()));
-        assert_eq!(bar_age(9_000), Some(" · 2h old".to_string()));
+        // An account with plenty left is re-read every 15 minutes BY DESIGN, so
+        // a flat ten-minute threshold flagged it during normal operation - a
+        // warning that appears when nothing is wrong is one the reader learns
+        // to skip. Late means late for THIS account's own schedule.
+        let roomy = 900; // >50% headroom: read every 15 minutes
+        assert_eq!(
+            bar_age(840, roomy),
+            None,
+            "14m old on a 15m schedule is fine"
+        );
+        assert_eq!(bar_age(1_799, roomy), None);
+        assert_eq!(bar_age(1_800, roomy), Some(" · 30m old".to_string()));
+
+        // A spent account is re-read every minute, but never nag before ten.
+        let tight = 60;
+        assert_eq!(bar_age(300, tight), None);
+        assert_eq!(bar_age(599, tight), None);
+        assert_eq!(bar_age(600, tight), Some(" · 10m old".to_string()));
+        assert_eq!(bar_age(9_000, tight), Some(" · 2h old".to_string()));
     }
 }
