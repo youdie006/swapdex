@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.111.0
+
+- `import` no longer invents a Claude account for a tool it does not know. The
+  tool name went straight to the slot store, which does not validate it, and the
+  display falls back to Claude for an unrecognised name - so an account for any
+  tool this build has not heard of became a Claude slot that can never serve.
+  Exporting a Gemini account and importing it on a build that predates Gemini did
+  exactly this, and `FORMAT_VERSION` cannot catch it because adding an adapter is
+  not a format change. Such accounts are now named and skipped, the rest of the
+  file still imports, and the exit code is 2 so a script cannot read a partial
+  import as a clean one.
+
 ## 0.110.0
 
 - The status bar's staleness marker no longer fires while everything is working.

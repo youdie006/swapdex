@@ -702,3 +702,41 @@ fn a_damaged_registry_is_not_reported_as_having_no_accounts() {
         "nothing said the registry could not be read:\n{out}{err}"
     );
 }
+
+/// An account for a tool this swapdex does not know must not be invented.
+///
+/// The tool string went straight to `Slots::open_for`, which does not validate
+/// it, so a manifest naming a tool this build has never heard of produced a slot
+/// that can never serve - announced as "(claude)", because the display falls
+/// back to Claude for an unknown name. swapdex ships four adapters and is built
+/// to grow: exporting a Gemini account and importing it on a build that predates
+/// Gemini turns it into a Claude account, and `FORMAT_VERSION` cannot catch that
+/// because adding an adapter is not a format change.
+#[test]
+fn importing_an_account_for_an_unknown_tool_refuses_instead_of_guessing() {
+    let td = fixture();
+    let root = td.path();
+    let manifest = root.join("in.json");
+    std::fs::write(
+        &manifest,
+        br#"{"version":1,"accounts":[{"name":"zed","tool":"nosuchtool"},
+             {"name":"ok","tool":"claude-code"}]}"#,
+    )
+    .unwrap();
+
+    let (out, err, _) = run(root, &["import", manifest.to_str().unwrap()]);
+    let all = format!("{out}{err}");
+    assert!(
+        all.contains("nosuchtool"),
+        "the unknown tool was never named:\n{all}"
+    );
+    assert!(
+        !all.contains("created zed"),
+        "an account was created for a tool this build cannot serve:\n{all}"
+    );
+    // The rest of the file still imports.
+    assert!(
+        all.contains("created ok"),
+        "a known account was skipped:\n{all}"
+    );
+}

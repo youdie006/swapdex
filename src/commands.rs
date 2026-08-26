@@ -5620,7 +5620,24 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
     if todo.is_empty() {
         println!("every account in that file is already here");
     }
+    let mut unknown_tools: Vec<&str> = Vec::new();
     for a in &todo {
+        // The tool name goes straight to the slot store, which does not check
+        // it, and the display falls back to Claude for anything it does not
+        // recognise - so a manifest naming a tool this build has never heard of
+        // produced a slot that can never serve, announced as a Claude account.
+        // swapdex ships four adapters and is built to grow; a file from a newer
+        // build is the ordinary case, and FORMAT_VERSION cannot catch it because
+        // adding an adapter is not a format change.
+        if crate::adapters::by_name(&a.tool).is_none() {
+            eprintln!(
+                "swapdex: skipped '{}': this build does not know the tool '{}' - \
+                 upgrade swapdex and import again",
+                a.name, a.tool
+            );
+            unknown_tools.push(&a.tool);
+            continue;
+        }
         if dry_run {
             println!("would create {} ({})", a.name, tool_binary(&a.tool));
             continue;
@@ -5645,6 +5662,10 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
     }
     if !todo.is_empty() && !dry_run {
         println!("  each one still needs its own sign-in: `swapdex run <name>`");
+    }
+    if !unknown_tools.is_empty() {
+        // Non-zero so a script does not read a partial import as a clean one.
+        return Ok(2);
     }
     Ok(0)
 }
