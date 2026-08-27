@@ -5840,6 +5840,30 @@ pub fn strategy(paths: &Paths, value: Option<&str>) -> Result<i32> {
 /// and one started over ssh on macOS cannot open the Keychain, so it answers
 /// every turn with the client's own login and never says so. An agent runs in the
 /// user's own login session, has that access, and is restarted when it stops.
+/// What to say after installing the service, once it is known whether it came up.
+///
+/// The install used to announce "it starts at login, comes back if it stops"
+/// without checking that it had. On a Mac whose launchd context cannot open the
+/// Keychain the proxy refuses to run - deliberately, because it would forward
+/// the user's own login and never say so - so the unit failed every start while
+/// swapdex called it installed. The only working proxy on that machine was one
+/// started by hand, which is also why it never picked up an upgrade.
+fn install_verdict(came_up: bool, tool: &str) -> (bool, String) {
+    if came_up {
+        return (true, "installed and running".to_string());
+    }
+    (
+        false,
+        format!(
+            "the unit is written but the proxy did not start. On macOS this is \
+             usually the Keychain: a service started by launchd cannot open it, \
+             and swapdex refuses to run a proxy that would forward your own login \
+             without saying so. Start it from a terminal on this machine instead: \
+             `swapdex proxy --ensure --tool {tool}`, then `swapdex shim`"
+        ),
+    )
+}
+
 pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
     let tool = slot_tool(sel);
     let path = crate::service::install(paths, tool)?;
@@ -5849,10 +5873,28 @@ pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
         crate::util::redact_path(&path.display().to_string())
     );
     println!(
-        "  it starts at login, comes back if it stops, and writes what it says to {}",
+        "  it writes what it says to {}",
         crate::util::redact_path(&crate::service::log_dir(paths).display().to_string())
     );
-    Ok(0)
+    // Wait for it to actually come up. Announcing that it "starts at login and
+    // comes back if it stops" without looking is how a machine ends up with a
+    // unit that has failed every start since the day it was installed.
+    let mut came_up = false;
+    for _ in 0..10 {
+        if crate::proxy::running_proxy_for(paths, tool).is_some() {
+            came_up = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    let (ok, msg) = install_verdict(came_up, tool);
+    if ok {
+        println!("  {msg}");
+        Ok(0)
+    } else {
+        eprintln!("swapdex: {msg}");
+        Ok(2)
+    }
 }
 
 /// `swapdex service uninstall` - stop it and take the unit away.
@@ -8526,6 +8568,45 @@ mod throttled_note_tests {
         assert!(
             n.contains("try again"),
             "the remedy still belongs here: {n}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod install_verdict_tests {
+    use super::*;
+
+    /// Installing a service that cannot start is not a successful install.
+    ///
+    /// `service install` wrote the unit and announced "it starts at login, comes
+    /// back if it stops" without ever checking that it had. On a Mac whose
+    /// launchd context cannot open the Keychain, the proxy refuses to run - by
+    /// design, because it would forward the user's own login and never say so -
+    /// so the unit failed every start while swapdex reported it as installed.
+    /// The only proxy on that machine was one somebody had started by hand,
+    /// which is why it also never picked up an upgrade.
+    #[test]
+    fn an_install_that_never_came_up_is_reported_as_a_failure() {
+        let (ok, msg) = install_verdict(true, "claude-code");
+        assert!(ok, "it came up: {msg}");
+        assert!(msg.contains("running"), "say it is running: {msg}");
+
+        let (ok, msg) = install_verdict(false, "claude-code");
+        assert!(
+            !ok,
+            "a service that did not start is not installed successfully"
+        );
+        assert!(
+            msg.contains("did not start"),
+            "say plainly that it did not start: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("keychain"),
+            "name the usual cause on this platform: {msg}"
+        );
+        assert!(
+            msg.contains("swapdex proxy --ensure"),
+            "give the way that does work: {msg}"
         );
     }
 }

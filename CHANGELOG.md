@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.116.0
+
+- `service install` waits to see the proxy come up before calling it installed.
+  It used to write the unit and announce "it starts at login, comes back if it
+  stops" without ever looking. On a Mac whose launchd context cannot open the
+  Keychain the proxy refuses to run - deliberately, since it would forward the
+  user's own login and never say so - so the unit failed every start while
+  swapdex reported success. A machine in that state has no working proxy unless
+  somebody starts one by hand, which is also why such a proxy never picks up an
+  upgrade. It now says the unit is written, that the proxy did not start, the
+  usual reason, and the way that does work - and exits 2.
+
 ## 0.115.0
 
 - Every refresh now passes the burst gate, because the gate moved to where the
