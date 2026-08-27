@@ -315,6 +315,12 @@ pub fn pace_between_accounts() {
 /// endpoint objects to - the backoff inside each read covers the rest.
 const PACE_MS: u64 = 120;
 
+/// The same gap, for a caller that staggers concurrent reads instead of
+/// sleeping between sequential ones.
+pub fn pace_ms() -> u64 {
+    PACE_MS
+}
+
 /// Read several accounts at once, keeping each result with its caller's index.
 ///
 /// Serially this cost the pacing gap plus a full round trip PER ACCOUNT, which

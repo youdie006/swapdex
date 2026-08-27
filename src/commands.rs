@@ -3000,16 +3000,15 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         // What the proxy recorded while serving. Windows past their reset are
         // dropped on load, so a turned-over window never lingers here.
         let codex_seen = crate::quota_cache::load_for(paths, "codex");
+        // Read them concurrently, staggered: sequential reads made the numbers
+        // arrive after the sum of every round trip.
+        let live_by_name: std::collections::HashMap<String, crate::codex_usage::Account> =
+            fetch_codex_live(codex_homes.clone())
+                .into_iter()
+                .filter_map(|(n, a)| a.map(|a| (n, a)))
+                .collect();
         for (name, dir) in &codex_homes {
-            let live = crate::proxy::codex::slot_auth(dir).and_then(|auth| {
-                match crate::codex_usage::fetch(&auth) {
-                    crate::codex_usage::Fetch::Ok(a) => Some(*a),
-                    // Any other outcome falls through to the transcript rather
-                    // than blanking the row: a throttled endpoint says nothing
-                    // about the account behind it.
-                    _ => None,
-                }
-            });
+            let live = live_by_name.get(name).cloned();
             let transcript = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400);
             let seen_by_proxy = codex_seen.get(name).cloned();
             if let Some(row) = codex_row(
@@ -3046,7 +3045,31 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         .collect()
                 })
                 .unwrap_or_default();
-            for name in codex_names_without_a_slot(&stored, &slot_names) {
+            let extra: Vec<String> = codex_names_without_a_slot(&stored, &slot_names)
+                .into_iter()
+                .filter(|n| !claude.iter().any(|(have, _)| have == n))
+                .collect();
+            // Same treatment as the slot reads: concurrent, staggered.
+            let extra_live: std::collections::HashMap<String, crate::codex_usage::Account> = extra
+                .iter()
+                .map(|n| (n.clone(), snapshot_codex_auth(paths, n)))
+                .filter_map(|(n, a)| a.map(|a| (n, a)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, (n, auth))| {
+                    if i > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::quota::pace_ms(),
+                        ));
+                    }
+                    match crate::codex_usage::fetch(&auth) {
+                        crate::codex_usage::Fetch::Ok(a) => Some((n, *a)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            for name in extra {
                 // A name is unique only WITHIN a tool. `kong` holds both a
                 // Claude and a Codex login, and pushing a second row under that
                 // name put the Codex windows where the Claude ones belong -
@@ -3055,12 +3078,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 if claude.iter().any(|(n, _)| *n == name) {
                     continue;
                 }
-                let live = snapshot_codex_auth(paths, &name).and_then(|auth| {
-                    match crate::codex_usage::fetch(&auth) {
-                        crate::codex_usage::Fetch::Ok(a) => Some(*a),
-                        _ => None,
-                    }
-                });
+                let live = extra_live.get(&name).cloned();
                 let seen_by_proxy = codex_seen.get(&name).cloned();
                 if let Some(row) = codex_row(
                     &name,
@@ -5773,6 +5791,44 @@ pub const CODEX_TOOL: &str = "codex";
 /// the "checking" note go away made it quieter, not shorter.
 pub fn cached_quota_tools() -> [&'static str; 2] {
     [CLAUDE_TOOL, CODEX_TOOL]
+}
+
+/// Read several Codex accounts concurrently, started one pace apart.
+///
+/// The reads were sequential, so the dashboard's numbers arrived after the SUM
+/// of every account's round trip - which is the "usage shows up late" report.
+/// Starting them all at once would be a burst, the thing `pace_between_accounts`
+/// exists to prevent and the cause of the throttled, blank gauges this file
+/// keeps having to fix. So they are staggered by that same gap and run
+/// concurrently from there: wall clock becomes the slowest single read plus the
+/// stagger, instead of the total.
+fn fetch_codex_live(
+    items: Vec<(String, std::path::PathBuf)>,
+) -> Vec<(String, Option<crate::codex_usage::Account>)> {
+    let handles: Vec<_> = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, dir))| {
+            std::thread::spawn(move || {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::quota::pace_ms() * i as u64,
+                    ));
+                }
+                let live = crate::proxy::codex::slot_auth(&dir).and_then(|auth| {
+                    match crate::codex_usage::fetch(&auth) {
+                        crate::codex_usage::Fetch::Ok(a) => Some(*a),
+                        // Anything else falls through to the remembered reading
+                        // rather than blanking the row: a throttled endpoint
+                        // says nothing about the account behind it.
+                        _ => None,
+                    }
+                });
+                (name, live)
+            })
+        })
+        .collect();
+    handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
 pub fn codex_names_without_a_slot(store: &[String], slots: &[String]) -> Vec<String> {

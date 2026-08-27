@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.124.0
+
+- Codex accounts are read concurrently instead of one after another, so the very
+  first open no longer waits for the sum of every account's round trip. Starting
+  them together would be a burst - the thing the pacing exists to prevent, and
+  the cause of the throttled blank gauges fixed earlier in this series - so they
+  are staggered by that same gap and run concurrently from there. Wall clock
+  becomes the slowest single read plus the stagger rather than the total.
+
 ## 0.123.0
 
 - The dashboard's first frame reads every tool's remembered readings, not just
