@@ -393,6 +393,26 @@ pub fn pin_verdict(service_installed: bool, port: u16) -> PinVerdict {
 ///
 /// These settings hold the user's model, hooks and permissions; rewriting them
 /// to add one key would be a far worse bug than the one being fixed.
+/// The loopback port a settings file pins Claude Code to, if it pins one.
+///
+/// `pin_base_url` refuses to write the address unless a proxy is alive, so the
+/// moment of pinning is safe - and then nothing watched it. When the proxy later
+/// went away, every session on that machine got "Connection refused", because
+/// the settings still named an address nobody was answering. Reading the pin
+/// back is what lets the health check say so.
+///
+/// `None` for an address this check cannot speak for: only a loopback pin is
+/// swapdex's to verify.
+pub fn pinned_port(settings: &serde_json::Value) -> Option<u16> {
+    let url = settings.get("env")?.get("ANTHROPIC_BASE_URL")?.as_str()?;
+    let rest = url.strip_prefix("http://")?;
+    let (host, port) = rest.trim_end_matches('/').rsplit_once(':')?;
+    if host != "127.0.0.1" && host != "localhost" {
+        return None;
+    }
+    port.parse().ok()
+}
+
 pub fn with_base_url(settings: &serde_json::Value, port: u16) -> serde_json::Value {
     let mut out = settings.clone();
     if !out.is_object() {
@@ -1097,5 +1117,41 @@ mod pin_base_url_tests {
         let after = with_base_url(&serde_json::json!({"model": "opus"}), 9001);
         assert_eq!(after["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9001");
         assert_eq!(after["model"], "opus");
+    }
+}
+
+#[cfg(test)]
+mod pinned_port_tests {
+    use super::*;
+
+    /// The pin has to be readable back, or nothing can check it is still good.
+    ///
+    /// `pin_base_url` refuses to write the address unless a proxy is alive, so
+    /// the moment of pinning is safe. Nothing watched it afterwards. When the
+    /// proxy later went away, every session on that machine got "Connection
+    /// refused" - the settings still named an address nobody was answering -
+    /// and `doctor` said the service was fine, because it looked at the unit
+    /// and the process and never at the address itself.
+    #[test]
+    fn the_pinned_port_can_be_read_back_out_of_settings() {
+        let pinned = serde_json::json!({
+            "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"},
+            "model": "opus"
+        });
+        assert_eq!(pinned_port(&pinned), Some(8787));
+
+        let other_port = serde_json::json!({
+            "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9001"}
+        });
+        assert_eq!(pinned_port(&other_port), Some(9001));
+
+        // Not pinned at all, and pinned somewhere this check cannot speak for.
+        assert_eq!(pinned_port(&serde_json::json!({"model": "opus"})), None);
+        assert_eq!(
+            pinned_port(
+                &serde_json::json!({"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}})
+            ),
+            None
+        );
     }
 }

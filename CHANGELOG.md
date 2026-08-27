@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.114.0
+
+- `doctor` checks that the pinned proxy address still answers. `swapdex shim`
+  refuses to write the address unless a proxy is alive, so pinning is safe - and
+  then nothing watched it. When the proxy later went away, settings.json still
+  sent Claude Code to a loopback port nobody was listening on, so every session
+  got "Connection refused" while this same health check reported the service as
+  fine: it looked at the unit file and the process, never at the address. A pin
+  nothing answers is a brick, and it now says so, with both ways out.
+
 ## 0.113.0
 
 - A reading that failed to refresh now says so, even when an older number

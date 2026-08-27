@@ -4180,6 +4180,46 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         }
     }
 
+    // The pinned proxy address. `swapdex shim` refuses to write it unless a
+    // proxy is alive, so pinning is safe - and then nothing watched it. When the
+    // proxy went away, every session got "Connection refused" while the settings
+    // still named an address nobody answered, and this health check said the
+    // service was fine because it looked at the unit and the process, never at
+    // the address. A pin nothing answers is a brick.
+    {
+        let settings_file = paths.claude_dir().join("settings.json");
+        let pinned = std::fs::read_to_string(&settings_file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| crate::shim::pinned_port(&v));
+        if let Some(port) = pinned {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let answers =
+                std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(700))
+                    .is_ok();
+            if answers {
+                report(
+                    "proxy pin",
+                    true,
+                    format!("Claude Code -> 127.0.0.1:{port}, answering"),
+                );
+            } else {
+                report(
+                    "proxy pin",
+                    false,
+                    format!(
+                        "settings.json sends Claude Code to 127.0.0.1:{port} and nothing is \
+                         answering there - every session gets 'Connection refused'. Start the \
+                         proxy (`swapdex service restart --tool claude-code`, from a terminal \
+                         on this machine so it can read the Keychain), or remove the pin from \
+                         {} to go direct.",
+                        crate::util::redact_path(&settings_file.display().to_string())
+                    ),
+                );
+            }
+        }
+    }
+
     // CLIs on PATH - informational (a codex-only user is not "broken").
     let mut found = Vec::new();
     for cli in ["claude", "codex", "gemini", "agy"] {
