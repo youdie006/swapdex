@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.121.0
+
+- Fixes a regression from 0.120.0: an account holding logins for two tools showed
+  the wrong tool's windows. A name is unique only WITHIN a tool, and 0.120.0
+  pushed a second row under the same name for Codex accounts with no slot - so
+  `kong`, which holds both a Claude and a Codex login, lost its Claude 5h reading
+  and showed the Codex account's 7d in its place. Caught on the dashboard minutes
+  after shipping.
+
 ## 0.120.0
 
 - The dashboard asks about Codex accounts that have no slot. It built its Codex

@@ -3040,6 +3040,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 })
                 .unwrap_or_default();
             for name in codex_names_without_a_slot(&stored, &slot_names) {
+                // A name is unique only WITHIN a tool. `kong` holds both a
+                // Claude and a Codex login, and pushing a second row under that
+                // name put the Codex windows where the Claude ones belong -
+                // exactly the collision `quota_cache` warns about. The row that
+                // is already here was built from this account's own tool.
+                if claude.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
                 let live = snapshot_codex_auth(paths, &name).and_then(|auth| {
                     match crate::codex_usage::fetch(&auth) {
                         crate::codex_usage::Fetch::Ok(a) => Some(*a),
@@ -8758,5 +8766,28 @@ mod codex_snapshot_rows_tests {
         );
         // Nothing to add when the registry already covers them.
         assert!(codex_names_without_a_slot(&slots, &slots).is_empty());
+    }
+
+    /// A name is unique only WITHIN a tool, and a second row under it shadows
+    /// the first.
+    ///
+    /// `kong` holds both a Claude and a Codex login. Adding the snapshot-only
+    /// Codex rows without checking put a second `kong` in the list, and the
+    /// lookup by name found the Codex windows where the Claude ones belonged -
+    /// its 5h went blank and its 7d showed the Codex account's number. Shipped
+    /// and caught on the dashboard within minutes.
+    #[test]
+    fn a_name_already_shown_is_not_given_a_second_row() {
+        let already = ["kong".to_string(), "rnd".to_string()];
+        let stored = ["kong".to_string(), "work".to_string()];
+        let add: Vec<String> = codex_names_without_a_slot(&stored, &[])
+            .into_iter()
+            .filter(|n| !already.contains(n))
+            .collect();
+        assert_eq!(
+            add,
+            vec!["work".to_string()],
+            "only the account that has no row yet"
+        );
     }
 }
