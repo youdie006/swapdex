@@ -3384,7 +3384,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn cached_quota(&mut self) -> Vec<(String, crate::tui::Usage)> {
-            crate::quota_cache::load(self.paths)
+            // Every tool's cache, not just Claude's: a remembered reading that
+            // nobody reads back leaves the row empty until the network answers.
+            cached_quota_tools()
+                .into_iter()
+                .flat_map(|t| crate::quota_cache::load_for(self.paths, t))
+                .collect::<Vec<_>>()
                 .into_iter()
                 .map(|(name, e)| {
                     (
@@ -5753,6 +5758,21 @@ fn remember_codex_reading(paths: &Paths, name: &str, u: &crate::tui::Usage) {
         refused: None,
     };
     crate::quota_cache::update_for(paths, "codex", &[(name.to_string(), entry)]);
+}
+
+/// The tool name Claude Code is registered under.
+pub const CLAUDE_TOOL: &str = "claude-code";
+/// The tool name Codex is registered under.
+pub const CODEX_TOOL: &str = "codex";
+
+/// Which tools' caches the dashboard's first frame reads.
+///
+/// It called `quota_cache::load`, which is hardcoded to Claude, so a remembered
+/// reading for any other tool was written and never read back - those rows sat
+/// empty until a live network read returned, and that wait is the delay. Making
+/// the "checking" note go away made it quieter, not shorter.
+pub fn cached_quota_tools() -> [&'static str; 2] {
+    [CLAUDE_TOOL, CODEX_TOOL]
 }
 
 pub fn codex_names_without_a_slot(store: &[String], slots: &[String]) -> Vec<String> {
@@ -8819,6 +8839,31 @@ mod codex_snapshot_rows_tests {
             add,
             vec!["work".to_string()],
             "only the account that has no row yet"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cached_quota_tools_tests {
+    use super::*;
+
+    /// The first frame must read every tool's cache, not just Claude's.
+    ///
+    /// The dashboard fills its first frame from `cached_quota`, which called
+    /// `quota_cache::load` - hardcoded to claude-code. So a remembered Codex
+    /// reading was written and never read back: those rows stayed empty until a
+    /// live network read returned, which is the whole delay. Dropping the
+    /// "checking..." note made the wait quieter, not shorter.
+    #[test]
+    fn the_first_frame_reads_a_cache_per_tool() {
+        let tools = cached_quota_tools();
+        assert!(
+            tools.contains(&CLAUDE_TOOL),
+            "claude was always read: {tools:?}"
+        );
+        assert!(
+            tools.contains(&CODEX_TOOL),
+            "a remembered reading has to be read back too: {tools:?}"
         );
     }
 }

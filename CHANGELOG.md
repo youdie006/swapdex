@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.123.0
+
+- The dashboard's first frame reads every tool's remembered readings, not just
+  Claude's. 0.122.0 started writing them down for the other tools, and this is
+  the half that reads them back: the first frame called a loader hardcoded to
+  Claude, so those rows stayed empty until a live network read returned. Dropping
+  the "checking" note in 0.122.0 made that wait quieter without making it
+  shorter, which is exactly how it was reported.
+
 ## 0.122.0
 
 - A Codex row no longer borrows Claude's wording for a window Codex does not
