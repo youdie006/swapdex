@@ -132,8 +132,40 @@ const npmArgs = dryRun
 for (const p of PLATFORMS) sh("npm", npmArgs, { cwd: join(buildDir, p.pkg) });
 sh("npm", npmArgs, { cwd: here });
 
+// Wait for the registry to actually SERVE what was just published. `npm
+// publish` returning means the write was accepted, not that a reader can
+// resolve it - so an install run seconds later fails with ETARGET ("No matching
+// version found") for a version that exists. That happened on every release,
+// and each time it read as a broken install rather than a slow registry.
+if (!dryRun) {
+  const wanted = [
+    `@youdie006/swapdex@${version}`,
+    ...PLATFORMS.map((p) => `${p.pkg}@${version}`),
+  ];
+  const deadline = Date.now() + 120_000;
+  for (const spec of wanted) {
+    for (;;) {
+      let seen = "";
+      try {
+        seen = execFileSync("npm", ["view", spec, "version"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+      } catch {
+        seen = "";
+      }
+      if (seen === version) break;
+      if (Date.now() > deadline) {
+        console.error(`\nWARNING: ${spec} is still not resolvable - an install may fail`);
+        break;
+      }
+      execFileSync("sleep", ["3"], { stdio: "ignore" });
+    }
+  }
+}
+
 console.log(
   dryRun
     ? `\nDRY RUN complete: tarballs in ${buildDir}, nothing published.`
-    : `\nPublished swapdex ${version}: main + ${PLATFORMS.length} platform packages.`
+    : `\nPublished swapdex ${version}: main + ${PLATFORMS.length} platform packages (resolvable).`
 );
