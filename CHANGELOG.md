@@ -4,6 +4,22 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.119.0
+
+- The dashboard keeps its numbers when a usage round comes back empty. It
+  replaced the whole quota map with whatever a fetch returned and stamped it as
+  freshly read, so one empty round - the usage endpoint throttles for minutes at
+  a time - blanked every gauge and stopped it retrying soon. Left open, the
+  account list, statuses and active markers all stayed correct while the 5h and
+  7d columns showed nothing, with good numbers sitting in the cache on disk the
+  whole time. This is the "usage disappears after a while" report.
+- `doctor` says what a switch can actually reach, per tool. It reported the Codex
+  login and listed Codex accounts while nothing was carrying Codex traffic, so a
+  session opened believing swapdex was on for it went straight to the vendor and
+  a switch changed nothing it could see. Running without a proxy is a legitimate
+  way to use swapdex, so this is a fact rather than a fault - but it was a fact
+  only swapdex knew.
+
 ## 0.118.0
 
 - Many open sessions no longer starve the usage readings. The cold-start branch

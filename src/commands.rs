@@ -3602,6 +3602,29 @@ fn keychain_verdict(
 /// healthy, 9 when any problem was found (scripts can gate on it). Checks the
 /// store, every saved snapshot, both live logins, backups, and the CLIs on
 /// PATH - and never touches the network.
+/// What a switch can actually reach for this tool, given whether a proxy carries
+/// its traffic.
+///
+/// swapdex reported the Codex login, listed three Codex accounts, and never said
+/// that nothing was carrying Codex traffic. A session opened believing swapdex
+/// was "on" for it went straight to the vendor, and switching accounts changed
+/// nothing it could see. Running without a proxy is a legitimate way to use
+/// swapdex - so this is a fact, not a fault - but it is a fact only swapdex
+/// knows, and it was keeping it.
+fn serving_reach(has_proxy: bool, accounts: usize) -> Option<String> {
+    if accounts == 0 {
+        return None;
+    }
+    Some(if has_proxy {
+        format!("{accounts} account(s), proxy carrying traffic - a switch moves a running session")
+    } else {
+        format!(
+            "{accounts} account(s), no proxy - a switch takes effect in the NEXT session, \
+             not one already running (`swapdex service install --tool <tool>` to change that)"
+        )
+    })
+}
+
 pub fn doctor(paths: &Paths) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
     // Stat BEFORE Store::open, which self-heals the mode to 0700 - otherwise
@@ -4217,6 +4240,19 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     ),
                 );
             }
+        }
+    }
+
+    // What a switch can actually reach, per tool. swapdex knew that nothing was
+    // carrying a tool's traffic and never said so, so a session opened believing
+    // swapdex was "on" for it was talking straight to the vendor.
+    for tool in crate::adapters::names() {
+        let accounts = crate::slots::Slots::open_for(paths, tool)
+            .map(|s| s.list().len())
+            .unwrap_or(0);
+        let has_proxy = crate::proxy::running_proxy_for(paths, tool).is_some();
+        if let Some(msg) = serving_reach(has_proxy, accounts) {
+            report(&format!("reach:{}", tool_binary(tool)), true, msg);
         }
     }
 
@@ -8608,5 +8644,40 @@ mod install_verdict_tests {
             msg.contains("swapdex proxy --ensure"),
             "give the way that does work: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod serving_reach_tests {
+    use super::*;
+
+    /// A tool with accounts but no proxy must say switching cannot reach a
+    /// running session.
+    ///
+    /// swapdex reported the Codex login, listed three Codex accounts, and never
+    /// mentioned that nothing was carrying Codex traffic - no proxy, no pinned
+    /// address. A session opened believing swapdex was "on" for it was talking
+    /// straight to the vendor, and switching accounts changed nothing it could
+    /// see. Not a fault, but a fact the tool alone knows and did not say.
+    #[test]
+    fn a_tool_with_no_proxy_says_what_switching_can_and_cannot_do() {
+        let served = serving_reach(true, 3).expect("a tool with accounts has something to say");
+        assert!(
+            served.contains("running session"),
+            "say a running session can be moved: {served}"
+        );
+
+        let unserved = serving_reach(false, 3).unwrap();
+        assert!(
+            unserved.to_lowercase().contains("next session"),
+            "say when a switch takes effect: {unserved}"
+        );
+        assert!(
+            !unserved.to_lowercase().contains("problem"),
+            "not having a proxy is a choice, not a fault: {unserved}"
+        );
+
+        // Nothing to say about a tool with no accounts at all.
+        assert_eq!(serving_reach(false, 0), None);
     }
 }

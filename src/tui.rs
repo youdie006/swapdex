@@ -726,6 +726,25 @@ pub struct Row {
 /// whose token expired says nothing about the slot that answered for the same
 /// login - and showing its reason instead of the slot's figures loses the only
 /// real information present.
+/// Fold a finished usage reading into what the dashboard already shows.
+///
+/// The map used to be replaced with whatever came back, and stamped as freshly
+/// read. An empty round - the usage endpoint throttles, for minutes at a time -
+/// therefore blanked every gauge and reset the staleness timer, so the numbers
+/// stayed gone while the cache on disk still held good ones. Leave the dashboard
+/// open long enough and one empty round wipes it.
+///
+/// Returns the map to show and whether a reading actually landed.
+pub fn merge_reading(
+    current: Option<std::collections::HashMap<String, Usage>>,
+    incoming: Vec<(String, Usage)>,
+) -> (Option<std::collections::HashMap<String, Usage>>, bool) {
+    if incoming.is_empty() {
+        return (current, false);
+    }
+    (Some(incoming.into_iter().collect()), true)
+}
+
 pub fn usage_for<'a>(
     map: &'a std::collections::HashMap<String, Usage>,
     r: &Row,
@@ -1889,8 +1908,14 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 // A reading can arrive knowing whose account it is, and a row
                 // labelled from a local file cannot know the server disagrees.
                 apply_live_identity(&mut rows, &got);
-                quota_pct = Some(got.into_iter().collect());
-                quota_fetched = Some(std::time::Instant::now());
+                // An empty round is not a reading: keep the numbers already on
+                // screen rather than blanking every gauge, and do not stamp it
+                // as fresh - the next tick should try again soon.
+                let (next, landed) = merge_reading(quota_pct.take(), got);
+                quota_pct = next;
+                if landed {
+                    quota_fetched = Some(std::time::Instant::now());
+                }
                 quota_rx = None;
             }
         }
@@ -3543,5 +3568,57 @@ mod paste_guard_tests {
         // Pasted: both keys landed in the same instant.
         assert!(!confirm_is_deliberate(0, 0));
         assert!(!confirm_is_deliberate(0, PASTE_GAP_MS - 1));
+    }
+}
+
+#[cfg(test)]
+mod empty_reading_tests {
+    use super::*;
+
+    /// A reading that came back with nothing must not erase the numbers on screen.
+    ///
+    /// The dashboard replaced its whole quota map with whatever a fetch
+    /// returned, and stamped it as freshly read. When a round came back empty -
+    /// the usage endpoint throttles, and it does so for minutes at a time - the
+    /// gauges went blank and stayed blank, while the cache on disk still held
+    /// good numbers. Leave the dashboard open and eventually one empty round
+    /// wipes it: that is the "the usage disappears after a while" report.
+    #[test]
+    fn an_empty_reading_leaves_the_numbers_that_are_already_there() {
+        let have: std::collections::HashMap<String, Usage> = [(
+            "rnd".to_string(),
+            Usage {
+                five_h: Some(4.0),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        // Nothing came back: keep what is on screen.
+        let (map, landed) = merge_reading(Some(have.clone()), Vec::new());
+        assert!(!landed, "an empty round is not a reading");
+        assert_eq!(
+            map.as_ref()
+                .and_then(|m| m.get("rnd"))
+                .and_then(|u| u.five_h),
+            Some(4.0),
+            "the numbers survived"
+        );
+
+        // A real reading replaces it.
+        let fresh = vec![(
+            "rnd".to_string(),
+            Usage {
+                five_h: Some(9.0),
+                ..Default::default()
+            },
+        )];
+        let (map, landed) = merge_reading(Some(have), fresh);
+        assert!(landed, "a reading with rows in it landed");
+        assert_eq!(
+            map.and_then(|m| m.get("rnd").and_then(|u| u.five_h)),
+            Some(9.0)
+        );
     }
 }
