@@ -4,6 +4,23 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.118.0
+
+- Many open sessions no longer starve the usage readings. The cold-start branch
+  of the measurement claim returned "go ahead" without recording the claim, so
+  every thread that arrived before the first read finished ran a full measurement
+  of its own. With eighteen sessions open that is eighteen bursts at the usage
+  endpoint at once - it throttles all of them, nothing lands, the cache is never
+  written, and the numbers age out of every screen. Watched live: ten measurement
+  rounds in twelve minutes with nothing landing, then recovery. This is the
+  "usage dies after a while" report, and it got worse the more sessions were open.
+- The threshold corner lifts once quota comes back. Its only clear-to-None sat
+  inside the same `if full` block that set it, so after the windows reset that
+  block was skipped and the latch stayed on: with `fallback_model` configured,
+  every turn was silently rewritten to the cheaper model for the life of the
+  process, announced once, hours earlier. An account with no reading at all does
+  NOT lift it - no reading is not the same as having room.
+
 ## 0.117.0
 
 - A transient overload no longer benches every account at once. The retry count

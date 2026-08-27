@@ -155,6 +155,25 @@ pub fn usage_line(
     parts.join(", ")
 }
 
+/// Whether the corner still holds, given whether this account is still full.
+///
+/// Being cornered is a state, not a verdict that outlives its cause. The latch
+/// was set when every account sat past the threshold, and the only path that
+/// cleared it lived inside the same `if full` block that set it - so once the
+/// windows reset and `full` went false, that block was skipped and nothing put
+/// the latch down. With `fallback_model` configured, every request was then
+/// rewritten to the cheaper model for the life of the process, with full quota
+/// available and the explanation printed once, hours earlier.
+/// `still_full` is `None` when this account has no reading at all. That is not
+/// the same as having room, and lifting the corner on it would throw a real
+/// corner away because one measurement round came back empty.
+pub fn corner_after(still_full: Option<bool>, held: Option<Corner>) -> Option<Corner> {
+    match still_full {
+        Some(false) => None,
+        _ => held,
+    }
+}
+
 /// Why there is nowhere left to send this turn.
 ///
 /// Two different situations reach the same dead end, and they are not the same
@@ -1933,5 +1952,43 @@ mod carried_failure_tests {
             out[0].contains("5h 100% left"),
             "the carried reading is still worth showing: {out:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod corner_latch_tests {
+    use super::*;
+
+    /// Being cornered is a state, not a verdict that outlives its cause.
+    ///
+    /// The latch is set when every account sits past the threshold, and the only
+    /// path that cleared it lived inside the same `if full` block that set it.
+    /// Once the windows reset, `full` is false, that block is skipped entirely,
+    /// and nothing ever puts the latch down. With `fallback_model` configured
+    /// every request is then silently rewritten to the cheaper model - for the
+    /// life of the process, with full quota available, announced once hours
+    /// earlier. Only a restart cleared it.
+    #[test]
+    fn the_corner_lifts_once_the_account_is_no_longer_full() {
+        let held = Some(Corner::PastThreshold);
+        assert_eq!(
+            corner_after(Some(true), held),
+            held,
+            "still full: still cornered"
+        );
+        assert_eq!(
+            corner_after(Some(false), held),
+            None,
+            "quota came back - the corner is over"
+        );
+        // No reading is not the same as having room. Lifting on it would throw a
+        // real corner away because one round came back empty.
+        assert_eq!(
+            corner_after(None, held),
+            held,
+            "unmeasured keeps the corner"
+        );
+        assert_eq!(corner_after(Some(false), None), None);
+        assert_eq!(corner_after(Some(true), None), None, "nothing to carry");
     }
 }

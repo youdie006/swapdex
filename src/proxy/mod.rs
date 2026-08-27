@@ -392,12 +392,25 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
         // asking one API about another's account.
         if let Some(t) = live_threshold.filter(|_| opts.tool != "codex") {
             refresh_measured(paths, &list, sh);
-            let full = sh
+            // Some(true/false) when this account HAS a reading; None when it has
+            // none. The two are not the same, and only the first can lift a
+            // corner - see `pick::corner_after`.
+            let measured_full = sh
                 .measured
                 .held()
                 .1
                 .get(&chosen.name)
-                .is_some_and(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits));
+                .map(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits));
+            let full = measured_full.unwrap_or(false);
+            // The corner is a state, not a verdict that outlives its cause. Its
+            // only clear-to-None lived inside the `if full` block below, so once
+            // the windows reset and `full` went false that block was skipped and
+            // the latch stayed set - every turn silently rewritten to the
+            // fallback model, with full quota, for the life of the process.
+            {
+                let mut c = sh.cornered.held();
+                *c = pick::corner_after(measured_full, *c);
+            }
             // A move made moments ago stands: without this, two accounts either
             // side of the line trade the session back and forth.
             let cooling = sh
@@ -548,20 +561,38 @@ const PREEMPT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300
 /// Read each account's utilization from the zero-spend usage endpoint, at most
 /// once per `MEASURE_EVERY`. This is the same read `swapdex quota` performs, with
 /// each account's own token; it spends no message quota.
-fn refresh_measured(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
-    let first = {
-        let mut m = sh.measured.held();
-        match m.0 {
-            Some(t) if t.elapsed() < MEASURE_EVERY => return,
-            // Claim the slot BEFORE the work starts, so concurrent turns do not
-            // each begin their own read of the same accounts.
-            Some(_) => {
-                m.0 = Some(std::time::Instant::now());
-                false
-            }
-            None => true,
+/// Claim the right to measure now. True for the one caller that should go.
+///
+/// The later-read arm claimed the slot before starting, so concurrent turns did
+/// not each begin their own read. The cold-start arm did not - it returned "go
+/// ahead" and wrote nothing, so every thread arriving before the first read
+/// finished saw an empty slot and ran a full measurement of its own. With
+/// eighteen sessions open that is eighteen bursts at the usage endpoint at once.
+/// It throttles all of them, nothing lands, the cache is never written, and the
+/// numbers age out of every screen.
+fn claim_measure(
+    measured: &Mutex<(Option<std::time::Instant>, HashMap<String, Measurement>)>,
+    now: std::time::Instant,
+) -> bool {
+    let mut m = measured.held();
+    match m.0 {
+        Some(t) if now.duration_since(t) < MEASURE_EVERY => false,
+        _ => {
+            m.0 = Some(now);
+            true
         }
-    };
+    }
+}
+
+fn refresh_measured(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
+    // Claim the slot BEFORE the work starts, so concurrent turns do not each
+    // begin their own read of the same accounts - the cold start included, which
+    // used to be the one case that claimed nothing.
+    let had_reading = sh.measured.held().0.is_some();
+    if !claim_measure(&sh.measured, std::time::Instant::now()) {
+        return;
+    }
+    let first = !had_reading;
     // The FIRST read is worth waiting for: with nothing measured there is nothing
     // to steer by, and the turn would start on whichever account the pointer
     // happens to name - which is exactly the near-limit one the threshold exists
@@ -2474,5 +2505,39 @@ mod write_back_tests {
         if let Some(q) = q {
             assert!(reading_landed(&crate::quota::Fetch::Ok(q)));
         }
+    }
+}
+
+#[cfg(test)]
+mod first_measure_tests {
+    use super::*;
+
+    /// The first measurement must be claimed like every later one.
+    ///
+    /// The `Some(_)` arm writes the timestamp before starting, so concurrent
+    /// turns do not each begin their own read. The `None` arm - the cold start -
+    /// wrote nothing, so every thread that arrived before the first read
+    /// finished saw `None` and ran a full measurement of its own. With eighteen
+    /// sessions open that is eighteen bursts at the usage endpoint at once; it
+    /// throttles all of them, nothing lands, the cache stops being written, and
+    /// the numbers age out of every screen. Measured live: ten rounds in twelve
+    /// minutes with nothing landing, then recovery.
+    #[test]
+    fn a_cold_start_is_claimed_so_only_one_caller_measures() {
+        let m: Mutex<(Option<std::time::Instant>, HashMap<String, Measurement>)> =
+            Mutex::new((None, HashMap::new()));
+        let now = std::time::Instant::now();
+
+        // First caller through a cold start goes ahead AND claims.
+        assert!(claim_measure(&m, now), "the first caller measures");
+        // A second caller arriving while that read is still running stands down.
+        assert!(
+            !claim_measure(&m, now),
+            "a concurrent cold start stands down"
+        );
+        assert!(
+            m.held().0.is_some(),
+            "the claim is recorded, not left for the next thread to miss"
+        );
     }
 }
