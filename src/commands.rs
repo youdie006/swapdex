@@ -3447,6 +3447,11 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         fn proxy_running(&mut self) -> bool {
             crate::proxy::running_port(self.paths).is_some()
         }
+        fn paying_account(&mut self) -> Option<String> {
+            crate::adapters::names()
+                .into_iter()
+                .find_map(|t| crate::proxy::serving_account_for(self.paths, t))
+        }
         fn sessionwiki_present(&mut self) -> bool {
             command_exists("sessionwiki")
         }

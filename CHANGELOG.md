@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.125.0
+
+- The dashboard confirms a switch before announcing one. It printed "<name> now
+  serves the running session" on the strength of a proxy being alive, and never
+  checked that the payer had actually changed - so a switch that quietly did not
+  take produced the sentence saying it had, and every later symptom then looked
+  like a different bug. It now reads back who is paying and says plainly when
+  that is somebody else, or nobody.
+
 ## 0.124.0
 
 - Codex accounts are read concurrently instead of one after another, so the very

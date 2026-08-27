@@ -351,6 +351,36 @@ mod live_identity_tests {
 /// either way, and says why it is empty rather than leaving a hole.
 ///
 /// A slot too narrow for the phrase pads instead of truncating it into nonsense.
+/// What the dashboard may claim after a switch.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SwitchClaim {
+    /// The payer agrees: the running session is on this account now.
+    Serving,
+    /// No proxy carries this tool, so the switch reaches the NEXT session.
+    Saved,
+    /// A proxy is running but the payer is not who was asked for. Carries who
+    /// it actually is, empty when nobody does.
+    NotConfirmed(String),
+}
+
+/// Decide what a switch may be announced as.
+///
+/// The dashboard printed "<name> now serves the running session" after checking
+/// only that a proxy was alive - never that the pointer had moved. A switch that
+/// quietly did not take therefore produced the sentence saying it did, which is
+/// the worst reading available: the account is believed changed, and every later
+/// symptom looks like a different bug.
+pub fn switch_result(asked: &str, proxy_running: bool, paying: Option<&str>) -> SwitchClaim {
+    if !proxy_running {
+        return SwitchClaim::Saved;
+    }
+    match paying {
+        Some(p) if p == asked => SwitchClaim::Serving,
+        Some(p) => SwitchClaim::NotConfirmed(p.to_string()),
+        None => SwitchClaim::NotConfirmed(String::new()),
+    }
+}
+
 /// What an empty window column should say, given whether the source publishes
 /// that window at all.
 ///
@@ -841,6 +871,12 @@ pub trait TuiCtx {
     /// not implement it.
     fn proxy_running(&mut self) -> bool {
         false
+    }
+    /// Who is paying for turns right now, so a switch is confirmed rather than
+    /// assumed. `None` when nobody is. Default None so test contexts need not
+    /// implement it.
+    fn paying_account(&mut self) -> Option<String> {
+        None
     }
     /// Is `sessionwiki` installed? When not, the session menu is native and a
     /// one-line hint points at what installing it would add.
@@ -3669,5 +3705,42 @@ mod publishes_window_tests {
         assert!(publishes_session_window("claude-code*, codex"));
         // Nothing known: keep the old default rather than claiming Codex.
         assert!(publishes_session_window(""));
+    }
+}
+
+#[cfg(test)]
+mod switch_claim_tests {
+    use super::*;
+
+    /// The dashboard must not announce a switch it has not confirmed.
+    ///
+    /// On success it printed "<name> now serves the running session" after
+    /// checking only that a proxy was alive - never that the pointer had
+    /// actually moved. A switch that quietly did not take therefore produced
+    /// the sentence that says it did, which is the worst possible reading: the
+    /// user believes the account changed and every later symptom looks like a
+    /// different bug.
+    #[test]
+    fn a_switch_is_only_announced_when_the_payer_agrees() {
+        assert_eq!(
+            switch_result("rnd", true, Some("rnd")),
+            SwitchClaim::Serving,
+            "the payer agrees: say so"
+        );
+        assert_eq!(
+            switch_result("rnd", true, Some("kong")),
+            SwitchClaim::NotConfirmed("kong".into()),
+            "someone else is paying - do not claim the switch landed"
+        );
+        assert_eq!(
+            switch_result("rnd", true, None),
+            SwitchClaim::NotConfirmed(String::new()),
+            "nobody is paying - still not a confirmed switch"
+        );
+        assert_eq!(
+            switch_result("rnd", false, None),
+            SwitchClaim::Saved,
+            "no proxy: the switch is real but reaches the next session"
+        );
     }
 }
