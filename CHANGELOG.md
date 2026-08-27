@@ -4,6 +4,21 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.113.0
+
+- A reading that failed to refresh now says so, even when an older number
+  survives it. The reason was dropped whenever the same account still had a
+  carried-over value, so a run of failing reads showed the previous numbers with
+  a growing age and nothing else. Caught live: ten measurement rounds in twelve
+  minutes, each printing "(read 20m ago)", "(read 22m ago)", "(read 23m ago)"
+  while every read was being turned away - and no line anywhere said that. This
+  is what "the usage died" looked like from the outside.
+- `quota` no longer vouches for an account it could not read. A 429 is the usage
+  endpoint declining to answer, which `quota.rs` classifies correctly and has a
+  test named for - but the line printed said "the account is fine", the same
+  mistake mirrored. A real account that was spent and refusing every turn showed
+  exactly that.
+
 ## 0.112.0
 
 - `doctor` checks the proxy service. Its failure takes every session down at

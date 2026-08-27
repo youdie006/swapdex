@@ -91,7 +91,18 @@ pub fn usage_block(
                     }
                 })
                 .unwrap_or_default();
-            format!("{n:width$}  {v}{mark}")
+            // A failed read still has to be said when an old number survives
+            // it. Dropping it turned a run of failing reads into the previous
+            // numbers with a growing age and no explanation - watched live as
+            // ten rounds printing "(read 20m ago)", "(read 22m ago)", "(read
+            // 23m ago)" while nothing landed. The number is worth keeping; the
+            // silence about why it is not moving is not.
+            let stalled = unread
+                .iter()
+                .find(|(u, _)| u == n)
+                .map(|(_, why)| format!("  - not refreshed: {why}"))
+                .unwrap_or_default();
+            format!("{n:width$}  {v}{mark}{stalled}")
         })
         .collect();
     out.sort();
@@ -1892,5 +1903,35 @@ mod reading_age_tests {
         assert_eq!(reading_age_note(300), Some("read 5m ago".to_string()));
         assert_eq!(reading_age_note(3_600), Some("read 1h0m ago".to_string()));
         assert_eq!(reading_age_note(9_000), Some("read 2h30m ago".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod carried_failure_tests {
+    use super::*;
+
+    /// A failed read must be said even when an old number survives it.
+    ///
+    /// `unread` entries were dropped whenever the same account still had a
+    /// carried-over reading, so a run of failing reads showed the previous
+    /// numbers with a growing age and nothing else. Watched live: ten rounds in
+    /// twelve minutes, every one printing "(read 20m ago)", "(read 22m ago)",
+    /// "(read 23m ago)" - the reads were failing the whole time and the line
+    /// never said so. Then the windows reset, the cache dropped the expired
+    /// entries, and the usage went blank with no explanation anywhere.
+    #[test]
+    fn a_carried_reading_still_reports_why_this_round_failed() {
+        let measured = vec![("rnd".to_string(), "5h 100% left (read 23m ago)".to_string())];
+        let unread = vec![("rnd".to_string(), "usage endpoint throttled".to_string())];
+        let out = usage_block(&measured, &unread, &[]);
+        assert_eq!(out.len(), 1, "one row per account, not two: {out:?}");
+        assert!(
+            out[0].contains("usage endpoint throttled"),
+            "the reason this round failed was dropped: {out:?}"
+        );
+        assert!(
+            out[0].contains("5h 100% left"),
+            "the carried reading is still worth showing: {out:?}"
+        );
     }
 }

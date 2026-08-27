@@ -7157,17 +7157,26 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 );
             }
             Fetch::Offline(msg) => println!("  {msg}"),
-            // The ENDPOINT was busy, not this account - saying "no data" here
-            // would read as a problem with the account itself.
-            Fetch::Throttled => println!(
-                "  usage endpoint busy just now - the account is fine, try again in a moment"
-            ),
+            Fetch::Throttled => println!("  {}", throttled_note()),
         }
         println!();
     }
     print_codex_quota(paths, now);
     println!("this is the only swapdex command that touches the network.");
     Ok(0)
+}
+
+/// What to say when the usage endpoint declined to answer.
+///
+/// A 429 is the ENDPOINT being busy, and `quota.rs` classifies it that way with
+/// a test named for it. This line then said "the account is fine" - the same
+/// mistake mirrored: avoiding a false alarm by making a false reassurance. A
+/// real account that was spent and refusing every turn printed exactly that
+/// while the user tried to work out why nothing went through. A declined read
+/// is no reading; it is not evidence in either direction.
+fn throttled_note() -> &'static str {
+    "usage endpoint declined to answer just now - that is no reading, \
+     not a verdict on this account either way; try again in a moment"
 }
 
 /// The Codex login held in a saved snapshot, for accounts with no slot.
@@ -8449,5 +8458,34 @@ mod bar_age_tests {
         assert_eq!(bar_age(599, tight), None);
         assert_eq!(bar_age(600, tight), Some(" · 10m old".to_string()));
         assert_eq!(bar_age(9_000, tight), Some(" · 2h old".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod throttled_note_tests {
+    use super::*;
+
+    /// A throttled endpoint is not a verdict on the account - in either direction.
+    ///
+    /// `quota.rs` already guards this on the way in: a 429 is classified as the
+    /// ENDPOINT being busy, with a test named for it. The line printed on the
+    /// way out then said "the account is fine", which is the same mistake
+    /// mirrored - avoiding a false alarm by making a false reassurance. A real
+    /// account that was spent and refusing every turn showed exactly this line.
+    #[test]
+    fn a_throttled_read_claims_nothing_about_the_account() {
+        let n = throttled_note();
+        assert!(
+            !n.contains("account is fine"),
+            "a declined read is not evidence the account is healthy: {n}"
+        );
+        assert!(
+            n.contains("no reading"),
+            "say what actually happened - there is no reading: {n}"
+        );
+        assert!(
+            n.contains("try again"),
+            "the remedy still belongs here: {n}"
+        );
     }
 }
