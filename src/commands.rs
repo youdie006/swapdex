@@ -3023,6 +3023,42 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 claude.push(row);
             }
         }
+        // Codex accounts that live only as a saved snapshot. The loop above
+        // walks the slot registry, so these were never asked about and their
+        // windows sat empty - while `swapdex quota`, which reads exactly this
+        // case, printed real numbers for them. Two commands, one account, two
+        // answers, and the silent one is the dashboard.
+        {
+            let slot_names: Vec<String> = codex_homes.iter().map(|(n, _)| n.clone()).collect();
+            let stored: Vec<String> = Store::open(paths)
+                .map(|st| {
+                    st.list()
+                        .into_iter()
+                        .filter(|p| p.tools.iter().any(|t| t == "codex"))
+                        .map(|p| p.name)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for name in codex_names_without_a_slot(&stored, &slot_names) {
+                let live = snapshot_codex_auth(paths, &name).and_then(|auth| {
+                    match crate::codex_usage::fetch(&auth) {
+                        crate::codex_usage::Fetch::Ok(a) => Some(*a),
+                        _ => None,
+                    }
+                });
+                let seen_by_proxy = codex_seen.get(&name).cloned();
+                if let Some(row) = codex_row(
+                    &name,
+                    live.as_ref(),
+                    None,
+                    seen_by_proxy,
+                    None,
+                    now_secs() as i64,
+                ) {
+                    claude.push(row);
+                }
+            }
+        }
         // The user asked for an account and the proxy is serving another. Say
         // so on the row they picked: resolving it silently leaves them looking
         // at an account they did not choose with no idea why.
@@ -5673,6 +5709,21 @@ pub fn codex_row(
 /// An earlier version looked up whoever the switch timeline said was paying when
 /// the reading was written, which moved real numbers onto an account that had no
 /// transcripts at all.
+/// Stored Codex accounts the slot registry does not cover.
+///
+/// The dashboard built its Codex rows by walking slots, so an account living
+/// only as a saved snapshot was never asked about and its windows stayed empty.
+/// `swapdex quota` reads that case through `snapshot_codex_auth` and prints real
+/// numbers, so the two commands disagreed about the same account - and the one
+/// people look at was the one saying nothing.
+pub fn codex_names_without_a_slot(store: &[String], slots: &[String]) -> Vec<String> {
+    store
+        .iter()
+        .filter(|n| !slots.contains(n))
+        .cloned()
+        .collect()
+}
+
 pub fn codex_usage_row(home: &str, l: &crate::codex_limits::Limits) -> (String, crate::tui::Usage) {
     let p = crate::codex_limits::place(l);
     let u = crate::tui::Usage {
@@ -8679,5 +8730,33 @@ mod serving_reach_tests {
 
         // Nothing to say about a tool with no accounts at all.
         assert_eq!(serving_reach(false, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod codex_snapshot_rows_tests {
+    use super::*;
+
+    /// A Codex account with no slot still has usage to show.
+    ///
+    /// The dashboard built its Codex rows by walking the slot registry, so an
+    /// account that lives only as a saved snapshot was never asked about and its
+    /// windows sat empty. `swapdex quota` reads exactly that case through
+    /// `snapshot_codex_auth` and prints real numbers - so the two commands gave
+    /// different answers about the same account, and the one people look at was
+    /// the one that said nothing.
+    #[test]
+    fn codex_accounts_without_a_slot_are_still_asked_about() {
+        let slots = ["youdie".to_string()];
+        let store = ["work".to_string(), "youdie".to_string(), "kong".to_string()];
+        let mut missing = codex_names_without_a_slot(&store, &slots);
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec!["kong".to_string(), "work".to_string()],
+            "every stored Codex account that has no slot"
+        );
+        // Nothing to add when the registry already covers them.
+        assert!(codex_names_without_a_slot(&slots, &slots).is_empty());
     }
 }

@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.120.0
+
+- The dashboard asks about Codex accounts that have no slot. It built its Codex
+  rows by walking the slot registry, so an account living only as a saved
+  snapshot was never asked about and its windows stayed empty - while
+  `swapdex quota`, which reads exactly that case, printed real numbers for the
+  same account. Two commands, one account, two answers, and the silent one was
+  the dashboard.
+
 ## 0.119.0
 
 - The dashboard keeps its numbers when a usage round comes back empty. It
