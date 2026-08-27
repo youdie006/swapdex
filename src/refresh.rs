@@ -53,6 +53,10 @@ pub enum RefreshError {
     Expired,
     /// The login server is rate-limiting; the account itself is fine.
     Busy,
+    /// Another caller in this process is already renewing this slot. Spending
+    /// the same refresh token twice is what logs an account out, so the second
+    /// caller stands down and uses the credential the first is about to write.
+    AlreadyRefreshing,
     /// The server refused the exchange.
     Refused(String),
     /// The request could not be made at all.
@@ -75,6 +79,10 @@ impl RefreshError {
             ),
             Self::Busy => format!(
                 "the login server is busy - '{name}' is fine, renewing again shortly will work"
+            ),
+            Self::AlreadyRefreshing => format!(
+                "'{name}' is already being renewed by another turn - nothing to do; \
+                 spending its refresh token twice is what logs an account out"
             ),
             Self::Refused(why) => format!("'{name}' could not be renewed: {why}"),
             Self::Offline(why) => format!("could not reach the login server: {why}"),
@@ -160,10 +168,32 @@ impl RefreshGate {
     }
 }
 
+/// The one gate every refresh passes through.
+///
+/// `RefreshGate` was created for this and then applied at a single call site,
+/// while two other paths - the keep-alive sweep and `has_usable_login` - reached
+/// `refresh_slot` unguarded. A rule enforced at one caller is a rule the next
+/// caller does not know exists, so it lives here now, where the token is
+/// actually spent.
+fn gate() -> &'static RefreshGate {
+    static GATE: std::sync::OnceLock<RefreshGate> = std::sync::OnceLock::new();
+    GATE.get_or_init(RefreshGate::default)
+}
+
+/// Claim the right to renew this slot now. False when another caller has it.
+fn claim_refresh_at(dir: &Path, now_secs: i64) -> bool {
+    gate().claim(dir, now_secs)
+}
+
 pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
     // A slot the tool is using is never touched - see the module note.
     if slot_in_use(dir) {
         return Err(RefreshError::InUse);
+    }
+    // Claimed HERE, not at a caller: every path that spends this token passes
+    // through this line, and spending it twice is what logs an account out.
+    if !claim_refresh_at(dir, now_ms / 1000) {
+        return Err(RefreshError::AlreadyRefreshing);
     }
     let blob = read_credential(dir).ok_or(RefreshError::NoCredential)?;
     if refresh_token_expired(blob.expose(), now_ms) {
@@ -506,5 +536,53 @@ mod one_refresh_per_burst_tests {
         assert!(g.claim(std::path::Path::new("/s/b"), 1_000));
         // Long enough later, it is a new event rather than the same burst.
         assert!(g.claim(dir, 1_000 + BURST_SECS + 1));
+    }
+}
+
+#[cfg(test)]
+mod point_of_effect_tests {
+    use super::*;
+
+    /// The gate has to sit at the point of effect, not at one caller.
+    ///
+    /// `RefreshGate`'s own doc names the outcome: N concurrent renewals of one
+    /// slot spend the same refresh token N times, every result but one is dead
+    /// when it lands, and the account logs itself out. Only one of the three
+    /// paths reaching `refresh_slot` claimed it - the keep-alive sweep and
+    /// `has_usable_login` went straight through. A rule enforced at one caller
+    /// is a rule the next caller does not know exists.
+    #[test]
+    fn a_second_refresh_of_the_same_slot_in_a_burst_stands_down() {
+        let a = std::path::Path::new("/tmp/swapdex-gate-a");
+        let b = std::path::Path::new("/tmp/swapdex-gate-b");
+        assert!(claim_refresh_at(a, 10_000), "the first caller goes ahead");
+        assert!(
+            !claim_refresh_at(a, 10_000),
+            "a second in the same burst stands down"
+        );
+        assert!(
+            !claim_refresh_at(a, 10_000 + BURST_SECS),
+            "still inside the window"
+        );
+        assert!(
+            claim_refresh_at(a, 10_001 + BURST_SECS),
+            "a later refresh is a new event, not the same burst"
+        );
+        assert!(
+            claim_refresh_at(b, 10_000),
+            "another account is never blocked"
+        );
+    }
+
+    /// Standing down is not the login server refusing, and must not read as it.
+    #[test]
+    fn standing_down_is_its_own_answer() {
+        let e = RefreshError::AlreadyRefreshing;
+        let r = e.remedy("rnd");
+        assert!(
+            !r.to_lowercase().contains("sign in"),
+            "nobody needs to sign in: {r}"
+        );
+        assert!(r.contains("rnd"), "name the account: {r}");
     }
 }

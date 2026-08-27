@@ -113,7 +113,6 @@ struct Shared {
     /// One refresh per slot per burst. Refresh tokens rotate, so N concurrent
     /// 401s each renewing the same slot spend the same token N times and all
     /// but one result is stale on arrival - the account logs itself out.
-    refresh_gate: crate::refresh::RefreshGate,
     /// When each account's credential was last replaced. A refusal belongs to
     /// the credential that earned it, so a token refresh retires it - without
     /// this, a re-authorized account stayed sidelined for a dead reason.
@@ -1078,7 +1077,6 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         codex_headers_seen: std::sync::atomic::AtomicBool::new(false),
         refused_at: Mutex::new(HashMap::new()),
         ok_at: Mutex::new(HashMap::new()),
-        refresh_gate: crate::refresh::RefreshGate::default(),
         replaced_at: Mutex::new(HashMap::new()),
         agent: upstream::agent(),
         base: if opts.tool == "codex" {
@@ -1424,9 +1422,12 @@ fn forward_turn(
         // one result is stale on arrival - the account logs itself out by its own
         // renewal. A caller that stands down here simply uses the credential the
         // winner is about to write.
-        if creds::slot_token_expired(&slot.config_dir, now_ms())
-            && sh.refresh_gate.claim(&slot.config_dir, now_secs())
-        {
+        // The claim used to live in this condition, so the two other paths that
+        // reach `refresh_slot` - the keep-alive sweep and `has_usable_login` -
+        // spent the token unguarded. It now lives inside `refresh_slot` itself,
+        // which is why there is no claim here: claiming twice would make this
+        // caller stand down against itself.
+        if creds::slot_token_expired(&slot.config_dir, now_ms()) {
             match crate::refresh::refresh_slot(&slot.config_dir, now_ms()) {
                 Ok(()) => {
                     // A new credential: any refusal the OLD one earned is not
@@ -1434,6 +1435,9 @@ fn forward_turn(
                     sh.replaced_at.held().insert(slot.name.clone(), now_secs());
                     println!("  {}: renewed its login", slot.name)
                 }
+                // Another turn is renewing it; the credential it writes is the
+                // one this turn will use. Not worth a line on the request path.
+                Err(crate::refresh::RefreshError::AlreadyRefreshing) => {}
                 Err(why) => println!("  {}", why.remedy(&slot.name)),
             }
             std::io::stdout().flush().ok();

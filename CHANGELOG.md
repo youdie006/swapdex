@@ -4,6 +4,22 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.115.0
+
+- Every refresh now passes the burst gate, because the gate moved to where the
+  token is actually spent. `RefreshGate` was written for exactly this hazard -
+  its own doc says N concurrent renewals of one slot spend the same refresh
+  token N times, every result but one is dead on arrival, and the account logs
+  itself out - but it was claimed at a single call site. Five paths reach
+  `refresh_slot`, and four of them, including the keep-alive sweep, went straight
+  through unguarded. The claim now lives inside `refresh_slot`; the caller-side
+  gate is gone rather than left sitting there looking like protection.
+- Standing down has its own answer (`AlreadyRefreshing`) instead of borrowing
+  `Busy`, which means the login server is rate-limiting. Those are different
+  facts and only one of them is about the account.
+- Known limit: the gate is process-wide. A CLI `swapdex refresh` running at the
+  same moment as the proxy is still two processes spending one token.
+
 ## 0.114.0
 
 - `doctor` checks that the pinned proxy address still answers. `swapdex shim`
