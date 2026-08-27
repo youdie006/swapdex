@@ -358,6 +358,26 @@ mod live_identity_tests {
 /// for Claude, whose 5h window begins on first use. False for Codex, whose
 /// server never sends a session window - and there the phrase reads as "you
 /// have room" beside an account the user has just been told is out.
+/// Does the source behind this row publish a session (5h) window at all?
+///
+/// Codex's server never sends one, so "not started" - which CLAIMS the window
+/// exists and is untouched - reads as "you have room" beside an account just
+/// reported as out. The check compared the row's tools string to "codex"
+/// exactly, and that string carries the active marker: the ACTIVE Codex account
+/// reads "codex*", failed the comparison, and got Claude's phrase while the idle
+/// one beside it got the right one. A display string is not a key.
+pub fn publishes_session_window(tools: &str) -> bool {
+    let mut named = tools
+        .split(',')
+        .map(|t| t.trim().trim_end_matches('*'))
+        .filter(|t| !t.is_empty())
+        .peekable();
+    if named.peek().is_none() {
+        return true; // nothing known: keep the old default
+    }
+    !named.all(|t| t == "codex")
+}
+
 pub fn empty_window_phrase(source_publishes: bool) -> &'static str {
     if source_publishes {
         "not started"
@@ -1365,7 +1385,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 // window, so an empty 5h cell there means "not
                                 // reported", not "not started" - the latter
                                 // reads as room the account may not have.
-                                let publishes_5h = r.tools != "codex";
+                                let publishes_5h = publishes_session_window(&r.tools);
                                 let slot = |r: &str, word: bool, w: usize| -> String {
                                     if w == 0 {
                                         String::new()
@@ -3620,5 +3640,34 @@ mod empty_reading_tests {
             map.and_then(|m| m.get("rnd").and_then(|u| u.five_h)),
             Some(9.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod publishes_window_tests {
+    use super::*;
+
+    /// Whether the source publishes a 5h window must not depend on a marker.
+    ///
+    /// Codex's server never sends a session window, so "not started" - which
+    /// claims the window exists and is untouched - reads as "you have room"
+    /// beside an account just reported as out. The check compared the row's
+    /// tools string to "codex" exactly, and that string carries the active
+    /// marker: the ACTIVE Codex account reads "codex*", failed the comparison,
+    /// and got Claude's phrase while the idle one next to it got the right one.
+    #[test]
+    fn the_active_marker_does_not_change_what_a_source_publishes() {
+        assert!(!publishes_session_window("codex"));
+        assert!(
+            !publishes_session_window("codex*"),
+            "the marker is not part of the tool"
+        );
+        assert!(!publishes_session_window("codex, codex*"));
+        assert!(publishes_session_window("claude-code"));
+        assert!(publishes_session_window("claude-code*"));
+        // A row carrying both publishes one, so the phrase stays Claude's.
+        assert!(publishes_session_window("claude-code*, codex"));
+        // Nothing known: keep the old default rather than claiming Codex.
+        assert!(publishes_session_window(""));
     }
 }

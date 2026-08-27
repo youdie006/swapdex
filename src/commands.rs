@@ -3020,6 +3020,13 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 transcript,
                 now_secs() as i64,
             ) {
+                // Remember it. Claude's numbers come from the cache and appear
+                // the instant the dashboard opens; Codex's were read live every
+                // time and never written down, so every open showed "checking…"
+                // for as long as the network took. A remembered reading fills
+                // the row immediately and the live one replaces it when it
+                // lands.
+                remember_codex_reading(paths, &row.0, &row.1);
                 claude.push(row);
             }
         }
@@ -3063,6 +3070,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     None,
                     now_secs() as i64,
                 ) {
+                    remember_codex_reading(paths, &row.0, &row.1);
                     claude.push(row);
                 }
             }
@@ -5724,6 +5732,29 @@ pub fn codex_row(
 /// `swapdex quota` reads that case through `snapshot_codex_auth` and prints real
 /// numbers, so the two commands disagreed about the same account - and the one
 /// people look at was the one saying nothing.
+/// Write a Codex reading where the next dashboard open can find it instantly.
+///
+/// Claude's numbers come from the quota cache and fill the row the moment the
+/// dashboard draws. Codex's were read live on every open and never written down,
+/// so every open sat on "checking…" for as long as the network took - and if the
+/// read failed, the row had nothing at all to show. Only the proxy wrote this
+/// cache, and there is no Codex proxy on most machines.
+fn remember_codex_reading(paths: &Paths, name: &str, u: &crate::tui::Usage) {
+    if u.five_h.is_none() && u.seven_d.is_none() {
+        return; // nothing read is not a reading
+    }
+    let entry = crate::quota_cache::Entry {
+        five_h: u.five_h,
+        five_h_reset: u.five_h_reset,
+        seven_d: u.seven_d,
+        seven_d_reset: u.seven_d_reset,
+        at: u.observed_at.unwrap_or(now_secs() as i64),
+        on_credits: u.on_credits,
+        refused: None,
+    };
+    crate::quota_cache::update_for(paths, "codex", &[(name.to_string(), entry)]);
+}
+
 pub fn codex_names_without_a_slot(store: &[String], slots: &[String]) -> Vec<String> {
     store
         .iter()

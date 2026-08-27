@@ -4,6 +4,22 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.122.0
+
+- A Codex row no longer borrows Claude's wording for a window Codex does not
+  publish. "not started" claims the window exists and is untouched, which reads
+  as "you have room" beside an account just reported as out. The check compared
+  the row's tools string to "codex" exactly - and that string carries the active
+  marker, so the ACTIVE Codex account read "codex*", failed the comparison, and
+  got Claude's phrase while the idle one beside it got the right one. A display
+  string is not a key.
+- Codex readings are remembered, so the dashboard stops opening on "checking…".
+  Claude's numbers come from the quota cache and fill the row the instant it
+  draws; Codex's were read live on every open and never written down - and only
+  the proxy ever wrote that cache, which most machines do not run for Codex. A
+  remembered reading fills the row immediately and the live one replaces it when
+  it lands.
+
 ## 0.121.0
 
 - Fixes a regression from 0.120.0: an account holding logins for two tools showed
