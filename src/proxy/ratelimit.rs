@@ -427,6 +427,18 @@ mod failover_status_tests {
 /// The response's own headers are the proof: `*-status: rejected` says the
 /// window is gone. Repeated refusals are the other proof - an account that keeps
 /// saying no past the retries is out, whatever it declined to explain.
+/// The retry count a turn carries into a DIFFERENT account: none.
+///
+/// `proven_spent` treats three attempts as proof a window is spent, which is
+/// true of the account those attempts were made against and of no other. The
+/// counter lived outside the account loop and survived rotation, so a 529 spell
+/// on one account handed the next a counter already reading "spent" - and its
+/// first bare throttle, carrying no rate-limit headers at all, benched it on no
+/// evidence of its own. One transient overload took every account out at once.
+pub fn attempts_against_next_account() -> u32 {
+    0
+}
+
 pub fn proven_spent(headers: &[(String, String)], attempt: u32) -> bool {
     from_headers(headers).is_some_and(|q| q.rejected) || attempt >= 3
 }
@@ -502,5 +514,32 @@ mod rewrite_retry_tests {
         }
         // 422 is the other shape-of-request refusal this API uses.
         assert!(retry_unrewritten(422, true, 0));
+    }
+}
+
+#[cfg(test)]
+mod attempt_scope_tests {
+    use super::*;
+
+    /// Retries are evidence about ONE account, and do not carry to the next.
+    ///
+    /// `proven_spent` treats `attempt >= 3` as proof a window is spent, and the
+    /// counter lived outside the account loop and was never reset on rotation.
+    /// A 529 spell - the log here recorded eighteen inside one minute - drives
+    /// it to 3 on the first account. Rotating then hands the next account a
+    /// counter that already says "spent", so its very first bare throttle, with
+    /// no rate-limit headers at all, benches it on no evidence of its own. One
+    /// transient overload takes the whole fleet out for fifteen minutes.
+    #[test]
+    fn a_retry_count_does_not_follow_the_turn_to_another_account() {
+        // A bare throttle - no unified headers - is not proof on its own.
+        assert!(!proven_spent(&[], 0), "no headers, no attempts: not proven");
+        assert!(
+            proven_spent(&[], 3),
+            "three tries at one account is the rule"
+        );
+
+        // Rotating resets the evidence, because it is about the account.
+        assert_eq!(attempts_against_next_account(), 0);
     }
 }

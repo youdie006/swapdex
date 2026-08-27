@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.117.0
+
+- A transient overload no longer benches every account at once. The retry count
+  lived outside the account loop and survived rotation, while `proven_spent`
+  treats three attempts as proof a window is spent - true of the account those
+  attempts were made against, and of no other. A 529 spell (eighteen inside one
+  minute, in this proxy's own log) drove the count to three on the first account;
+  rotating then handed the next one a counter already reading "spent", so its
+  first bare throttle - carrying no rate-limit headers at all - benched it on no
+  evidence of its own, for fifteen minutes, and the same for the account after
+  that. The count now resets when the turn moves to a different account.
+
 ## 0.116.0
 
 - `service install` waits to see the proxy come up before calling it installed.

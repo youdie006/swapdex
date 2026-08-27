@@ -1589,6 +1589,10 @@ fn forward_turn(
                     std::io::stdout().flush().ok();
                     *sh.rotated.held() = Some(next.name.clone());
                     note_serving_for(paths, &opts.tool, &next.name);
+                    // Retries are evidence about the account they were made against.
+                    // Carrying the count across a rotation benched the next account
+                    // on the first bare throttle, with nothing of its own to show.
+                    attempt = crate::proxy::ratelimit::attempts_against_next_account();
                     slot = next;
                     continue;
                 }
@@ -1826,6 +1830,10 @@ fn forward_turn(
                 std::io::stdout().flush().ok();
                 *sh.rotated.held() = Some(next.name.clone());
                 drop(up); // discard the failed response; the retry replaces it
+                          // Retries are evidence about the account they were made against.
+                          // Carrying the count across a rotation benched the next account
+                          // on the first bare throttle, with nothing of its own to show.
+                attempt = crate::proxy::ratelimit::attempts_against_next_account();
                 slot = next;
             }
             None => {
