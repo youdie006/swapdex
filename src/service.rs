@@ -106,6 +106,27 @@ pub fn log_dir(paths: &Paths) -> PathBuf {
 /// The binary path is written in FULL, resolved now: an agent that looked a name
 /// up on PATH would be at the mercy of whatever a login shell happens to set, and
 /// that is precisely the ambiguity that made two installs of swapdex fight.
+/// The program a service unit will run, read back from the unit itself.
+///
+/// The proxy is the one part whose failure takes every session down at once, so
+/// the health check has to be able to see what the unit actually points at. The
+/// path is resolved at install time; for an npm install it contains the Node
+/// version, so upgrading Node deletes it and the proxy silently never starts
+/// again - the service still reads as installed.
+pub fn unit_program(body: &str) -> Option<&str> {
+    if let Some(line) = body
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))
+    {
+        return line.split_whitespace().next();
+    }
+    // launchd: the first <string> after <key>ProgramArguments</key>.
+    let rest = body.split("ProgramArguments").nth(1)?;
+    let open = rest.find("<string>")? + "<string>".len();
+    let close = rest[open..].find("</string>")? + open;
+    Some(rest[open..close].trim())
+}
+
 pub fn install(paths: &Paths, tool: &str) -> anyhow::Result<PathBuf> {
     use anyhow::Context;
     let exe = std::env::current_exe().context("cannot find swapdex's own path")?;
@@ -290,5 +311,34 @@ mod tests {
             systemd_path(home, "codex"),
             home.join(".config/systemd/user/swapdex-codex.service")
         );
+    }
+}
+
+#[cfg(test)]
+mod unit_program_tests {
+    use super::*;
+
+    /// The health check must be able to see what a service unit will run.
+    ///
+    /// The proxy service is the one part whose failure takes every session down
+    /// at once, and `doctor` did not look at it at all. The unit records an
+    /// absolute path resolved at install time; for an npm install that path
+    /// contains the Node version, so upgrading Node deletes it and the proxy
+    /// silently never starts again. That is exactly the shape of the outage
+    /// that took an hour to name: the service reads as installed, and nothing
+    /// says the binary it points at is gone.
+    #[test]
+    fn the_program_a_unit_will_run_can_be_read_back() {
+        let systemd = "[Unit]\nDescription=x\n[Service]\n\
+                       ExecStart=/opt/swapdex/bin/swapdex proxy --tool claude-code --port 8787\n\
+                       Restart=always\n";
+        assert_eq!(unit_program(systemd), Some("/opt/swapdex/bin/swapdex"));
+
+        let plist = "<plist><dict>\n<key>ProgramArguments</key>\n<array>\n\
+                     <string>/usr/local/bin/swapdex</string>\n<string>proxy</string>\n\
+                     </array>\n</dict></plist>\n";
+        assert_eq!(unit_program(plist), Some("/usr/local/bin/swapdex"));
+
+        assert_eq!(unit_program("nothing here"), None);
     }
 }

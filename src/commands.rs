@@ -4118,6 +4118,68 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         report("backups", true, format!("intact - {}", kept.join(", ")));
     }
 
+    // The proxy service. Its failure takes every session down at once, and this
+    // check did not exist - so the outage that reads as "API error everywhere"
+    // had nothing here to name it. The unit records an absolute path resolved at
+    // install time; for an npm install that path carries the Node version, so
+    // upgrading Node deletes it while the service still reads as installed.
+    // A sandboxed run has no real service, and reading the machine's own unit
+    // from a temporary store would report the developer's box, not the sandbox.
+    let home = if paths.sandboxed() {
+        None
+    } else {
+        dirs::home_dir()
+    };
+    for tool in ["claude-code", "codex"] {
+        let Some(path) = home.as_ref().map(|h| {
+            if cfg!(target_os = "macos") {
+                crate::service::launchd_path(h, tool)
+            } else {
+                crate::service::systemd_path(h, tool)
+            }
+        }) else {
+            continue;
+        };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue; // not installed for this tool: not a problem
+        };
+        let label = format!("service:{}", crate::commands::tool_binary(tool));
+        match crate::service::unit_program(&body) {
+            Some(prog) if std::path::Path::new(prog).exists() => {
+                let up = crate::proxy::running_proxy_for(paths, tool).is_some();
+                if up {
+                    report(&label, true, "installed and running".into());
+                } else {
+                    report(
+                        &label,
+                        false,
+                        format!(
+                            "installed but not running - `swapdex service restart --tool {}` \
+                             (sessions fall back to your own login until it is up)",
+                            tool
+                        ),
+                    );
+                }
+            }
+            Some(prog) => report(
+                &label,
+                false,
+                format!(
+                    "points at {} which no longer exists - reinstall with \
+                     `swapdex service install --tool {}` (an npm path carries the Node \
+                     version, so upgrading Node breaks it)",
+                    crate::util::redact_path(prog),
+                    tool
+                ),
+            ),
+            None => report(
+                &label,
+                false,
+                format!("{} names no program - reinstall it", path.display()),
+            ),
+        }
+    }
+
     // CLIs on PATH - informational (a codex-only user is not "broken").
     let mut found = Vec::new();
     for cli in ["claude", "codex", "gemini", "agy"] {

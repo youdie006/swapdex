@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.112.0
+
+- `doctor` checks the proxy service. Its failure takes every session down at
+  once - that is what "API error everywhere" looks like - and the health check
+  did not mention it at all. It now reports whether the unit is installed,
+  whether the binary it names still exists, and whether the proxy is actually
+  running. The unit records an absolute path resolved at install time, and for an
+  npm install that path carries the Node version, so upgrading Node deletes it
+  while the service still reads as installed.
+
 ## 0.111.0
 
 - `import` no longer invents a Claude account for a tool it does not know. The
