@@ -1427,8 +1427,15 @@ pub fn measure_after(headroom: Option<f64>) -> std::time::Duration {
         Some(h) if h <= 10.0 => 60,
         Some(h) if h <= 25.0 => 120,
         Some(h) if h <= 50.0 => 300,
-        // Plenty left. Asking again in two minutes buys nothing.
-        _ => 900,
+        // Plenty left, so asked least often - but not forgotten. Fifteen minutes
+        // assumed an idle account's number cannot change, which holds only when
+        // this machine is the only one spending it. The same account signed in
+        // on a second machine moves while it sits idle here, and the row showed
+        // a quarter-hour-old number as current. The pacing was a defence against
+        // throttling, and that throttling came from a BURST - every thread
+        // measuring at once on a cold start, fixed in 0.118.0 - not from this
+        // steady rate, which is a handful of reads per five minutes.
+        _ => 300,
     };
     std::time::Duration::from_secs(secs)
 }
@@ -1442,9 +1449,30 @@ mod pacing_tests {
         assert!(measure_after(Some(5.0)) <= std::time::Duration::from_secs(60));
     }
 
+    /// An account with room is asked less often - but not so seldom that a spend
+    /// somewhere else goes unnoticed for a quarter of an hour.
+    ///
+    /// The interval was fifteen minutes, on the reasoning that an idle account's
+    /// number cannot change. That holds only when this machine is the only one
+    /// spending it: the same account signed in on a second machine, or used in a
+    /// browser, moves while it sits idle here, and the dashboard showed a number
+    /// a quarter of an hour old with nothing to say so.
+    ///
+    /// The pacing existed to avoid throttling, but the throttling came from a
+    /// BURST - the cold-start claim that let every thread measure at once, fixed
+    /// in 0.118.0 - not from the steady rate, which is a handful of reads per
+    /// five minutes.
     #[test]
-    fn a_fresh_one_is_left_alone_far_longer() {
-        assert!(measure_after(Some(95.0)) >= std::time::Duration::from_secs(600));
+    fn a_fresh_one_is_left_alone_longer_but_not_forgotten() {
+        let d = measure_after(Some(95.0));
+        assert!(
+            d >= std::time::Duration::from_secs(240),
+            "still far less often than a nearly spent one"
+        );
+        assert!(
+            d <= std::time::Duration::from_secs(300),
+            "a spend from another machine must not sit unseen for a quarter hour"
+        );
     }
 
     /// Monotone: more room can never mean a shorter wait. Without this the

@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.127.0
+
+- An account with plenty of quota is re-read every 5 minutes instead of every 15.
+  The long interval rested on "an idle account's number cannot change", which
+  holds only when this machine is the only thing spending it - the same account
+  signed in on a second machine, or used in a browser, moves while it sits idle
+  here, and the row showed a quarter-hour-old number as if it were current. The
+  pacing was a defence against throttling, and the throttling came from a BURST
+  (every thread measuring at once on a cold start, fixed in 0.118.0) rather than
+  from the steady rate, which is a handful of reads per five minutes.
+
 ## 0.126.0
 
 - Enter runs the command that works for the row it is on. Serving reads a slot's
