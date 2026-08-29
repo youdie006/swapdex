@@ -3297,14 +3297,18 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // sections rather than one mixed list.
             crate::tui::group_sorted(crate::tui::dedupe_by_identity(list))
         }
-        fn switch(&mut self, name: &str) -> (bool, String) {
+        fn switch(&mut self, name: &str, is_slot: bool) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
             // Enter means "let this account serve me" - not "move where my
             // conversations live". Moving the store is what `use` does, and having
             // the most natural key do it split a history in two every time
             // somebody changed accounts, which is the opposite of the point.
             let tool = tool_of_account(self.paths, name);
-            run_self(&["serve", name, "--tool", tool])
+            // A snapshot cannot pay for turns - serving reads a slot's own
+            // credential directory - so `serve` on one only ever answered that
+            // it had never been signed in here. Switching a snapshot means
+            // copying its credentials into place, which is what `use` does.
+            run_self(&[crate::tui::switch_verb(is_slot), name, "--tool", tool])
         }
         fn toggle_rotation(&mut self, name: &str) -> String {
             let mut cfg = crate::settings::load(self.paths);

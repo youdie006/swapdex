@@ -351,6 +351,22 @@ mod live_identity_tests {
 /// either way, and says why it is empty rather than leaving a hole.
 ///
 /// A slot too narrow for the phrase pads instead of truncating it into nonsense.
+/// Which command Enter should run for this row.
+///
+/// Serving reads a slot's own credential directory, so a snapshot cannot pay for
+/// turns and `serve` on one answers that it has never been signed in here. Enter
+/// called `serve` for every row - including the snapshot rows added so their
+/// usage could be seen - so pressing it there always failed. A snapshot IS
+/// switchable: `use` copies its credentials into place, which is what switching
+/// a snapshot has always meant.
+pub fn switch_verb(is_slot: bool) -> &'static str {
+    if is_slot {
+        "serve"
+    } else {
+        "use"
+    }
+}
+
 /// What the dashboard may claim after a switch.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SwitchClaim {
@@ -817,7 +833,7 @@ pub trait TuiCtx {
     fn rows(&mut self) -> Vec<Row>;
     /// Perform the switch (subprocess); returns (success, condensed message).
     /// `"-"` toggles to the previously-used account (the `r` key).
-    fn switch(&mut self, name: &str) -> (bool, String);
+    fn switch(&mut self, name: &str, is_slot: bool) -> (bool, String);
     fn delete(&mut self, name: &str) -> String;
     /// Take an account out of automatic rotation, or put it back. Returns the
     /// message to show. Default no-op so test contexts need not implement it.
@@ -2142,7 +2158,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         let idx = (c as usize) - ('1' as usize);
                         if let Some(name) = rows.get(idx).map(|r| r.name.clone()) {
                             state.select(Some(idx));
-                            let (ok, msg) = ctx.switch(&name);
+                            let (ok, msg) = ctx.switch(
+                                &name,
+                                state
+                                    .selected()
+                                    .and_then(|i| rows.get(i))
+                                    .is_some_and(|r| r.is_slot),
+                            );
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
                             status = if !ok {
@@ -2162,7 +2184,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .and_then(|i| rows.get(i))
                             .map(|r| r.name.clone())
                         {
-                            let (ok, msg) = ctx.switch(&name);
+                            let (ok, msg) = ctx.switch(
+                                &name,
+                                state
+                                    .selected()
+                                    .and_then(|i| rows.get(i))
+                                    .is_some_and(|r| r.is_slot),
+                            );
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
                             // Enter switches and STAYS here. Leaving for a session
@@ -2190,7 +2218,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // profile would open the wrong account. `o` differs
                             // from Enter only in always showing the full menu
                             // (Enter shortcuts a single-tool profile to the folder).
-                            let (ok, msg) = ctx.switch(&name);
+                            let (ok, msg) = ctx.switch(
+                                &name,
+                                state
+                                    .selected()
+                                    .and_then(|i| rows.get(i))
+                                    .is_some_and(|r| r.is_slot),
+                            );
                             status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
@@ -2246,7 +2280,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         // not `restore`: restore returns the pre-switch login,
                         // which in hub-and-spoke use is always one fixed base,
                         // never the account you actually used before.
-                        let (_ok, msg) = ctx.switch("-");
+                        let (_ok, msg) = ctx.switch("-", true);
                         status = msg;
                         rows = ctx.rows();
                     }
@@ -3316,7 +3350,7 @@ mod tests {
             fn rows(&mut self) -> Vec<Row> {
                 Vec::new()
             }
-            fn switch(&mut self, _: &str) -> (bool, String) {
+            fn switch(&mut self, _: &str, _: bool) -> (bool, String) {
                 (true, String::new())
             }
             fn delete(&mut self, _: &str) -> String {
@@ -3742,5 +3776,25 @@ mod switch_claim_tests {
             SwitchClaim::Saved,
             "no proxy: the switch is real but reaches the next session"
         );
+    }
+}
+
+#[cfg(test)]
+mod switch_command_tests {
+    use super::*;
+
+    /// Enter has to run the command that works for THIS account.
+    ///
+    /// Serving reads a slot's own credential directory, so a snapshot cannot pay
+    /// for turns - `serve` on one answers "'work' is saved but has never been
+    /// signed in on this machine". Enter called `serve` for every row, including
+    /// the snapshot rows added so their usage could be seen, so pressing it
+    /// there always failed. A snapshot IS switchable: `use` copies its
+    /// credentials into place, which is what the row's own doc says switching a
+    /// snapshot means.
+    #[test]
+    fn enter_serves_a_slot_and_uses_a_snapshot() {
+        assert_eq!(switch_verb(true), "serve", "a slot can pay for turns");
+        assert_eq!(switch_verb(false), "use", "a snapshot is copied into place");
     }
 }

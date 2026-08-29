@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.126.0
+
+- Enter runs the command that works for the row it is on. Serving reads a slot's
+  own credential directory, so an account saved only as a snapshot cannot pay for
+  turns - and Enter called `serve` for every row, including the snapshot rows
+  added in 0.120.0 so their usage could be seen. Pressing it there always failed
+  with a message about the account never having been signed in on this machine.
+  A snapshot is switchable, just not servable: `use` copies its credentials into
+  place, which is what switching a snapshot has always meant.
+
 ## 0.125.0
 
 - The dashboard confirms a switch before announcing one. It printed "<name> now
