@@ -5048,6 +5048,20 @@ pub fn run_account(
 /// down, so adding several meant relaunching it between each. Here the tool is a
 /// child process that owns the terminal while it runs, and when it exits the
 /// caller is still alive to redraw.
+/// Should a sign-in be followed by re-capturing the saved copy?
+///
+/// The sign-in key put a login into the SLOT and stopped, while the "stale"
+/// marker is about the SNAPSHOT - the saved copy, whose token lapsed and cannot
+/// be renewed because refresh tokens rotate. Pressing sign-in never cleared it,
+/// and nothing else re-captured from a freshly signed-in slot, so there was
+/// nothing a user could do about a marker their own action should have fixed.
+///
+/// Only after a sign-in that actually landed: re-capturing from a slot with no
+/// login would replace a good snapshot with nothing.
+fn recapture_after_sign_in(signed_in: bool) -> bool {
+    signed_in
+}
+
 pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, String) {
     let Some(home_var) = crate::slots::home_var(tool) else {
         return (
@@ -5091,6 +5105,34 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
                 _ => crate::proxy::creds::slot_token(&rec.config_dir).is_some(),
             };
             if signed_in {
+                // Re-capture, so the saved copy stops being the stale one. The
+                // marker the user is trying to clear is about this snapshot,
+                // not about the slot they just signed into.
+                if recapture_after_sign_in(signed_in) {
+                    let ok = std::env::current_exe()
+                        .ok()
+                        .and_then(|exe| {
+                            Command::new(exe)
+                                .args(["add", name])
+                                .stdin(std::process::Stdio::null())
+                                .output()
+                                .ok()
+                        })
+                        .is_some_and(|o| o.status.success());
+                    if ok {
+                        return (
+                            true,
+                            format!("'{name}' is signed in, and its saved copy is fresh"),
+                        );
+                    }
+                    return (
+                        true,
+                        format!(
+                            "'{name}' is signed in, but its saved copy could not be refreshed - \
+                             `swapdex add {name}` retries it"
+                        ),
+                    );
+                }
                 (true, format!("'{name}' is signed in"))
             } else {
                 (
@@ -8929,6 +8971,27 @@ mod cached_quota_tools_tests {
         assert!(
             tools.contains(&CODEX_TOOL),
             "a remembered reading has to be read back too: {tools:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sign_in_refresh_tests {
+    use super::*;
+
+    /// A successful sign-in has to refresh the saved copy too.
+    ///
+    /// The `l` key signs the SLOT in and stops there, while the "stale" marker
+    /// in `ls` is about the SNAPSHOT - the saved copy, whose token lapsed and
+    /// cannot be renewed because refresh tokens rotate. So pressing sign-in as
+    /// many times as you like never cleared it, and no other command re-captured
+    /// from a freshly signed-in slot either: there was nothing a user could do.
+    #[test]
+    fn a_fresh_sign_in_is_worth_re_capturing() {
+        assert!(recapture_after_sign_in(true), "it signed in: save that");
+        assert!(
+            !recapture_after_sign_in(false),
+            "it did not sign in - re-capturing would overwrite a good snapshot with nothing"
         );
     }
 }

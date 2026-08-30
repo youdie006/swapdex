@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.128.0
+
+- Signing in refreshes the saved copy, so the "stale" marker can actually be
+  cleared. The sign-in key put a login into the SLOT and stopped there, while
+  that marker is about the SNAPSHOT - the saved copy, whose token lapsed and
+  cannot be renewed because refresh tokens rotate. No command re-captured from a
+  freshly signed-in slot either, so pressing sign-in as many times as you liked
+  never changed anything, and there was nothing a user could do about a marker
+  their own action should have fixed. A sign-in that actually lands now
+  re-captures; one that does not is left alone, since re-capturing an empty slot
+  would replace a good snapshot with nothing.
+
 ## 0.127.0
 
 - An account with plenty of quota is re-read every 5 minutes instead of every 15.
