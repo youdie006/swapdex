@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.129.0
+
+- A Codex transcript is scanned line by line instead of being read whole. The
+  dashboard refreshes every 45 seconds, and each refresh loaded entire transcript
+  files into memory to find the handful of lines carrying rate limits. On a Mac
+  with 82 GB of Codex sessions - the largest file 1.1 GB - it went from 8 MB to
+  2.1 GB on every refresh, on a machine already 5 GB into swap, while the same
+  build on a machine with small transcripts sat at 44 MB. Same code, different
+  data. Measured on a 0.94 GB fixture: peak RSS 4.4 MB.
+
 ## 0.128.0
 
 - Signing in refreshes the saved copy, so the "stale" marker can actually be

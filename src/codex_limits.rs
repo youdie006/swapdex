@@ -101,9 +101,26 @@ fn window_from(v: &serde_json::Value) -> Option<Window> {
 /// and reading that comment is how someone would conclude these numbers arrive
 /// already attributed.
 fn from_transcript(path: &Path) -> Option<Limits> {
-    let text = std::fs::read_to_string(path).ok()?;
+    scan_transcript(path)
+}
+
+/// Scan a transcript for its rate-limit lines WITHOUT holding it in memory.
+///
+/// This used to read the whole file into a String to find a handful of lines.
+/// On a machine with 82 GB of Codex sessions the largest is 1.1 GB, so the
+/// dashboard - which refreshes every 45 seconds - went from 8 MB to 2.1 GB on
+/// every refresh, on a machine already 5 GB into swap. The same build on a
+/// machine with small transcripts sat at 44 MB: same code, different data.
+///
+/// Only a few lines carry the field, and only the last one is kept, so nothing
+/// needs to be resident but one line at a time.
+fn scan_transcript(path: &Path) -> Option<Limits> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
     let mut limits: Option<Limits> = None;
-    for line in text.lines() {
+    for line in reader.lines().map_while(Result::ok) {
+        let line = line.as_str();
         // Cheap prefilter: parsing every line of a long transcript is the slow
         // part, and only a few carry this field.
         if !line.contains("\"rate_limits\"") {
@@ -355,5 +372,57 @@ mod tests {
         assert_eq!(got.short.unwrap().used_pct, 55.0, "the newest one wins");
         // A transcript older than the window is not consulted at all.
         assert!(for_slot(paths.codex_dir(), secs + 200_000, 3600).is_none());
+    }
+}
+
+#[cfg(test)]
+mod streaming_read_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A transcript must be scanned, not swallowed.
+    ///
+    /// `from_transcript` read the whole file into a String to find a handful of
+    /// lines carrying `rate_limits`. On a Mac with 82 GB of Codex sessions the
+    /// largest is 1.1 GB, so the dashboard - which refreshes every 45 seconds -
+    /// spiked from 8 MB to 2.1 GB each time, on a machine already 5 GB into
+    /// swap. The same code on a machine with small transcripts sat at 44 MB:
+    /// same code, different data.
+    /// Peak memory while scanning a real ~1 GB transcript, so the claim is
+    /// measured rather than argued. Ignored by default: it needs the fixture.
+    #[test]
+    #[ignore]
+    fn scanning_a_gigabyte_stays_small() {
+        let p = std::path::Path::new(
+            "/tmp/claude-1000/-mnt-d-MyProject-gitstar/c3f27d4f-e0fc-4fb7-861d-89887f526f54/scratchpad/big/.codex/sessions/rollout-big.jsonl",
+        );
+        if !p.exists() {
+            return;
+        }
+        let got = scan_transcript(p);
+        assert!(got.is_some(), "the reading at the end is still found");
+    }
+
+    #[test]
+    fn a_huge_transcript_is_scanned_line_by_line() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("rollout.jsonl");
+        let mut f = std::fs::File::create(&p).unwrap();
+        // Bulk that must never be resident all at once, then the line that matters.
+        for _ in 0..2000 {
+            writeln!(f, "{{\"noise\":\"{}\"}}", "x".repeat(400)).unwrap();
+        }
+        writeln!(
+            f,
+            r#"{{"rate_limits":{{"secondary":{{"used_percent":40.0,"window_minutes":10080,"resets_in_seconds":600}}}}}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        let got = scan_transcript(&p).expect("the reading is found by scanning");
+        assert!(
+            got.long.is_some(),
+            "the window at the end of a long file is still found: {got:?}"
+        );
     }
 }
