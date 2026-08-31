@@ -680,7 +680,14 @@ fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
     // login. So prefer the Keychain when it is in play; the file is only the
     // fallback (a Keychain locked/absent, or an install that still uses it).
     if keychain_enabled() {
-        return keychain_read().or_else(|| {
+        // The item belongs to the DIRECTORY, and the service name used to be
+        // computed from the environment instead - so a capture pointed at one
+        // account's slot redirected the file lookup and went on reading the
+        // default item. A fresh sign-in was then followed by a capture that
+        // stored the account's OLD token: right account, wrong vintage, and the
+        // stale marker survived the one action meant to clear it.
+        let by_dir = slot_keychain_read_detail(paths.claude_dir()).ok();
+        return by_dir.or_else(keychain_read).or_else(|| {
             let f = paths.claude_credentials();
             f.exists()
                 .then(|| crate::atomic::read_regular(&f).ok())
@@ -1269,5 +1276,30 @@ mod tests {
         let id = Claude.identity(&pb).unwrap().unwrap();
         assert_eq!(id.account_id, "uuid-A");
         assert_eq!(id.email.as_deref(), Some("a@x.com"));
+    }
+}
+
+#[cfg(test)]
+mod capture_reads_slot_keychain_tests {
+    /// A capture pointed at a slot must read THAT slot's Keychain item.
+    ///
+    /// On macOS the Keychain is authoritative, and its service name was computed
+    /// from the ENVIRONMENT, not from the paths handed in. So pointing a capture
+    /// at a slot redirected the file lookup and left the Keychain reading the
+    /// default item: a fresh sign-in was followed by a capture that stored the
+    /// account's OLD token, and the stale marker survived the one action meant
+    /// to clear it. Right account, wrong vintage.
+    #[test]
+    fn the_service_follows_the_directory_it_was_given() {
+        let a = std::path::Path::new("/tmp/swapdex-kc-a");
+        let b = std::path::Path::new("/tmp/swapdex-kc-b");
+        let sa = super::slot_service(a);
+        let sb = super::slot_service(b);
+        assert_ne!(sa, sb, "different slots get different items");
+        assert_eq!(sa, super::slot_service(a), "and it is stable");
+        assert!(
+            sa.starts_with("Claude Code-credentials-"),
+            "it is a per-slot item, not the default one: {sa}"
+        );
     }
 }

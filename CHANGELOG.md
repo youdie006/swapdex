@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.131.0
+
+- A capture reads the Keychain item belonging to the directory it was handed. On
+  macOS the Keychain is authoritative and its service name was computed from the
+  ENVIRONMENT, so 0.130.0's capture-from-a-slot redirected only the file lookup
+  and went on reading the default item. The result was a refresh that stored the
+  account's OLD token - right account, wrong vintage - so a fresh sign-in wrote a
+  new snapshot and the stale marker survived the one action meant to clear it.
+
 ## 0.130.0
 
 - Signing in refreshes the saved copy, reading the slot it just signed into. The

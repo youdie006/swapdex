@@ -5041,6 +5041,29 @@ pub fn run_account(
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
 }
 
+/// Where a capture reads the credential from.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CaptureSource {
+    /// The live login - what every capture has always read.
+    LiveHome,
+    /// The account's own slot directory.
+    Slot,
+}
+
+/// Which one `--from-slot` selects.
+///
+/// A stale saved copy did not mean a bad login: the slot holds a good one, which
+/// is why the account serves turns fine. Only the snapshot was old, and the sole
+/// path that could refresh it ran inside the interactive sign-in key - so the
+/// only way to clear the marker was to sign in again for no reason.
+pub fn capture_source(from_slot: bool) -> CaptureSource {
+    if from_slot {
+        CaptureSource::Slot
+    } else {
+        CaptureSource::LiveHome
+    }
+}
+
 pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, String) {
     let Some(home_var) = crate::slots::home_var(tool) else {
         return (
@@ -8992,6 +9015,30 @@ mod slot_capture_tests {
         assert!(
             !creds.contains("AT-DEFAULT"),
             "must NOT read the default home: {creds}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_slot_flag_tests {
+    /// Refreshing a stale saved copy must not require signing in again.
+    ///
+    /// The account's slot already holds a good login - that is why it serves
+    /// turns fine. Only the SAVED COPY is old, and the one path that could
+    /// refresh it ran inside the interactive sign-in key, so the only way to
+    /// clear the marker was to log in again for no reason. Capturing from the
+    /// slot is the whole fix, and it needs to be reachable on its own.
+    #[test]
+    fn capture_source_is_the_slot_when_asked() {
+        assert_eq!(
+            super::capture_source(true),
+            super::CaptureSource::Slot,
+            "--from-slot reads the account own directory"
+        );
+        assert_eq!(
+            super::capture_source(false),
+            super::CaptureSource::LiveHome,
+            "the default stays the live login, as every other capture"
         );
     }
 }
