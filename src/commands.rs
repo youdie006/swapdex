@@ -5041,27 +5041,6 @@ pub fn run_account(
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
 }
 
-/// Sign an account in and come BACK.
-///
-/// `run_account` replaces this process, which is right for `swapdex run` from a
-/// shell and wrong for the dashboard: signing in one account tore the dashboard
-/// down, so adding several meant relaunching it between each. Here the tool is a
-/// child process that owns the terminal while it runs, and when it exits the
-/// caller is still alive to redraw.
-/// Should a sign-in be followed by re-capturing the saved copy?
-///
-/// The sign-in key put a login into the SLOT and stopped, while the "stale"
-/// marker is about the SNAPSHOT - the saved copy, whose token lapsed and cannot
-/// be renewed because refresh tokens rotate. Pressing sign-in never cleared it,
-/// and nothing else re-captured from a freshly signed-in slot, so there was
-/// nothing a user could do about a marker their own action should have fixed.
-///
-/// Only after a sign-in that actually landed: re-capturing from a slot with no
-/// login would replace a good snapshot with nothing.
-fn recapture_after_sign_in(signed_in: bool) -> bool {
-    signed_in
-}
-
 pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, String) {
     let Some(home_var) = crate::slots::home_var(tool) else {
         return (
@@ -5105,35 +5084,33 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
                 _ => crate::proxy::creds::slot_token(&rec.config_dir).is_some(),
             };
             if signed_in {
-                // Re-capture, so the saved copy stops being the stale one. The
-                // marker the user is trying to clear is about this snapshot,
-                // not about the slot they just signed into.
-                if recapture_after_sign_in(signed_in) {
-                    let ok = std::env::current_exe()
-                        .ok()
-                        .and_then(|exe| {
-                            Command::new(exe)
-                                .args(["add", name])
-                                .stdin(std::process::Stdio::null())
-                                .output()
-                                .ok()
-                        })
-                        .is_some_and(|o| o.status.success());
-                    if ok {
-                        return (
-                            true,
-                            format!("'{name}' is signed in, and its saved copy is fresh"),
-                        );
-                    }
-                    return (
+                // Re-capture from the slot this sign-in just landed in. The
+                // marker the user is trying to clear is about the SAVED COPY,
+                // and until now nothing could refresh it from the login they had
+                // just made. Reading the default dir instead would file whoever
+                // happens to be live under this account's name, so the paths are
+                // pointed at the slot explicitly rather than through an
+                // environment variable a sandbox would ignore.
+                let at_slot = paths.with_tool_dir(tool, &rec.config_dir);
+                match crate::adapters::by_name(tool)
+                    .ok_or_else(|| anyhow::anyhow!("unknown tool"))
+                    .and_then(|a| a.capture(&at_slot))
+                    .and_then(|snap| {
+                        crate::store::Store::open(paths)?.save(name, &snap)?;
+                        Ok(())
+                    }) {
+                    Ok(()) => (
+                        true,
+                        format!("'{name}' is signed in, and its saved copy is fresh"),
+                    ),
+                    Err(e) => (
                         true,
                         format!(
-                            "'{name}' is signed in, but its saved copy could not be refreshed - \
-                             `swapdex add {name}` retries it"
+                            "'{name}' is signed in, but its saved copy could not be \
+                             refreshed ({e})"
                         ),
-                    );
+                    ),
                 }
-                (true, format!("'{name}' is signed in"))
             } else {
                 (
                     false,
@@ -8976,22 +8953,45 @@ mod cached_quota_tools_tests {
 }
 
 #[cfg(test)]
-mod sign_in_refresh_tests {
-    use super::*;
+mod slot_capture_tests {
 
-    /// A successful sign-in has to refresh the saved copy too.
+    /// Capturing from a slot must read THAT slot, never the default home.
     ///
-    /// The `l` key signs the SLOT in and stops there, while the "stale" marker
-    /// in `ls` is about the SNAPSHOT - the saved copy, whose token lapsed and
-    /// cannot be renewed because refresh tokens rotate. So pressing sign-in as
-    /// many times as you like never cleared it, and no other command re-captured
-    /// from a freshly signed-in slot either: there was nothing a user could do.
+    /// This is the check that could not be written before: a SWAPDEX_ROOT
+    /// fixture ignores the environment variables the real resolver honours, so
+    /// pointing a capture at a slot through the environment was unverifiable -
+    /// and an unverified capture files whoever happens to be live under someone
+    /// else's name. Pointing the Paths directly is testable.
     #[test]
-    fn a_fresh_sign_in_is_worth_re_capturing() {
-        assert!(recapture_after_sign_in(true), "it signed in: save that");
+    fn a_slot_capture_reads_the_slot_not_the_default_home() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let paths = crate::paths::Paths::rooted(root);
+        let mk = |d: &std::path::Path, who: &str| {
+            std::fs::create_dir_all(d).unwrap();
+            let v = serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": format!("AT-{who}"),
+                    "refreshToken": "RT",
+                    "expiresAt": 9999999999999i64
+                }
+            });
+            std::fs::write(d.join(".credentials.json"), v.to_string()).unwrap();
+        };
+        mk(paths.claude_dir(), "DEFAULT");
+        let slot = root.join("slotdir");
+        mk(&slot, "SLOT");
+
+        let at = paths.with_tool_dir("claude-code", &slot);
+        let snap = crate::adapters::by_name("claude-code")
+            .unwrap()
+            .capture(&at)
+            .expect("the slot has a login");
+        let creds = String::from_utf8_lossy(snap.part("credentials").unwrap().expose()).to_string();
+        assert!(creds.contains("AT-SLOT"), "must read the slot: {creds}");
         assert!(
-            !recapture_after_sign_in(false),
-            "it did not sign in - re-capturing would overwrite a good snapshot with nothing"
+            !creds.contains("AT-DEFAULT"),
+            "must NOT read the default home: {creds}"
         );
     }
 }

@@ -35,6 +35,27 @@ impl Paths {
 
     /// Are these a redirected (test or SWAPDEX_ROOT) tree rather than the real
     /// one? Checked before starting anything that outlives this process.
+    /// The same paths, but with ONE tool config dir pointed somewhere else.
+    ///
+    /// The sign-in key lands a login in an account own slot directory, while
+    /// every capture reads whatever dir was resolved at startup - so the saved
+    /// copy could never be refreshed from the login just made, and the "stale"
+    /// marker had nothing that could clear it. The store is deliberately left
+    /// alone: only where the TOOL credential is read from moves.
+    ///
+    /// An environment variable would not do: the sandbox used by tests ignores
+    /// those by design, so the one check that proves this works could never run.
+    pub fn with_tool_dir(&self, tool: &str, dir: &Path) -> Paths {
+        let mut p = self.clone();
+        match tool {
+            "claude-code" => p.claude_dir = dir.to_path_buf(),
+            "codex" => p.codex_dir = dir.to_path_buf(),
+            "gemini" => p.gemini_dir = dir.to_path_buf(),
+            _ => {}
+        }
+        p
+    }
+
     pub fn sandboxed(&self) -> bool {
         self.sandboxed
     }
@@ -192,5 +213,36 @@ mod log_path_tests {
         // Under the store, so it travels with the rest of swapdex's state.
         assert!(a.starts_with(p.store_dir()), "{a:?}");
         assert!(a.to_string_lossy().contains("log"), "named as a log: {a:?}");
+    }
+}
+
+#[cfg(test)]
+mod pointed_at_slot_tests {
+    use super::*;
+
+    /// Capturing must be able to read ONE named slot, not just the default home.
+    ///
+    /// The sign-in key lands a login in the account's own slot directory, while
+    /// every capture path reads whatever dir `Paths` resolved at startup. So the
+    /// saved copy could never be refreshed from the login just made, and the
+    /// stale marker had nothing that could clear it. Pointing an existing Paths
+    /// at one slot is what makes that capture possible - and testable, which
+    /// matters because a SWAPDEX_ROOT fixture deliberately ignores the env vars
+    /// the real resolver honours.
+    #[test]
+    fn a_paths_can_be_pointed_at_one_slot() {
+        let base = Paths::rooted(std::path::Path::new("/tmp/swapdex-pointed"));
+        let slot = std::path::Path::new("/tmp/swapdex-pointed/slotdir");
+        let at = base.with_tool_dir("claude-code", slot);
+        assert_eq!(at.claude_dir(), slot, "claude reads the slot");
+        assert_eq!(
+            at.codex_dir(),
+            base.codex_dir(),
+            "other tools are untouched"
+        );
+        assert_eq!(at.store_dir(), base.store_dir(), "the store never moves");
+        let cx = base.with_tool_dir("codex", slot);
+        assert_eq!(cx.codex_dir(), slot);
+        assert_eq!(cx.claude_dir(), base.claude_dir());
     }
 }

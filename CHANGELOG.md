@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.130.0
+
+- Signing in refreshes the saved copy, reading the slot it just signed into. The
+  "stale" marker is about the SNAPSHOT, whose token lapsed and cannot be renewed
+  because refresh tokens rotate - so pressing the sign-in key never cleared it
+  and nothing else could either. Two earlier attempts at this were reverted: both
+  would have captured whatever config dir was resolved at startup, filing whoever
+  happened to be live under this account's name, and a SWAPDEX_ROOT fixture
+  ignores the environment variables that would have redirected it - so neither
+  could be verified. `Paths::with_tool_dir` points a capture at one slot
+  directly, which a test can check: it reads the slot's token and not the default
+  home's.
+
 ## 0.129.0
 
 - A Codex transcript is scanned line by line instead of being read whole. The
