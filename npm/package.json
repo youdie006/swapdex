@@ -1,6 +1,6 @@
 {
   "name": "@youdie006/swapdex",
-  "version": "0.132.0",
+  "version": "0.133.0",
   "description": "Switch between multiple Claude Code, Codex, Gemini, and Antigravity login accounts, locally and safely.",
   "bin": {
     "swapdex": "bin/swapdex.js"
@@ -11,10 +11,10 @@
     "man/swapdex.1"
   ],
   "optionalDependencies": {
-    "@youdie006/swapdex-darwin-arm64": "0.132.0",
-    "@youdie006/swapdex-darwin-x64": "0.132.0",
-    "@youdie006/swapdex-linux-x64": "0.132.0",
-    "@youdie006/swapdex-linux-arm64": "0.132.0"
+    "@youdie006/swapdex-darwin-arm64": "0.133.0",
+    "@youdie006/swapdex-darwin-x64": "0.133.0",
+    "@youdie006/swapdex-linux-x64": "0.133.0",
+    "@youdie006/swapdex-linux-arm64": "0.133.0"
   },
   "keywords": [
     "cli",

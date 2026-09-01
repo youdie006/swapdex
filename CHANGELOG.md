@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.133.0
+
+- Proxy log lines carry the time, and a 429 says which kind it is. Thirty-one
+  429s sat in a log with no timestamps: whether that was one burst inside a
+  second or a steady refusal across an hour decides the diagnosis entirely, and
+  the log could answer neither. A manual probe then returned 200 on that same
+  account with every window `allowed`, so the account had been fine all along and
+  the timing was the whole question - thrown away by the one file kept to answer
+  it. A 429 carrying no unified rate-limit headers is now named as a burst limit
+  rather than reported as a bare "throttled", because it says nothing about the
+  account it landed on.
+
 ## 0.132.0
 
 - An empty credential is no longer reported as a corrupt snapshot. `token_usable`

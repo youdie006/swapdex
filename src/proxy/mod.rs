@@ -584,6 +584,23 @@ fn claim_measure(
     }
 }
 
+/// A wall-clock stamp for a log line, local time, `hh:mm:ss`.
+///
+/// Thirty-one 429s sat in a proxy log with no times on them. Whether that was
+/// one burst inside a second or a steady refusal across an hour decides the
+/// diagnosis entirely - a burst points at request volume, a steady stream at the
+/// account - and the log could answer neither. The account turned out to be
+/// fine, so the timing was the whole question, and it had been thrown away.
+fn stamp_at(local_secs: i64) -> String {
+    let d = local_secs.rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", d / 3600, (d % 3600) / 60, d % 60)
+}
+
+/// The stamp for right now, in the machine's own time zone.
+fn stamp() -> String {
+    stamp_at(now_secs() + tz_offset())
+}
+
 fn refresh_measured(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
     // Claim the slot BEFORE the work starts, so concurrent turns do not each
     // begin their own read of the same accounts - the cold start included, which
@@ -1417,7 +1434,10 @@ fn forward_turn(
     // injected, no identity rewritten - and say so, since a silent exemption in
     // the log would be indistinguishable from a turn nobody served.
     if is_auth_exchange(&path) {
-        println!("  {method} {path} -> signing in, passed through untouched");
+        println!(
+            "  [{}] {method} {path} -> signing in, passed through untouched",
+            stamp()
+        );
         std::io::stdout().flush().ok();
         let mut headers = client_headers.clone();
         if let Some(auth) = client_auth.clone() {
@@ -1521,7 +1541,8 @@ fn forward_turn(
                         Err(e) => match transport_retry(t) {
                             Some(wait) => {
                                 println!(
-                                    "{} {path} -> connection lost, retrying in {}ms",
+                                    "[{}] {} {path} -> connection lost, retrying in {}ms",
+                                    stamp(),
                                     slot.name,
                                     wait.as_millis()
                                 );
@@ -1707,8 +1728,10 @@ fn forward_turn(
             if ratelimit::retry_unrewritten(up.status, rewritten, unrewritten_tries) {
                 unrewritten_tries += 1;
                 println!(
-                    "{} {path} -> {} on a request swapdex rewrote - retrying as you wrote it",
-                    slot.name, up.status
+                    "[{}] {} {path} -> {} on a request swapdex rewrote - retrying as you wrote it",
+                    stamp(),
+                    slot.name,
+                    up.status
                 );
                 std::io::stdout().flush().ok();
                 drop(up);
@@ -1721,7 +1744,8 @@ fn forward_turn(
             // talks to the same server.
             if let Some(wait) = overload_retry(up.status, attempt) {
                 println!(
-                    "{} {path} -> 529 overloaded, retrying in {}s",
+                    "[{}] {} {path} -> 529 overloaded, retrying in {}s",
+                    stamp(),
                     slot.name,
                     wait.as_secs()
                 );
@@ -1736,8 +1760,21 @@ fn forward_turn(
             }
             match ratelimit::classify_429(&up.headers, attempt) {
                 ratelimit::Throttle::RetryAfter(wait) => {
+                    // Say WHICH kind of 429. One carrying no unified rate-limit
+                    // headers is a burst throttle and says nothing about the
+                    // account; one naming a spent window is the account's own
+                    // wall. Thirty-one of these sat in a log saying only
+                    // "throttled", and the account turned out to be fine.
+                    let named = ratelimit::from_headers(&up.headers)
+                        .map(|q| q.rejected_windows().join(", "))
+                        .filter(|w| !w.is_empty());
+                    let why = match named {
+                        Some(w) => format!("spent: {w}"),
+                        None => "no window named - a burst limit, not this account".to_string(),
+                    };
                     println!(
-                        "{} {path} -> 429 throttled, retrying in {}s",
+                        "[{}] {} {path} -> 429 throttled ({why}), retrying in {}s",
+                        stamp(),
                         slot.name,
                         wait.as_secs()
                     );
@@ -1761,8 +1798,9 @@ fn forward_turn(
                     match pick::hold_for(&resets, now_secs(), cap) {
                         Some(wait) => {
                             println!(
-                                "{} {path} -> every account is spent; holding {}s for the \
+                                "[{}] {} {path} -> every account is spent; holding {}s for the \
                                  earliest window to reset",
+                                stamp(),
                                 slot.name,
                                 wait.as_secs()
                             );
@@ -1787,7 +1825,12 @@ fn forward_turn(
         // reason is read off it here - the API sends one, it was simply never
         // looked at. The body is handed on to the client untouched.
         if let Some(why) = upstream::explain_failure(&mut up) {
-            println!("{} {path} -> {} - {why}", slot.name, up.status);
+            println!(
+                "[{}] {} {path} -> {} - {why}",
+                stamp(),
+                slot.name,
+                up.status
+            );
             std::io::stdout().flush().ok();
         }
         let quota = ratelimit::from_headers(&up.headers);
@@ -1799,7 +1842,8 @@ fn forward_turn(
         // accounts sitting idle.
         match &quota {
             Some(q) if q.rejected => println!(
-                "{} {path} -> {} ({} spent)",
+                "[{}] {} {path} -> {} ({} spent)",
+                stamp(),
                 slot.name,
                 up.status,
                 q.rejected_windows().join(", ")
@@ -2539,5 +2583,30 @@ mod first_measure_tests {
             m.held().0.is_some(),
             "the claim is recorded, not left for the next thread to miss"
         );
+    }
+}
+
+#[cfg(test)]
+mod log_stamp_tests {
+    use super::*;
+
+    /// A proxy line has to say WHEN, or it cannot answer the question it exists
+    /// for.
+    ///
+    /// Thirty-one 429s sat in a log with no times on them. Whether that was one
+    /// burst in a second or a steady refusal over an hour decides the diagnosis
+    /// entirely - a burst points at request volume, a steady stream at the
+    /// account - and the log could answer neither. The account turned out to be
+    /// fine (a manual probe returned 200 with every window `allowed`), so the
+    /// timing was the whole question and it had been thrown away.
+    #[test]
+    fn a_log_line_carries_a_time() {
+        let a = stamp_at(0);
+        assert_eq!(a.len(), 8, "hh:mm:ss, so lines stay narrow: {a}");
+        assert_eq!(stamp_at(0), "00:00:00");
+        assert_eq!(stamp_at(3661), "01:01:01");
+        assert_eq!(stamp_at(86399), "23:59:59");
+        // Wraps at midnight rather than running past 24.
+        assert_eq!(stamp_at(86400), "00:00:00");
     }
 }
