@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.134.0
+
+- A proxy withdraws its pinned address when it stops. Left behind, that address
+  names a loopback port nobody answers, and a session STARTED in that window is
+  bricked for its whole life - Claude Code reads the address once, at startup, so
+  no later recovery reaches it. Going direct is the login the user already has,
+  and it works. Only a pin naming this proxy's own port is touched: another port
+  belongs to a second proxy or to a choice made by hand, and taking that away
+  would be its own outage. Every other setting in the file is preserved and the
+  write is atomic, so a stop cannot leave a half-written settings file.
+- Known limit: a session already running keeps the address it started with, so
+  this helps the next session, not the current one. And a hard kill (SIGKILL)
+  runs no handler at all.
+
 ## 0.133.0
 
 - Proxy log lines carry the time, and a 429 says which kind it is. Thirty-one

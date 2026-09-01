@@ -1077,9 +1077,18 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         // the other proxy's, so the surviving proxy stopped being reported as
         // serving anything.
         let serving = serving_file_for(paths, &opts.tool);
+        // Withdraw the pinned address too. Left behind, it names a port nobody
+        // answers, and a session STARTED in that window is bricked for its whole
+        // life - the address is read once, at startup. Going direct is the login
+        // the user already has, and it works. Only a pin naming this proxy's own
+        // port is touched; another port belongs to something else.
+        let unpin = (opts.tool != "codex").then(|| (paths.clone(), opts.port));
         let _ = ctrl_c_cleanup(move || {
             let _ = std::fs::remove_file(&m);
             let _ = std::fs::remove_file(&serving);
+            if let Some((p, port)) = &unpin {
+                crate::shim::withdraw_pin(p, *port);
+            }
         });
     }
     let is_codex = opts.tool == "codex";

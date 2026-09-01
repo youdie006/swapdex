@@ -403,6 +403,53 @@ pub fn pin_verdict(service_installed: bool, port: u16) -> PinVerdict {
 ///
 /// `None` for an address this check cannot speak for: only a loopback pin is
 /// swapdex's to verify.
+/// Is the pinned address this proxy's own?
+///
+/// When the proxy stops, the address in settings.json goes on naming a port
+/// nobody answers, and a session started in that window is bricked for its whole
+/// life - the address is read once, at startup. Withdrawing the pin on the way
+/// out lets those sessions go direct instead.
+///
+/// Only ours: a pin naming another port belongs to a second proxy or to a choice
+/// the user made by hand, and taking that away would be its own outage.
+pub fn pin_is_ours(pinned: Option<u16>, mine: u16) -> bool {
+    pinned == Some(mine)
+}
+
+/// Take the pin out of the settings file, if it is this proxy's.
+///
+/// Every other key is preserved - the file holds the user's model, hooks and
+/// permissions - and the write is atomic, so a stop cannot leave a half-written
+/// settings file behind.
+pub fn withdraw_pin(paths: &Paths, mine: u16) -> bool {
+    let file = paths.claude_dir().join("settings.json");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return false;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    if !pin_is_ours(pinned_port(&v), mine) {
+        return false;
+    }
+    let emptied = match v.get_mut("env").and_then(|e| e.as_object_mut()) {
+        Some(env) => {
+            env.remove("ANTHROPIC_BASE_URL");
+            env.is_empty()
+        }
+        None => false,
+    };
+    if emptied {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("env");
+        }
+    }
+    let Ok(body) = serde_json::to_vec_pretty(&v) else {
+        return false;
+    };
+    crate::atomic::write_secret(&file, &body).is_ok()
+}
+
 pub fn pinned_port(settings: &serde_json::Value) -> Option<u16> {
     let url = settings.get("env")?.get("ANTHROPIC_BASE_URL")?.as_str()?;
     let rest = url.strip_prefix("http://")?;
@@ -1153,5 +1200,63 @@ mod pinned_port_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod unpin_on_exit_tests {
+    use super::*;
+
+    /// A pin must be withdrawn only when it points at THIS proxy.
+    ///
+    /// When the proxy stops, the address in settings.json goes on naming a port
+    /// nobody answers - and a session started in that window is bricked for its
+    /// whole life, because the address is read once at startup. Withdrawing it
+    /// on the way out lets those sessions go direct instead.
+    ///
+    /// It must never touch a pin that belongs to something else: a second proxy
+    /// on another port, or an address the user set by hand.
+    #[test]
+    fn only_this_proxy_pin_is_withdrawn() {
+        assert!(pin_is_ours(Some(8787), 8787), "our own port");
+        assert!(!pin_is_ours(Some(9001), 8787), "another proxy port");
+        assert!(
+            !pin_is_ours(None, 8787),
+            "nothing pinned - nothing to withdraw"
+        );
+    }
+}
+
+#[cfg(test)]
+mod withdraw_pin_file_tests {
+    use super::*;
+
+    /// Withdrawing keeps every other setting, and leaves other pins alone.
+    #[test]
+    fn it_removes_only_our_pin_and_keeps_the_rest() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(td.path());
+        std::fs::create_dir_all(paths.claude_dir()).unwrap();
+        let f = paths.claude_dir().join("settings.json");
+        let write = |v: serde_json::Value| std::fs::write(&f, v.to_string()).unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap()
+        };
+
+        // Ours: withdrawn, and the neighbouring keys survive.
+        write(serde_json::json!({
+            "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787", "KEEP": "1"},
+            "model": "opus", "hooks": {}
+        }));
+        assert!(withdraw_pin(&paths, 8787));
+        let v = read();
+        assert!(v["env"]["ANTHROPIC_BASE_URL"].is_null(), "the pin is gone");
+        assert_eq!(v["env"]["KEEP"], "1", "other env survives");
+        assert_eq!(v["model"], "opus", "other settings survive");
+
+        // Someone else's port: untouched.
+        write(serde_json::json!({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9001"}}));
+        assert!(!withdraw_pin(&paths, 8787), "not ours to withdraw");
+        assert_eq!(read()["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9001");
     }
 }
