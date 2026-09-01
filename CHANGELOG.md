@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.132.0
+
+- An empty credential is no longer reported as a corrupt snapshot. `token_usable`
+  rejects an empty token and a malformed one alike, so a credential that simply
+  could not be READ here - on macOS, a Keychain that will not open for this shell
+  - was announced as corrupt with `add --update` offered as the fix. That would
+  overwrite a perfectly good saved copy with what this shell can see, which is
+  nothing. Other accounts in the same listing already said plainly that the
+  keychain could not be read; only this branch guessed, and guessed destructively.
+
 ## 0.131.0
 
 - A capture reads the Keychain item belonging to the directory it was handed. On

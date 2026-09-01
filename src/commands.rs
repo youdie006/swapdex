@@ -5041,6 +5041,29 @@ pub fn run_account(
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
 }
 
+/// Why a token could not be used, without guessing which kind of failure it was.
+///
+/// `token_usable` rejects an empty token and a malformed one alike, so a
+/// credential that came back EMPTY - on macOS, a Keychain that would not open
+/// for this shell - was reported as a corrupt snapshot with `add --update`
+/// offered as the fix. That would overwrite a perfectly good saved copy with
+/// whatever this shell can see, which is nothing. Other accounts in the same
+/// listing said plainly that the keychain could not be read; only this branch
+/// guessed, and guessed destructively.
+pub fn unusable_token_reason(token: &str, unreadable: Option<&str>) -> String {
+    if !token.is_empty() {
+        return "saved token unusable (corrupt snapshot?) - `swapdex add <name> --update` \
+                re-saves it"
+            .to_string();
+    }
+    match unreadable {
+        Some(why) => why.to_string(),
+        None => "its credential read back empty here - nothing was saved wrong; \
+                 run this where the login can be read"
+            .to_string(),
+    }
+}
+
 /// Where a capture reads the credential from.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CaptureSource {
@@ -7371,11 +7394,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             // network is down" and abort the whole run.
             Some(t) if !q::token_usable(t) => results.push((
                 i,
-                Fetch::Offline(
-                    "saved token unusable (corrupt snapshot?) - `swapdex add <name> --update` \
-                     re-saves it"
-                        .into(),
-                ),
+                Fetch::Offline(unusable_token_reason(t, r.unreadable.as_deref())),
             )),
             // Collected and read together below: one round trip per account in
             // sequence was most of the wait.
@@ -9039,6 +9058,41 @@ mod from_slot_flag_tests {
             super::capture_source(false),
             super::CaptureSource::LiveHome,
             "the default stays the live login, as every other capture"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unusable_token_tests {
+    use super::*;
+
+    /// An empty token is not a corrupt one, and must not invite an overwrite.
+    ///
+    /// `token_usable` rejects both, so a credential that came back EMPTY -
+    /// which on macOS means the Keychain would not open for this shell - was
+    /// reported as a corrupt snapshot, with `add --update` offered as the fix.
+    /// That would overwrite a perfectly good saved copy with whatever this
+    /// shell could see, which is nothing. The other accounts in the same
+    /// listing said plainly that the keychain could not be read; only this
+    /// branch guessed, and guessed destructively.
+    #[test]
+    fn an_empty_token_says_it_was_not_read_not_that_it_is_corrupt() {
+        let empty = unusable_token_reason("", None);
+        assert!(
+            !empty.contains("corrupt") && !empty.contains("--update"),
+            "nothing was read - do not call it corrupt or offer to overwrite: {empty}"
+        );
+        // When the caller knows WHY it could not be read, that reason wins.
+        let why = unusable_token_reason(
+            "",
+            Some("signed in, but this shell cannot read the keychain"),
+        );
+        assert!(why.contains("keychain"), "the known reason is used: {why}");
+        // A token that really is malformed keeps the original advice.
+        let bad = unusable_token_reason("abc\ndef", None);
+        assert!(
+            bad.contains("corrupt"),
+            "a malformed token is still corrupt: {bad}"
         );
     }
 }
