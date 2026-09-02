@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.135.0
+
+- A dropped connection or a failed DNS lookup is retried wherever it happens.
+  That retry existed and was wired into ONE of seven upstream call sites, so
+  every other path - including the one that serves ordinary turns - returned the
+  blip straight up and it reached the user as a 502. One Mac's proxy log held 102
+  of them: 72 DNS lookups that did not resolve, 24 broken pipes, plus timeouts
+  and a vanished route. The retry now lives inside the forwarding call itself, so
+  no caller can miss it. A refusal from the server is still passed through
+  untouched - that is an answer, not a blip - and so is a certificate failure,
+  which asking again will not fix.
+
 ## 0.134.0
 
 - A proxy withdraws its pinned address when it stops. Left behind, that address

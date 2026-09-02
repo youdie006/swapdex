@@ -115,7 +115,60 @@ fn collect_headers<T>(resp: &ureq::http::Response<T>) -> Vec<(String, String)> {
 
 /// Forward one request upstream. `headers` is passed through verbatim - the
 /// caller has already replaced Authorization and dropped hop-by-hop headers.
+/// Is this failure a blip worth one more attempt?
+///
+/// A dropped connection, a DNS lookup that did not resolve, a route that
+/// vanished for a moment - the network or the server shedding load, where the
+/// next attempt usually succeeds. The retry for these was written once and wired
+/// into one of seven call sites, so every other path returned the error straight
+/// up and it reached the user as a 502. One Mac's proxy log held 102 of them:
+/// 72 DNS lookups, 24 broken pipes.
+///
+/// A refusal from the server is an ANSWER, not a blip, and has to reach the
+/// caller so the account logic can act on it. So must a certificate failure,
+/// which will not fix itself by being asked again.
+pub fn worth_retrying(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    if e.contains("certificate") || e.contains("http status") {
+        return false;
+    }
+    e.contains("lookup address")
+        || e.contains("broken pipe")
+        || e.contains("no route to host")
+        || e.contains("unexpected end of file")
+        || e.contains("connection reset")
+        || e.contains("connection refused")
+        || e.contains("timeout")
+}
+
 pub fn forward(
+    agent: &ureq::Agent,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<Upstream> {
+    // Retried HERE, so every caller is covered. This was written once and wired
+    // into one of seven call sites; the other six returned a dropped connection
+    // or a failed DNS lookup straight up, and it reached the user as a 502.
+    const TRIES: u32 = 4;
+    let mut attempt = 0u32;
+    loop {
+        match forward_once(agent, method, url, headers, body) {
+            Ok(u) => return Ok(u),
+            Err(e) => {
+                let text = format!("{e:#}");
+                if attempt + 1 >= TRIES || !worth_retrying(&text) {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250u64 << attempt));
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn forward_once(
     agent: &ureq::Agent,
     method: &str,
     url: &str,
@@ -240,5 +293,31 @@ mod explain_tests {
         let mut back = String::new();
         up.reader.read_to_string(&mut back).unwrap();
         assert_eq!(back, "event: message_start\n\n");
+    }
+}
+
+#[cfg(test)]
+mod transient_retry_tests {
+    use super::*;
+
+    /// A transport failure is retried wherever it happens, not at one caller.
+    ///
+    /// A dropped connection or a DNS blip is the server or the network shedding
+    /// load; the next attempt usually succeeds. That retry was written once and
+    /// wired into a single one of seven call sites, so every other path returned
+    /// the error straight up and it reached the user as a 502. On one Mac the
+    /// proxy log held 102 of them - 72 DNS lookups, 24 broken pipes - each one a
+    /// blip that a second attempt would have covered.
+    #[test]
+    fn transient_transport_errors_are_worth_another_try() {
+        assert!(worth_retrying("io: failed to lookup address information"));
+        assert!(worth_retrying("io: Broken pipe (os error 32)"));
+        assert!(worth_retrying("io: No route to host"));
+        assert!(worth_retrying("io: unexpected end of file"));
+        assert!(worth_retrying("timeout: global"));
+        // A refusal from the server is an answer, not a blip - it must reach the
+        // caller so the account logic can act on it.
+        assert!(!worth_retrying("http status 401"));
+        assert!(!worth_retrying("certificate verification failed"));
     }
 }
