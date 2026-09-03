@@ -283,6 +283,13 @@ enum Cmd {
 }
 
 fn main() {
+    // Rust sets SIGPIPE to SIG_IGN before main, so a reader that stops early
+    // turns the next println! into a panic: `swapdex ls | head -1` printed a
+    // Rust panic and a backtrace hint where every other Unix tool just stops.
+    // Restore the default so a closed pipe ends the process quietly.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let paths = match Paths::resolve() {
         Ok(p) => p,

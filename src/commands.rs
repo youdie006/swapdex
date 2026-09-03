@@ -6199,15 +6199,25 @@ pub fn service_status(paths: &Paths) -> Result<i32> {
         });
         let installed = path.as_ref().is_some_and(|p| p.exists());
         let running = crate::proxy::running_proxy_for(paths, tool).is_some();
+        // A proxy that keeps dying and being restarted reads as "running" on
+        // the instant this runs, which is how a crash every hour stayed
+        // invisible. Ask the supervisor what it has been watching.
+        let note = if installed {
+            let (restarts, last_exit) = crate::service::supervisor_report(tool);
+            crate::service::supervision_note(restarts, last_exit)
+        } else {
+            None
+        };
         println!(
-            "{:<12} service: {:<13} proxy: {}",
+            "{:<12} service: {:<13} proxy: {}{}",
             tool_binary(tool),
             if installed {
                 "installed"
             } else {
                 "not installed"
             },
-            if running { "running" } else { "not running" }
+            if running { "running" } else { "not running" },
+            note.map(|n| format!("  - {n}")).unwrap_or_default()
         );
     }
     println!(

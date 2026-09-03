@@ -127,6 +127,79 @@ pub fn unit_program(body: &str) -> Option<&str> {
     Some(rest[open..close].trim())
 }
 
+/// `systemctl show -p NRestarts --value` prints the count, or nothing at all
+/// for a unit it does not know. Empty is not zero: a supervisor that did not
+/// answer has not told us the proxy is fine.
+pub fn parse_nrestarts(out: &str) -> Option<u32> {
+    out.trim().parse().ok()
+}
+
+/// `launchctl list <label>` prints a plist-ish block holding LastExitStatus,
+/// or an error line when the job is not loaded. launchd keeps no restart
+/// count, so this is the whole of what it can say.
+pub fn parse_launchctl_last_exit(out: &str) -> Option<i32> {
+    out.lines()
+        .find_map(|l| l.split_once("\"LastExitStatus\" = "))
+        .and_then(|(_, rest)| rest.trim().trim_end_matches(';').parse().ok())
+}
+
+/// Ask whichever supervisor is on this machine. Both answers stay None when
+/// the supervisor could not be reached, so silence is never read as health.
+pub fn supervisor_report(tool: &str) -> (Option<u32>, Option<i32>) {
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("launchctl")
+            .args(["list", &launchd_label(tool)])
+            .output()
+            .ok();
+        let text = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        (None, parse_launchctl_last_exit(&text))
+    } else {
+        let out = std::process::Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                &systemd_unit(tool),
+                "-p",
+                "NRestarts",
+                "--value",
+            ])
+            .output()
+            .ok();
+        let text = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        (parse_nrestarts(&text), None)
+    }
+}
+
+/// What the supervisor knows about a proxy that is not staying up.
+///
+/// `service status` used to answer one question - is something listening - so a
+/// proxy that had crashed and been restarted five times that day printed the
+/// same line as one that had been up for a week. The supervisor was counting
+/// the whole time; nothing asked it.
+///
+/// The two supervisors know different things, so each says only its own:
+/// systemd keeps a restart count, launchd keeps only the last exit status.
+pub fn supervision_note(restarts: Option<u32>, last_exit: Option<i32>) -> Option<String> {
+    if let Some(n) = restarts {
+        if n > 0 {
+            let how = if n == 1 {
+                "once".to_string()
+            } else {
+                format!("{n} times")
+            };
+            return Some(format!("restarted {how} - it is not staying up"));
+        }
+    }
+    match last_exit {
+        Some(0) | None => None,
+        Some(c) => Some(format!("last exit {c}")),
+    }
+}
+
 pub fn install(paths: &Paths, tool: &str) -> anyhow::Result<PathBuf> {
     use anyhow::Context;
     let exe = std::env::current_exe().context("cannot find swapdex's own path")?;
@@ -340,5 +413,69 @@ mod unit_program_tests {
         assert_eq!(unit_program(plist), Some("/usr/local/bin/swapdex"));
 
         assert_eq!(unit_program("nothing here"), None);
+    }
+}
+
+#[cfg(test)]
+mod supervision_note_tests {
+    use super::*;
+
+    #[test]
+    fn a_proxy_that_stays_up_gets_no_note() {
+        assert_eq!(supervision_note(Some(0), Some(0)), None);
+        assert_eq!(supervision_note(None, None), None);
+    }
+
+    /// The whole point. `swapdex service status` said "proxy: running" for a
+    /// proxy that had died and been restarted five times that day, because it
+    /// asked whether one was listening and nothing else. systemd counts the
+    /// restarts; swapdex simply never asked.
+    #[test]
+    fn systemd_restarts_are_reported() {
+        let note = supervision_note(Some(5), Some(1)).expect("five restarts is worth saying");
+        assert!(note.contains('5'), "should name the count: {note}");
+    }
+
+    #[test]
+    fn one_restart_reads_as_english() {
+        let note = supervision_note(Some(1), None).expect("one restart is still worth saying");
+        assert!(note.contains("once"), "not 'restarted 1 times': {note}");
+    }
+
+    /// launchd keeps no restart count, only the last exit status, so on macOS
+    /// that is all there is to say - and saying it is better than silence.
+    #[test]
+    fn launchd_reports_the_last_exit_instead() {
+        assert_eq!(supervision_note(None, Some(0)), None);
+        let note = supervision_note(None, Some(137)).expect("a non-zero exit is worth saying");
+        assert!(note.contains("137"), "should name the status: {note}");
+    }
+}
+
+#[cfg(test)]
+mod supervisor_parse_tests {
+    use super::*;
+
+    #[test]
+    fn systemd_restart_count() {
+        assert_eq!(parse_nrestarts("5\n"), Some(5));
+        assert_eq!(parse_nrestarts("0\n"), Some(0));
+        // A unit systemd does not know answers empty, and that is not zero.
+        assert_eq!(parse_nrestarts("\n"), None);
+        assert_eq!(parse_nrestarts("[not-set]"), None);
+    }
+
+    #[test]
+    fn launchctl_last_exit_status() {
+        let block = "{\n\t\"Label\" = \"io.github.youdie006.swapdex.claude\";\n\
+                     \t\"LastExitStatus\" = 137;\n\t\"PID\" = 4242;\n}";
+        assert_eq!(parse_launchctl_last_exit(block), Some(137));
+        let ok = "{\n\t\"LastExitStatus\" = 0;\n}";
+        assert_eq!(parse_launchctl_last_exit(ok), Some(0));
+        // Not loaded: launchctl prints an error, not a block.
+        assert_eq!(
+            parse_launchctl_last_exit("Could not find service in domain"),
+            None
+        );
     }
 }

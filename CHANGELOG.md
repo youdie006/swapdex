@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.139.0
+
+- `service status` reports a proxy that keeps dying. It used to answer only
+  whether something was listening at that instant, so a proxy restarted five
+  times that day looked identical to one up for a week - which is how an hourly
+  crash stayed invisible. systemd's restart count and launchd's last exit
+  status are now read and shown; a supervisor that cannot be reached stays
+  silent rather than reading as healthy.
+- A closed pipe ends the process quietly. Rust ignores SIGPIPE before main, so
+  `swapdex ls | head -1` panicked with "failed printing to stdout: Broken pipe"
+  where every other Unix tool simply stops.
+
 ## 0.138.0
 
 - The npm launcher reports the signal that killed the binary instead of exit 1.
