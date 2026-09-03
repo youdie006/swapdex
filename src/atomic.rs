@@ -110,6 +110,13 @@ pub fn tmp_path_for(dest: &Path) -> std::path::PathBuf {
 /// the destination's OWN directory (so rename is same-filesystem) with mode
 /// 0600 at creation (no create-then-chmod world-readable window).
 pub fn write_secret(dest: &Path, bytes: &[u8]) -> Result<()> {
+    // Checked HERE, where the write happens. It used to be called from six entry
+    // points while thirty writes come through this function, so signing in,
+    // onboarding, installing the slash command and syncing MCP all wrote
+    // unguarded. A write made as root leaves root-owned files in the user's own
+    // store, and every later write by the user then fails - quietly, and long
+    // after the command that caused it.
+    ensure_not_root()?;
     refuse_unsafe_path(dest)?;
     let dir = dest.parent().context("destination has no parent dir")?;
     if !dir.exists() {
@@ -212,5 +219,30 @@ mod unique_tmp_tests {
         let name = a.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with('.'), "{name}");
         assert!(name.contains("swapdex"), "{name}");
+    }
+}
+
+#[cfg(test)]
+mod root_guard_placement_tests {
+    use super::*;
+
+    /// The root refusal belongs where the write happens, not at some callers.
+    ///
+    /// It was called from six entry points while thirty writes go through
+    /// `write_secret`, so `sign_in`, `onboard`, `install-slash` and `sync-mcp`
+    /// all wrote unguarded. A write made as root leaves root-owned files in the
+    /// user's own store, and every later write by the user then fails - quietly,
+    /// and long after the command that caused it.
+    #[test]
+    fn every_secret_write_checks_before_it_writes() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("creds.json");
+        // Not root here, so the guard passes and the write proceeds; the point
+        // is that the check is ON this path at all.
+        assert!(write_secret(&p, b"{}").is_ok());
+        // What this CANNOT check: the refusal itself. The test does not run as
+        // root, so the guard is never exercised here - only that adding it did
+        // not break the ordinary path. The placement is the fix; a test that
+        // asserted it by returning `true` would prove nothing.
     }
 }

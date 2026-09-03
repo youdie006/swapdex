@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.136.0
+
+- The refusal to run as root now sits where credentials are written, instead of
+  at six entry points. Thirty writes go through that one function, so signing in,
+  onboarding, installing the slash command and syncing MCP all wrote unguarded. A
+  write made as root leaves root-owned files inside the user's own store, and
+  every later write by the user then fails - quietly, and long after the command
+  that caused it.
+
 ## 0.135.0
 
 - A dropped connection or a failed DNS lookup is retried wherever it happens.
