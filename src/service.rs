@@ -180,26 +180,42 @@ pub fn restart_argv(tool: &str, macos: bool, uid: u32) -> Vec<String> {
     }
 }
 
-/// Ask the supervisor to restart the proxy. False when there is no supervisor
-/// for this tool, or it would not do it - the caller then falls back to the
-/// signal, because not replacing a stale proxy at all is worse.
-pub fn restart_via_supervisor(home: Option<&Path>, tool: &str) -> bool {
+/// Ask the supervisor to restart the proxy.
+///
+/// `Err` carries WHY it could not, because the caller then falls back to
+/// signalling the proxy - which costs the supervisor's restart delay and a
+/// counted crash. That fallback used to happen in silence, so a machine where
+/// it always fired looked exactly like one where it never did.
+pub fn restart_via_supervisor(home: Option<&Path>, tool: &str) -> Result<(), String> {
     let macos = cfg!(target_os = "macos");
-    let installed = home.is_some_and(|h| {
-        if macos {
-            launchd_path(h, tool).exists()
-        } else {
-            systemd_path(h, tool).exists()
-        }
-    });
-    if !installed {
-        return false;
+    let Some(home) = home else {
+        return Err("no home directory to look for a service in".into());
+    };
+    let unit = if macos {
+        launchd_path(home, tool)
+    } else {
+        systemd_path(home, tool)
+    };
+    if !unit.exists() {
+        return Err(format!("no service installed at {}", unit.display()));
     }
     let argv = restart_argv(tool, macos, unsafe { libc::getuid() });
-    std::process::Command::new(&argv[0])
+    match std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .output()
-        .is_ok_and(|o| o.status.success())
+    {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let e = String::from_utf8_lossy(&o.stderr);
+            let e = e.trim();
+            Err(format!(
+                "{} refused: {}",
+                argv[0],
+                if e.is_empty() { "no reason given" } else { e }
+            ))
+        }
+        Err(e) => Err(format!("could not run {}: {e}", argv[0])),
+    }
 }
 
 /// `systemctl show -p NRestarts --value` prints the count, or nothing at all
@@ -756,13 +772,13 @@ mod supervisor_sandbox_tests {
     #[test]
     fn an_empty_home_has_no_supervisor_to_ask() {
         let home = tempfile::tempdir().unwrap();
-        assert!(!restart_via_supervisor(Some(home.path()), "claude-code"));
-        assert!(!restart_via_supervisor(Some(home.path()), "codex"));
+        assert!(restart_via_supervisor(Some(home.path()), "claude-code").is_err());
+        assert!(restart_via_supervisor(Some(home.path()), "codex").is_err());
     }
 
     #[test]
     fn no_home_at_all_is_not_a_supervisor_either() {
-        assert!(!restart_via_supervisor(None, "claude-code"));
+        assert!(restart_via_supervisor(None, "claude-code").is_err());
     }
 }
 

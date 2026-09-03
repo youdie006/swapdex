@@ -2142,7 +2142,11 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
         // paths.home(), never dirs::home_dir(): under a test root the latter
         // still points at the real home, and asking the supervisor there
         // restarts the developer's own proxy from inside a sandboxed run.
-        if !crate::service::restart_via_supervisor(Some(paths.home()), tool) {
+        if let Err(why) = crate::service::restart_via_supervisor(Some(paths.home()), tool) {
+            // Say it. The fallback is worse for the user - a five second gap
+            // and a crash on the supervisor's record - so a machine that takes
+            // it every time must not look like one that never does.
+            eprintln!("swapdex: replacing the proxy by signal instead ({why})");
             unsafe { libc::kill(pid, libc::SIGTERM) };
         }
         // Two endings, and starting a proxy on the wrong one is how a pair of

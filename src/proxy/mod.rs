@@ -2004,9 +2004,14 @@ pub fn build_id() -> String {
 /// One file per tool. A single shared one meant the Codex proxy's choice
 /// overwrote the Claude proxy's, so the Claude dashboard read a Codex account as
 /// the one serving its turns - and no Claude row matched it.
-fn serving_file_for(paths: &Paths, tool: &str) -> std::path::PathBuf {
+pub(crate) fn serving_file_for(paths: &Paths, tool: &str) -> std::path::PathBuf {
     match tool {
         "codex" => paths.store_dir().join("proxy-serving-codex"),
+        // "One file per tool" was true of two of the four: gemini and
+        // antigravity fell through to Claude's, which is the same overwrite
+        // this function exists to prevent.
+        "gemini" => paths.store_dir().join("proxy-serving-gemini"),
+        "antigravity" => paths.store_dir().join("proxy-serving-antigravity"),
         // Claude's keeps the name it has always had, so a proxy already running
         // is not orphaned by an upgrade.
         _ => paths.store_dir().join("proxy-serving"),

@@ -23,6 +23,10 @@ pub fn shim_bin_dir(paths: &Paths) -> PathBuf {
 pub fn shim_path_for(paths: &Paths, tool: &str) -> PathBuf {
     let bin = match tool {
         "codex" => "codex",
+        // Same fall-through: a gemini shim would have been installed under the
+        // name "claude", replacing the shim a plain `claude` runs.
+        "gemini" => "gemini",
+        "antigravity" => "agy",
         _ => "claude",
     };
     paths.store_dir().join("bin").join(bin)
@@ -153,6 +157,11 @@ pub fn proxy_marker(paths: &Paths) -> PathBuf {
 pub fn proxy_marker_for(paths: &Paths, tool: &str) -> PathBuf {
     match tool {
         "codex" => paths.store_dir().join("proxy-codex"),
+        // These two used to fall through to Claude's file. A gemini proxy
+        // would then overwrite the marker Claude's own shim reads, and every
+        // Claude session would be pointed at the Gemini proxy.
+        "gemini" => paths.store_dir().join("proxy-gemini"),
+        "antigravity" => paths.store_dir().join("proxy-antigravity"),
         // Claude's keeps the name it has always had, so an upgrade does not
         // orphan a proxy that is already running.
         _ => paths.store_dir().join("proxy"),
@@ -1306,5 +1315,59 @@ mod profile_read_tests {
         std::fs::create_dir(&p).unwrap();
         let err = read_profile_for_edit(&p).unwrap_err().to_string();
         assert!(err.contains("refusing"), "unhelpful: {err}");
+    }
+}
+
+#[cfg(test)]
+mod per_tool_path_tests {
+    use super::*;
+
+    /// `paths.proxy_log` already names a file per tool. These two did not: the
+    /// marker and the shim both fell through to Claude's name, so a gemini
+    /// proxy would overwrite the marker Claude's own shim reads - pointing
+    /// every Claude session at the Gemini proxy - and a gemini shim would
+    /// overwrite the Claude shim binary.
+    #[test]
+    fn every_tool_gets_its_own_marker_and_shim() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(d.path());
+        let tools = ["claude-code", "codex", "gemini", "antigravity"];
+        let markers: Vec<_> = tools.iter().map(|t| proxy_marker_for(&paths, t)).collect();
+        let shims: Vec<_> = tools.iter().map(|t| shim_path_for(&paths, t)).collect();
+        let serving: Vec<_> = tools
+            .iter()
+            .map(|t| crate::proxy::serving_file_for(&paths, t))
+            .collect();
+        for i in 0..tools.len() {
+            for j in (i + 1)..tools.len() {
+                assert_ne!(
+                    markers[i], markers[j],
+                    "{} and {} share a proxy marker",
+                    tools[i], tools[j]
+                );
+                assert_ne!(
+                    shims[i], shims[j],
+                    "{} and {} share a shim path",
+                    tools[i], tools[j]
+                );
+                assert_ne!(
+                    serving[i], serving[j],
+                    "{} and {} share a serving file",
+                    tools[i], tools[j]
+                );
+            }
+        }
+    }
+
+    /// Claude's marker and shim keep the names they have, or an upgrade
+    /// orphans a proxy that is already running and a shim already on PATH.
+    #[test]
+    fn the_established_names_do_not_move() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(d.path());
+        assert!(proxy_marker_for(&paths, "claude-code").ends_with("proxy"));
+        assert!(proxy_marker_for(&paths, "codex").ends_with("proxy-codex"));
+        assert!(shim_path_for(&paths, "claude-code").ends_with("claude"));
+        assert!(shim_path_for(&paths, "codex").ends_with("codex"));
     }
 }

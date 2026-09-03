@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.143.0
+
+- The proxy marker, the shim binary and the serving file are named per tool.
+  gemini and antigravity fell through to Claude's names, so `service status`
+  reported a Gemini proxy running when the file it read was Claude's, and a
+  Gemini proxy or shim would have overwritten Claude's own.
+- Replacing a supervised proxy by signal, when the supervisor will not do it,
+  now says why. That fallback costs a five second gap and a counted crash, and
+  it was taken in silence.
+
 ## 0.142.0
 
 - gemini and antigravity get their own service unit, port and binary name.
