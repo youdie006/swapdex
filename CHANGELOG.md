@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.144.0
+
+- Antigravity is actually pointed at its slot. `with_tool_dir` had no arm for
+  it, so it returned the paths unchanged and the capture after a sign-in read
+  the live default dir instead - filing whoever was signed in there under the
+  slot account's name. Its token lives under the gemini dir, so that is what
+  moves. A redirect that cannot be made is now refused rather than ignored.
+- The proxy says so when it stops serving. Its loop has no exit of its own, and
+  the path that returns exited 0 - which systemd restarts without logging
+  anything at all.
+
 ## 0.143.0
 
 - The proxy marker, the shim binary and the serving file are named per tool.

@@ -2081,6 +2081,12 @@ pub fn proxy(
         threshold_pinned,
     };
     crate::proxy::serve(paths, &opts)?;
+    // The serve loop has no exit of its own, so reaching here means something
+    // ended it. A supervised proxy that exits 0 is restarted in silence -
+    // systemd logs nothing for a clean exit - and this one did that twice in
+    // six seconds with no record anywhere of why. Leave one.
+    println!("  the proxy stopped serving and is exiting; nothing asked it to");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
     Ok(0)
 }
 
@@ -5164,10 +5170,22 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
                 // happens to be live under this account's name, so the paths are
                 // pointed at the slot explicitly rather than through an
                 // environment variable a sandbox would ignore.
-                let at_slot = paths.with_tool_dir(tool, &rec.config_dir);
-                match crate::adapters::by_name(tool)
-                    .ok_or_else(|| anyhow::anyhow!("unknown tool"))
-                    .and_then(|a| a.capture(&at_slot))
+                // A redirect that quietly did nothing is worse than none: the
+                // capture below would then read the LIVE default dir and file
+                // whoever is signed in there under this account's name.
+                match paths
+                    .try_with_tool_dir(tool, &rec.config_dir)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot point '{tool}' at its slot, so a capture would \
+                             read the live default instead"
+                        )
+                    })
+                    .and_then(|at_slot| {
+                        crate::adapters::by_name(tool)
+                            .ok_or_else(|| anyhow::anyhow!("unknown tool"))
+                            .and_then(|a| a.capture(&at_slot))
+                    })
                     .and_then(|snap| {
                         crate::store::Store::open(paths)?.save(name, &snap)?;
                         Ok(())

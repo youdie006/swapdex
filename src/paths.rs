@@ -46,14 +46,27 @@ impl Paths {
     /// An environment variable would not do: the sandbox used by tests ignores
     /// those by design, so the one check that proves this works could never run.
     pub fn with_tool_dir(&self, tool: &str, dir: &Path) -> Paths {
+        self.try_with_tool_dir(tool, dir)
+            .unwrap_or_else(|| self.clone())
+    }
+
+    /// The same, but `None` for a name that is not a tool, so a caller that
+    /// depends on the redirect can tell it did not happen.
+    ///
+    /// Antigravity used to land in the catch-all and change nothing, and the
+    /// caller then captured from the live default dir - the exact outcome the
+    /// doc above says this function exists to prevent, filing whoever happened
+    /// to be signed in under the slot account's name. Its token lives under
+    /// the gemini dir, so that is what moves.
+    pub fn try_with_tool_dir(&self, tool: &str, dir: &Path) -> Option<Paths> {
         let mut p = self.clone();
         match tool {
             "claude-code" => p.claude_dir = dir.to_path_buf(),
             "codex" => p.codex_dir = dir.to_path_buf(),
-            "gemini" => p.gemini_dir = dir.to_path_buf(),
-            _ => {}
+            "gemini" | "antigravity" => p.gemini_dir = dir.to_path_buf(),
+            _ => return None,
         }
-        p
+        Some(p)
     }
 
     pub fn sandboxed(&self) -> bool {
@@ -252,5 +265,53 @@ mod pointed_at_slot_tests {
         let cx = base.with_tool_dir("codex", slot);
         assert_eq!(cx.codex_dir(), slot);
         assert_eq!(cx.claude_dir(), base.claude_dir());
+    }
+}
+
+#[cfg(test)]
+mod with_tool_dir_tests {
+    use super::*;
+
+    /// `with_tool_dir` exists so a capture reads ONE named slot instead of the
+    /// live default - its own comment says reading the default "would file
+    /// whoever happens to be live under this account's name". For antigravity
+    /// the match had no arm and fell through to `_ => {}`, so it returned the
+    /// paths unchanged and the capture read the default anyway, silently.
+    #[test]
+    fn every_tool_is_actually_redirected() {
+        let root = tempfile::tempdir().unwrap();
+        let base = Paths::rooted(root.path());
+        let slot = root.path().join("slot-one");
+
+        let at = base.with_tool_dir("claude-code", &slot);
+        assert!(at.claude_credentials().starts_with(&slot));
+
+        let cx = base.with_tool_dir("codex", &slot);
+        assert!(cx.codex_auth().starts_with(&slot));
+
+        let gm = base.with_tool_dir("gemini", &slot);
+        assert!(gm.gemini_oauth().starts_with(&slot));
+
+        // Antigravity keeps its token under the gemini dir, so redirecting it
+        // means redirecting that.
+        let ag = base.with_tool_dir("antigravity", &slot);
+        assert!(
+            ag.antigravity_token().starts_with(&slot),
+            "antigravity was not redirected: {}",
+            ag.antigravity_token().display()
+        );
+    }
+
+    /// A name that is not a tool must not look like a successful redirect.
+    #[test]
+    fn an_unknown_tool_is_refused_rather_than_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let base = Paths::rooted(root.path());
+        assert!(base
+            .try_with_tool_dir("not-a-tool", &root.path().join("s"))
+            .is_none());
+        assert!(base
+            .try_with_tool_dir("codex", &root.path().join("s"))
+            .is_some());
     }
 }
