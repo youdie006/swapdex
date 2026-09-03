@@ -1,0 +1,75 @@
+name: triage
+
+# A first response that asks for the facts a fix actually depends on, so the
+# round trip costs minutes instead of days. It labels nothing by guessing at
+# keywords - the issue templates already set bug/enhancement, and a wrong label
+# is worse than no label.
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  ask-for-the-missing-facts:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: A bug report with no version cannot be acted on
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+
+          # Only bug reports. A feature request has no version to give, and
+          # asking for one there is noise.
+          case ",$LABELS," in
+            *,bug,*) ;;
+            *) echo "not a bug report - nothing to ask for"; exit 0 ;;
+          esac
+
+          # Any filled-in version has digits in it. An untouched template line
+          # ("- swapdex version (swapdex --version):") does not.
+          if printf '%s' "$BODY" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "a version is present - leaving it alone"
+            exit 0
+          fi
+
+          gh issue edit "$NUMBER" -R "$REPO" --add-label "needs info"
+          gh issue comment "$NUMBER" -R "$REPO" --body 'Thanks for the report. Two things decide what happens next, and neither is here yet:
+
+          - The output of `swapdex --version`. The installed one, not the release you read about: if two installs are on PATH they disagree, and `npm ls -g @youdie006/swapdex` or `brew info swapdex` settles which one is answering.
+          - Which OS, and which tool was involved: Claude Code, Codex, Gemini or Antigravity.
+
+          If it touches switching, serving, or the proxy, paste `swapdex doctor` as well. It reports what swapdex can and cannot see, which is usually where these turn out to live.
+
+          Labelled `needs info`. Add them in a comment and it goes back into the normal queue.'
+
+  greet-an-outside-pull-request:
+    # pull_request_target so a pull request from a fork gets a token that can
+    # comment. The fork's code is never checked out here, only commented on.
+    if: >-
+      github.event_name == 'pull_request_target'
+      && github.event.pull_request.user.login != github.repository_owner
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Say what happens next
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$NUMBER" -R "$REPO" --body 'Thanks for the pull request. This is a one-person project, so here is what happens next rather than silence:
+
+          CI has to be green, and changes are read against the tests. A fix that arrives with a test which fails before it and passes after is the one that moves fastest. A fix without one tends to sit here while I work out how to verify it.
+
+          Nothing else is expected of you. If CI goes red on something unrelated to your change, say so and I will look.'
