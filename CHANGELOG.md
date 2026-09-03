@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.138.0
+
+- The npm launcher reports the signal that killed the binary instead of exit 1.
+  `spawnSync` reports a signal death as a null status plus a signal name, and
+  the launcher discarded the name - so a killed proxy and a failed proxy were
+  the same observation, with no output either way. It now exits 128 + signal
+  (a SIGKILL reads as 137) and names the signal on stderr. Found while a WSL
+  proxy was exiting silently at the top of every hour.
+
 ## 0.137.0
 
 - Never rewrite a shell profile that could not be read. Putting the shim on PATH

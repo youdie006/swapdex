@@ -35,6 +35,12 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all
+      - name: Test the npm launcher
+        # It decides what a user sees when the binary dies, and it is the only
+        # part of the npm install that is not the binary itself.
+        # The pattern is quoted so node expands it, not the shell: a bare
+        # directory argument makes node try to load it as a module.
+        run: node --test 'npm/bin/**/*.test.mjs'
       - name: No async runtime or heavy HTTP stack in the graph
         run: |
           # swapdex talks to the network in exactly two places, both of which the

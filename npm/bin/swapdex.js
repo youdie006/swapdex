@@ -6,6 +6,7 @@
 // install time and there is no allow-scripts prompt.
 
 const { spawnSync } = require("child_process");
+const { describeExit } = require("./exit.js");
 
 // swapdex is a Unix tool (Linux, WSL, macOS) - it manages 0600 credential files.
 const PKGS = {
@@ -46,4 +47,6 @@ if (result.error) {
   );
   process.exit(1);
 }
-process.exit(result.status === null ? 1 : result.status);
+const { code, note } = describeExit(result);
+if (note) console.error(note);
+process.exit(code);
