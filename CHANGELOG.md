@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.137.0
+
+- Never rewrite a shell profile that could not be read. Putting the shim on PATH
+  reads `~/.zshrc`, appends two lines and writes it back; the read used
+  `unwrap_or_default()`, so a profile that failed to read for any reason other
+  than being absent became an empty string - and the write then replaced the
+  user's PATH, aliases and version managers with the swapdex stanza. Absence
+  still means an empty profile; anything else now refuses.
+
 ## 0.136.0
 
 - The refusal to run as root now sits where credentials are written, instead of

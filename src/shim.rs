@@ -5,7 +5,7 @@
 //! `CLAUDE_CONFIG_DIR`.
 
 use crate::paths::Paths;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Where swapdex installs the shim: `<store_dir>/bin/claude`.
@@ -334,6 +334,26 @@ pub enum PathSetup {
     Manual,
 }
 
+/// Read a shell profile that is about to be rewritten.
+///
+/// Absent is an empty profile - that is a first install and appending is right.
+/// Unreadable is NOT. This used to be `read_to_string(..).unwrap_or_default()`,
+/// so a profile we could not read became an empty string and the write below
+/// put it back with only our two lines in it, taking the user's PATH, aliases
+/// and version managers with it. The one case swapdex must never get wrong is
+/// the one where it destroys a file it does not own.
+fn read_profile_for_edit(profile: &Path) -> Result<String> {
+    match std::fs::read_to_string(profile) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => bail!(
+            "cannot read {} ({e}) - refusing to rewrite it, because rewriting \
+             what we could not read would replace it",
+            profile.display()
+        ),
+    }
+}
+
 /// Put the shim dir on PATH by editing the user's shell profile, because leaving
 /// this to the user means the shim silently does nothing: it is installed, PATH
 /// never reaches it, and `swapdex use` appears to work while changing nothing.
@@ -345,7 +365,7 @@ pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
     let Some(profile) = shell_profile() else {
         return Ok(PathSetup::Manual);
     };
-    let existing = std::fs::read_to_string(&profile).unwrap_or_default();
+    let existing = read_profile_for_edit(&profile)?;
     let line = path_line(shim_dir);
     if existing.contains(PROFILE_MARKER) || profile_already_adds(&existing, shim_dir) {
         // Written before but not active yet: the user has not started a new shell.
@@ -1258,5 +1278,33 @@ mod withdraw_pin_file_tests {
         write(serde_json::json!({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9001"}}));
         assert!(!withdraw_pin(&paths, 8787), "not ours to withdraw");
         assert_eq!(read()["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9001");
+    }
+}
+
+#[cfg(test)]
+mod profile_read_tests {
+    use super::*;
+
+    /// Absent and unreadable are different. Only the first one means "empty".
+    #[test]
+    fn a_missing_profile_reads_as_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("no-such-rc");
+        assert_eq!(read_profile_for_edit(&p).unwrap(), "");
+    }
+
+    /// The whole point. `unwrap_or_default()` turned any read failure into an
+    /// empty profile, and the very next line wrote that empty profile back with
+    /// our two lines appended - replacing the user's PATH, aliases and version
+    /// managers with a swapdex stanza. A directory stands in for every
+    /// non-absence failure (permissions, I/O); it fails the same way for every
+    /// user, root included.
+    #[test]
+    fn an_unreadable_profile_is_an_error_not_an_empty_one() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("rc-is-a-dir");
+        std::fs::create_dir(&p).unwrap();
+        let err = read_profile_for_edit(&p).unwrap_err().to_string();
+        assert!(err.contains("refusing"), "unhelpful: {err}");
     }
 }
