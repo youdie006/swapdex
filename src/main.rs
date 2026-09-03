@@ -413,7 +413,7 @@ fn main() {
         }
         Cmd::Service { what } => match what {
             ServiceCmd::Install { tool } => commands::service_install(&paths, *tool),
-            ServiceCmd::Uninstall { tool } => commands::service_uninstall(*tool),
+            ServiceCmd::Uninstall { tool } => commands::service_uninstall(&paths, *tool),
             ServiceCmd::Status => commands::service_status(&paths),
         },
         Cmd::Slots => commands::list_slots(&paths),

@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.142.0
+
+- gemini and antigravity get their own service unit, port and binary name.
+  Everything that was not codex fell through to claude, so
+  `service install --tool gemini` overwrote the Claude service with one running
+  the Gemini proxy on Claude's own port 8787, and the shim looked for the
+  `claude` executable when asked for gemini. claude and codex keep the unit
+  names and ports already installed on real machines.
+- `service status` lists all four tools; two of them were simply not checked.
+- A service install stays inside `SWAPDEX_ROOT`. It located the unit with
+  `dirs::home_dir()`, which a sandbox cannot redirect, so a sandboxed run wrote
+  a real unit into the user's home and asked the supervisor to load it.
+
 ## 0.141.0
 
 - The supervisor's history is dated rather than reported as the present. A

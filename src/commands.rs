@@ -2091,11 +2091,14 @@ pub const DEFAULT_PROXY_PORT: u16 = 8787;
 /// The port a tool's proxy binds when nobody names one. Codex takes the next
 /// port so both can run at once - the rule `proxy --ensure` has always applied,
 /// now stated once so anything else writing a proxy invocation agrees with it.
+/// One port per tool. Two proxies cannot share one, and the port is written
+/// into the service unit - gemini and antigravity both used to take Claude's.
 pub fn default_port_for(tool: &str) -> u16 {
-    if tool == "codex" {
-        DEFAULT_PROXY_PORT + 1
-    } else {
-        DEFAULT_PROXY_PORT
+    match tool {
+        "codex" => DEFAULT_PROXY_PORT + 1,
+        "gemini" => DEFAULT_PROXY_PORT + 2,
+        "antigravity" => DEFAULT_PROXY_PORT + 3,
+        _ => DEFAULT_PROXY_PORT,
     }
 }
 
@@ -3608,13 +3611,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
 /// conversation" handoff. Only returns on exec failure.
 fn exec_tool(tool: &str, dir: Option<&std::path::Path>) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
-    let bin = match tool {
-        "claude-code" => "claude",
-        "codex" => "codex",
-        "gemini" => "gemini",
-        "antigravity" => "agy",
-        other => return anyhow::anyhow!("unknown tool '{other}'"),
-    };
+    // One table, in tool_binary. An unknown name is refused here rather than
+    // silently launching Claude.
+    if !matches!(tool, "claude-code" | "codex" | "gemini" | "antigravity") {
+        return anyhow::anyhow!("unknown tool '{tool}'");
+    }
+    let bin = tool_binary(tool);
     let mut cmd = Command::new(bin);
     if let Some(d) = dir {
         cmd.current_dir(d);
@@ -5239,9 +5241,17 @@ pub(crate) fn slot_tool(sel: Option<ToolSel>) -> &'static str {
     }
 }
 
+/// The executable each tool actually installs.
+///
+/// The one table. `exec_tool` had this right while this had everything that
+/// was not codex answering "claude", and fourteen call sites read this one -
+/// including the shim's search for the real binary, so for gemini and
+/// antigravity swapdex went looking for Claude.
 pub(crate) fn tool_binary(tool: &str) -> &'static str {
     match tool {
         "codex" => "codex",
+        "gemini" => "gemini",
+        "antigravity" => "agy",
         _ => "claude",
     }
 }
@@ -6195,9 +6205,9 @@ pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
 }
 
 /// `swapdex service uninstall` - stop it and take the unit away.
-pub fn service_uninstall(sel: Option<ToolSel>) -> Result<i32> {
+pub fn service_uninstall(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
     let tool = slot_tool(sel);
-    match crate::service::uninstall(tool)? {
+    match crate::service::uninstall(paths, tool)? {
         Some(p) => println!(
             "removed {}",
             crate::util::redact_path(&p.display().to_string())
@@ -6209,16 +6219,13 @@ pub fn service_uninstall(sel: Option<ToolSel>) -> Result<i32> {
 
 /// `swapdex service status` - what is installed, and whether it is up.
 pub fn service_status(paths: &Paths) -> Result<i32> {
-    let home = dirs::home_dir();
-    for tool in ["claude-code", "codex"] {
-        let path = home.as_ref().map(|h| {
-            if cfg!(target_os = "macos") {
-                crate::service::launchd_path(h, tool)
-            } else {
-                crate::service::systemd_path(h, tool)
-            }
-        });
-        let installed = path.as_ref().is_some_and(|p| p.exists());
+    // All four, not the two that were listed here: a gemini or antigravity
+    // service could be installed and running and this said nothing about it.
+    // The unit's location comes from `paths` so a sandboxed run reports on the
+    // sandbox rather than on the machine.
+    for tool in ["claude-code", "codex", "gemini", "antigravity"] {
+        let path = crate::service::unit_path(paths, tool);
+        let installed = path.exists();
         let running = crate::proxy::running_proxy_for(paths, tool).is_some();
         // A proxy that keeps dying and being restarted reads as "running" on
         // the instant this runs, which is how a crash every hour stayed
@@ -9125,5 +9132,40 @@ mod unusable_token_tests {
             bad.contains("corrupt"),
             "a malformed token is still corrupt: {bad}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_binary_tests {
+    use super::*;
+
+    /// The same fact was written twice: `exec_tool` had the right table and
+    /// `tool_binary` had a wrong one where everything that was not codex
+    /// became "claude". Fourteen call sites use `tool_binary`, including the
+    /// one that resolves the real executable, so for gemini and antigravity
+    /// swapdex looked for - and named - Claude.
+    #[test]
+    fn tool_binary_names_the_binary_each_tool_actually_has() {
+        assert_eq!(tool_binary("claude-code"), "claude");
+        assert_eq!(tool_binary("codex"), "codex");
+        assert_eq!(tool_binary("gemini"), "gemini");
+        assert_eq!(tool_binary("antigravity"), "agy");
+    }
+
+    /// And nothing collapses onto another tool's name.
+    #[test]
+    fn no_two_tools_report_the_same_binary() {
+        let tools = ["claude-code", "codex", "gemini", "antigravity"];
+        for i in 0..tools.len() {
+            for j in (i + 1)..tools.len() {
+                assert_ne!(
+                    tool_binary(tools[i]),
+                    tool_binary(tools[j]),
+                    "{} and {} both resolve to the same binary",
+                    tools[i],
+                    tools[j]
+                );
+            }
+        }
     }
 }

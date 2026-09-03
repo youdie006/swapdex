@@ -21,9 +21,17 @@ pub fn systemd_unit(tool: &str) -> String {
     format!("swapdex-{}.service", short_tool(tool))
 }
 
+/// The short name in a unit file or launchd label, one per tool.
+///
+/// `claude` and `codex` are fixed: units under those names are already
+/// installed on real machines and renaming them would orphan them. The other
+/// two used to fall through to "claude", so `service install --tool gemini`
+/// overwrote the Claude service with one that ran the Gemini proxy.
 fn short_tool(tool: &str) -> &'static str {
     match tool {
         "codex" => "codex",
+        "gemini" => "gemini",
+        "antigravity" => "antigravity",
         _ => "claude",
     }
 }
@@ -99,6 +107,28 @@ pub fn systemd_path(home: &Path, tool: &str) -> PathBuf {
 /// Where a managed proxy writes what it says.
 pub fn log_dir(paths: &Paths) -> PathBuf {
     paths.store_dir().join("logs")
+}
+
+/// Where this machine's supervisor keeps one tool's unit, derived from the
+/// paths in hand rather than the ambient home.
+///
+/// `install` used to ask `dirs::home_dir()`, which `SWAPDEX_ROOT` cannot
+/// redirect - a sandboxed run would have written a real launchd agent or
+/// systemd unit into the user's home.
+pub fn unit_path(paths: &Paths, tool: &str) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        launchd_path(paths.home(), tool)
+    } else {
+        systemd_path(paths.home(), tool)
+    }
+}
+
+/// Whether these paths describe the real machine, rather than a test root.
+///
+/// Writing the unit somewhere harmless is not containment on its own: asking
+/// launchctl or systemctl to load it would still reach the real supervisor.
+pub fn manages_the_real_machine(paths: &Paths) -> bool {
+    dirs::home_dir().is_some_and(|h| h == paths.home())
 }
 
 /// Install (or replace) the agent for one tool and start it.
@@ -358,14 +388,14 @@ pub fn install(paths: &Paths, tool: &str) -> anyhow::Result<PathBuf> {
     use anyhow::Context;
     let exe = std::env::current_exe().context("cannot find swapdex's own path")?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let home = dirs::home_dir().context("cannot determine home dir")?;
     let logs = log_dir(paths);
     std::fs::create_dir_all(&logs).ok();
 
+    let path = unit_path(paths, tool);
     let (path, body) = if cfg!(target_os = "macos") {
-        (launchd_path(&home, tool), launchd_plist(&exe, tool, &logs))
+        (path, launchd_plist(&exe, tool, &logs))
     } else {
-        (systemd_path(&home, tool), systemd_service(&exe, tool))
+        (path, systemd_service(&exe, tool))
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("create the service directory")?;
@@ -375,7 +405,12 @@ pub fn install(paths: &Paths, tool: &str) -> anyhow::Result<PathBuf> {
     // bind the port - and with KeepAlive set, the supervisor would restart it into
     // that same failure for as long as the machine is on.
     stop_running(paths, tool);
-    load(&path, tool);
+    // Only the real machine's supervisor gets driven. Under a test root the
+    // unit now lands inside the sandbox, but handing that path to launchctl or
+    // systemctl would still load it for real.
+    if manages_the_real_machine(paths) {
+        load(&path, tool);
+    }
     Ok(path)
 }
 
@@ -436,26 +471,23 @@ fn load(path: &Path, tool: &str) {
 }
 
 /// Remove the agent and stop it.
-pub fn uninstall(tool: &str) -> anyhow::Result<Option<PathBuf>> {
+pub fn uninstall(paths: &Paths, tool: &str) -> anyhow::Result<Option<PathBuf>> {
     use anyhow::Context;
-    let home = dirs::home_dir().context("cannot determine home dir")?;
-    let path = if cfg!(target_os = "macos") {
-        launchd_path(&home, tool)
-    } else {
-        systemd_path(&home, tool)
-    };
+    let path = unit_path(paths, tool);
     if !path.exists() {
         return Ok(None);
     }
-    if cfg!(target_os = "macos") {
-        let target = format!("gui/{}", unsafe { libc::getuid() });
-        let _ = std::process::Command::new("launchctl")
-            .args(["bootout", &target, &path.display().to_string()])
-            .output();
-    } else {
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "disable", "--now", &systemd_unit(tool)])
-            .output();
+    if manages_the_real_machine(paths) {
+        if cfg!(target_os = "macos") {
+            let target = format!("gui/{}", unsafe { libc::getuid() });
+            let _ = std::process::Command::new("launchctl")
+                .args(["bootout", &target, &path.display().to_string()])
+                .output();
+        } else {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", "--now", &systemd_unit(tool)])
+                .output();
+        }
     }
     std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     Ok(Some(path))
@@ -752,5 +784,96 @@ mod etime_tests {
         assert_eq!(parse_etime("00:00"), Some(0));
         assert_eq!(parse_etime(""), None);
         assert_eq!(parse_etime("not a duration"), None);
+    }
+}
+
+#[cfg(test)]
+mod sandbox_containment_tests {
+    use super::*;
+
+    /// `SWAPDEX_ROOT` promises that a run cannot touch the real machine, and
+    /// `install` was computing the unit's location from `dirs::home_dir()` -
+    /// so a sandboxed install would have written a real launchd agent or
+    /// systemd unit into the user's home and asked the supervisor to load it.
+    #[test]
+    fn the_unit_lands_under_the_paths_home_not_the_ambient_one() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        for tool in ["claude-code", "codex"] {
+            let p = unit_path(&paths, tool);
+            assert!(
+                p.starts_with(root.path()),
+                "{tool} unit escaped the sandbox: {}",
+                p.display()
+            );
+        }
+    }
+
+    /// And a sandboxed run must not drive the real supervisor either: writing
+    /// the file somewhere harmless is no good if launchctl or systemctl is
+    /// then asked to load it.
+    #[test]
+    fn a_sandboxed_run_does_not_drive_the_supervisor() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!manages_the_real_machine(&crate::paths::Paths::rooted(
+            root.path()
+        )));
+    }
+}
+
+#[cfg(test)]
+mod tool_identity_tests {
+    use super::*;
+
+    /// Four tools are offered on `--tool`, and every one that was not codex
+    /// collapsed onto "claude". `service install --tool gemini` therefore wrote
+    /// a file called `swapdex-claude.service` whose ExecStart ran the GEMINI
+    /// proxy - replacing the user's Claude service, on the port Claude is
+    /// pinned to.
+    #[test]
+    fn every_tool_gets_its_own_unit_and_label() {
+        let tools = ["claude-code", "codex", "gemini", "antigravity"];
+        let units: Vec<String> = tools.iter().map(|t| systemd_unit(t)).collect();
+        let labels: Vec<String> = tools.iter().map(|t| launchd_label(t)).collect();
+        for i in 0..tools.len() {
+            for j in (i + 1)..tools.len() {
+                assert_ne!(
+                    units[i], units[j],
+                    "{} and {} share a unit file",
+                    tools[i], tools[j]
+                );
+                assert_ne!(
+                    labels[i], labels[j],
+                    "{} and {} share a launchd label",
+                    tools[i], tools[j]
+                );
+            }
+        }
+    }
+
+    /// The names already installed on real machines must not move.
+    #[test]
+    fn the_two_that_already_exist_keep_their_names() {
+        assert_eq!(systemd_unit("claude-code"), "swapdex-claude.service");
+        assert_eq!(systemd_unit("codex"), "swapdex-codex.service");
+    }
+
+    /// Two proxies cannot share a port, and the unit is written with one.
+    #[test]
+    fn every_tool_gets_its_own_port() {
+        let tools = ["claude-code", "codex", "gemini", "antigravity"];
+        let ports: Vec<u16> = tools
+            .iter()
+            .map(|t| crate::commands::default_port_for(t))
+            .collect();
+        for i in 0..tools.len() {
+            for j in (i + 1)..tools.len() {
+                assert_ne!(
+                    ports[i], ports[j],
+                    "{} and {} both want port {}",
+                    tools[i], tools[j], ports[i]
+                );
+            }
+        }
     }
 }
