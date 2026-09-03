@@ -94,6 +94,14 @@ impl Paths {
     pub fn claude_config_json(&self) -> PathBuf {
         self.home.join(".claude.json")
     }
+    /// The home these paths hang off - the temp root under a test root, the
+    /// real one otherwise. Anything that needs a path in the user's home must
+    /// ask here rather than call `dirs::home_dir()`, which a sandbox cannot
+    /// redirect: a test doing that reached out and restarted the developer's
+    /// own service.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
     pub fn codex_auth(&self) -> PathBuf {
         self.codex_dir.join("auth.json")
     }

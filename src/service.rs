@@ -127,6 +127,51 @@ pub fn unit_program(body: &str) -> Option<&str> {
     Some(rest[open..close].trim())
 }
 
+/// The command that asks this machine's supervisor to restart one tool's proxy.
+///
+/// Pure, and takes the platform rather than reading it, so both shapes are
+/// tested on either machine.
+pub fn restart_argv(tool: &str, macos: bool, uid: u32) -> Vec<String> {
+    if macos {
+        vec![
+            "launchctl".into(),
+            "kickstart".into(),
+            // Without -k an already-running job is left exactly as it is.
+            "-k".into(),
+            format!("gui/{uid}/{}", launchd_label(tool)),
+        ]
+    } else {
+        vec![
+            "systemctl".into(),
+            "--user".into(),
+            "restart".into(),
+            systemd_unit(tool),
+        ]
+    }
+}
+
+/// Ask the supervisor to restart the proxy. False when there is no supervisor
+/// for this tool, or it would not do it - the caller then falls back to the
+/// signal, because not replacing a stale proxy at all is worse.
+pub fn restart_via_supervisor(home: Option<&Path>, tool: &str) -> bool {
+    let macos = cfg!(target_os = "macos");
+    let installed = home.is_some_and(|h| {
+        if macos {
+            launchd_path(h, tool).exists()
+        } else {
+            systemd_path(h, tool).exists()
+        }
+    });
+    if !installed {
+        return false;
+    }
+    let argv = restart_argv(tool, macos, unsafe { libc::getuid() });
+    std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 /// `systemctl show -p NRestarts --value` prints the count, or nothing at all
 /// for a unit it does not know. Empty is not zero: a supervisor that did not
 /// answer has not told us the proxy is fine.
@@ -477,5 +522,69 @@ mod supervisor_parse_tests {
             parse_launchctl_last_exit("Could not find service in domain"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod restart_argv_tests {
+    use super::*;
+
+    /// Replacing a proxy the supervisor owns by signalling it makes the
+    /// supervisor count a crash: every routine upgrade of swapdex added one to
+    /// NRestarts, so the "it is not staying up" note would cry wolf on a
+    /// machine where nothing was wrong. Ask the supervisor instead.
+    #[test]
+    fn systemd_is_asked_to_restart_its_own_unit() {
+        let argv = restart_argv("claude-code", false, 1000);
+        assert_eq!(
+            argv,
+            vec![
+                "systemctl".to_string(),
+                "--user".into(),
+                "restart".into(),
+                "swapdex-claude.service".into()
+            ]
+        );
+    }
+
+    /// launchd needs the -k so the running job is stopped first; a plain
+    /// kickstart on an already-running job does nothing at all.
+    #[test]
+    fn launchd_kickstarts_the_agent_in_the_user_domain() {
+        let argv = restart_argv("codex", true, 501);
+        assert_eq!(
+            argv,
+            vec![
+                "launchctl".to_string(),
+                "kickstart".into(),
+                "-k".into(),
+                "gui/501/io.github.youdie006.swapdex.codex".into()
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod supervisor_sandbox_tests {
+    use super::*;
+
+    /// It must consult the home it is GIVEN, not the ambient one. The first
+    /// wiring called `dirs::home_dir()`, which a `SWAPDEX_ROOT` sandbox cannot
+    /// redirect, and the test suite restarted the developer's own proxy twice
+    /// before anyone noticed.
+    ///
+    /// What this can check on a machine with no service installed is only that
+    /// an empty home yields false; on a machine that has one, it also proves
+    /// the ambient home was not consulted.
+    #[test]
+    fn an_empty_home_has_no_supervisor_to_ask() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!restart_via_supervisor(Some(home.path()), "claude-code"));
+        assert!(!restart_via_supervisor(Some(home.path()), "codex"));
+    }
+
+    #[test]
+    fn no_home_at_all_is_not_a_supervisor_either() {
+        assert!(!restart_via_supervisor(None, "claude-code"));
     }
 }

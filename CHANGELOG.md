@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.140.0
+
+- A proxy the supervisor owns is now replaced through the supervisor, not by
+  signal. Upgrading swapdex does not upgrade the proxy already running, so the
+  next shim call replaces it; doing that with SIGTERM made the supervisor wait
+  out its restart delay - five seconds on systemd - and count a crash. Every
+  routine upgrade therefore dropped the request in flight and added one to the
+  restart count `service status` reports. The signal remains the fallback.
+- `Paths::home()`, because the first version of the above read
+  `dirs::home_dir()`, which a `SWAPDEX_ROOT` sandbox cannot redirect - the test
+  suite restarted the developer's own proxy twice before that was caught.
+
 ## 0.139.0
 
 - `service status` reports a proxy that keeps dying. It used to answer only

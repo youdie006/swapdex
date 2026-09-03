@@ -2128,12 +2128,33 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
         // and still not be what serves the next request. Replace it on the SAME
         // port, because sessions already point at that port and would otherwise
         // be left talking to nothing.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
-        for _ in 0..40 {
-            if crate::proxy::running_proxy_for(paths, tool).is_none() {
-                break;
+        //
+        // Through the supervisor when one owns it. Signalling a supervised proxy
+        // makes the supervisor count a crash and wait out its restart delay -
+        // five seconds on systemd - so every routine upgrade both dropped the
+        // request in flight and added one to the restart count that `service
+        // status` now reports as "it is not staying up". The supervisor's own
+        // restart is orderly and immediate; the signal stays as the fallback,
+        // because leaving a stale proxy serving is worse than either.
+        // paths.home(), never dirs::home_dir(): under a test root the latter
+        // still points at the real home, and asking the supervisor there
+        // restarts the developer's own proxy from inside a sandboxed run.
+        if !crate::service::restart_via_supervisor(Some(paths.home()), tool) {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        // Two endings, and starting a proxy on the wrong one is how a pair of
+        // them would displace each other for as long as the machine is on: the
+        // supervisor puts the current build back (use it, start nothing), or
+        // the old proxy simply goes (start one below).
+        for _ in 0..60 {
+            match crate::proxy::running_proxy_for(paths, tool) {
+                None => break,
+                Some((_, p, b)) if b == crate::proxy::build_id() => {
+                    println!("{p}");
+                    return Ok(0);
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         port = running;
     }
