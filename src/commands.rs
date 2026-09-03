@@ -6224,8 +6224,8 @@ pub fn service_status(paths: &Paths) -> Result<i32> {
         // the instant this runs, which is how a crash every hour stayed
         // invisible. Ask the supervisor what it has been watching.
         let note = if installed {
-            let (restarts, last_exit) = crate::service::supervisor_report(tool);
-            crate::service::supervision_note(restarts, last_exit)
+            let (restarts, last_exit, uptime) = crate::service::supervisor_report(tool);
+            crate::service::supervision_note(restarts, last_exit, uptime)
         } else {
             None
         };

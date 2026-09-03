@@ -190,7 +190,7 @@ pub fn parse_launchctl_last_exit(out: &str) -> Option<i32> {
 
 /// Ask whichever supervisor is on this machine. Both answers stay None when
 /// the supervisor could not be reached, so silence is never read as health.
-pub fn supervisor_report(tool: &str) -> (Option<u32>, Option<i32>) {
+pub fn supervisor_report(tool: &str) -> (Option<u32>, Option<i32>, Option<u64>) {
     if cfg!(target_os = "macos") {
         let out = std::process::Command::new("launchctl")
             .args(["list", &launchd_label(tool)])
@@ -199,7 +199,11 @@ pub fn supervisor_report(tool: &str) -> (Option<u32>, Option<i32>) {
         let text = out
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
-        (None, parse_launchctl_last_exit(&text))
+        (
+            None,
+            parse_launchctl_last_exit(&text),
+            launchd_uptime_secs(&text),
+        )
     } else {
         let out = std::process::Command::new("systemctl")
             .args([
@@ -215,8 +219,78 @@ pub fn supervisor_report(tool: &str) -> (Option<u32>, Option<i32>) {
         let text = out
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
-        (parse_nrestarts(&text), None)
+        (parse_nrestarts(&text), None, systemd_uptime_secs(tool))
     }
+}
+
+/// `ps -o etime=` as seconds. The format is `[[DD-]HH:]MM:SS`, right-padded.
+///
+/// `etime` and not `etimes`: the seconds form is a Linux procps extension and
+/// does not exist on macOS, which is the only platform that reaches the
+/// launchd path at all.
+pub fn parse_etime(out: &str) -> Option<u64> {
+    let t = out.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let (days, rest) = match t.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, t),
+    };
+    let mut parts = rest.split(':').rev();
+    let secs: u64 = parts.next()?.parse().ok()?;
+    let mins: u64 = parts.next()?.parse().ok()?;
+    let hours: u64 = match parts.next() {
+        Some(h) => h.parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(days * 86400 + hours * 3600 + mins * 60 + secs)
+}
+
+/// How long the running job has been up, via the PID launchctl reports. None
+/// when it is not running or `ps` will not say - which keeps a note that
+/// cannot be dated in its present-tense form rather than guessing.
+pub fn launchd_uptime_secs(list_output: &str) -> Option<u64> {
+    let pid: i32 = list_output
+        .lines()
+        .find_map(|l| l.split_once("\"PID\" = "))
+        .and_then(|(_, r)| r.trim().trim_end_matches(';').parse().ok())?;
+    let out = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    parse_etime(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The same for systemd, from the unit's own activation timestamp.
+pub fn systemd_uptime_secs(tool: &str) -> Option<u64> {
+    let out = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            &systemd_unit(tool),
+            "-p",
+            "ActiveEnterTimestampMonotonic",
+            "--value",
+        ])
+        .output()
+        .ok()?;
+    let entered: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    if entered == 0 {
+        return None;
+    }
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return None;
+    }
+    let now_us = ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1_000;
+    now_us.checked_sub(entered).map(|d| d / 1_000_000)
 }
 
 /// What the supervisor knows about a proxy that is not staying up.
@@ -228,7 +302,23 @@ pub fn supervisor_report(tool: &str) -> (Option<u32>, Option<i32>) {
 ///
 /// The two supervisors know different things, so each says only its own:
 /// systemd keeps a restart count, launchd keeps only the last exit status.
-pub fn supervision_note(restarts: Option<u32>, last_exit: Option<i32>) -> Option<String> {
+///
+/// Both are HISTORY, and history is not a claim about now. A codex proxy on a
+/// real machine had been up for twenty-five hours with launchd still holding a
+/// `9` from the run before; saying "last exit 9" flat made a healthy proxy
+/// read as a broken one. So the uptime decides the wording: still short means
+/// the alarm is live, long enough means it is something that happened once.
+pub fn supervision_note(
+    restarts: Option<u32>,
+    last_exit: Option<i32>,
+    uptime_secs: Option<u64>,
+) -> Option<String> {
+    // An hour: long enough that a proxy replaced on an upgrade, or restarted
+    // once overnight, is plainly running now; short enough that a crash loop
+    // never reaches it.
+    let settled = uptime_secs.is_some_and(|u| u >= 3600);
+    let since = uptime_secs.map(for_how_long).unwrap_or_default();
+
     if let Some(n) = restarts {
         if n > 0 {
             let how = if n == 1 {
@@ -236,12 +326,31 @@ pub fn supervision_note(restarts: Option<u32>, last_exit: Option<i32>) -> Option
             } else {
                 format!("{n} times")
             };
-            return Some(format!("restarted {how} - it is not staying up"));
+            return Some(if settled {
+                format!("restarted {how}, but up {since} since")
+            } else {
+                format!("restarted {how} - it is not staying up")
+            });
         }
     }
     match last_exit {
         Some(0) | None => None,
+        Some(c) if settled => Some(format!("a previous run exited {c}; up {since} since")),
         Some(c) => Some(format!("last exit {c}")),
+    }
+}
+
+/// A duration a person reads at a glance, not a precise one.
+fn for_how_long(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
     }
 }
 
@@ -467,8 +576,42 @@ mod supervision_note_tests {
 
     #[test]
     fn a_proxy_that_stays_up_gets_no_note() {
-        assert_eq!(supervision_note(Some(0), Some(0)), None);
-        assert_eq!(supervision_note(None, None), None);
+        assert_eq!(supervision_note(Some(0), Some(0), None), None);
+        assert_eq!(supervision_note(None, None, None), None);
+    }
+
+    /// A count is not a claim about now. On a real machine a codex proxy had
+    /// been up for twenty-five hours with launchd still holding a `9` from the
+    /// run before it - and the first version of this said "last exit 9" as
+    /// though something were wrong at that moment. Same for a restart count
+    /// that a long uptime has since outlived.
+    #[test]
+    fn history_is_not_reported_as_a_present_problem() {
+        let day = 25 * 3600;
+        let old_exit = supervision_note(None, Some(9), Some(day)).expect("still worth mentioning");
+        assert!(
+            old_exit.contains("previous") || old_exit.contains("since"),
+            "must place it in the past: {old_exit}"
+        );
+        assert!(!old_exit.contains("not staying up"), "not now: {old_exit}");
+
+        let old_restarts = supervision_note(Some(5), None, Some(day)).expect("worth mentioning");
+        assert!(
+            !old_restarts.contains("not staying up"),
+            "it plainly is staying up: {old_restarts}"
+        );
+        assert!(
+            old_restarts.contains('5'),
+            "the count still shows: {old_restarts}"
+        );
+    }
+
+    /// The alarm still fires when the uptime is short, which is what a proxy
+    /// dying every few minutes actually looks like.
+    #[test]
+    fn a_short_uptime_with_restarts_is_still_an_alarm() {
+        let note = supervision_note(Some(5), None, Some(90)).expect("this one is real");
+        assert!(note.contains("not staying up"), "should alarm: {note}");
     }
 
     /// The whole point. `swapdex service status` said "proxy: running" for a
@@ -477,13 +620,14 @@ mod supervision_note_tests {
     /// restarts; swapdex simply never asked.
     #[test]
     fn systemd_restarts_are_reported() {
-        let note = supervision_note(Some(5), Some(1)).expect("five restarts is worth saying");
+        let note = supervision_note(Some(5), Some(1), None).expect("five restarts is worth saying");
         assert!(note.contains('5'), "should name the count: {note}");
     }
 
     #[test]
     fn one_restart_reads_as_english() {
-        let note = supervision_note(Some(1), None).expect("one restart is still worth saying");
+        let note =
+            supervision_note(Some(1), None, None).expect("one restart is still worth saying");
         assert!(note.contains("once"), "not 'restarted 1 times': {note}");
     }
 
@@ -491,8 +635,9 @@ mod supervision_note_tests {
     /// that is all there is to say - and saying it is better than silence.
     #[test]
     fn launchd_reports_the_last_exit_instead() {
-        assert_eq!(supervision_note(None, Some(0)), None);
-        let note = supervision_note(None, Some(137)).expect("a non-zero exit is worth saying");
+        assert_eq!(supervision_note(None, Some(0), None), None);
+        let note =
+            supervision_note(None, Some(137), None).expect("a non-zero exit is worth saying");
         assert!(note.contains("137"), "should name the status: {note}");
     }
 }
@@ -586,5 +731,26 @@ mod supervisor_sandbox_tests {
     #[test]
     fn no_home_at_all_is_not_a_supervisor_either() {
         assert!(!restart_via_supervisor(None, "claude-code"));
+    }
+}
+
+#[cfg(test)]
+mod etime_tests {
+    use super::*;
+
+    /// macOS `ps` has no `etimes` - that is a Linux procps extension, and the
+    /// first version asked for it on the one platform this code path serves,
+    /// so it would have answered None forever and the stale note would have
+    /// stayed. `etime` exists on both; these are its real shapes, copied from
+    /// the machine that showed the bug.
+    #[test]
+    fn etime_is_parsed_in_every_shape_ps_prints() {
+        assert_eq!(parse_etime("01-01:06:48"), Some(90408)); // 1d 1h 6m 48s
+        assert_eq!(parse_etime("01-05:27:51"), Some(106071)); // 86400+18000+1620+51
+        assert_eq!(parse_etime("   01:02:03"), Some(3723)); // padded HH:MM:SS
+        assert_eq!(parse_etime("      12:34"), Some(754)); // padded MM:SS
+        assert_eq!(parse_etime("00:00"), Some(0));
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("not a duration"), None);
     }
 }

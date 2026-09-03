@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.141.0
+
+- The supervisor's history is dated rather than reported as the present. A
+  proxy up for twenty-five hours was being labelled "last exit 9" from a run
+  that had ended a day earlier. Under an hour of uptime a restart count still
+  reads as "it is not staying up"; past that it reads as "restarted 5 times,
+  but up 3h 20m since".
+- The uptime is read with `ps -o etime=`, not `etimes=`: the seconds form is a
+  Linux extension macOS does not have, and macOS is the only platform that
+  reaches the launchd path.
+
 ## 0.140.0
 
 - A proxy the supervisor owns is now replaced through the supervisor, not by
