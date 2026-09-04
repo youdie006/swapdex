@@ -13,6 +13,7 @@
 //   v<version>/swapdex-<target>.tar.gz  (a release must exist for <version>).
 
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   mkdirSync,
   writeFileSync,
@@ -137,13 +138,19 @@ sh("npm", npmArgs, { cwd: here });
 // resolve it - so an install run seconds later fails with ETARGET ("No matching
 // version found") for a version that exists. That happened on every release,
 // and each time it read as a broken install rather than a slow registry.
+const { publishSummary } = createRequire(import.meta.url)("./summary.js");
+const unresolved = [];
 if (!dryRun) {
   const wanted = [
     `@youdie006/swapdex@${version}`,
     ...PLATFORMS.map((p) => `${p.pkg}@${version}`),
   ];
-  const deadline = Date.now() + 120_000;
   for (const spec of wanted) {
+    // Per package, not one budget shared by all of them. It was computed once
+    // before this loop, so four packages that each took thirty seconds left
+    // the fifth none at all - which is how a release went out with one
+    // platform package unpublished.
+    const deadline = Date.now() + 120_000;
     for (;;) {
       let seen = "";
       try {
@@ -156,7 +163,7 @@ if (!dryRun) {
       }
       if (seen === version) break;
       if (Date.now() > deadline) {
-        console.error(`\nWARNING: ${spec} is still not resolvable - an install may fail`);
+        unresolved.push(spec);
         break;
       }
       execFileSync("sleep", ["3"], { stdio: "ignore" });
@@ -164,8 +171,12 @@ if (!dryRun) {
   }
 }
 
-console.log(
-  dryRun
-    ? `\nDRY RUN complete: tarballs in ${buildDir}, nothing published.`
-    : `\nPublished swapdex ${version}: main + ${PLATFORMS.length} platform packages (resolvable).`
-);
+if (dryRun) {
+  console.log(`\nDRY RUN complete: tarballs in ${buildDir}, nothing published.`);
+} else {
+  const { text, ok } = publishSummary(version, PLATFORMS.length, unresolved);
+  console.log(text);
+  // Non-zero, so a release that half-landed cannot be mistaken for one that
+  // did - including by a caller that only reads the last line.
+  if (!ok) process.exit(1);
+}

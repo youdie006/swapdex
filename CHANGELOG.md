@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.148.0
+
+- A publish run that leaves a package unresolvable now says which one and exits
+  non-zero, instead of printing a warning and then claiming "(resolvable)"
+  anyway. 0.147.0 went out with one platform package still propagating, and the
+  install that followed removed the working one and installed nothing.
+- The wait for the registry is budgeted per package. It was one budget shared by
+  all five, so the last one could be given no time at all.
+
 ## 0.147.0
 
 - A sign-in that worked is no longer reported as failed. The check after a
