@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.147.0
+
+- A sign-in that worked is no longer reported as failed. The check after a
+  sign-in kept its own copy of "is this account signed in", which gave gemini
+  and antigravity Claude's answer and threw away the reason a Claude read
+  failed - so a locked Keychain also read as never signed in. It asks
+  `has_login` now, the one place that knows the question per tool.
+
 ## 0.146.0
 
 - Creating a gemini or antigravity slot no longer symlinks Claude's

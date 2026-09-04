@@ -5159,10 +5159,14 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
         Ok(_) => {
             // Whether the sign-in succeeded is the credential's story, not the
             // exit code's: the tool exits 0 when the user simply quits it.
-            let signed_in = match tool {
-                "codex" => crate::proxy::codex::slot_auth(&rec.config_dir).is_some(),
-                _ => crate::proxy::creds::slot_token(&rec.config_dir).is_some(),
-            };
+            //
+            // Asked through has_login, which is the one place that knows what a
+            // login looks like per tool. This was a third copy of that question
+            // and it was wrong twice over: gemini and antigravity got Claude's
+            // check, so a sign-in that worked was reported as failed, and it
+            // used `slot_token` - the wrapper that throws away WHY - so a
+            // Keychain that would not open also read as never signed in.
+            let signed_in = crate::proxy::has_login(paths, tool, &rec.config_dir);
             if signed_in {
                 // Re-capture from the slot this sign-in just landed in. The
                 // marker the user is trying to clear is about the SAVED COPY,
