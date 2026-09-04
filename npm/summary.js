@@ -25,4 +25,17 @@ function publishSummary(version, total, unresolved) {
   };
 }
 
-module.exports = { publishSummary };
+// Every package spec the resolvability check must ask npm about.
+//
+// Scoped, all of them. Publishing built the platform names as
+// `${SCOPE}/${p.pkg}` in two places and the check used a bare `p.pkg` in the
+// third, so it asked npm about a package that does not exist - it could only
+// time out, on every release, for all four platforms.
+function wantedSpecs(scope, platforms, version) {
+  return [
+    `${scope}/swapdex@${version}`,
+    ...platforms.map((p) => `${scope}/${p.pkg}@${version}`),
+  ];
+}
+
+module.exports = { publishSummary, wantedSpecs };

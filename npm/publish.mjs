@@ -138,13 +138,10 @@ sh("npm", npmArgs, { cwd: here });
 // resolve it - so an install run seconds later fails with ETARGET ("No matching
 // version found") for a version that exists. That happened on every release,
 // and each time it read as a broken install rather than a slow registry.
-const { publishSummary } = createRequire(import.meta.url)("./summary.js");
+const { publishSummary, wantedSpecs } = createRequire(import.meta.url)("./summary.js");
 const unresolved = [];
 if (!dryRun) {
-  const wanted = [
-    `@youdie006/swapdex@${version}`,
-    ...PLATFORMS.map((p) => `${p.pkg}@${version}`),
-  ];
+  const wanted = wantedSpecs(SCOPE, PLATFORMS, version);
   for (const spec of wanted) {
     // Per package, not one budget shared by all of them. It was computed once
     // before this loop, so four packages that each took thirty seconds left
