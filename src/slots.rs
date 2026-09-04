@@ -563,6 +563,11 @@ pub fn find_any_tool(paths: &crate::paths::Paths, name: &str) -> Option<(String,
 pub fn shared_files(tool: &str) -> &'static [&'static str] {
     match tool {
         "codex" => SHARED_CONFIG_FILES_CODEX,
+        // Nothing is known to be shared for these two, and Claude's list is
+        // not an answer: falling through to it symlinked settings.json,
+        // CLAUDE.md and Claude's whole `projects` store into a slot of theirs.
+        // An empty list claims nothing, which is what is actually known.
+        "gemini" | "antigravity" => &[],
         _ => SHARED_CONFIG_FILES,
     }
 }
@@ -1204,5 +1209,38 @@ mod registry_durability_tests {
             before, after,
             "slots.json was overwritten in place - a crash mid-write loses every account"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_files_per_tool_tests {
+    use super::*;
+
+    /// Claude's list is Claude's. gemini and antigravity fell through to it, so
+    /// creating a slot for either symlinked `settings.json`, `CLAUDE.md` and
+    /// `projects` - Claude's entire conversation store - into it. Neither tool
+    /// reads any of them, and claiming a file is shared when it is not is the
+    /// part that matters: nothing here knows what those two share, and saying
+    /// nothing is the honest answer.
+    #[test]
+    fn no_tool_inherits_another_tools_shared_set() {
+        for tool in ["gemini", "antigravity"] {
+            let got = shared_files(tool);
+            for claude_only in SHARED_CONFIG_FILES {
+                assert!(
+                    !got.contains(claude_only),
+                    "{tool} claims Claude's {claude_only} is shared"
+                );
+            }
+            for codex_only in SHARED_CONFIG_FILES_CODEX {
+                assert!(
+                    !got.contains(codex_only),
+                    "{tool} claims Codex's {codex_only} is shared"
+                );
+            }
+        }
+        // The two that are defined keep theirs.
+        assert!(shared_files("claude-code").contains(&"projects"));
+        assert!(shared_files("codex").contains(&"sessions"));
     }
 }

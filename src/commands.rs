@@ -5284,6 +5284,10 @@ pub(crate) fn tool_binary(tool: &str) -> &'static str {
 fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
     match tool {
         "codex" => paths.codex_dir().to_path_buf(),
+        // Their own tree, not Claude's. Nothing is linked from here for these
+        // two today, but pointing the source at the wrong tool is how an empty
+        // list becomes a wrong one the moment somebody fills it in.
+        "gemini" | "antigravity" => paths.gemini_dir().to_path_buf(),
         _ => paths.claude_dir().to_path_buf(),
     }
 }
@@ -9202,5 +9206,31 @@ mod tool_binary_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_source_tests {
+    use super::*;
+
+    /// Where a new slot borrows from has to be the tool's own dir. Gemini and
+    /// antigravity both resolved to Claude's, so even an empty shared list
+    /// would have pointed at the wrong tree the moment one was added.
+    #[test]
+    fn a_slot_borrows_from_its_own_tools_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(d.path());
+        assert_eq!(shared_source(&paths, "claude-code"), paths.claude_dir());
+        assert_eq!(shared_source(&paths, "codex"), paths.codex_dir());
+        assert_ne!(
+            shared_source(&paths, "gemini"),
+            paths.claude_dir(),
+            "gemini borrowed from Claude's dir"
+        );
+        assert_ne!(
+            shared_source(&paths, "antigravity"),
+            paths.claude_dir(),
+            "antigravity borrowed from Claude's dir"
+        );
     }
 }

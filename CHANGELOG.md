@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.146.0
+
+- Creating a gemini or antigravity slot no longer symlinks Claude's
+  settings.json, CLAUDE.md and whole `projects` conversation store into it. Both
+  the shared-file list and the directory it borrowed from fell through to
+  Claude's. Nothing is known to be shared for those two, and an empty list says
+  that rather than asserting something false.
+
 ## 0.145.0
 
 - Each tool is asked its own login question. Gemini and antigravity were asked

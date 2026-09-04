@@ -159,6 +159,11 @@ impl Paths {
     pub fn codex_dir(&self) -> &Path {
         &self.codex_dir
     }
+    /// The bare Gemini dir (`~/.gemini`). Antigravity's token lives under it,
+    /// so it is the source tree for both.
+    pub fn gemini_dir(&self) -> &Path {
+        &self.gemini_dir
+    }
     /// Sibling `~/.claude-*` config dirs a user already runs via aliases -
     /// adoptable as slots during onboarding. Excludes the bare `~/.claude`.
     /// Best-effort; empty on failure.
