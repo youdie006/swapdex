@@ -1286,7 +1286,7 @@ fn next_account_in(
             // refresh it. What a login LOOKS like differs per tool, and asking
             // the Claude question about a Codex slot answered "no login" for
             // every one of them - so a refused Codex turn had nowhere to go.
-            usable: has_usable_login(tool, &r.config_dir),
+            usable: has_usable_login(paths, tool, &r.config_dir),
         })
         .collect();
     let chosen = pick::next_usable(&candidates)?.name.clone();
@@ -1301,9 +1301,17 @@ fn next_account_in(
 /// tokens would rotate a refresh token behind the user's back, which is the
 /// logout this project exists to prevent. A lapsed token still counts as a
 /// login here, because it is renewable.
-pub fn has_login(tool: &str, dir: &std::path::Path) -> bool {
+pub fn has_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
     match tool {
         "codex" => codex::slot_auth(dir).is_some(),
+        // What a login looks like differs per tool, and the adapter is what
+        // knows. Gemini and antigravity used to be asked the CLAUDE question -
+        // is there a `.credentials.json` or a Keychain item - which a slot of
+        // theirs has never had, so a signed-in account read as signed-out.
+        "gemini" | "antigravity" => paths
+            .try_with_tool_dir(tool, dir)
+            .and_then(|at| crate::adapters::by_name(tool).map(|a| a.present(&at)))
+            .unwrap_or(false),
         _ => login_present(creds::slot_token_detail(dir)),
     }
 }
@@ -1320,7 +1328,7 @@ pub fn login_present(read: Result<crate::secret::Secret, creds::TokenUnavailable
 }
 
 /// Can this slot serve a turn for `tool` right now?
-fn has_usable_login(tool: &str, dir: &std::path::Path) -> bool {
+fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
     // A lapsed Claude token is renewable, so try before ruling the account out:
     // the accounts idle long enough to lapse are the ones with quota left.
     if tool != "codex" && creds::slot_token_expired(dir, now_ms()) {
@@ -1330,6 +1338,8 @@ fn has_usable_login(tool: &str, dir: &std::path::Path) -> bool {
         // Codex refreshes its own token inside its home and records no expiry
         // swapdex can read, so the question is only whether a login is there.
         "codex" => codex::slot_auth(dir).is_some(),
+        // Same per-tool question as has_login.
+        "gemini" | "antigravity" => has_login(paths, tool, dir),
         _ => creds::slot_token(dir).is_some() && !creds::slot_token_expired(dir, now_ms()),
     }
 }
@@ -2622,5 +2632,55 @@ mod log_stamp_tests {
         assert_eq!(stamp_at(86399), "23:59:59");
         // Wraps at midnight rather than running past 24.
         assert_eq!(stamp_at(86400), "00:00:00");
+    }
+}
+
+#[cfg(test)]
+mod has_login_per_tool_tests {
+    use super::*;
+
+    /// The comment on `usable` above records this exact failure for Codex:
+    /// "asking the Claude question about a Codex slot answered no login for
+    /// every one of them - so a refused Codex turn had nowhere to go." Codex
+    /// got an arm; gemini and antigravity kept falling into the Claude branch,
+    /// which looks for `.credentials.json` and a Keychain item that a Gemini
+    /// slot has never had. A signed-in Gemini account therefore read as
+    /// signed-out everywhere this is asked.
+    #[test]
+    fn a_signed_in_gemini_slot_is_seen_as_signed_in() {
+        let root = tempfile::tempdir().unwrap();
+        let base = crate::paths::Paths::rooted(root.path());
+        let slot = root.path().join("gemini-slot");
+        std::fs::create_dir_all(&slot).unwrap();
+        assert!(!has_login(&base, "gemini", &slot), "nothing there yet");
+
+        std::fs::write(
+            slot.join("oauth_creds.json"),
+            br#"{"refresh_token":"RT-G"}"#,
+        )
+        .unwrap();
+        assert!(
+            has_login(&base, "gemini", &slot),
+            "a gemini slot with its own oauth_creds.json is signed in"
+        );
+    }
+
+    #[test]
+    fn a_signed_in_antigravity_slot_is_seen_as_signed_in() {
+        let root = tempfile::tempdir().unwrap();
+        let base = crate::paths::Paths::rooted(root.path());
+        let slot = root.path().join("agy-slot");
+        std::fs::create_dir_all(slot.join("antigravity-cli")).unwrap();
+        assert!(!has_login(&base, "antigravity", &slot), "nothing there yet");
+
+        std::fs::write(
+            slot.join("antigravity-cli").join("antigravity-oauth-token"),
+            b"token-bytes",
+        )
+        .unwrap();
+        assert!(
+            has_login(&base, "antigravity", &slot),
+            "an antigravity slot with its own token is signed in"
+        );
     }
 }

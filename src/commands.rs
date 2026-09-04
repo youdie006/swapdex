@@ -3247,6 +3247,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         // leaves only this row, so the lossy answer was the only
                         // one shown.
                         needs_login: row_needs_login(
+                            self.paths,
                             "claude-code",
                             slot_dir_of(&p.name).as_deref(),
                         ),
@@ -3316,7 +3317,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     // A Keychain that will not open is not an account that was
                     // never signed in; telling the user to log in again would
                     // send them to fix something that is not broken.
-                    needs_login: row_needs_login("claude-code", Some(dir)),
+                    needs_login: row_needs_login(self.paths, "claude-code", Some(dir)),
                     name: name.clone(),
                     ident: identity_column(crate::proxy::creds::slot_email(dir), None),
                     tools: "claude-code".into(),
@@ -5543,7 +5544,7 @@ pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
         payer_line(
             &who,
             email.as_deref(),
-            crate::proxy::has_login(tool, &rec.config_dir),
+            crate::proxy::has_login(paths, tool, &rec.config_dir),
         ),
         home_note(&who, home.as_deref())
     ))
@@ -5690,7 +5691,7 @@ pub fn serve(
     // steps aside and forwards the client's OWN credential, so the turn works
     // and somebody else pays for it while every screen names this account. Refuse
     // the state rather than report it after the fact.
-    if !crate::proxy::has_login(tool, &rec.config_dir) {
+    if !crate::proxy::has_login(paths, tool, &rec.config_dir) {
         eprintln!(
             "swapdex: '{name}' has no {bin} login, so it cannot pay for turns - your own account would, while every screen named '{name}'"
         );
@@ -5989,8 +5990,8 @@ pub fn codex_usage_row(home: &str, l: &crate::codex_limits::Limits) -> (String, 
 /// live usage figures.
 ///
 /// A row with no slot behind it has nothing to sign into and never asks.
-pub fn row_needs_login(tool: &str, dir: Option<&std::path::Path>) -> bool {
-    dir.is_some_and(|d| !crate::proxy::has_login(tool, d))
+pub fn row_needs_login(paths: &Paths, tool: &str, dir: Option<&std::path::Path>) -> bool {
+    dir.is_some_and(|d| !crate::proxy::has_login(paths, tool, d))
 }
 
 /// `swapdex export [file]` - this machine's account setup, without a single
@@ -7973,16 +7974,28 @@ mod tests {
     fn a_row_with_a_readable_login_does_not_ask_for_one() {
         let dir = tempfile::tempdir().unwrap();
         // Nothing there yet: it needs a login, and says so.
-        assert!(row_needs_login("claude-code", Some(dir.path())));
+        assert!(row_needs_login(
+            &crate::paths::Paths::rooted(dir.path()),
+            "claude-code",
+            Some(dir.path())
+        ));
         // A credential in the slot: nothing to ask for.
         std::fs::write(
             dir.path().join(".credentials.json"),
             br#"{"claudeAiOauth":{"accessToken":"T"}}"#,
         )
         .unwrap();
-        assert!(!row_needs_login("claude-code", Some(dir.path())));
+        assert!(!row_needs_login(
+            &crate::paths::Paths::rooted(dir.path()),
+            "claude-code",
+            Some(dir.path())
+        ));
         // A row with no slot behind it has nothing to sign into.
-        assert!(!row_needs_login("claude-code", None));
+        assert!(!row_needs_login(
+            &crate::paths::Paths::rooted(std::path::Path::new("/nonexistent")),
+            "claude-code",
+            None
+        ));
     }
 
     /// Codex prints the provider name and nothing else about identity, so that

@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.145.0
+
+- Each tool is asked its own login question. Gemini and antigravity were asked
+  Claude's - is there a `.credentials.json` or a Keychain item - which a slot of
+  theirs never has, so a signed-in account of either read as signed-out
+  everywhere: the picker skipped it, `serve` refused it, and its row said it
+  needed a sign-in. The adapters already knew the answer; these now ask them.
+
 ## 0.144.0
 
 - Antigravity is actually pointed at its slot. `with_tool_dir` had no arm for
