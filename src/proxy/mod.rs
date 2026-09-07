@@ -1337,9 +1337,12 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
         let _ = crate::refresh::refresh_slot(dir, now_ms());
     }
     match tool {
-        // Codex refreshes its own token inside its home and records no expiry
-        // swapdex can read, so the question is only whether a login is there.
-        "codex" => codex::slot_auth(dir).is_some(),
+        // Codex renews its token when CODEX RUNS, so a slot nobody has opened
+        // does not renew at all - and the token says when it lapses, in the
+        // `exp` claim of its own JWT. Asking only "is a login there" sent turns
+        // to a slot whose token had expired days earlier and reported the 401
+        // that came back as a rejected account.
+        "codex" => codex::slot_auth(dir).is_some() && !codex::slot_token_expired(dir, now_secs()),
         // Same per-tool question as has_login.
         "gemini" | "antigravity" => has_login(paths, tool, dir),
         _ => creds::slot_token(dir).is_some() && !creds::slot_token_expired(dir, now_ms()),
