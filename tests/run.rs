@@ -745,8 +745,10 @@ fn shim_puts_itself_on_path_via_the_shell_profile() {
 #[test]
 fn slash_installs_a_claude_code_command() {
     let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
+    // Under `SWAPDEX_ROOT` the root IS the home - that is what `Paths::rooted`
+    // means and what containment is. `slash` used to ask `dirs` for the home
+    // instead, so it honoured $HOME here and the REAL one everywhere else.
+    let home = root.path().to_path_buf();
     let out = String::from_utf8_lossy(
         &Command::new(bin())
             .args(["slash"])

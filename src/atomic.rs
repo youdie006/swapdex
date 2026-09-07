@@ -106,6 +106,24 @@ pub fn tmp_path_for(dest: &Path) -> std::path::PathBuf {
     dir.join(format!(".{base}.swapdex.{}.{n}.tmp", std::process::id()))
 }
 
+/// Write a file swapdex MANAGES that is not a secret - a slash command, a skill
+/// file, a marker. Same root refusal as [`write_secret`], ordinary permissions.
+///
+/// The refusal moved into `write_secret` so thirty writes would carry it, and
+/// its comment names "installing the slash command" and "onboarding" among the
+/// paths that had been unguarded. Neither of those writes a SECRET, so neither
+/// goes through `write_secret` and neither was covered - the fix named them and
+/// then missed them. A root-owned `swap.md` in the user's `~/.claude/commands`
+/// is the same failure as a root-owned credential: every later write by the
+/// user fails, quietly, long after the command that caused it.
+pub fn write_managed(dest: &Path, bytes: &[u8]) -> Result<()> {
+    ensure_not_root()?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    std::fs::write(dest, bytes).with_context(|| format!("write {}", dest.display()))
+}
+
 /// Write bytes to `dest` atomically at mode 0600. The temp file is created in
 /// the destination's OWN directory (so rename is same-filesystem) with mode
 /// 0600 at creation (no create-then-chmod world-readable window).

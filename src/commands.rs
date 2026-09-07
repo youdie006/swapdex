@@ -2471,17 +2471,18 @@ pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
 }
 
 pub fn install_slash(paths: &Paths) -> Result<i32> {
-    let _ = paths; // these dirs belong to the assistants, not swapdex's store
-    let Some(home) = dirs::home_dir() else {
-        eprintln!("swapdex: cannot find your home directory");
-        return Ok(1);
-    };
+    // The dirs belong to the assistants rather than to swapdex's store, but the
+    // HOME they hang off is still the one `paths` names: asking `dirs` for it
+    // meant a run under `SWAPDEX_ROOT` wrote into the real `~/.claude`, which is
+    // the one thing that variable exists to prevent.
+    let home = paths.home().to_path_buf();
     let mut installed = 0;
 
     let claude_dir = home.join(".claude").join("commands");
-    match std::fs::create_dir_all(&claude_dir)
-        .and_then(|()| std::fs::write(claude_dir.join("swap.md"), claude_command_body()))
-    {
+    match crate::atomic::write_managed(
+        &claude_dir.join("swap.md"),
+        claude_command_body().as_bytes(),
+    ) {
         Ok(()) => {
             println!(
                 "Claude Code: /swap  ({})",
@@ -2493,9 +2494,7 @@ pub fn install_slash(paths: &Paths) -> Result<i32> {
     }
 
     let codex_dir = home.join(".codex").join("skills").join("swap");
-    match std::fs::create_dir_all(&codex_dir)
-        .and_then(|()| std::fs::write(codex_dir.join("SKILL.md"), codex_skill_body()))
-    {
+    match crate::atomic::write_managed(&codex_dir.join("SKILL.md"), codex_skill_body().as_bytes()) {
         Ok(()) => {
             println!(
                 "Codex:       /swap  ({})",
@@ -4953,8 +4952,7 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
     }
 
     // Mark it shown so a bare `swapdex` does not re-run this every launch.
-    let _ = std::fs::create_dir_all(paths.store_dir());
-    let _ = std::fs::write(onboarded_marker(paths), b"1");
+    let _ = crate::atomic::write_managed(&onboarded_marker(paths), b"1");
 
     // Wrap up.
     if crate::slots::Slots::open(paths)?.list().is_empty() {

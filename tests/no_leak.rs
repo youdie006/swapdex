@@ -125,3 +125,53 @@ fn mcp_tools_never_leak_a_token() {
     assert!(!combined.contains(".credentials.json"));
     assert!(combined.contains("whoami") || combined.contains("me@") || combined.contains("work"));
 }
+
+/// `SWAPDEX_ROOT` must contain every file a command writes.
+///
+/// `slash` asked `dirs` for the home directory and wrote
+/// `~/.claude/commands/swap.md` and `~/.codex/skills/swap/SKILL.md` into the
+/// REAL one - so running it under a test root touched the developer's own
+/// assistants. The dirs belong to the assistants; the HOME they hang off is
+/// still the one `paths` names.
+#[test]
+fn slash_writes_inside_the_sandbox_only() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let real_claude = dirs::home_dir().map(|h| h.join(".claude/commands/swap.md"));
+    let before = real_claude.as_ref().and_then(|p| std::fs::metadata(p).ok());
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .arg("slash")
+        .env("SWAPDEX_ROOT", root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        root.join(".claude/commands/swap.md").exists(),
+        "it must write under the sandbox root"
+    );
+    assert!(root.join(".codex/skills/swap/SKILL.md").exists());
+
+    // And the real home is exactly as it was - still absent, or untouched.
+    if let Some(p) = real_claude {
+        match (before, std::fs::metadata(&p).ok()) {
+            (None, after) => assert!(
+                after.is_none(),
+                "it created {} outside the sandbox",
+                p.display()
+            ),
+            (Some(b), Some(a)) => assert_eq!(
+                b.modified().ok(),
+                a.modified().ok(),
+                "it rewrote {} outside the sandbox",
+                p.display()
+            ),
+            (Some(_), None) => panic!("it removed {}", p.display()),
+        }
+    }
+}
