@@ -4,6 +4,49 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.149.0
+
+- **Sessions are attributed to the account that actually served them.** The
+  reader answering "which account was this session under" only counted `use` and
+  `restore`, which was true while every switch went through them. Switching now
+  goes through the proxy, which writes `serve`. On this machine that left 4457
+  of 5193 sessions credited to nobody - claude-code has never been `use`d, so
+  190 serves naming three accounts read as no information - while codex sessions
+  carried a name from six weeks before the account last changed. The newest
+  event now wins, whatever kind it is; a session that predates every event is
+  still unattributed rather than guessed at.
+- **`doctor` checks the proxy service for every tool, not two of four.** The
+  unit can be installed for claude, codex, gemini and antigravity, and
+  `service status` reports on all four. The health check looked at two, so a
+  gemini or antigravity proxy could be down with doctor saying nothing.
+- **Three commands swapdex told you to run did not exist.** `doctor`'s answer to
+  "the proxy service is installed but not running" - the exact shape of an
+  outage - was `swapdex service restart`, which has never been a subcommand, and
+  a credential warning pointed at `swapdex whoami`. They now name commands that
+  work. A test reads the source for every backtick-quoted command and asks the
+  binary about each one, so the remedy text and the CLI cannot drift apart
+  again.
+- **A rejected token is no longer displayed as an unused account.** A refused
+  read fell through to the last remembered one, which showed a dead account as
+  0% used with everything left. A throttled or unreadable reply still keeps the
+  remembered reading - it says nothing about the account - but a rejection is a
+  fact about the account and now blanks the row instead of reassuring about it.
+- **A shared transcript is no longer read as one account's usage.** Codex slots
+  share `sessions/` on purpose, so every slot read the same file and each
+  account's row showed the same numbers. The per-account reading is now taken
+  only where those transcripts belong to that account alone.
+- **Token usage is attributed to who paid.** The breakdown asked which account
+  HOLDS the conversation, which deliberately ignores `serve` - so on a machine
+  where the proxy hands out the turns it attributed nothing at all: seven days
+  and 77.6M tokens under no account.
+- **The publish checks run in CI.** They were added after a release went out
+  half-landed, and the workflow's glob covered `npm/bin/` only - so three of the
+  seven node tests ran and that guard was never exercised.
+- Removed `commands::resume`: written in July, never wired to a command, and
+  superseded by the `ui` hand-off to `sessionwiki resume`. Its premise - that a
+  conversation is only visible from the account that started it - stopped being
+  true when transcripts became shared across slots.
+
 ## 0.148.0
 
 - A publish run that leaves a package unresolvable now says which one and exits

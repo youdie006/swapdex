@@ -350,6 +350,37 @@ pub enum Fetch {
     Offline(String),
 }
 
+/// What a live read means for the row it was taken for.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LiveOutcome {
+    /// A reading came back. Use it.
+    Reading,
+    /// The endpoint said nothing about the account. Whatever was remembered
+    /// still describes it, so keep showing that.
+    KeepRemembered,
+    /// The account itself will not answer. A remembered reading describes an
+    /// account that no longer works, and showing it reads as health.
+    Refused,
+}
+
+/// Which of those a `Fetch` is. (`classify` in this file is the HTTP-status
+/// side of the same journey; this is what the row does with the result.)
+///
+/// `Throttled` and `Unauthorized` used to be collapsed into the same fallback.
+/// The justification written there - "a throttled endpoint says nothing about
+/// the account behind it" - is true of a throttle and false of a rejection, so
+/// a rejected token kept displaying its last good reading: 0% used, everything
+/// left, indistinguishable from an account nobody had touched.
+pub fn outcome_of(f: &Fetch) -> LiveOutcome {
+    match f {
+        Fetch::Ok(_) => LiveOutcome::Reading,
+        Fetch::Unauthorized => LiveOutcome::Refused,
+        // A busy endpoint, an unreadable reply and an unreachable network all
+        // say nothing about the account behind them.
+        Fetch::Throttled | Fetch::Unexpected(..) | Fetch::Offline(_) => LiveOutcome::KeepRemembered,
+    }
+}
+
 impl Fetch {
     /// Why this read produced no number, in the words a log should use.
     pub fn why_no_number(&self) -> Option<&'static str> {
@@ -896,5 +927,28 @@ mod tests {
         // A value that could break out of the curl config is refused for the
         // same reason the token is.
         assert!(!workspace_id("id\"\nheader = \"X: y"));
+    }
+}
+
+#[cfg(test)]
+mod live_outcome_tests {
+    use super::*;
+
+    /// `Throttled`'s own doc says it "says nothing whatever about the account's
+    /// own quota, and must never be shown as though it did" - so falling back
+    /// to a remembered reading is right for it. `Unauthorized` is the opposite:
+    /// it is a definite fact about the account. Both were collapsed into the
+    /// same fallback, so a rejected token kept displaying the last good
+    /// reading - a 0%-used, everything-left row indistinguishable from a
+    /// healthy account that has simply not been used.
+    #[test]
+    fn a_rejected_token_is_not_the_same_as_a_busy_endpoint() {
+        assert_eq!(outcome_of(&Fetch::Unauthorized), LiveOutcome::Refused);
+        assert_eq!(outcome_of(&Fetch::Throttled), LiveOutcome::KeepRemembered);
+        assert_eq!(
+            outcome_of(&Fetch::Unexpected(500, "boom".into())),
+            LiveOutcome::KeepRemembered,
+            "a reply we could not read says nothing about the account either"
+        );
     }
 }

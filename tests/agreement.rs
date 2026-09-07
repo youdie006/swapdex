@@ -740,3 +740,95 @@ fn importing_an_account_for_an_unknown_tool_refuses_instead_of_guessing() {
         "a known account was skipped:\n{all}"
     );
 }
+
+/// Every command swapdex prints as a remedy must be a command swapdex accepts.
+///
+/// The remedy text is a second copy of the CLI, kept by hand, and it drifted:
+/// `doctor` answered "the proxy service is installed but not running" - the
+/// exact shape of an outage - with `swapdex service restart`, which has never
+/// existed, and a credential warning pointed at `swapdex whoami`. Reading the
+/// source for backtick-quoted commands and asking the binary about each one
+/// keeps the two copies honest, and costs nothing to extend: a command that
+/// takes subcommands has its second word checked too.
+#[test]
+fn every_command_we_tell_the_user_to_run_exists() {
+    fn words(line: &str) -> Vec<(String, Option<String>)> {
+        let mut out = Vec::new();
+        let mut rest = line;
+        while let Some(i) = rest.find("`swapdex ") {
+            rest = &rest[i + "`swapdex ".len()..];
+            let mut it = rest.split_whitespace();
+            // The leading run of command characters: the token carries the
+            // closing backtick, a `<placeholder>` or a `--flag` after it.
+            let word = |w: &str| {
+                if w.starts_with('-') {
+                    return None;
+                }
+                let t: String = w
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .collect();
+                (!t.is_empty()).then_some(t)
+            };
+            let Some(first) = it.next().and_then(word) else {
+                continue;
+            };
+            out.push((first, it.next().and_then(word)));
+        }
+        out
+    }
+
+    fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                rs_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    rs_files(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+        &mut files,
+    );
+    assert!(!files.is_empty(), "no source to read");
+
+    let help = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+
+    let mut missing: Vec<String> = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        for (cmd, sub) in words(&text) {
+            if !help(&["help", &cmd]) {
+                missing.push(format!("{}: swapdex {cmd}", f.display()));
+                continue;
+            }
+            // Only a command that HAS subcommands can have a wrong one.
+            let listing = Command::new(bin()).args(["help", &cmd]).output().unwrap();
+            let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
+            let Some(sub) = sub.filter(|_| listing.contains("Commands:")) else {
+                continue;
+            };
+            if !help(&[&cmd, &sub, "--help"]) {
+                missing.push(format!("{}: swapdex {cmd} {sub}", f.display()));
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "swapdex tells the user to run commands it does not have:\n  {}",
+        missing.join("\n  ")
+    );
+}

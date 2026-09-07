@@ -248,7 +248,7 @@ pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
             "recorded as {email} ({org}), and its credential is a '{sub}' plan. \
              That is normal if you hold a personal plan alongside the \
              organisation; if you did not expect it, the config was written by a \
-             different login than the one in this slot - `swapdex whoami` while \
+             different login than the one in this slot - `swapdex status` while \
              running as this account settles it"
         ));
     }

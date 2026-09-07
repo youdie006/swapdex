@@ -136,7 +136,13 @@ fn credit(
     if toks == 0 {
         return;
     }
-    let Some(account) = crate::session_link::attribute(events, tool, ts as i64) else {
+    // `payer_at`, not `attribute`. The two answer different questions:
+    // `attribute` says which account HOLDS the conversation - where new
+    // sessions start - and deliberately ignores `serve`. A token count asks who
+    // PAID, and `serve` is the event that says so. On a machine where switching
+    // happens through the proxy, every event is a `serve`, so this attributed
+    // nothing at all: seven days of tokens under no account.
+    let Some(account) = crate::session_link::payer_at(events, tool, ts as i64) else {
         return;
     };
     let e = map.entry(account).or_insert((0, 0));
@@ -540,6 +546,29 @@ mod tests {
             "6h ago is outside 5h"
         );
         assert_eq!(accounts.get("personal"), Some(&(40, 40)));
+        // A machine whose switches are all `serve` must still attribute. The
+        // proxy writes `serve` for every turn it hands to an account, and
+        // `attribute` filters those out on purpose - it answers "which account
+        // HOLDS this conversation", which is not the question a token count
+        // asks. On the machine this was found, all 190 claude events were
+        // `serve` and 77.7M tokens over seven days were attributed to nobody:
+        // the per-account breakdown was simply empty for the tool in daily use.
+        let served = |ts: i64, account: &str| crate::session_link::Event {
+            ts,
+            tool: "claude-code".into(),
+            account: account.into(),
+            action: crate::session_link::SERVE.into(),
+        };
+        let serve_only = vec![served(0, "work"), served(t10, "personal")];
+        let (_b5, _b7, by_serve) =
+            claude_usage(dir.path(), now, &serve_only, &mut UsageCache::default());
+        assert_eq!(
+            by_serve.get("work"),
+            Some(&(0, 100)),
+            "a serve event names who paid: {by_serve:?}"
+        );
+        assert_eq!(by_serve.get("personal"), Some(&(40, 40)));
+
         // No events -> no attribution at all (never a guess).
         let (_b5, _b7, none) = claude_usage(dir.path(), now, &[], &mut UsageCache::default());
         assert!(none.is_empty());

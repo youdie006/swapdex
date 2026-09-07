@@ -63,6 +63,24 @@ pub fn attribute(events: &[Event], tool: &str, started_secs: i64) -> Option<Stri
         .map(|e| e.account.clone())
 }
 
+/// The account `tool` was ON at `at_secs`: the newest event of ANY action at or
+/// before it, `None` before the first one.
+///
+/// `attribute` answers a narrower question - where a `use` last moved the
+/// conversations - and it was standing in for this one. That held only while
+/// every switch went through `use`. Once switching moved into the proxy the
+/// last `use` on this machine went months stale and every change since was a
+/// `serve`, so sessions were credited to an account that had not served a turn
+/// in weeks; a tool never `use`d at all was credited to nobody, which was 4457
+/// of 5193 sessions here.
+pub fn active_at(events: &[Event], tool: &str, at_secs: i64) -> Option<String> {
+    events
+        .iter()
+        .filter(|e| e.tool == tool && e.ts <= at_secs)
+        .max_by_key(|e| e.ts)
+        .map(|e| e.account.clone())
+}
+
 /// The account PAYING for `tool` at `at_secs`: the last `serve` event at or
 /// before it, and otherwise the account whose home the session ran in - with
 /// nobody handed the turns, that account pays for itself.
@@ -83,7 +101,12 @@ pub fn payer_at(events: &[Event], tool: &str, at_secs: i64) -> Option<String> {
 /// if sessionwiki is absent/unusable - the caller degrades to "unavailable".
 pub fn sessions_by_account(paths: &Paths) -> Option<BTreeMap<String, usize>> {
     let rows = sessionwiki_rows()?;
-    let events = read_timeline(paths);
+    Some(count_by_account(&rows, &read_timeline(paths)))
+}
+
+/// Pure counting, separated from the sessionwiki shell-out so which account a
+/// row lands under is unit-testable.
+pub(crate) fn count_by_account(rows: &[Value], events: &[Event]) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for row in rows {
         let tool = match row["tool"].as_str() {
@@ -94,10 +117,10 @@ pub fn sessions_by_account(paths: &Paths) -> Option<BTreeMap<String, usize>> {
             .as_str()
             .and_then(rfc3339_to_secs)
             .unwrap_or(0);
-        let acct = attribute(&events, tool, started).unwrap_or_else(|| UNATTRIBUTED.to_string());
+        let acct = active_at(events, tool, started).unwrap_or_else(|| UNATTRIBUTED.to_string());
         *counts.entry(acct).or_insert(0) += 1;
     }
-    Some(counts)
+    counts
 }
 
 pub fn status_line(paths: &Paths) -> Option<String> {
@@ -176,7 +199,7 @@ pub(crate) fn pick_recent(
         .filter_map(|row| {
             let tool = row["tool"].as_str()?;
             let started = row["started"].as_str().and_then(rfc3339_to_secs)?;
-            if attribute(events, tool, started).as_deref() != Some(account) {
+            if active_at(events, tool, started).as_deref() != Some(account) {
                 return None;
             }
             Some(RecentSession {
@@ -312,6 +335,35 @@ mod tests {
     }
 
     #[test]
+    fn the_account_a_session_ran_under_is_the_newest_evidence() {
+        // A machine driven by the proxy: the last `use` is months old and every
+        // change of account since has been a `serve`.
+        let events = vec![ev(100, "codex", "stale"), served(200, "codex", "current")];
+        assert_eq!(
+            active_at(&events, "codex", 300).as_deref(),
+            Some("current"),
+            "the newest evidence wins, whatever wrote it"
+        );
+        assert_eq!(
+            active_at(&events, "codex", 50),
+            None,
+            "still nothing before the first event"
+        );
+
+        // And a tool that has never been `use`d at all on this machine.
+        let only_serves = vec![served(200, "claude-code", "kong")];
+        assert_eq!(
+            active_at(&only_serves, "claude-code", 300).as_deref(),
+            Some("kong")
+        );
+        assert_eq!(
+            attribute(&only_serves, "claude-code", 300),
+            None,
+            "which the switch-only reader could not see"
+        );
+    }
+
+    #[test]
     fn attribute_picks_the_last_switch_before_the_session() {
         let events = vec![
             ev(100, "codex", "work"),
@@ -366,5 +418,58 @@ mod tests {
         let one = pick_recent(&rows, &events, "personal", 1);
         assert_eq!(one.len(), 1, "truncates to n");
         assert_eq!(one[0].id, "bbb222");
+    }
+
+    #[test]
+    fn a_served_session_is_not_counted_as_unattributed() {
+        // claude-code on this machine has never been `use`d, so the whole
+        // breakdown read "(unattributed)" while every turn had a named payer.
+        let events = vec![
+            served(50, "claude-code", "rnd"),
+            served(100, "claude-code", "kong"),
+        ];
+        let rows: Vec<serde_json::Value> = vec![
+            serde_json::json!({"tool":"claude-code","started":"1970-01-01T00:01:00Z"}), // t=60
+            serde_json::json!({"tool":"claude-code","started":"1970-01-01T00:03:00Z"}), // t=180
+            serde_json::json!({"tool":"claude-code","started":"1970-01-01T00:00:10Z"}), // t=10
+        ];
+        let counts = count_by_account(&rows, &events);
+        assert_eq!(counts.get("rnd"), Some(&1));
+        assert_eq!(counts.get("kong"), Some(&1));
+        assert_eq!(
+            counts.get(UNATTRIBUTED),
+            Some(&1),
+            "only the session that predates every event stays unattributed"
+        );
+    }
+
+    #[test]
+    fn pick_recent_sees_sessions_on_a_proxy_driven_machine() {
+        // The shape that produced 4457 unattributed sessions: the account
+        // changed through the proxy, so the only events are serves.
+        let events = vec![
+            served(50, "claude-code", "rnd"),
+            served(100, "claude-code", "kong"),
+        ];
+        let rows: Vec<serde_json::Value> = vec![
+            serde_json::json!({"id":"aaa111","tool":"claude-code","title":"on rnd",
+                               "started":"1970-01-01T00:01:00Z"}), // t=60 -> rnd
+            serde_json::json!({"id":"bbb222","tool":"claude-code","title":"on kong",
+                               "started":"1970-01-01T00:03:00Z"}), // t=180 -> kong
+        ];
+        let ids: Vec<String> = pick_recent(&rows, &events, "kong", 5)
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["bbb222"],
+            "a served session belongs to the account that served it"
+        );
+        assert_eq!(
+            pick_recent(&rows, &events, "rnd", 5).len(),
+            1,
+            "and the earlier one to the account serving then"
+        );
     }
 }

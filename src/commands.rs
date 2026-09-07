@@ -2680,7 +2680,7 @@ pub(crate) fn recent_menu_sessions(
     let mine: Vec<crate::native_sessions::NativeSession> = all
         .iter()
         .filter(|s| {
-            crate::session_link::attribute(&events, s.tool, s.started).as_deref() == Some(name)
+            crate::session_link::active_at(&events, s.tool, s.started).as_deref() == Some(name)
         })
         .map(|s| crate::native_sessions::NativeSession {
             tool: s.tool,
@@ -3036,15 +3036,36 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         let codex_seen = crate::quota_cache::load_for(paths, "codex");
         // Read them concurrently, staggered: sequential reads made the numbers
         // arrive after the sum of every round trip.
-        let live_by_name: std::collections::HashMap<String, crate::codex_usage::Account> =
-            fetch_codex_live(codex_homes.clone())
-                .into_iter()
-                .filter_map(|(n, a)| a.map(|a| (n, a)))
-                .collect();
+        let fetched = fetch_codex_live(codex_homes.clone());
+        let live_by_name: std::collections::HashMap<String, crate::codex_usage::Account> = fetched
+            .iter()
+            .filter_map(|(n, a, _)| a.clone().map(|a| (n.clone(), a)))
+            .collect();
+        // The accounts whose own token was rejected. Not the same as an account
+        // the endpoint would not answer about, and the remembered reading must
+        // not stand in for it: it would show a dead account as an unused one.
+        let refused_names: std::collections::HashSet<String> = fetched
+            .iter()
+            .filter(|(_, _, refused)| *refused)
+            .map(|(n, _, _)| n.clone())
+            .collect();
         for (name, dir) in &codex_homes {
             let live = live_by_name.get(name).cloned();
-            let transcript = crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400);
-            let seen_by_proxy = codex_seen.get(name).cloned();
+            // Only when those transcripts are this account's alone. Codex slots
+            // share `sessions/` by design, so on a normal machine every slot
+            // reads the same file and the row would show one account's usage
+            // under every name - which is exactly what was reported, on both
+            // machines here.
+            let all_dirs: Vec<std::path::PathBuf> =
+                codex_homes.iter().map(|(_, d)| d.clone()).collect();
+            let transcript = crate::codex_limits::transcript_is_private(dir, &all_dirs)
+                .then(|| crate::codex_limits::for_slot(dir, now_secs(), 7 * 86_400))
+                .flatten();
+            let seen_by_proxy = if refused_names.contains(name) {
+                None
+            } else {
+                codex_seen.get(name).cloned()
+            };
             if let Some(row) = codex_row(
                 name,
                 live.as_ref(),
@@ -3059,7 +3080,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 // for as long as the network took. A remembered reading fills
                 // the row immediately and the live one replaces it when it
                 // lands.
-                remember_codex_reading(paths, &row.0, &row.1);
+                if !refused_names.contains(name) {
+                    remember_codex_reading(paths, &row.0, &row.1);
+                }
                 claude.push(row);
             }
         }
@@ -4271,7 +4294,9 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     } else {
         dirs::home_dir()
     };
-    for tool in ["claude-code", "codex"] {
+    // Every tool `service install --tool` accepts. It checked two of the four,
+    // so a gemini or antigravity proxy could be down with doctor saying nothing.
+    for tool in crate::store::KNOWN_TOOLS {
         let Some(path) = home.as_ref().map(|h| {
             if cfg!(target_os = "macos") {
                 crate::service::launchd_path(h, tool)
@@ -4295,9 +4320,10 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         &label,
                         false,
                         format!(
-                            "installed but not running - `swapdex service restart --tool {}` \
+                            "installed but not running - `swapdex service install --tool {}` \
+                             writes the unit and hands it back to the supervisor \
                              (sessions fall back to your own login until it is up)",
-                            tool
+                            pretty_tool_flag(tool)
                         ),
                     );
                 }
@@ -4310,7 +4336,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                      `swapdex service install --tool {}` (an npm path carries the Node \
                      version, so upgrading Node breaks it)",
                     crate::util::redact_path(prog),
-                    tool
+                    pretty_tool_flag(tool)
                 ),
             ),
             None => report(
@@ -4351,7 +4377,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     format!(
                         "settings.json sends Claude Code to 127.0.0.1:{port} and nothing is \
                          answering there - every session gets 'Connection refused'. Start the \
-                         proxy (`swapdex service restart --tool claude-code`, from a terminal \
+                         proxy (`swapdex service install --tool claude`, from a terminal \
                          on this machine so it can read the Keychain), or remove the pin from \
                          {} to go direct.",
                         crate::util::redact_path(&settings_file.display().to_string())
@@ -4714,7 +4740,7 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
         None => println!(
             "  not pinning the proxy address: no service keeps the proxy alive, and a \
              pinned address with nothing behind it would stop `claude` from starting.\n\
-             \x20     run `swapdex service install --tool claude-code` first"
+             \x20     run `swapdex service install --tool claude` first"
         ),
     }
     match crate::shim::install_codex(paths)? {
@@ -5340,61 +5366,6 @@ pub fn whereis(paths: &Paths, project: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
-/// `swapdex resume [project]` - reopen a conversation without first working out
-/// which account owns it.
-///
-/// The stores cannot be merged: Claude writes a conversation into whichever
-/// config dir it was launched with, and that separation is the same property
-/// that stopped accounts logging each other out. What CAN be merged is the
-/// looking - so this searches every account, picks the newest match, and
-/// launches Claude against the store that actually holds it.
-pub fn resume(paths: &Paths, project: Option<&str>) -> Result<i32> {
-    use std::os::unix::process::CommandExt;
-    // No argument means "this project", which is the common case and saves the
-    // user having to spell out a path they are already standing in.
-    let cwd = std::env::current_dir().ok();
-    let filter = project
-        .map(str::to_string)
-        .or_else(|| cwd.as_ref().map(|d| d.display().to_string()));
-    let found = crate::whereis::find(paths, filter.as_deref(), 5);
-    let Some(top) = found.first() else {
-        match project {
-            Some(p) => {
-                eprintln!("swapdex: no conversation under a path matching '{p}', in any account")
-            }
-            None => eprintln!(
-                "swapdex: no conversation for this directory in any account - \
-                 `swapdex whereis` lists what there is"
-            ),
-        }
-        return Ok(5);
-    };
-    println!(
-        "resuming in '{}' ({})",
-        top.account,
-        crate::util::redact_path(&top.config_dir.display().to_string())
-    );
-    if found.len() > 1 {
-        // Say that a choice was made, and how to make a different one.
-        println!(
-            "  (newest of {} here - `swapdex whereis` lists the rest)",
-            found.len()
-        );
-    }
-    if !command_exists("claude") {
-        eprintln!("swapdex: `claude` isn't on your PATH. Install it, then retry.");
-        return Ok(3);
-    }
-    // Naming the store explicitly is what makes this work from any account: the
-    // shim only fills that variable in when it is unset.
-    let err = std::process::Command::new("claude")
-        .arg("-r")
-        .arg(&top.session_id)
-        .env("CLAUDE_CONFIG_DIR", &top.config_dir)
-        .exec();
-    Err(anyhow::anyhow!("failed to launch claude: {err}"))
-}
-
 /// `swapdex serve [name]` - hand turns to an account without moving where new
 /// sessions start.
 ///
@@ -5940,7 +5911,7 @@ pub fn cached_quota_tools() -> [&'static str; 2] {
 /// stagger, instead of the total.
 fn fetch_codex_live(
     items: Vec<(String, std::path::PathBuf)>,
-) -> Vec<(String, Option<crate::codex_usage::Account>)> {
+) -> Vec<(String, Option<crate::codex_usage::Account>, bool)> {
     let handles: Vec<_> = items
         .into_iter()
         .enumerate()
@@ -5951,16 +5922,26 @@ fn fetch_codex_live(
                         crate::quota::pace_ms() * i as u64,
                     ));
                 }
-                let live = crate::proxy::codex::slot_auth(&dir).and_then(|auth| {
-                    match crate::codex_usage::fetch(&auth) {
-                        crate::codex_usage::Fetch::Ok(a) => Some(*a),
-                        // Anything else falls through to the remembered reading
-                        // rather than blanking the row: a throttled endpoint
-                        // says nothing about the account behind it.
-                        _ => None,
+                // Three outcomes, not two. A throttled or unreadable reply says
+                // nothing about the account, so the remembered reading still
+                // stands; a REJECTED token is a fact about the account, and
+                // letting the remembered reading stand there shows a dead
+                // account as a fresh one.
+                let mut live = None;
+                let mut refused = false;
+                if let Some(auth) = crate::proxy::codex::slot_auth(&dir) {
+                    let f = crate::codex_usage::fetch(&auth);
+                    match crate::codex_usage::outcome_of(&f) {
+                        crate::codex_usage::LiveOutcome::Reading => {
+                            if let crate::codex_usage::Fetch::Ok(a) = f {
+                                live = Some(*a);
+                            }
+                        }
+                        crate::codex_usage::LiveOutcome::Refused => refused = true,
+                        crate::codex_usage::LiveOutcome::KeepRemembered => {}
                     }
-                });
-                (name, live)
+                }
+                (name, live, refused)
             })
         })
         .collect();

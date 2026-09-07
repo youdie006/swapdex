@@ -176,6 +176,28 @@ fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::V
 /// is what `run`, `adopt` and `onboard` create - had its transcripts sitting in
 /// a directory nothing looked at, and got no usage at all while another home's
 /// numbers were displayed beside it.
+/// Whether this slot's transcripts describe THIS account and no other.
+///
+/// They do not when its `sessions/` resolves to a directory another slot also
+/// reads - which is the normal arrangement, not an accident: Codex slots share
+/// `sessions/` on purpose, because a conversation is not the property of the
+/// account that funded it. `codex_row`'s doc concedes the transcript source is
+/// "bound to the home rather than to a credential"; when homes share, that
+/// makes it bound to nothing in particular, and every account was shown the
+/// same numbers as its own.
+pub fn transcript_is_private(dir: &Path, all_slot_dirs: &[std::path::PathBuf]) -> bool {
+    let mine = std::fs::canonicalize(dir.join("sessions"));
+    let Ok(mine) = mine else {
+        // No sessions dir to share; nothing will be read from it either.
+        return true;
+    };
+    !all_slot_dirs
+        .iter()
+        .filter(|other| other.as_path() != dir)
+        .filter_map(|other| std::fs::canonicalize(other.join("sessions")).ok())
+        .any(|theirs| theirs == mine)
+}
+
 pub fn for_slot(config_dir: &Path, now: u64, max_age_secs: u64) -> Option<Limits> {
     from_sessions_dir(&config_dir.join("sessions"), now, max_age_secs)
 }
@@ -424,5 +446,54 @@ mod streaming_read_tests {
             got.long.is_some(),
             "the window at the end of a long file is still found: {got:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_transcript_tests {
+    use super::*;
+
+    /// `codex_row` treats a home's transcripts as that ACCOUNT's usage, and its
+    /// own doc concedes they are "bound to the home rather than to a
+    /// credential". Codex slots share `sessions/` on purpose - a conversation
+    /// is not the property of the account that funded it - so on both machines
+    /// here every slot's sessions is a symlink to the same `~/.codex/sessions`.
+    /// Every account then reads the SAME numbers and the row presents them as
+    /// its own, which is why two Codex accounts showed identical usage.
+    #[test]
+    fn a_sessions_dir_shared_with_another_slot_is_not_private() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("codex-sessions");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        let a = root.path().join("slot-a");
+        let b = root.path().join("slot-b");
+        for s in [&a, &b] {
+            std::fs::create_dir_all(s).unwrap();
+            std::os::unix::fs::symlink(&shared, s.join("sessions")).unwrap();
+        }
+        assert!(!transcript_is_private(&a, &[a.clone(), b.clone()]));
+        assert!(!transcript_is_private(&b, &[a.clone(), b.clone()]));
+    }
+
+    #[test]
+    fn a_sessions_dir_of_its_own_is_private() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("slot-a");
+        let b = root.path().join("slot-b");
+        for s in [&a, &b] {
+            std::fs::create_dir_all(s.join("sessions")).unwrap();
+        }
+        assert!(transcript_is_private(&a, &[a.clone(), b.clone()]));
+        assert!(transcript_is_private(&b, &[a.clone(), b.clone()]));
+    }
+
+    /// One slot on the machine has nothing to share with.
+    #[test]
+    fn the_only_slot_is_private_to_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("only");
+        std::fs::create_dir_all(a.join("sessions")).unwrap();
+        assert!(transcript_is_private(&a, std::slice::from_ref(&a)));
     }
 }
