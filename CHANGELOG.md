@@ -4,6 +4,57 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.151.0
+
+- **An upstream that never answers no longer hangs the client.** The relay
+  client was built with no timeouts at all, and every retry in that path fires
+  on an ERROR - which a server that accepts the connection and then says nothing
+  never produces. Measured against a listener that does exactly that: 120
+  seconds, zero bytes to the client, and not one line in the proxy's log,
+  because the request never reached the point where it would be logged. That is
+  the ordinary shape of a black-holing network - a captive portal, a firewall
+  that DROPs instead of REJECTs, a half-open VPN. Resolving, connecting and
+  waiting for the response HEADERS are bounded now; the body deliberately is
+  not, because responses stream and cutting one in half is the failure this
+  proxy exists to avoid. The same case now answers 502 in twelve seconds and
+  says why. A response timeout is also terminal rather than retried: retrying
+  one multiplied it sixteen times over.
+- **The proxy refuses a tool it has no relay for.** `--tool gemini` was accepted
+  and fell through to the Anthropic branch, so `swapdex proxy --tool gemini`
+  announced itself as "swapdex claude proxy" and told you to point CLAUDE at it -
+  and `service install --tool gemini` put that under the supervisor on Gemini's
+  port, restarted forever by KeepAlive.
+- **A Codex login can be renewed.** Renewal has existed since July and every
+  line of it was Anthropic's, so on a Codex slot it found no credential and did
+  nothing, silently. A Codex access token expires exactly ten days after its
+  last renewal and Codex renews only when Codex RUNS: four of eight slots across
+  two machines were already dead, including the one paying for Codex on one of
+  them. `swapdex refresh` covers Codex now, and the proxy renews a lapsed slot
+  before writing it off.
+- **A lapsed Codex login is reported as lapsed.** The proxy asked only whether a
+  login was PRESENT, which an expired one is, so it kept routing turns to a dead
+  slot and reported the 401 that came back as a rejected account. `quota` says
+  "login expired" and names the fix; `status`, which had been silent beside a
+  login three days dead, says it too.
+- **Codex token counts are comparable to Claude's again.** The Claude side counts
+  input, output and cache WRITES, and leaves cache reads out. Codex's
+  `total_tokens` counts the whole re-read context on every turn, so one long
+  session reported 1.7 BILLION tokens. Measured across seven days on one
+  machine: 42.0B as written, 2.0B net of cache reads.
+- **A rejected token is no longer displayed as an unused account**, and a
+  reading that has stopped arriving no longer reads as one that is merely late.
+- **Names that no command would accept can no longer be registered by another.**
+  `run` and `adopt` - the two that create a slot - skipped the check the other
+  five run, so `adopt '../evil'` registered that name and a name carrying a
+  carriage return listed as something other than itself.
+- **The root refusal covers the two paths its own comment named.** It lives in
+  `write_secret`, and `slash` and `onboard` write no secret, so neither was
+  covered. `slash` also asked the ambient home rather than the one `paths`
+  names, so a run under `SWAPDEX_ROOT` wrote into the real `~/.claude`.
+- **`doctor` checks the proxy service for every tool it can be installed for**,
+  and three printed messages no longer carry source indentation in the middle of
+  the sentence - two of them on the proxy's request path.
+
 ## 0.150.0
 
 - **A reading that has stopped arriving no longer reads as one that is late.**
