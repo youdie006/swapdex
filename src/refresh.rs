@@ -295,6 +295,165 @@ fn post(refresh_token: &str) -> Result<(String, u32), RefreshError> {
     Ok(out)
 }
 
+/// Codex's public OAuth client id, and where its exchange happens.
+///
+/// Not guessed: `icoretech/codex-pooler`, an Elixir gateway that keeps a pool of
+/// Codex accounts alive, carries both as constants, and the issuer matches the
+/// `iss` claim on every access token in a real slot here
+/// (`https://auth.openai.com`).
+pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+/// Where a Codex refresh is exchanged. Redirected only under `SWAPDEX_ROOT`,
+/// the same rule the Claude URL follows, so a production run can never be
+/// pointed at another host holding a live refresh token.
+pub fn codex_token_url() -> String {
+    if std::env::var_os("SWAPDEX_ROOT").is_some() {
+        if let Some(u) = std::env::var_os("SWAPDEX_CODEX_OAUTH_URL") {
+            return u.to_string_lossy().into_owned();
+        }
+    }
+    "https://auth.openai.com/oauth/token".to_string()
+}
+
+/// The form body for a Codex exchange. Form-encoded, not JSON: that is what
+/// RFC 6749 specifies and what the working implementation sends.
+///
+/// Probed against the real endpoint with a deliberately invalid token, which
+/// spends nothing: it answers a clean JSON 401 to a bare `User-Agent: swapdex`,
+/// so the URL, the form shape and the client id are all accepted and no
+/// browser fingerprint is needed.
+pub fn codex_request_body(refresh_token: &str) -> String {
+    // A JWT is unreserved characters only, but encode anyway rather than depend
+    // on the shape of someone else's token.
+    let enc = |s: &str| -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        enc(refresh_token),
+        enc(CODEX_CLIENT_ID)
+    )
+}
+
+/// Fold a Codex exchange's answer back into the slot's `auth.json`, keeping
+/// every field it already had.
+///
+/// The rotated refresh token is written when the server sends one. Dropping it
+/// would leave the slot holding a token the server has already retired - the
+/// logout this project exists to prevent, arrived at from the other direction.
+pub fn merge_codex_response(old: &[u8], response: &str, now_rfc3339: &str) -> Option<Vec<u8>> {
+    let mut blob: serde_json::Value = serde_json::from_slice(old).ok()?;
+    let r: serde_json::Value = serde_json::from_str(response).ok()?;
+    let access = r["access_token"].as_str().filter(|s| !s.is_empty())?;
+    let t = blob.get_mut("tokens")?.as_object_mut()?;
+    t.insert("access_token".into(), access.into());
+    for (from, to) in [("refresh_token", "refresh_token"), ("id_token", "id_token")] {
+        if let Some(v) = r[from].as_str().filter(|s| !s.is_empty()) {
+            t.insert(to.into(), v.into());
+        }
+    }
+    blob.as_object_mut()?
+        .insert("last_refresh".into(), now_rfc3339.into());
+    serde_json::to_vec_pretty(&blob).ok()
+}
+
+/// `last_refresh` the way Codex writes it: RFC 3339, UTC. Only this field needs
+/// it, so the civil-date arithmetic lives here rather than pulling in a clock
+/// crate the rest of the tool does not use.
+pub fn rfc3339_utc(secs: i64) -> String {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // days-from-civil, inverted (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+/// Renew a Codex slot's access token in place.
+///
+/// The guards are the Claude path's, for the same reasons: never while Codex is
+/// running in that slot (its session holds the refresh token, and retiring it
+/// would break the session's own next renewal), and the claim is taken here -
+/// where the token is SPENT - so two callers cannot spend it twice.
+pub fn refresh_codex_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
+    if slot_in_use(dir) {
+        return Err(RefreshError::InUse);
+    }
+    if !claim_refresh_at(dir, now_ms / 1000) {
+        return Err(RefreshError::AlreadyRefreshing);
+    }
+    let path = dir.join("auth.json");
+    let blob = std::fs::read(&path)
+        .ok()
+        .filter(|b| !b.is_empty())
+        .map(Secret::new)
+        .ok_or(RefreshError::NoCredential)?;
+    let token = serde_json::from_slice::<serde_json::Value>(blob.expose())
+        .ok()
+        .and_then(|v| {
+            v["tokens"]["refresh_token"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .ok_or(RefreshError::NoCredential)?;
+
+    let (body, status) = post_codex(&token)?;
+    if status == 429 {
+        return Err(RefreshError::Busy);
+    }
+    if matches!(status, 400 | 401 | 403) {
+        return Err(RefreshError::Expired);
+    }
+    if !(200..300).contains(&status) {
+        return Err(RefreshError::Refused(format!("HTTP {status}")));
+    }
+    let merged = merge_codex_response(blob.expose(), &body, &rfc3339_utc(now_ms / 1000))
+        .ok_or_else(|| RefreshError::Refused("the server's answer had no access token".into()))?;
+    crate::atomic::write_secret(&path, &merged)
+        .map_err(|e| RefreshError::Refused(e.to_string()))?;
+    Ok(())
+}
+
+fn post_codex(refresh_token: &str) -> Result<(String, u32), RefreshError> {
+    let body = codex_request_body(refresh_token);
+    let cfg = format!(
+        "url = \"{}\"\n\
+         request = POST\n\
+         header = \"content-type: application/x-www-form-urlencoded\"\n\
+         header = \"Accept: application/json\"\n\
+         header = \"User-Agent: swapdex\"\n\
+         data = \"{}\"\n\
+         silent\n\
+         show-error\n\
+         connect-timeout = 6\n\
+         max-time = 15\n\
+         write-out = \"\\n%{{http_code}}\"\n",
+        codex_token_url(),
+        body.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    crate::quota::run_curl_cfg(&cfg).map_err(RefreshError::Offline)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

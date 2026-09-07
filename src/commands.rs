@@ -6335,25 +6335,30 @@ pub fn keep_alive(paths: &Paths) -> Result<i32> {
 pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
     let slots = crate::slots::Slots::open_for(paths, "claude-code")?;
     let list: Vec<_> = match name {
-        Some(n) => match slots.get(n) {
-            Some(r) => vec![r],
-            None => {
-                // Name them here rather than sending the reader to another
-                // screen to read four words.
-                let known: Vec<String> = slots.list().into_iter().map(|r| r.name).collect();
-                let refs: Vec<&str> = known.iter().map(String::as_str).collect();
-                eprintln!("swapdex: {}", unknown_account(n, &refs));
-                return Ok(5);
-            }
-        },
+        Some(n) => slots.get(n).into_iter().collect(),
         None => slots.list(),
     };
-    if list.is_empty() {
-        println!("No Claude accounts to renew.");
-        return Ok(0);
+    let codex = crate::slots::Slots::open_for(paths, "codex").ok();
+    let codex_list: Vec<_> = match (&codex, name) {
+        (Some(c), Some(n)) => c.get(n).into_iter().collect(),
+        (Some(c), None) => c.list(),
+        (None, _) => Vec::new(),
+    };
+    // A named account is unknown only when NEITHER tool has it. Asking Claude
+    // alone meant `refresh <a codex account>` reported the name as unknown and
+    // returned before the Codex half ever ran.
+    if name.is_some() && list.is_empty() && codex_list.is_empty() {
+        let mut known: Vec<String> = slots.list().into_iter().map(|r| r.name).collect();
+        known.extend(codex.iter().flat_map(|c| c.list()).map(|r| r.name));
+        let refs: Vec<&str> = known.iter().map(String::as_str).collect();
+        eprintln!("swapdex: {}", unknown_account(name.unwrap_or(""), &refs));
+        return Ok(5);
     }
     let now = now_ms();
     let mut renewed = 0;
+    if list.is_empty() && codex_list.is_empty() {
+        println!("No accounts to renew.");
+    }
     for r in &list {
         if !crate::proxy::creds::slot_token_expired(&r.config_dir, now) {
             println!("  {} is already current", r.name);
@@ -6367,10 +6372,36 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
             Err(why) => println!("  {}", why.remedy(&r.name)),
         }
     }
+    renewed += refresh_codex(&codex_list, now);
     if renewed > 0 {
         println!("\n{renewed} account(s) renewed - no sign-in needed.");
     }
     Ok(0)
+}
+
+/// The Codex half of `swapdex refresh`.
+///
+/// This command opened the claude-code slot list only, so a Codex login could
+/// not be renewed by any means swapdex offered. Codex renews its own token when
+/// Codex RUNS, which is fine for a slot in daily use and useless for one that
+/// is not: measured across two machines, a slot dies exactly ten days after its
+/// last run, and four of eight were already dead when this was written.
+fn refresh_codex(list: &[crate::slots::SlotRecord], now: i64) -> usize {
+    let mut renewed = 0;
+    for r in list {
+        if !crate::proxy::codex::slot_token_expired(&r.config_dir, now / 1000) {
+            println!("  {} is already current", r.name);
+            continue;
+        }
+        match crate::refresh::refresh_codex_slot(&r.config_dir, now) {
+            Ok(()) => {
+                println!("  {} renewed", r.name);
+                renewed += 1;
+            }
+            Err(why) => println!("  {}", why.remedy(&r.name)),
+        }
+    }
+    renewed
 }
 
 /// List the permanent slots (name + the config dir each launches into).
@@ -7654,6 +7685,23 @@ pub fn codex_account_sources(
     out
 }
 
+/// What `quota` says about a Codex account that came back with no number.
+///
+/// "token rejected" is the endpoint's word, and for a token that has simply
+/// LAPSED it reads as a broken account - which is how a machine with two dead
+/// slots looked. The deadline is in the token itself, so when it has passed,
+/// say the thing the reader can act on. Codex renews its own token when Codex
+/// RUNS, so the remedy is to run it once in that slot.
+fn codex_no_number(f: &crate::codex_usage::Fetch, name: &str, expired: bool) -> String {
+    if expired && matches!(f, crate::codex_usage::Fetch::Unauthorized) {
+        return format!(
+            "login expired - `swapdex run {name} --tool codex` once renews it \
+             (Codex renews its token when it runs, and this slot has not been opened since)"
+        );
+    }
+    f.why_no_number().unwrap_or("no reading").to_string()
+}
+
 /// The Codex half of `swapdex quota`.
 ///
 /// Kept as its own pass rather than folded into the Claude loop above: the two
@@ -7720,8 +7768,11 @@ fn print_codex_quota(paths: &Paths, now: i64) {
                     // the Claude side: a busy endpoint and a dead login are different
                     // news, and one silence for both hides whichever matters.
                     f => {
+                        let expired = dir
+                            .as_deref()
+                            .is_some_and(|d| crate::proxy::codex::slot_token_expired(d, now));
                         println!("{name}   {}", saved.unwrap_or_default());
-                        println!("  {}", f.why_no_number().unwrap_or("no reading"));
+                        println!("  {}", codex_no_number(&f, name, expired));
                     }
                 }
             }
@@ -8908,6 +8959,34 @@ mod bar_age_tests {
         assert_eq!(bar_age(599, tight), None);
         assert_eq!(bar_age(600, tight), Some(" · 10m old".to_string()));
         assert_eq!(bar_age(9_000, tight), Some(" · 2h old".to_string()));
+    }
+
+    #[test]
+    fn a_lapsed_codex_login_is_not_reported_as_a_rejected_account() {
+        use crate::codex_usage::Fetch;
+        // Four slots on two machines were in exactly this state: the token had
+        // simply run out - Codex renews it when Codex runs, and nobody had run
+        // it - and `quota` called every one of them "token rejected".
+        let lapsed = codex_no_number(&Fetch::Unauthorized, "work", true);
+        assert!(lapsed.contains("login expired"), "{lapsed}");
+        assert!(
+            lapsed.contains("swapdex run work --tool codex"),
+            "and names the remedy: {lapsed}"
+        );
+
+        // A 401 on a token that has NOT expired is a different fact, and the
+        // endpoint's own word is the honest one for it.
+        assert_eq!(
+            codex_no_number(&Fetch::Unauthorized, "work", false),
+            "token rejected"
+        );
+        // Everything else is untouched by the deadline either way.
+        for expired in [true, false] {
+            assert_eq!(
+                codex_no_number(&Fetch::Throttled, "work", expired),
+                "usage endpoint throttled"
+            );
+        }
     }
 
     #[test]

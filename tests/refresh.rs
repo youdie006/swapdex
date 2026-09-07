@@ -263,3 +263,129 @@ fn keep_alive_renews_an_account_that_has_not_lapsed_yet() {
         "it says which account it renewed: {said}"
     );
 }
+
+/// A Codex slot whose access token lapsed and whose refresh token is still good.
+///
+/// Measured on two real machines: a slot's access token expires exactly ten days
+/// after its last renewal, Codex only renews when Codex RUNS, and four of eight
+/// slots were already dead. Nothing in swapdex could renew one - `refresh_slot`
+/// reads Claude's credential shape, so it answered "no credential" and did
+/// nothing, silently.
+fn seed_lapsed_codex(root: &std::path::Path, name: &str, id: &str) -> std::path::PathBuf {
+    let store = root.join(".local/share/swapdex");
+    let slot = store.join("slots").join(id);
+    std::fs::create_dir_all(&slot).unwrap();
+    // A JWT that expired an hour ago: header.payload.sig, payload carrying `exp`.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let b64 = |s: &str| {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s)
+    };
+    let lapsed = format!(
+        "{}.{}.sig",
+        b64(r#"{"alg":"none"}"#),
+        b64(&format!(r#"{{"exp":{}}}"#, now - 3_600))
+    );
+    std::fs::write(
+        slot.join("auth.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": serde_json::Value::Null,
+            "tokens": {
+                "id_token": "OLD-ID", "access_token": lapsed,
+                "refresh_token": "OLD-RT", "account_id": "acct-1"
+            },
+            "last_refresh": "2026-08-19T07:41:56Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "name": name, "id": id, "config_dir": slot, "adopted": false, "tool": "codex"
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    slot
+}
+
+fn codex_auth(slot: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(slot.join("auth.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn a_lapsed_codex_account_is_renewed_in_place() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let slot = seed_lapsed_codex(root, "work", "codex-1");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = fake_oauth(
+        asked.clone(),
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","id_token":"NEW-ID"}"#,
+    );
+
+    let out = Command::new(bin())
+        .args(["refresh", "work"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_CODEX_OAUTH_URL", &url)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("work renewed"), "stdout was:\n{text}");
+
+    // The request is the one the working implementation sends: form-encoded,
+    // the account's own refresh token, Codex's public client id.
+    let body = asked.lock().unwrap().first().cloned().unwrap_or_default();
+    assert!(body.contains("grant_type=refresh_token"), "body: {body}");
+    assert!(body.contains("refresh_token=OLD-RT"), "body: {body}");
+    assert!(
+        body.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"),
+        "body: {body}"
+    );
+
+    // And the answer landed in the file Codex reads, keeping its other fields.
+    let a = codex_auth(&slot);
+    assert_eq!(a["tokens"]["access_token"], "NEW-AT");
+    assert_eq!(
+        a["tokens"]["refresh_token"], "NEW-RT",
+        "the ROTATED token must be written, or the slot holds one the server retired"
+    );
+    assert_eq!(a["tokens"]["id_token"], "NEW-ID");
+    assert_eq!(
+        a["tokens"]["account_id"], "acct-1",
+        "untouched fields survive"
+    );
+    assert_eq!(a["auth_mode"], "chatgpt");
+    assert_ne!(a["last_refresh"], "2026-08-19T07:41:56Z", "stamped anew");
+}
+
+#[test]
+fn a_codex_renewal_the_server_refuses_changes_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let slot = seed_lapsed_codex(root, "work", "codex-1");
+    let before = codex_auth(&slot);
+    let url = fake_oauth(
+        Arc::new(Mutex::new(Vec::new())),
+        r#"{"error":"invalid_grant"}"#,
+    );
+    // tiny_http answers 200 by default, so a refusal is modelled as a body with
+    // no access token - the other half of the same guard.
+    let out = Command::new(bin())
+        .args(["refresh", "work"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_CODEX_OAUTH_URL", &url)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        codex_auth(&slot),
+        before,
+        "an answer with no access token must leave the credential alone"
+    );
+}

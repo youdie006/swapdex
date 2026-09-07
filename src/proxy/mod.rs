@@ -1342,7 +1342,15 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
         // `exp` claim of its own JWT. Asking only "is a login there" sent turns
         // to a slot whose token had expired days earlier and reported the 401
         // that came back as a rejected account.
-        "codex" => codex::slot_auth(dir).is_some() && !codex::slot_token_expired(dir, now_secs()),
+        "codex" => {
+            if codex::slot_token_expired(dir, now_secs()) {
+                // Same order as the Claude branch above: try to renew before
+                // ruling the account out, because the slots idle long enough to
+                // lapse are exactly the ones with quota left.
+                let _ = crate::refresh::refresh_codex_slot(dir, now_ms());
+            }
+            codex::slot_auth(dir).is_some() && !codex::slot_token_expired(dir, now_secs())
+        }
         // Same per-tool question as has_login.
         "gemini" | "antigravity" => has_login(paths, tool, dir),
         _ => creds::slot_token(dir).is_some() && !creds::slot_token_expired(dir, now_ms()),
