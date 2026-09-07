@@ -2082,8 +2082,15 @@ pub fn proxy(
     ensure: bool,
     threshold: Option<f64>,
 ) -> Result<i32> {
+    // Refuse where the relay does not exist, rather than starting a Claude proxy
+    // under another tool's name and port.
+    let tool = slot_tool(sel);
+    if !crate::proxy::carries(tool) {
+        eprintln!("{}", crate::proxy::cannot_carry(tool));
+        return Ok(2);
+    }
     if ensure {
-        return proxy_ensure(paths, port, slot_tool(sel));
+        return proxy_ensure(paths, port, tool);
     }
     // A flag decides THIS run; no flag means "whatever the setting says", and the
     // proxy re-reads that on every request - so `swapdex auto on` reaches one that
@@ -6210,6 +6217,13 @@ fn install_verdict(came_up: bool, tool: &str) -> (bool, String) {
 
 pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
     let tool = slot_tool(sel);
+    // The unit runs `proxy --tool <tool>`. Installing one for a tool the proxy
+    // cannot carry put a Claude proxy on that tool's port, under the supervisor,
+    // restarted forever by KeepAlive.
+    if !crate::proxy::carries(tool) {
+        eprintln!("{}", crate::proxy::cannot_carry(tool));
+        return Ok(2);
+    }
     let path = crate::service::install(paths, tool)?;
     println!(
         "the {} proxy is now a service: {}",
@@ -6256,10 +6270,11 @@ pub fn service_uninstall(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
 
 /// `swapdex service status` - what is installed, and whether it is up.
 pub fn service_status(paths: &Paths) -> Result<i32> {
-    // All four, not the two that were listed here: a gemini or antigravity
-    // service could be installed and running and this said nothing about it.
-    // The unit's location comes from `paths` so a sandboxed run reports on the
-    // sandbox rather than on the machine.
+    // All four, not the two that were listed here. `install` now refuses a tool
+    // the proxy cannot carry, but a machine that installed one BEFORE that
+    // refusal still has the unit, and a supervised proxy nothing reports on is
+    // exactly the one nobody removes. The unit's location comes from `paths` so
+    // a sandboxed run reports on the sandbox rather than on the machine.
     for tool in ["claude-code", "codex", "gemini", "antigravity"] {
         let path = crate::service::unit_path(paths, tool);
         let installed = path.exists();

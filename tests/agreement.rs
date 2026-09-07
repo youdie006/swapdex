@@ -889,3 +889,93 @@ fn the_status_bar_says_a_reading_stopped_arriving_not_that_it_is_late() {
         "and must not keep offering a number nothing can refresh: {rejected}"
     );
 }
+
+/// Run `proxy --tool <tool>` and require it to EXIT. Returns (stderr, code).
+/// Fails the test if it is still running after a few seconds, which is what
+/// "it started a server instead of refusing" looks like from out here.
+fn refuse_or_die(root: &Path, tool: &str) -> (String, i32) {
+    use std::process::Stdio;
+    let mut child = Command::new(bin())
+        .args(["proxy", "--tool", tool, "--port", "39999"])
+        .env("SWAPDEX_ROOT", root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let out = child.wait_with_output().unwrap();
+            return (
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+                status.code().unwrap_or(-1),
+            );
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`proxy --tool {tool}` is still running - it started a proxy instead of refusing"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// A tool the proxy cannot carry must not be offered a proxy or a service.
+///
+/// `--tool` was accepted for gemini and antigravity and fell through to the
+/// Anthropic branch: `swapdex proxy --tool gemini` announced itself as "swapdex
+/// claude proxy" and told the reader to point CLAUDE at it, and `service
+/// install --tool gemini` wrote a unit running exactly that on Gemini's port,
+/// restarted forever by KeepAlive. The command surface said a Gemini proxy
+/// existed; the relay only ever spoke to Anthropic and ChatGPT.
+#[test]
+fn the_proxy_refuses_a_tool_it_has_no_relay_for() {
+    let t = fixture();
+    let root = t.path();
+    for tool in ["gemini", "antigravity"] {
+        // Bounded on purpose. When this regressed, the proxy STARTED and served
+        // forever, so a blocking `output()` hung instead of failing - a test
+        // that hangs on the defect it exists to catch reports nothing at all.
+        let (err, code) = refuse_or_die(root, tool);
+        assert_ne!(code, 0, "`proxy --tool {tool}` must not start: {err}");
+        assert!(
+            err.contains(&format!("no {tool} relay")),
+            "and must say why, naming the tool: {err}"
+        );
+        assert!(
+            !err.contains("ANTHROPIC_BASE_URL"),
+            "it must never hand out Claude's variable for another tool: {err}"
+        );
+
+        let (out, err, code) = run(root, &["service", "install", "--tool", tool]);
+        assert_ne!(
+            code, 0,
+            "`service install --tool {tool}` must refuse: {out}{err}"
+        );
+        let unit = root.join(format!(".config/systemd/user/swapdex-{tool}.service"));
+        let plist = root.join(format!(
+            "Library/LaunchAgents/io.github.youdie006.swapdex.{tool}.plist"
+        ));
+        assert!(
+            !unit.exists() && !plist.exists(),
+            "and must leave no unit behind"
+        );
+    }
+
+    // The two it DOES carry still get a unit written. (Whether the proxy then
+    // comes UP is a different question, and in a fixture with no accounts it
+    // does not - which is why this looks at the unit and not the exit code.)
+    for (tool, unit) in [("claude", "swapdex-claude"), ("codex", "swapdex-codex")] {
+        run(root, &["service", "install", "--tool", tool]);
+        let systemd = root.join(format!(".config/systemd/user/{unit}.service"));
+        let launchd = root.join(format!(
+            "Library/LaunchAgents/io.github.youdie006.swapdex.{tool}.plist"
+        ));
+        assert!(
+            systemd.exists() || launchd.exists(),
+            "`service install --tool {tool}` must still write a unit"
+        );
+    }
+}

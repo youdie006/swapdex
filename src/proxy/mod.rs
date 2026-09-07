@@ -1295,6 +1295,32 @@ fn next_account_in(
     slots.into_iter().find(|r| r.name == chosen)
 }
 
+/// Can the proxy carry this tool's traffic?
+///
+/// It relays two upstreams: Anthropic's, and ChatGPT's for Codex. There is no
+/// Gemini or Antigravity relay - and `--tool` was accepted for them anyway,
+/// silently falling through to the Anthropic branch. `swapdex proxy --tool
+/// gemini` announced itself as "swapdex claude proxy", told the reader to point
+/// CLAUDE at it, and `service install --tool gemini` put exactly that under the
+/// supervisor on Gemini's port, restarted forever by KeepAlive.
+pub fn carries(tool: &str) -> bool {
+    matches!(tool, "claude-code" | "codex")
+}
+
+/// One sentence for a tool the proxy cannot carry, naming what it CAN do.
+pub fn cannot_carry(tool: &str) -> String {
+    format!(
+        "swapdex: the proxy carries claude and codex traffic; there is no {tool} relay, \
+         so it cannot serve {tool} turns. Switch {tool} accounts with `swapdex use <name> \
+         --tool {}` instead.",
+        if tool == "claude-code" {
+            "claude"
+        } else {
+            tool
+        }
+    )
+}
+
 /// Is there a login in this slot at all - asked WITHOUT touching it?
 ///
 /// Separate from `has_usable_login` on purpose: that one renews a lapsed Claude
