@@ -2046,7 +2046,7 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
                     Some(n) => format!("profile '{n}'"),
                     None => "not saved - run `swapdex add <name>`".to_string(),
                 };
-                let exp = expiry_note(id.expires_at);
+                let exp = expiry_note(id.expires_at, tool);
                 println!("{tool}: {} ({saved}){exp}", identity_line(&id));
             }
         }
@@ -7968,7 +7968,19 @@ fn identity_line(id: &Account) -> String {
     }
 }
 
-fn expiry_note(expires_at: Option<i64>) -> String {
+fn expiry_note(expires_at: Option<i64>, tool: &str) -> String {
+    // Codex is the exception the rest of this reasoning does not cover. Its
+    // token lives about ten days, not an hour, and nothing renews it silently -
+    // Codex renews only when Codex RUNS. So a lapsed Codex token is not noise
+    // to be waited out; it is the reason turns are failing right now.
+    if tool == "codex" {
+        return match expires_at {
+            Some(ms) if ms <= now_ms() => {
+                " - login expired; `swapdex refresh` renews it (or run codex once)".to_string()
+            }
+            _ => String::new(),
+        };
+    }
     // expiresAt is epoch millis. An OAuth ACCESS token lapses about hourly and
     // the tool refreshes it silently, so "expired" for a just-lapsed token is
     // pure noise (this is the `status` twin of the 0.20.0 ls/marker fix that
@@ -8959,6 +8971,28 @@ mod bar_age_tests {
         assert_eq!(bar_age(599, tight), None);
         assert_eq!(bar_age(600, tight), Some(" · 10m old".to_string()));
         assert_eq!(bar_age(9_000, tight), Some(" · 2h old".to_string()));
+    }
+
+    #[test]
+    fn status_says_a_codex_login_has_lapsed_and_stays_quiet_for_claude() {
+        let hour_ago = now_ms() - 3_600_000;
+        let long_ago = now_ms() - 40 * 86_400 * 1000;
+
+        // Codex: ten-day token, renewed only when Codex runs. An hour past its
+        // deadline is not noise - it is why turns are failing.
+        assert!(
+            expiry_note(Some(hour_ago), "codex").contains("login expired"),
+            "{}",
+            expiry_note(Some(hour_ago), "codex")
+        );
+        assert_eq!(expiry_note(Some(now_ms() + 86_400_000), "codex"), "");
+        assert_eq!(expiry_note(None, "codex"), "", "unknown is not expired");
+
+        // Claude: hourly token the tool refreshes silently, so the same hour
+        // must stay quiet - only a snapshot old enough to have a dead REFRESH
+        // token is worth a word.
+        assert_eq!(expiry_note(Some(hour_ago), "claude-code"), "");
+        assert!(expiry_note(Some(long_ago), "claude-code").contains("login is old"));
     }
 
     #[test]

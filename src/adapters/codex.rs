@@ -53,7 +53,15 @@ impl AuthTool for Codex {
             display: email.clone().unwrap_or_else(|| "codex account".into()),
             email,
             tier: v["auth_mode"].as_str().map(|s| s.to_string()),
-            expires_at: None,
+            // The access token is a JWT and its `exp` claim says when it
+            // lapses. Reporting None here is what left `swapdex status` silent
+            // beside a Codex login that had been dead for three days. `exp` is
+            // SECONDS; every other adapter reports millis, and the reader
+            // compares against `now_ms`.
+            expires_at: crate::proxy::codex::jwt_expiry(
+                v["tokens"]["access_token"].as_str().unwrap_or(""),
+            )
+            .map(|secs| secs * 1000),
         }))
     }
 }
@@ -103,6 +111,34 @@ mod tests {
             "last_refresh": "2026-07-03T00:00:00Z"
         });
         std::fs::write(p.codex_auth(), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    /// The deadline is in the token; reporting None left `swapdex status` silent
+    /// beside a Codex login that had been dead for three days.
+    #[test]
+    fn identity_reports_the_deadline_the_token_carries_in_millis() {
+        use base64::Engine;
+        let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(dir.path());
+        seed_codex(&p, "acct-1");
+        // A real deadline: 2026-09-04 11:13 UTC, in SECONDS as the claim holds it.
+        let at = format!(
+            "{}.{}.sig",
+            b64(r#"{"alg":"none"}"#),
+            b64(r#"{"exp":1788527580}"#)
+        );
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(p.codex_auth()).unwrap()).unwrap();
+        v["tokens"]["access_token"] = at.into();
+        std::fs::write(p.codex_auth(), serde_json::to_vec(&v).unwrap()).unwrap();
+
+        let id = Codex.identity(&p).unwrap().expect("a login is there");
+        assert_eq!(
+            id.expires_at,
+            Some(1_788_527_580_000),
+            "every other adapter reports MILLIS and the reader compares against now_ms"
+        );
     }
 
     #[test]
