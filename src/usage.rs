@@ -14,7 +14,9 @@
 //!   totals overcount ~2.5x.
 //! - Codex `last_token_usage` is per-request; `total_token_usage` is the
 //!   monotonic running sum. Window the per-event DELTAS of the running sum by
-//!   each line's timestamp.
+//!   each line's timestamp, and take `cached_input_tokens` off first: Codex
+//!   counts the whole re-read context every turn, Claude does not count its
+//!   cache reads, and one table cannot hold two units.
 
 use crate::paths::Paths;
 use serde_json::Value;
@@ -304,13 +306,21 @@ fn parse_codex_file(f: &Path) -> Vec<(String, u64, u64)> {
         if !tot.is_object() {
             continue;
         }
+        // Same rule as the Claude side, which counts input + output + cache
+        // WRITES and leaves cache reads out. Codex's `total_tokens` is
+        // `input_tokens + output_tokens`, and `cached_input_tokens` is the part
+        // of the input that came back from cache - so it has to come off, or
+        // the two columns of one table are in different units. On a real
+        // machine that was 42.0B against 2.0B: a 21x inflation, and the reason
+        // Codex read as thousands of times heavier than Claude beside it.
         let cur = match tot["total_tokens"].as_u64() {
             Some(t) => t,
             None => {
                 tot["input_tokens"].as_u64().unwrap_or(0)
                     + tot["output_tokens"].as_u64().unwrap_or(0)
             }
-        };
+        }
+        .saturating_sub(tot["cached_input_tokens"].as_u64().unwrap_or(0));
         // Duplicate token_count lines repeat the same running sum; the
         // saturating delta makes them contribute zero.
         let delta = cur.saturating_sub(prev);
@@ -483,6 +493,31 @@ mod tests {
         std::fs::write(proj.join("s.jsonl"), format!("{m1}\n{m2}\n")).unwrap();
         let (_b5, b7c, _a) = claude_usage(dir.path(), now, &[], &mut cache);
         assert_eq!(b7c.tokens, 160, "size change invalidates the entry");
+    }
+
+    #[test]
+    fn codex_leaves_out_the_context_it_re_reads_from_cache() {
+        // One table, one unit. The Claude side counts input + output + cache
+        // WRITES; Codex's `total_tokens` counts the whole re-read context on
+        // every turn, so a long session reported billions beside Claude's
+        // millions on the same machine.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("rollout-x.jsonl");
+        let l1 = serde_json::json!({"timestamp": "2026-07-06T11:58:00Z", "payload": {"info": {
+            "total_token_usage": {"input_tokens": 18996, "cached_input_tokens": 4992,
+                                  "output_tokens": 516, "total_tokens": 19512}}}});
+        // The next turn re-reads the context: `cached_input_tokens` jumps by
+        // 18808 of the 20308 the running sum gained.
+        let l2 = serde_json::json!({"timestamp": "2026-07-06T11:59:00Z", "payload": {"info": {
+            "total_token_usage": {"input_tokens": 38804, "cached_input_tokens": 23800,
+                                  "output_tokens": 1016, "total_tokens": 39820}}}});
+        std::fs::write(&f, format!("{l1}\n{l2}\n")).unwrap();
+
+        let total: u64 = parse_codex_file(&f).iter().map(|(_, _, t)| t).sum();
+        assert_eq!(
+            total, 16_020,
+            "19512-4992 = 14520, then 39820-23800 = 16020: the running sum net of cache reads"
+        );
     }
 
     #[test]
