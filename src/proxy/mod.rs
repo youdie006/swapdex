@@ -1914,7 +1914,8 @@ fn forward_turn(
         }
         if up.status == 403 {
             println!(
-                "{}: not entitled to serve this - a lapsed subscription, most likely.                  Holding it out so it cannot answer for the whole fleet.",
+                "{}: not entitled to serve this - a lapsed subscription, most likely. \
+                 Holding it out so it cannot answer for the whole fleet.",
                 slot.name
             );
             sh.unusable
@@ -2020,7 +2021,8 @@ fn forward_turn(
             let somewhere = next_account(paths, sh, &tried).is_some();
             if somewhere {
                 println!(
-                    "  another account could take this - telling the client to retry in {}s                      rather than let it cool down for 30 minutes",
+                    "  another account could take this - telling the client to retry in {}s \
+                     rather than let it cool down for 30 minutes",
                     ratelimit::CLIENT_SLEEPS_UP_TO_SECS
                 );
                 std::io::stdout().flush().ok();

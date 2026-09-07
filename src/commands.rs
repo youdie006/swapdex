@@ -3979,7 +3979,8 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 "version",
                 false,
                 format!(
-                    "running {running}, but {latest} is published - update, then check                          `swapdex --version` actually changed"
+                    "running {running}, but {latest} is published - update, then check \
+                     `swapdex --version` actually changed"
                 ),
             ),
             Some(latest) => report("version", true, format!("{running} (latest is {latest})")),

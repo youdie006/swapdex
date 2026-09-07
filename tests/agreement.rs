@@ -979,3 +979,72 @@ fn the_proxy_refuses_a_tool_it_has_no_relay_for() {
         );
     }
 }
+
+/// No message swapdex prints carries a run of collapsed whitespace.
+///
+/// A string literal split across source lines needs a trailing `\`; without it
+/// the indentation of the next line lands in the middle of the sentence. Three
+/// had it, and two of those print on the proxy's request path - so an account
+/// with a lapsed subscription was told about it in a sentence with an
+/// eighteen-space hole in it, at the moment the tool most needs to be believed.
+#[test]
+fn no_printed_message_has_a_hole_in_the_middle_of_it() {
+    fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                rs_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs")
+                // The wordmark is ASCII art; its spaces ARE the picture.
+                && p.file_name().is_some_and(|n| n != "banner.rs")
+            {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    rs_files(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+        &mut files,
+    );
+
+    let mut bad: Vec<String> = Vec::new();
+    for f in &files {
+        for (i, line) in std::fs::read_to_string(f).unwrap().lines().enumerate() {
+            let t = line.trim_start();
+            // Comments and doc comments wrap freely; this is about literals.
+            if t.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            // A width/alignment spec marks a table row, where runs of spaces
+            // are the columns. Plain `{}` interpolation is not one.
+            if line.contains("{:") {
+                continue;
+            }
+            // The shape that is always wrong: mid-SENTENCE. A letter or a
+            // sentence mark, then a run long enough to be source indentation,
+            // then more text on the same line. Column alignment does not look
+            // like this - it follows a `:` or a `}` format spec - and a
+            // deliberate output indent follows an escaped newline.
+            let b = line.as_bytes();
+            for w in 1..b.len().saturating_sub(7) {
+                let prev = b[w];
+                let sentence = prev.is_ascii_alphabetic() || matches!(prev, b'.' | b',' | b')');
+                // `\n` inside a literal: the `n` is a letter but not a word.
+                if !sentence || b[w - 1] == b'\\' {
+                    continue;
+                }
+                let run = b[w + 1..].iter().take_while(|&&c| c == b' ').count();
+                if run >= 6 && b.get(w + 1 + run).is_some_and(|&c| c != b'/') {
+                    bad.push(format!("{}:{}: {}", f.display(), i + 1, line.trim()));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a printed string carries source indentation inside it:\n  {}",
+        bad.join("\n  ")
+    );
+}
