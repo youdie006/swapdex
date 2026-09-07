@@ -1048,3 +1048,41 @@ fn no_printed_message_has_a_hole_in_the_middle_of_it() {
         bad.join("\n  ")
     );
 }
+
+/// Every command that REGISTERS an account enforces the same name rule.
+///
+/// `add`, `use`, `rm`, `rename` and `login` all called it. `run` and `adopt` -
+/// the two that actually create a slot - did not, so `adopt '../evil' <dir>`
+/// registered that name and `run` with a carriage return in the name made a
+/// permanent account that `ls` renders as something other than what it is.
+#[test]
+fn a_name_no_command_would_accept_cannot_be_registered_by_another() {
+    let t = fixture();
+    let root = t.path();
+    let dir = root.join("adopted");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for bad in ["../evil", "a/b", ".hidden", "good\rEVIL"] {
+        let (out, err, code) = run(root, &["adopt", bad, dir.to_str().unwrap()]);
+        assert_ne!(code, 0, "adopt accepted {bad:?}: {out}{err}");
+        let (out, err, code) = run(root, &["run", bad, "--no-launch"]);
+        assert_ne!(code, 0, "run accepted {bad:?}: {out}{err}");
+    }
+
+    // Nothing was registered, and the refusal never echoes a control character.
+    let listing = std::fs::read_to_string(root.join(".local/share/swapdex/slots.json"))
+        .unwrap_or_else(|_| "[]".into());
+    assert!(
+        !listing.contains("evil"),
+        "a refused name was registered: {listing}"
+    );
+    assert!(
+        !listing.contains("EVIL"),
+        "a refused name was registered: {listing}"
+    );
+    let (_, err, _) = run(root, &["adopt", "good\rEVIL", dir.to_str().unwrap()]);
+    assert!(
+        !err.contains('\r'),
+        "the refusal echoed the control character: {err:?}"
+    );
+}

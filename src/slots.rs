@@ -137,6 +137,28 @@ fn reject_tool_home_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The same name rule `add`, `use`, `rm`, `rename` and `login` enforce.
+///
+/// Those five call it; `create` and `adopt` did not, and they are the two that
+/// REGISTER an account. So `run '../evil'` and `adopt '../evil' <dir>` both
+/// made a permanent slot under a name the rule exists to forbid, and a name
+/// carrying a carriage return listed as something other than itself. Checked
+/// here rather than at the callers, because here is where the account starts
+/// existing.
+fn reject_invalid_name(name: &str) -> Result<()> {
+    if !crate::store::valid_profile_name(name) {
+        bail!(
+            "invalid account name '{}' (1-64 bytes, not all spaces; no '/', '\\', \
+             leading '.', or control chars)",
+            name.chars()
+                .filter(|c| !c.is_control())
+                .take(64)
+                .collect::<String>()
+        );
+    }
+    Ok(())
+}
+
 impl Slots {
     /// Claude's registry - the established caller, kept so every existing call
     /// site keeps meaning what it meant.
@@ -180,7 +202,11 @@ impl Slots {
         if self.records.iter().any(|r| r.name == name) {
             bail!("a slot named '{name}' already exists");
         }
+        // Tool-home first: `.claude` breaks BOTH rules, and "that reads as the
+        // tool's own home, try <tool>-account" is the more useful of the two
+        // answers. The general rule catches everything else.
         reject_tool_home_name(name)?;
+        reject_invalid_name(name)?;
         let id = new_id(name);
         let config_dir = self.slots_dir.join(&id);
         std::fs::create_dir_all(&config_dir).context("create slot dir")?;
@@ -279,7 +305,11 @@ impl Slots {
         if self.records.iter().any(|r| r.name == name) {
             bail!("a slot named '{name}' already exists");
         }
+        // Tool-home first: `.claude` breaks BOTH rules, and "that reads as the
+        // tool's own home, try <tool>-account" is the more useful of the two
+        // answers. The general rule catches everything else.
         reject_tool_home_name(name)?;
+        reject_invalid_name(name)?;
         if !config_dir.is_absolute() {
             bail!("config dir must be an absolute path");
         }
