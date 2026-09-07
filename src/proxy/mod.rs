@@ -925,6 +925,8 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                     at: now_secs(),
                     on_credits: m.credits,
                     refused: None,
+                    // A reading arrived, so the token works.
+                    token_rejected_at: None,
                 },
             )
         })
@@ -2168,6 +2170,7 @@ mod seed_tests {
             at,
             on_credits: false,
             refused: None,
+            token_rejected_at: None,
         }
     }
 

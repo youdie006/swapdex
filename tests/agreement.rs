@@ -832,3 +832,60 @@ fn every_command_we_tell_the_user_to_run_exists() {
         missing.join("\n  ")
     );
 }
+
+/// The status bar must not go on aging a number that has stopped arriving.
+///
+/// On a real machine the account paying for Codex had its token rejected by
+/// the usage endpoint. `quota` said "token rejected"; the bar, which reads only
+/// the cache, said "7d 95% . 1h old" and would have said "2h old", "3h old",
+/// forever - the two surfaces disagreeing about the same account, with the one
+/// people watch giving the reassuring answer.
+#[test]
+fn the_status_bar_says_a_reading_stopped_arriving_not_that_it_is_late() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    run(root, &["add", "alpha"]);
+    seed_slot(root, "alpha", "a@example.com");
+    run(root, &["serve", "alpha"]);
+
+    let cache = root.join(".local/share/swapdex/quota-cache.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // A reading taken well over an hour ago, and nothing since.
+    std::fs::write(
+        &cache,
+        serde_json::to_vec(&serde_json::json!({
+            "alpha": {"seven_d": 5.0, "at": now - 6300}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (late, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        late.contains("7d 95%") && late.contains("old"),
+        "a merely late reading still shows its number and its age: {late}"
+    );
+
+    // The same cache, plus the fact that the last read was refused outright.
+    std::fs::write(
+        &cache,
+        serde_json::to_vec(&serde_json::json!({
+            "alpha": {"seven_d": 5.0, "at": now - 6300, "token_rejected_at": now - 60}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (rejected, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        rejected.contains("token rejected"),
+        "the bar must say why the number stopped: {rejected}"
+    );
+    assert!(
+        !rejected.contains("95%"),
+        "and must not keep offering a number nothing can refresh: {rejected}"
+    );
+}

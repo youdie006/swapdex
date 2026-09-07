@@ -33,6 +33,16 @@ pub struct Entry {
     /// with no way to say what would clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// Unix seconds of the last live read the account's OWN TOKEN was rejected
+    /// for. Distinct from `refused`, which is an endpoint that recognises the
+    /// account and is declining to serve it: that clears when the window
+    /// resets, this one clears when somebody signs in again.
+    ///
+    /// Displays that read only the cache could say how OLD a number was and
+    /// not that it had stopped arriving, so an account whose reading can never
+    /// update again looked exactly like one running a little late.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_rejected_at: Option<i64>,
 }
 
 /// A BTreeMap so the file is stable across writes - a cache that reorders itself
@@ -135,8 +145,10 @@ fn load_file_at(path: &std::path::Path, now: i64, drop_clamped: bool) -> Cache {
     for e in c.values_mut() {
         *e = expire_windows(std::mem::take(e), now);
     }
-    // An entry with nothing left to say is not an entry.
-    c.retain(|_, e| e.five_h.is_some() || e.seven_d.is_some());
+    // An entry with nothing left to say is not an entry. A rejected token IS
+    // something to say - it is the reason no number is arriving - so it keeps
+    // the entry alive on its own.
+    c.retain(|_, e| e.five_h.is_some() || e.seven_d.is_some() || e.token_rejected_at.is_some());
     // Readings taken while `utilization` was misread as a fraction are all
     // exactly 100 - every account above 1% clamped there - and remembering them
     // would keep showing accounts as spent long after the reading was fixed.
@@ -170,6 +182,24 @@ pub fn update_for(paths: &Paths, tool: &str, fresh: &[(String, Entry)]) {
     for (name, e) in fresh {
         c.insert(name.clone(), e.clone());
     }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
+        let _ = std::fs::create_dir_all(paths.store_dir());
+        let _ = crate::atomic::write_secret(&path, &bytes);
+    }
+}
+
+/// Record that a live read of `name` was rejected by the account's own token.
+///
+/// Merged onto whatever is remembered rather than replacing it: the numbers
+/// were true when they were taken, and the caller wants to say "this stopped
+/// arriving", not "there was never anything here". An account with nothing
+/// remembered gets an entry carrying only the stamp, because "its token is
+/// being rejected" is worth saying about an account that has never read.
+pub fn note_token_rejected(paths: &Paths, tool: &str, name: &str, at: i64) {
+    let path = file_for(paths, tool);
+    let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
+    let e = c.entry(name.to_string()).or_default();
+    e.token_rejected_at = Some(at);
     if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
         let _ = std::fs::create_dir_all(paths.store_dir());
         let _ = crate::atomic::write_secret(&path, &bytes);
@@ -298,6 +328,32 @@ mod tests {
         // And it can be written over.
         update(&paths, &[("a".into(), entry(1.0, 1))]);
         assert_eq!(load(&paths).len(), 1);
+    }
+
+    #[test]
+    fn a_rejected_token_is_remembered_beside_the_numbers_and_cleared_by_a_reading() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        update_for(&paths, "codex", &[("work".into(), entry(5.0, now_secs()))]);
+
+        note_token_rejected(&paths, "codex", "work", 1_788_737_118);
+        let e = load_file_at(&file_for(&paths, "codex"), now_secs(), false)["work"].clone();
+        assert_eq!(e.token_rejected_at, Some(1_788_737_118));
+        assert_eq!(
+            e.five_h,
+            Some(5.0),
+            "the numbers it had are not thrown away"
+        );
+
+        // An account nothing is remembered for still gets the fact.
+        note_token_rejected(&paths, "codex", "never-read", 42);
+        let c = load_file_at(&file_for(&paths, "codex"), now_secs(), false);
+        assert_eq!(c["never-read"].token_rejected_at, Some(42));
+
+        // A reading is proof the token works, so it clears.
+        update_for(&paths, "codex", &[("work".into(), entry(9.0, now_secs()))]);
+        let e = load_file_at(&file_for(&paths, "codex"), now_secs(), false)["work"].clone();
+        assert_eq!(e.token_rejected_at, None);
     }
 }
 

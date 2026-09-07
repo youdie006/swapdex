@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.150.0
+
+- **A reading that has stopped arriving no longer reads as one that is late.**
+  When the usage endpoint rejects an account's own token, every refresh fails
+  and the last good number sits there aging. `quota` said "token rejected"; the
+  status line, which reads only the cache, said "7d 95% - 1h old" and would
+  have gone on to "2h old", "3h old", forever. Found on a machine where the
+  account PAYING for Codex was the rejected one, so the number people watch was
+  both frozen and reassuring. The refusal is now written down where a display
+  that never touches the network can see it, and every live read records it -
+  `quota`, the dashboard, and the dashboard's first pass - so the two surfaces
+  cannot say different things about the same account. A reading clears it,
+  because a reading is proof the token works.
+
 ## 0.149.0
 
 - **Sessions are attributed to the account that actually served them.** The

@@ -1334,6 +1334,30 @@ fn bar_age(age_secs: i64, refresh_secs: i64) -> Option<String> {
     })
 }
 
+/// What a display reading only the cache should say about one account.
+///
+/// It used to say the number and how old it was. "Old" and "not coming" are
+/// different news: on a machine where the paying account's token was being
+/// rejected, the bar read "7d 95% . 1h old" and would have gone on aging that
+/// number forever, because no live read could ever replace it. A rejection is
+/// about the account, so it replaces the number rather than annotating it -
+/// and it matches what `swapdex quota` says about the same account, which is
+/// where the reader goes next.
+fn cached_brief(e: &crate::quota_cache::Entry, now: i64) -> String {
+    // Only when the rejection is the LAST thing that happened. A reading
+    // clears the stamp, but a cache written by an older swapdex can carry both.
+    if e.token_rejected_at.is_some_and(|at| at >= e.at) {
+        return "token rejected".to_string();
+    }
+    // Carry the number's age. Without it the bar showed a reading taken hours
+    // earlier exactly like one taken now.
+    let refresh =
+        crate::proxy::pick::measure_after(crate::proxy::pick::headroom(e.five_h, e.seven_d))
+            .as_secs() as i64;
+    let age = bar_age(now.saturating_sub(e.at), refresh).unwrap_or_default();
+    format!("{}{age}", quota_brief(e.five_h, e.seven_d))
+}
+
 pub fn quota_brief(five_h_used: Option<f64>, seven_d_used: Option<f64>) -> String {
     let left = |u: f64| (100.0 - u).clamp(0.0, 100.0);
     match (five_h_used, seven_d_used) {
@@ -3049,6 +3073,13 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             .filter(|(_, _, refused)| *refused)
             .map(|(n, _, _)| n.clone())
             .collect();
+        // Write the refusal down where a display that never fetches can see it.
+        // The dashboard blanks the row itself; the status line reads only the
+        // cache, and without this it went on aging a number that had stopped
+        // arriving.
+        for name in &refused_names {
+            crate::quota_cache::note_token_rejected(paths, "codex", name, now_secs() as i64);
+        }
         for (name, dir) in &codex_homes {
             let live = live_by_name.get(name).cloned();
             // Only when those transcripts are this account's alone. Codex slots
@@ -3120,7 +3151,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             crate::quota::pace_ms(),
                         ));
                     }
-                    match crate::codex_usage::fetch(&auth) {
+                    let f = crate::codex_usage::fetch(&auth);
+                    crate::codex_usage::note_token_outcome(paths, &n, &f, now_secs() as i64);
+                    match f {
                         crate::codex_usage::Fetch::Ok(a) => Some((n, *a)),
                         _ => None,
                     }
@@ -5602,17 +5635,7 @@ pub fn serve(
             let cache = crate::quota_cache::load_for(paths, tool);
             let brief = cache
                 .get(&who)
-                .map(|e| {
-                    // Carry the number's age. Without it the bar showed a
-                    // reading taken hours earlier exactly like one taken now.
-                    let refresh = crate::proxy::pick::measure_after(crate::proxy::pick::headroom(
-                        e.five_h, e.seven_d,
-                    ))
-                    .as_secs() as i64;
-                    let age = bar_age((now_secs() as i64).saturating_sub(e.at), refresh)
-                        .unwrap_or_default();
-                    format!("{}{age}", quota_brief(e.five_h, e.seven_d))
-                })
+                .map(|e| cached_brief(e, now_secs() as i64))
                 // No entry at all is the same news as an entry with no numbers.
                 .unwrap_or_else(|| quota_brief(None, None));
             if brief.is_empty() {
@@ -5881,6 +5904,8 @@ fn remember_codex_reading(paths: &Paths, name: &str, u: &crate::tui::Usage) {
         at: u.observed_at.unwrap_or(now_secs() as i64),
         on_credits: u.on_credits,
         refused: None,
+        // A reading arrived, so the token works.
+        token_rejected_at: None,
     };
     crate::quota_cache::update_for(paths, "codex", &[(name.to_string(), entry)]);
 }
@@ -7482,6 +7507,8 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     at: now,
                     on_credits: qd.can_serve_past_windows(),
                     refused: None,
+                    // A reading arrived, so the token works.
+                    token_rejected_at: None,
                 },
             )),
             _ => None,
@@ -7673,24 +7700,31 @@ fn print_codex_quota(paths: &Paths, now: i64) {
                     "  no readable Codex login - `swapdex run {name} --tool codex` once signs it in"
                 );
             }
-            Some(auth) => match crate::codex_usage::fetch(&auth) {
-                crate::codex_usage::Fetch::Ok(a) => {
-                    println!(
-                        "{name}   {}",
-                        codex_identity(a.email.as_deref(), a.plan.as_deref(), saved.as_deref())
-                    );
-                    for line in codex_quota_lines(&a, now) {
-                        println!("  {line}");
+            Some(auth) => {
+                let f = crate::codex_usage::fetch(&auth);
+                // This command already says "token rejected" on screen. Writing
+                // it down is what lets the status line say the same thing
+                // without a network read of its own.
+                crate::codex_usage::note_token_outcome(paths, name, &f, now);
+                match f {
+                    crate::codex_usage::Fetch::Ok(a) => {
+                        println!(
+                            "{name}   {}",
+                            codex_identity(a.email.as_deref(), a.plan.as_deref(), saved.as_deref())
+                        );
+                        for line in codex_quota_lines(&a, now) {
+                            println!("  {line}");
+                        }
+                    }
+                    // Each failure keeps its own name for the same reason it does on
+                    // the Claude side: a busy endpoint and a dead login are different
+                    // news, and one silence for both hides whichever matters.
+                    f => {
+                        println!("{name}   {}", saved.unwrap_or_default());
+                        println!("  {}", f.why_no_number().unwrap_or("no reading"));
                     }
                 }
-                // Each failure keeps its own name for the same reason it does on
-                // the Claude side: a busy endpoint and a dead login are different
-                // news, and one silence for both hides whichever matters.
-                f => {
-                    println!("{name}   {}", saved.unwrap_or_default());
-                    println!("  {}", f.why_no_number().unwrap_or("no reading"));
-                }
-            },
+            }
         }
         println!();
     }
@@ -8874,6 +8908,32 @@ mod bar_age_tests {
         assert_eq!(bar_age(599, tight), None);
         assert_eq!(bar_age(600, tight), Some(" · 10m old".to_string()));
         assert_eq!(bar_age(9_000, tight), Some(" · 2h old".to_string()));
+    }
+
+    #[test]
+    fn a_rejected_token_replaces_the_number_it_can_no_longer_refresh() {
+        let now = 1_788_743_000i64;
+        let read = crate::quota_cache::Entry {
+            seven_d: Some(5.0),
+            at: now - 6300,
+            ..Default::default()
+        };
+        // Before: a number the reader cannot act on, and an age that will grow.
+        assert_eq!(cached_brief(&read, now), "7d 95% \u{b7} 1h old");
+
+        let rejected = crate::quota_cache::Entry {
+            token_rejected_at: Some(now - 60),
+            ..read.clone()
+        };
+        assert_eq!(cached_brief(&rejected, now), "token rejected");
+
+        // A reading taken AFTER the rejection wins - the token started working.
+        let recovered = crate::quota_cache::Entry {
+            at: now - 30,
+            token_rejected_at: Some(now - 60),
+            ..read.clone()
+        };
+        assert_eq!(cached_brief(&recovered, now), "7d 95%");
     }
 }
 

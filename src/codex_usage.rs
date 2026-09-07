@@ -321,6 +321,8 @@ pub fn remember(
         // windows. Dropping it left the row able to say an account was
         // refusing and unable to say what would clear it.
         refused: a.refused.as_deref().map(refusal_words),
+        // A reading arrived, so the token works.
+        token_rejected_at: None,
     };
     crate::quota_cache::update_for(paths, "codex", &[(serving.to_string(), entry)]);
     true
@@ -413,6 +415,19 @@ pub fn classify(code: u32, body: String) -> Fetch {
 /// workspace to answer for. It is omitted when the saved id is a placeholder
 /// rather than a real one - Codex writes `email_`/`local_` forms for logins that
 /// have no workspace, and sending those gets the whole request rejected.
+/// Record what a live read said about the account's OWN TOKEN, so a display
+/// that reads only the cache can tell a late number from one that has stopped
+/// arriving. Every site that classifies a `Fetch` calls this, because the
+/// alternative is three copies of the rule.
+///
+/// Only a refusal is written: a reading clears the stamp by replacing the
+/// entry, and a throttle or an unreachable network says nothing either way.
+pub fn note_token_outcome(paths: &crate::paths::Paths, name: &str, f: &Fetch, at: i64) {
+    if outcome_of(f) == LiveOutcome::Refused {
+        crate::quota_cache::note_token_rejected(paths, "codex", name, at);
+    }
+}
+
 pub fn fetch(auth: &crate::proxy::codex::Auth) -> Fetch {
     let Ok(token) = std::str::from_utf8(auth.token.expose()) else {
         return Fetch::Unauthorized;
