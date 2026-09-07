@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use std::io::Read;
+use std::time::Duration;
 
 /// Where the API lives. `SWAPDEX_UPSTREAM` redirects it for hermetic tests - the
 /// same fixture pattern as `SWAPDEX_CURL` in `quota.rs`, so no test ever reaches
@@ -93,9 +94,49 @@ pub fn why_refused(body: &[u8]) -> String {
 
 /// An agent that returns 4xx/5xx as responses instead of errors: a 429 carries
 /// the rate-limit headers rotation depends on, so it must not be swallowed.
+/// How long the proxy will wait on an upstream that is not answering.
+///
+/// `SWAPDEX_UPSTREAM_WAIT_MS` shortens them for tests, honoured ONLY under
+/// `SWAPDEX_ROOT` so a production run cannot be given a hair trigger.
+fn waits() -> (Duration, Duration) {
+    if std::env::var_os("SWAPDEX_ROOT").is_some() {
+        if let Some(ms) = std::env::var("SWAPDEX_UPSTREAM_WAIT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            return (Duration::from_millis(ms), Duration::from_millis(ms));
+        }
+    }
+    (Duration::from_secs(10), Duration::from_secs(300))
+}
+
+/// The client the proxy relays through.
+///
+/// It had no timeouts at all. Every retry in this file fires on an ERROR, and a
+/// server that accepts and says nothing never produces one - so an upstream
+/// that hangs hung the proxy, and the proxy hung the client: measured at two
+/// minutes with zero bytes sent and not one line in the log, because the
+/// request never got far enough to be logged. A black-holing network - a
+/// captive portal, a firewall that DROPs instead of REJECTs, a half-open VPN -
+/// is exactly the shape that produces it.
+///
+/// Bounded: resolving, connecting, and waiting for the response HEADERS.
+/// Deliberately NOT bounded: the body. Responses stream, an SSE turn can run for
+/// many minutes, and a global or body timeout would cut a working answer in half
+/// - which is the failure this proxy exists to avoid.
 pub fn agent() -> ureq::Agent {
+    let (short, headers) = waits();
+    agent_with(short, headers)
+}
+
+/// The construction itself, so a test can prove the waits REACH the client
+/// rather than only that the numbers are right.
+fn agent_with(short: Duration, headers: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .timeout_resolve(Some(short))
+        .timeout_connect(Some(short))
+        .timeout_recv_response(Some(headers))
         .build()
         .into()
 }
@@ -130,6 +171,15 @@ fn collect_headers<T>(resp: &ureq::http::Response<T>) -> Vec<(String, String)> {
 pub fn worth_retrying(err: &str) -> bool {
     let e = err.to_ascii_lowercase();
     if e.contains("certificate") || e.contains("http status") {
+        return false;
+    }
+    // A timeout waiting for the RESPONSE has already spent its whole budget.
+    // This list was written when the agent had no timeouts at all, so no
+    // timeout could reach it; now that the wait is bounded, retrying one
+    // multiplies it - four tries here inside four out there is sixteen, and at
+    // the response budget that is over an hour of silence. Resolving and
+    // connecting are short and worth another go.
+    if e.contains("receive response") || e.contains("recv response") {
         return false;
     }
     e.contains("lookup address")
@@ -319,5 +369,84 @@ mod transient_retry_tests {
         // caller so the account logic can act on it.
         assert!(!worth_retrying("http status 401"));
         assert!(!worth_retrying("certificate verification failed"));
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    /// Every wait that could hang forever is bounded; the body is not.
+    ///
+    /// The agent had no timeouts at all. Every retry in this file fires on an
+    /// ERROR, and an upstream that accepts and says nothing never produces one -
+    /// so the proxy waited forever and the client waited with it, measured at
+    /// two minutes with zero bytes and no log line at all.
+    #[test]
+    fn the_short_waits_are_bounded_and_the_body_is_not() {
+        let (short, headers) = waits();
+        assert!(short.as_secs() > 0 && short.as_secs() <= 30, "{short:?}");
+        assert!(
+            headers > short,
+            "the response headers get more room than a connect: {headers:?} vs {short:?}"
+        );
+        // A streaming turn runs for as long as the model talks; bounding the
+        // BODY would cut a working answer in half, which is the failure this
+        // proxy exists to avoid. Nothing here may be small enough to do that.
+        assert!(
+            headers.as_secs() >= 120,
+            "too tight for a slow first token: {headers:?}"
+        );
+    }
+
+    /// The wiring, not the numbers: an upstream that accepts and never answers
+    /// must produce an ERROR, because every retry in this file needs one.
+    #[test]
+    fn an_upstream_that_never_answers_becomes_an_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for c in listener.incoming() {
+                // Accept and say nothing - the shape a black-holing network has.
+                held.push(c);
+            }
+        });
+
+        // On its own thread with a deadline. With no bound the call never
+        // returns, and a test that HANGS on the defect it exists to catch
+        // reports nothing at all.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let agent = agent_with(Duration::from_millis(300), Duration::from_millis(300));
+            let out = forward(
+                &agent,
+                "POST",
+                &format!("http://127.0.0.1:{port}/v1/messages"),
+                &[],
+                b"{}",
+            );
+            let _ = tx.send(out.is_err());
+        });
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(is_err) => assert!(is_err, "silence must not read as success"),
+            Err(_) => panic!("the relay never returned - the upstream wait is unbounded"),
+        }
+    }
+
+    /// A spent budget is not worth spending again.
+    #[test]
+    fn a_response_timeout_is_terminal_but_a_connect_one_is_not() {
+        assert!(
+            !worth_retrying("timeout: receive response"),
+            "four tries inside four is sixteen response budgets"
+        );
+        assert!(!worth_retrying("timeout: recv response"));
+        // The short ones stay retryable: a route that flaps usually works next
+        // time, and each attempt costs seconds rather than minutes.
+        assert!(worth_retrying("timeout: connect"));
+        assert!(worth_retrying("connection reset by peer"));
+        // And the rules that were already here still hold.
+        assert!(!worth_retrying("invalid certificate"));
     }
 }
