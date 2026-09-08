@@ -83,6 +83,18 @@ pub fn slot_token_expired(dir: &Path, now_secs: i64) -> bool {
     slot_token_expiry(dir).is_some_and(|exp| exp <= now_secs)
 }
 
+/// Whether a credential held in hand has already lapsed.
+///
+/// `slot_token_expired` reads a slot directory, and a saved snapshot has none -
+/// yet a snapshot is the copy that goes stale by design, so the deadline has to
+/// be readable from the credential itself.
+pub fn auth_token_expired(auth: &Auth, now_secs: i64) -> bool {
+    std::str::from_utf8(auth.token.expose())
+        .ok()
+        .and_then(jwt_expiry)
+        .is_some_and(|exp| exp <= now_secs)
+}
+
 pub fn slot_auth(dir: &Path) -> Option<Auth> {
     let bytes = std::fs::read(dir.join("auth.json")).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;

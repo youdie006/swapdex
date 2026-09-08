@@ -3471,3 +3471,425 @@ fn renaming_a_codex_slot_actually_renames_it() {
         "and does not answer to the old one"
     );
 }
+
+/// A codex slot signed in as `account`, holding `token` as its access token.
+fn seed_codex_slot(root: &Path, name: &str, account: &str, token: &str) {
+    let dir = root.join(format!(".codex-{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("auth.json"),
+        format!(
+            r#"{{"tokens":{{"access_token":"{token}","account_id":"{account}","refresh_token":"R"}}}}"#
+        ),
+    )
+    .unwrap();
+    chmod600(&dir.join("auth.json"));
+    let store = root.join(".local/share/swapdex");
+    std::fs::create_dir_all(&store).unwrap();
+    let file = store.join("slots.json");
+    let mut list: Vec<serde_json::Value> = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    list.push(serde_json::json!({
+        "name": name,
+        "id": format!("id-{name}"),
+        "config_dir": dir,
+        "adopted": true,
+        "tool": "codex",
+    }));
+    std::fs::write(&file, serde_json::to_vec(&list).unwrap()).unwrap();
+}
+
+/// A saved codex snapshot in the store - a COPY, which nothing refreshes.
+fn seed_codex_snapshot(root: &Path, name: &str, account: &str, token: &str) {
+    let d = root
+        .join(".local/share/swapdex/accounts")
+        .join(name)
+        .join("codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("auth"),
+        format!(
+            r#"{{"tokens":{{"access_token":"{token}","account_id":"{account}","refresh_token":"R"}}}}"#
+        ),
+    )
+    .unwrap();
+    chmod600(&d.join("auth"));
+}
+
+/// A fake curl that answers the Codex usage endpoint for ONE live token.
+fn write_fake_codex_curl(dir: &Path, live_token: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("fake-codex-curl");
+    std::fs::write(
+        &p,
+        format!(
+            r#"#!/bin/sh
+cfg=$(cat)
+case "$cfg" in
+  *"{live_token}"*) printf '{{"email":"a@x.com","plan_type":"pro","rate_limit":{{"primary_window":{{"used_percent":24.0,"limit_window_seconds":604800,"reset_at":1893456000}}}}}}\n200' ;;
+  *) printf '{{"detail":"invalid token"}}\n401' ;;
+esac
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+const JWT_LAPSED: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjEwMDAwMDAwMDB9.sig";
+const JWT_LIVE: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
+
+/// A saved copy is not the account, and `quota` reported it as one.
+///
+/// Found on a real machine: one row printed "7d 100% left" and the row under
+/// it printed "token rejected". They were the SAME login - the second was a
+/// 42-day-old copy kept under another name. Nothing was wrong with that
+/// account.
+#[test]
+fn a_stale_codex_copy_does_not_condemn_the_login_it_is_a_copy_of() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "live", "acct-1", JWT_LIVE);
+    seed_codex_snapshot(root.path(), "copy", "acct-1", JWT_LAPSED);
+    let curl = write_fake_codex_curl(root.path(), JWT_LIVE);
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("live"), "the live slot is listed: {o}");
+    assert!(
+        o.contains("copy of the account signed in as 'live'"),
+        "the copy says whose account it copies: {o}"
+    );
+    assert!(
+        !o.contains("token rejected"),
+        "and never reports that account as rejected: {o}"
+    );
+    assert!(
+        !o.contains("swapdex run copy"),
+        "a copy is not renewed by running it: {o}"
+    );
+}
+
+/// `--json` is where the Codex rows send the reader, and it had no Codex in it.
+///
+/// `codex_usage::Fetch::Unexpected` is documented "kept whole so `--json` can
+/// show what came back", and a Codex row with no windows says "`swapdex quota
+/// --json` to inspect" - but the JSON branch returned before Codex was ever
+/// read, so a Codex-only machine reported `"accounts": []` and nothing else.
+#[test]
+fn quota_json_carries_the_codex_accounts_its_own_advice_points_at() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "live", "acct-1", JWT_LIVE);
+    seed_codex_snapshot(root.path(), "copy", "acct-1", JWT_LAPSED);
+    let curl = write_fake_codex_curl(root.path(), JWT_LIVE);
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let codex = v["codex"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a machine with Codex accounts lists them: {v}"));
+    assert_eq!(codex.len(), 2, "both accounts, slot and copy: {v}");
+
+    let live = codex.iter().find(|r| r["name"] == "live").unwrap();
+    assert_eq!(live["status"], "ok", "{v}");
+    assert_eq!(live["email"], "a@x.com");
+    assert_eq!(live["plan"], "pro");
+    assert_eq!(live["seven_day"]["used_pct"], 24.0, "{v}");
+
+    // The copy is reported as the copy it is, not as a rejected account.
+    let copy = codex.iter().find(|r| r["name"] == "copy").unwrap();
+    assert_eq!(copy["status"], "expired", "{v}");
+    assert_eq!(
+        copy["copy_of"], "live",
+        "and names the account it is a copy of: {v}"
+    );
+}
+
+/// The other JSON path: a machine with BOTH kinds of account.
+///
+/// `quota --json` has two exits - one for a machine with no Claude accounts and
+/// one for a machine with some - and a fix wired into either alone leaves the
+/// other reporting a Codex account that is right there.
+#[test]
+fn quota_json_carries_codex_on_a_machine_that_also_has_claude() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "main", "--tool", "claude"]);
+    seed_codex_slot(root.path(), "live", "acct-1", JWT_LIVE);
+    // One fake curl answers both endpoints: the Claude token seeded above is
+    // "AT", and the Codex slot's is a JWT.
+    let curl = write_fake_both_curl(root.path(), JWT_LIVE);
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    assert_eq!(
+        v["accounts"].as_array().map(Vec::len),
+        Some(1),
+        "the Claude account is still there: {v}"
+    );
+    let codex = v["codex"]
+        .as_array()
+        .unwrap_or_else(|| panic!("and the Codex account is too: {v}"));
+    assert_eq!(codex.len(), 1, "{v}");
+    assert_eq!(codex[0]["name"], "live");
+    assert_eq!(codex[0]["status"], "ok", "{v}");
+}
+
+/// A fake curl answering BOTH usage endpoints, keyed on the bearer token.
+fn write_fake_both_curl(dir: &Path, codex_token: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("fake-both-curl");
+    std::fs::write(
+        &p,
+        format!(
+            r#"#!/bin/sh
+cfg=$(cat)
+case "$cfg" in
+  *"{codex_token}"*) printf '{{"email":"a@x.com","plan_type":"pro","rate_limit":{{"primary_window":{{"used_percent":24.0,"limit_window_seconds":604800,"reset_at":1893456000}}}}}}\n200' ;;
+  *"Bearer AT"*) printf '{{"five_hour":{{"utilization":25.0,"resets_at":1893456000}},"seven_day":{{"utilization":50.0}}}}\n200' ;;
+  *) printf '{{"type":"error","error":{{"type":"authentication_error"}}}}\n401' ;;
+esac
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A live Codex login at `~/.codex/auth.json` under the sandbox root.
+fn seed_live_codex(root: &Path, account: &str) {
+    let d = root.join(".codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","last_refresh":"2026-09-01T00:00:00Z","tokens":{{"access_token":"{JWT_LIVE}","account_id":"{account}","refresh_token":"R"}}}}"#
+        ),
+    )
+    .unwrap();
+    chmod600(&d.join("auth.json"));
+}
+
+/// A saved Codex profile last refreshed `days_ago` days back.
+fn seed_codex_profile_aged(root: &Path, name: &str, account: &str, days_ago: i64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - days_ago * 86400;
+    // RFC3339 of `secs`, built the long way so the test needs no date crate.
+    let days = secs / 86400;
+    let (mut y, mut d) = (1970i64, days);
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let len = if leap { 366 } else { 365 };
+        if d < len {
+            break;
+        }
+        d -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0;
+    while d >= months[m] {
+        d -= months[m];
+        m += 1;
+    }
+    let stamp = format!("{y:04}-{:02}-{:02}T00:00:00Z", m + 1, d + 1);
+
+    let dir = root
+        .join(".local/share/swapdex/accounts")
+        .join(name)
+        .join("codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("auth"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","last_refresh":"{stamp}","tokens":{{"access_token":"{JWT_LAPSED}","account_id":"{account}","refresh_token":"R"}}}}"#
+        ),
+    )
+    .unwrap();
+    chmod600(&dir.join("auth"));
+}
+
+/// Switching INTO an ancient login is the moment the reader can act on it.
+///
+/// `ls` marks a snapshot older than 30 days "stale" for all four tools, and the
+/// switch itself warned for Claude only - so `use` installed a Codex login whose
+/// refresh token may be long revoked and said nothing but "switched".
+#[test]
+fn switching_to_an_ancient_codex_login_says_it_is_old() {
+    let root = tempfile::tempdir().unwrap();
+    seed_live_codex(root.path(), "acct-live");
+    seed_codex_profile_aged(root.path(), "old", "acct-old", 60);
+    let (o, e, c) = run(root.path(), &["use", "old", "--tool", "codex"]);
+    let all = format!("{o}{e}");
+    assert_eq!(c, 0, "{all}");
+    assert!(all.contains("switched codex"), "the switch happens: {all}");
+    assert!(
+        all.contains("old"),
+        "and says the saved login is old: {all}"
+    );
+    assert!(
+        all.contains("refresh token"),
+        "naming what may have lapsed: {all}"
+    );
+}
+
+/// The same switch to a FRESH saved login stays quiet - the note must not
+/// become the noise the Claude rule was written to avoid.
+#[test]
+fn switching_to_a_recent_codex_login_stays_quiet() {
+    let root = tempfile::tempdir().unwrap();
+    seed_live_codex(root.path(), "acct-live");
+    seed_codex_profile_aged(root.path(), "fresh", "acct-fresh", 1);
+    let (o, e, c) = run(root.path(), &["use", "fresh", "--tool", "codex"]);
+    let all = format!("{o}{e}");
+    assert_eq!(c, 0, "{all}");
+    assert!(all.contains("switched codex"), "{all}");
+    assert!(
+        !all.contains("refresh token"),
+        "a day-old login is not old news: {all}"
+    );
+}
+
+/// A fake curl that answers an OAuth refresh exchange with a new token.
+fn write_fake_oauth_curl(dir: &Path, new_access: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join("fake-oauth-curl");
+    std::fs::write(
+        &p,
+        format!(
+            r#"#!/bin/sh
+cat > /dev/null
+printf '{{"access_token":"{new_access}","refresh_token":"R2","id_token":"ID2"}}\n200'
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// The unattended sweep is what keeps an idle account alive - and it swept
+/// Claude only.
+///
+/// A Codex access token lives ten days and ONLY a Codex run renews it, so an
+/// account nobody opens dies on a schedule. `swapdex refresh <name>` learned to
+/// renew Codex; `refresh --keep-alive`, the half meant to run unattended, did
+/// not, and reported "no Claude accounts to keep alive" on a machine whose Codex
+/// account was days dead.
+#[test]
+fn the_keep_alive_sweep_renews_a_codex_account_too() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "work", "acct-1", JWT_LAPSED);
+    let curl = write_fake_oauth_curl(root.path(), JWT_LIVE);
+    let (o, e, c) = run_env(
+        root.path(),
+        &["refresh", "--keep-alive"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let all = format!("{o}{e}");
+    assert_eq!(c, 0, "{all}");
+    assert!(all.contains("renewed work"), "the sweep renews it: {all}");
+
+    // And the renewal actually landed: the slot now holds the new token, and
+    // the rotated refresh token replaced the spent one.
+    let auth = std::fs::read_to_string(root.path().join(".codex-work/auth.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&auth).unwrap();
+    assert_eq!(v["tokens"]["access_token"], JWT_LIVE, "{auth}");
+    assert_eq!(
+        v["tokens"]["refresh_token"], "R2",
+        "the rotated refresh token replaced the spent one: {auth}"
+    );
+}
+
+/// A Codex account with time left is not the sweep's business: every renewal
+/// rotates the refresh token, and rotating one more than needed is the risk the
+/// sweep exists to avoid, not to cause.
+#[test]
+fn the_keep_alive_sweep_leaves_a_current_codex_account_alone() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "work", "acct-1", JWT_LIVE);
+    let curl = write_fake_oauth_curl(root.path(), "SHOULD-NOT-BE-WRITTEN");
+    let (o, e, c) = run_env(
+        root.path(),
+        &["refresh", "--keep-alive"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let all = format!("{o}{e}");
+    assert_eq!(c, 0, "{all}");
+    assert!(!all.contains("renewed work"), "{all}");
+    let auth = std::fs::read_to_string(root.path().join(".codex-work/auth.json")).unwrap();
+    assert!(auth.contains(JWT_LIVE), "its token is untouched: {auth}");
+}
+
+/// The first screen a new user sees counted Claude accounts only.
+///
+/// swapdex learned this once already: `quota` carries the note "a machine can
+/// hold only Codex accounts, and returning here left it with nothing to show but
+/// a note about a tool it does not use". Onboarding still ended with "No
+/// accounts yet. Log into Claude" on a machine whose Codex account was
+/// registered and working.
+#[test]
+fn onboarding_a_codex_only_machine_does_not_say_there_are_no_accounts() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "work", "acct-1", JWT_LIVE);
+    let (o, e, c) = run(root.path(), &["onboard"]);
+    let all = format!("{o}{e}");
+    assert_eq!(c, 0, "{all}");
+    assert!(
+        !all.contains("No accounts yet"),
+        "this machine has one: {all}"
+    );
+    assert!(
+        !all.contains("Log into Claude"),
+        "and it is not a Claude account: {all}"
+    );
+}
+
+/// A machine with nothing still gets told what to do - and told it for both
+/// tools, since either one can be the only one someone uses.
+#[test]
+fn onboarding_an_empty_machine_names_both_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let (o, e, c) = run(root.path(), &["onboard"]);
+    let all = format!("{o}{e}");
+    assert_eq!(c, 0, "{all}");
+    assert!(all.contains("No accounts yet"), "{all}");
+    assert!(all.contains("codex"), "Codex is a way in too: {all}");
+}

@@ -1173,6 +1173,41 @@ fn age_line(stamp_nanos: u128) -> String {
 /// refresh token can rotate; flag one that has not been refreshed in a while.
 const STALE_DAYS: i64 = 30;
 
+/// When a stored snapshot was last refreshed, in unix seconds.
+///
+/// Every tool records it somewhere different, and each reader used to work that
+/// out for itself: `ls` marked all four "stale" past STALE_DAYS while the switch
+/// warned about Claude alone, so `use` installed a login whose refresh token may
+/// be long revoked and said only "switched".
+fn snapshot_refreshed_at(snap: &crate::adapters::Snapshot, tool: &str) -> Option<i64> {
+    let part = |n: &str| {
+        snap.part(n)
+            .and_then(|b| serde_json::from_slice::<Value>(b.expose()).ok())
+    };
+    match tool {
+        "claude-code" => part("credentials")?["claudeAiOauth"]["expiresAt"]
+            .as_i64()
+            .map(|ms| ms / 1000),
+        "codex" => part("auth")?["last_refresh"]
+            .as_str()
+            .and_then(crate::session_link::rfc3339_to_secs),
+        "gemini" => part("oauth")?["expiry_date"].as_i64().map(|ms| ms / 1000),
+        "antigravity" => part("token")?["token"]["expiry"]
+            .as_str()
+            .and_then(crate::session_link::rfc3339_to_secs),
+        _ => None,
+    }
+}
+
+/// Whether a snapshot is old enough that its REFRESH token may itself be dead.
+///
+/// An access token that merely lapsed is not news for any of these tools - they
+/// all refresh silently - which is why the threshold is days, not seconds.
+fn snapshot_is_stale(snap: &crate::adapters::Snapshot, tool: &str) -> bool {
+    snapshot_refreshed_at(snap, tool)
+        .is_some_and(|secs| now_ms() / 1000 - secs > STALE_DAYS * 86400)
+}
+
 /// Identity extracted from a STORED snapshot (no live read, no secrets):
 /// (email, tier, marker). marker is "stale" (a login snapshot older than
 /// STALE_DAYS whose refresh token may
@@ -1206,10 +1241,7 @@ fn profile_detail(
             // "expired" spam). Only flag a snapshot whose access token is
             // ANCIENT (>30 days) - by then the refresh token itself may be
             // revoked. Same rule as Codex / Gemini / Antigravity.
-            let marker = creds["claudeAiOauth"]["expiresAt"]
-                .as_i64()
-                .filter(|ms| now_ms() - ms > STALE_DAYS * 86400 * 1000)
-                .map(|_| "stale");
+            let marker = snapshot_is_stale(&snap, tool).then_some("stale");
             Some((
                 oauth["emailAddress"].as_str().map(String::from),
                 creds["claudeAiOauth"]["subscriptionType"]
@@ -1228,11 +1260,7 @@ fn profile_detail(
             let email = crate::adapters::codex::decode_email_from_id_token(
                 auth["tokens"]["id_token"].as_str(),
             );
-            let marker = auth["last_refresh"]
-                .as_str()
-                .and_then(crate::session_link::rfc3339_to_secs)
-                .filter(|&secs| now_ms() / 1000 - secs > STALE_DAYS * 86400)
-                .map(|_| "stale");
+            let marker = snapshot_is_stale(&snap, tool).then_some("stale");
             Some((email, auth["auth_mode"].as_str().map(String::from), marker))
         }
         "gemini" => {
@@ -1246,21 +1274,14 @@ fn profile_detail(
             // silently, so "expired right now" is noise. Meaningful signal:
             // a snapshot whose expiry is ANCIENT was refreshed long ago and
             // its refresh token may be revoked - same idea as codex's stale.
-            let marker = oauth["expiry_date"]
-                .as_i64()
-                .filter(|ms| now_ms() - ms > STALE_DAYS * 86400 * 1000)
-                .map(|_| "stale");
+            let marker = snapshot_is_stale(&snap, tool).then_some("stale");
             Some((email, None, marker))
         }
         "antigravity" => {
             let v: Value = serde_json::from_slice(snap.part("token")?.expose()).ok()?;
             // A snapshot whose token expiry is ancient was refreshed long ago;
             // its refresh token may be revoked - same idea as codex's stale.
-            let marker = v["token"]["expiry"]
-                .as_str()
-                .and_then(crate::session_link::rfc3339_to_secs)
-                .filter(|&secs| now_ms() / 1000 - secs > STALE_DAYS * 86400)
-                .map(|_| "stale");
+            let marker = snapshot_is_stale(&snap, tool).then_some("stale");
             Some((None, v["auth_method"].as_str().map(String::from), marker))
         }
         _ => None,
@@ -4956,8 +4977,18 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
     let _ = crate::atomic::write_managed(&onboarded_marker(paths), b"1");
 
     // Wrap up.
-    if crate::slots::Slots::open(paths)?.list().is_empty() {
-        println!("No accounts yet. Log into Claude, then run: swapdex run <name>");
+    // Counting Claude's registry alone told a Codex-only machine it had no
+    // accounts and pointed it at a tool it does not use - the blind spot `quota`
+    // carries a note about, on the first screen a new user sees.
+    let registered = crate::slots::Slots::open(paths)?.list().len()
+        + crate::slots::Slots::open_for(paths, "codex")
+            .map(|s| s.list().len())
+            .unwrap_or(0);
+    if registered == 0 {
+        println!(
+            "No accounts yet. Log in to Claude or Codex, then run: swapdex run <name> \
+             (add `--tool codex` for a Codex account)."
+        );
     } else {
         println!("You're set. `swapdex ui` shows your accounts and switches between them.");
     }
@@ -6313,20 +6344,30 @@ pub fn service_status(paths: &Paths) -> Result<i32> {
 /// touches is the one that dies: its refresh token goes stale unused, and then
 /// only a browser sign-in brings it back.
 pub fn keep_alive(paths: &Paths) -> Result<i32> {
-    let slots: Vec<(String, std::path::PathBuf)> =
-        crate::slots::Slots::open_for(paths, "claude-code")
+    let listed = |tool: &str| -> Vec<(String, std::path::PathBuf)> {
+        crate::slots::Slots::open_for(paths, tool)
             .map(|s| {
                 s.list()
                     .into_iter()
                     .map(|r| (r.name, r.config_dir))
                     .collect()
             })
-            .unwrap_or_default();
-    if slots.is_empty() {
-        println!("no Claude accounts to keep alive");
+            .unwrap_or_default()
+    };
+    let slots = listed("claude-code");
+    // Codex was the tool this sweep was most needed for and the one it skipped:
+    // its token lives ten days and only a Codex RUN renews it, so an account
+    // nobody opens dies on a schedule with nothing watching.
+    let codex = listed("codex");
+    if slots.is_empty() && codex.is_empty() {
+        println!("no accounts to keep alive");
         return Ok(0);
     }
-    let (renewed, failed) = crate::refresh::keep_alive_sweep(&slots, now_ms());
+    let now = now_ms();
+    let (mut renewed, mut failed) = crate::refresh::keep_alive_sweep(&slots, now);
+    let (codex_renewed, codex_failed) = crate::refresh::keep_alive_sweep_codex(&codex, now);
+    renewed.extend(codex_renewed);
+    failed.extend(codex_failed);
     for name in &renewed {
         println!("renewed {name}");
     }
@@ -7462,7 +7503,15 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
 
     if rows.is_empty() {
         if json {
-            println!("{}", serde_json::json!({"accounts": [], "offline": null}));
+            // A machine can hold only Codex accounts. Reporting no accounts at
+            // all on one of those was the JSON half of the same blind spot the
+            // human path below fixed.
+            let now = now_secs() as i64;
+            let codex = codex_quota_json(&read_codex_accounts(paths, now), now);
+            println!(
+                "{}",
+                serde_json::json!({"accounts": [], "codex": codex, "offline": null})
+            );
         } else {
             println!(
                 "No Claude accounts found. Log in with `claude`, or `swapdex add` to save one."
@@ -7573,9 +7622,12 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 )
             })
             .collect();
+        // The Codex rows point the reader at `--json` - a row with no windows
+        // says so in as many words - so this is where those accounts have to be.
+        let codex = codex_quota_json(&read_codex_accounts(paths, now), now);
         println!(
             "{}",
-            serde_json::json!({"accounts": accounts, "offline": offline})
+            serde_json::json!({"accounts": accounts, "codex": codex, "offline": offline})
         );
         return Ok(0);
     }
@@ -7706,14 +7758,50 @@ pub fn codex_account_sources(
 /// slots looked. The deadline is in the token itself, so when it has passed,
 /// say the thing the reader can act on. Codex renews its own token when Codex
 /// RUNS, so the remedy is to run it once in that slot.
-fn codex_no_number(f: &crate::codex_usage::Fetch, name: &str, expired: bool) -> String {
-    if expired && matches!(f, crate::codex_usage::Fetch::Unauthorized) {
-        return format!(
+fn codex_no_number(
+    f: &crate::codex_usage::Fetch,
+    name: &str,
+    expired: bool,
+    src: CodexSource<'_>,
+) -> String {
+    if !matches!(f, crate::codex_usage::Fetch::Unauthorized) {
+        return f.why_no_number().unwrap_or("no reading").to_string();
+    }
+    match src {
+        // The same login, signed in here under another name and answering. The
+        // copy's token lapsed; the account did not, and saying "token rejected"
+        // about a row directly above a healthy one condemns a working account.
+        CodexSource::Snapshot { twin: Some(t) } => format!(
+            "saved copy of the account signed in as '{t}' - this copy's token lapsed, \
+             which says nothing about that account; `swapdex add {name} --tool codex --update` \
+             saves a fresh copy, or leave it"
+        ),
+        // A copy cannot renew itself: only the live login rotates the token,
+        // and `swapdex run` on a name with no slot would build an empty one and
+        // ask for a fresh sign-in rather than renewing anything.
+        CodexSource::Snapshot { twin: None } if expired => format!(
+            "saved login expired - log in to that account and \
+             `swapdex add {name} --tool codex --update` saves it again \
+             (a saved copy cannot renew itself; only the live login does)"
+        ),
+        CodexSource::Slot if expired => format!(
             "login expired - `swapdex run {name} --tool codex` once renews it \
              (Codex renews its token when it runs, and this slot has not been opened since)"
-        );
+        ),
+        _ => f.why_no_number().unwrap_or("no reading").to_string(),
     }
-    f.why_no_number().unwrap_or("no reading").to_string()
+}
+
+/// Where a Codex credential was read from - which decides what can renew it.
+///
+/// A SLOT is the copy Codex itself renews when it runs. A SNAPSHOT is a copy in
+/// swapdex's store; nothing renews it, so it goes stale by design, and its
+/// remedy is a fresh capture rather than a run. `twin` names another account on
+/// this machine holding the SAME login that read fine.
+#[derive(Clone, Copy)]
+enum CodexSource<'a> {
+    Slot,
+    Snapshot { twin: Option<&'a str> },
 }
 
 /// The Codex half of `swapdex quota`.
@@ -7722,7 +7810,23 @@ fn codex_no_number(f: &crate::codex_usage::Fetch, name: &str, expired: bool) -> 
 /// answer different endpoints with different shapes, and the only thing they
 /// share is how a window is drawn. Silent when there are no Codex accounts, so
 /// a Claude-only machine sees no empty heading.
-fn print_codex_quota(paths: &Paths, now: i64) {
+/// One Codex account this machine knows, read once.
+struct CodexRow {
+    name: String,
+    /// `Some` for a slot (the copy Codex itself renews), `None` for a saved
+    /// snapshot in the store (a copy, which nothing renews).
+    dir: Option<std::path::PathBuf>,
+    auth: Option<crate::proxy::codex::Auth>,
+    fetch: Option<crate::codex_usage::Fetch>,
+}
+
+/// Read every Codex account, then ask the endpoint about each.
+///
+/// Gathered before anything is rendered because a row's honest answer can depend
+/// on ANOTHER row - a saved copy of a login that is signed in here under a
+/// different name - which a single pass cannot see. Both `quota` and
+/// `quota --json` read through here, so they cannot answer differently.
+fn read_codex_accounts(paths: &Paths, now: i64) -> Vec<CodexRow> {
     let slots: Vec<(String, std::path::PathBuf)> = crate::slots::Slots::open_for(paths, "codex")
         .map(|s| {
             s.list()
@@ -7740,59 +7844,223 @@ fn print_codex_quota(paths: &Paths, now: i64) {
                 .collect()
         })
         .unwrap_or_default();
-    let accounts = codex_account_sources(&slots, &snapshots);
-    if accounts.is_empty() {
+    codex_account_sources(&slots, &snapshots)
+        .into_iter()
+        .map(|(name, dir)| {
+            // A slot reads from its own directory; a snapshot from the copy in
+            // the store. Reading only the first left snapshot-only machines
+            // with an empty section and no reason for it.
+            let auth = match &dir {
+                Some(d) => crate::proxy::codex::slot_auth(d),
+                None => snapshot_codex_auth(paths, &name),
+            };
+            let fetch = auth.as_ref().map(crate::codex_usage::fetch);
+            if let Some(f) = &fetch {
+                // This command already says "token rejected" on screen. Writing
+                // it down is what lets the status line say the same thing
+                // without a network read of its own.
+                crate::codex_usage::note_token_outcome(paths, &name, f, now);
+            }
+            CodexRow {
+                name,
+                dir,
+                auth,
+                fetch,
+            }
+        })
+        .collect()
+}
+
+/// The Codex half of `swapdex quota`.
+///
+/// Kept as its own pass rather than folded into the Claude loop above: the two
+/// answer different endpoints with different shapes, and the only thing they
+/// share is how a window is drawn. Silent when there are no Codex accounts, so
+/// a Claude-only machine sees no empty heading.
+fn print_codex_quota(paths: &Paths, now: i64) {
+    let rows = read_codex_accounts(paths, now);
+    if rows.is_empty() {
         return;
     }
     println!("codex - remaining on your Codex accounts");
     println!("live from ChatGPT's usage endpoint; opt-in network, spends 0 message quota.\n");
-    for (name, dir) in &accounts {
-        let saved = dir.as_deref().and_then(codex_slot_email);
-        // A slot reads from its own directory; a snapshot from the copy in the
-        // store. Reading only the first left snapshot-only machines with an
-        // empty section and no reason for it.
-        let auth = match dir {
-            Some(d) => crate::proxy::codex::slot_auth(d),
-            None => snapshot_codex_auth(paths, name),
-        };
-        match auth {
-            None => {
+    let healthy = codex_healthy_by_account(&rows);
+
+    for r in &rows {
+        let name = &r.name;
+        let saved = r.dir.as_deref().and_then(codex_slot_email);
+        match (&r.auth, &r.fetch) {
+            (None, _) | (_, None) => {
                 println!("{name}");
                 println!(
                     "  no readable Codex login - `swapdex run {name} --tool codex` once signs it in"
                 );
             }
-            Some(auth) => {
-                let f = crate::codex_usage::fetch(&auth);
-                // This command already says "token rejected" on screen. Writing
-                // it down is what lets the status line say the same thing
-                // without a network read of its own.
-                crate::codex_usage::note_token_outcome(paths, name, &f, now);
-                match f {
-                    crate::codex_usage::Fetch::Ok(a) => {
-                        println!(
-                            "{name}   {}",
-                            codex_identity(a.email.as_deref(), a.plan.as_deref(), saved.as_deref())
-                        );
-                        for line in codex_quota_lines(&a, now) {
-                            println!("  {line}");
-                        }
-                    }
-                    // Each failure keeps its own name for the same reason it does on
-                    // the Claude side: a busy endpoint and a dead login are different
-                    // news, and one silence for both hides whichever matters.
-                    f => {
-                        let expired = dir
-                            .as_deref()
-                            .is_some_and(|d| crate::proxy::codex::slot_token_expired(d, now));
-                        println!("{name}   {}", saved.unwrap_or_default());
-                        println!("  {}", codex_no_number(&f, name, expired));
-                    }
+            (Some(_), Some(crate::codex_usage::Fetch::Ok(a))) => {
+                println!(
+                    "{name}   {}",
+                    codex_identity(a.email.as_deref(), a.plan.as_deref(), saved.as_deref())
+                );
+                for line in codex_quota_lines(a, now) {
+                    println!("  {line}");
                 }
+            }
+            // Each failure keeps its own name for the same reason it does on
+            // the Claude side: a busy endpoint and a dead login are different
+            // news, and one silence for both hides whichever matters.
+            (Some(auth), Some(f)) => {
+                let (expired, src) = codex_row_source(r.dir.as_deref(), auth, name, &healthy, now);
+                println!("{name}   {}", saved.unwrap_or_default());
+                println!("  {}", codex_no_number(f, name, expired, src));
             }
         }
         println!();
     }
+}
+
+/// The same accounts as `quota`, for `quota --json`.
+///
+/// The Codex rows send the reader here - a row with no windows says "`swapdex
+/// quota --json` to inspect", and `Fetch::Unexpected` is kept whole so this can
+/// show what came back - but the JSON branch returned before Codex was read at
+/// all, so a Codex-only machine reported no accounts and no reason.
+fn codex_quota_json(rows: &[CodexRow], now: i64) -> Vec<Value> {
+    fn win(w: &crate::codex_limits::Window) -> Value {
+        serde_json::json!({
+            "used_pct": (w.used_pct * 10.0).round() / 10.0,
+            "remaining_pct": ((100.0 - w.used_pct).max(0.0) * 10.0).round() / 10.0,
+            "window_minutes": w.window_minutes,
+            "resets_at": w.resets_at,
+        })
+    }
+    let healthy = codex_healthy_by_account(rows);
+    rows.iter()
+        .map(|r| {
+            let name = &r.name;
+            let saved = r.dir.as_deref().and_then(codex_slot_email);
+            let mut o = serde_json::json!({
+                "name": name,
+                "email": saved,
+                "slot": r.dir.is_some(),
+            });
+            let m = o.as_object_mut().expect("json object");
+            match (&r.auth, &r.fetch) {
+                (None, _) | (_, None) => {
+                    m.insert("status".into(), Value::String("unreadable".into()));
+                }
+                (Some(_), Some(crate::codex_usage::Fetch::Ok(a))) => {
+                    m.insert("status".into(), Value::String("ok".into()));
+                    if let Some(e) = &a.email {
+                        m.insert("email".into(), Value::String(e.clone()));
+                    }
+                    m.insert(
+                        "plan".into(),
+                        a.plan.clone().map(Value::String).unwrap_or(Value::Null),
+                    );
+                    let placed = crate::codex_limits::place(&a.limits);
+                    m.insert(
+                        "five_hour".into(),
+                        placed.five_h.as_ref().map(win).unwrap_or(Value::Null),
+                    );
+                    m.insert(
+                        "seven_day".into(),
+                        placed.seven_d.as_ref().map(win).unwrap_or(Value::Null),
+                    );
+                    let scoped: Vec<Value> = a
+                        .scoped
+                        .iter()
+                        .map(|(n, w)| {
+                            let mut wj = win(w);
+                            wj.as_object_mut()
+                                .expect("json object")
+                                .insert("label".into(), Value::String(n.clone()));
+                            wj
+                        })
+                        .collect();
+                    m.insert("scoped".into(), Value::Array(scoped));
+                }
+                (Some(auth), Some(f)) => {
+                    let (expired, src) =
+                        codex_row_source(r.dir.as_deref(), auth, name, &healthy, now);
+                    match f {
+                        crate::codex_usage::Fetch::Unauthorized => {
+                            m.insert(
+                                "status".into(),
+                                Value::String(if expired { "expired" } else { "rejected" }.into()),
+                            );
+                        }
+                        crate::codex_usage::Fetch::Throttled => {
+                            m.insert("status".into(), Value::String("throttled".into()));
+                            m.insert(
+                                "note".into(),
+                                Value::String(
+                                    "the usage endpoint is rate-limited, not this account".into(),
+                                ),
+                            );
+                        }
+                        crate::codex_usage::Fetch::Unexpected(code, body) => {
+                            m.insert("status".into(), Value::String("unexpected".into()));
+                            m.insert("http".into(), Value::from(*code));
+                            m.insert("raw".into(), Value::String(body.clone()));
+                        }
+                        crate::codex_usage::Fetch::Offline(msg) => {
+                            m.insert("status".into(), Value::String("offline".into()));
+                            m.insert("detail".into(), Value::String(msg.clone()));
+                        }
+                        crate::codex_usage::Fetch::Ok(_) => unreachable!("handled above"),
+                    }
+                    // A copy is not the account. Saying which login it copies is
+                    // what keeps a stale copy from reading as a dead account.
+                    if let CodexSource::Snapshot { twin: Some(t) } = src {
+                        m.insert("copy_of".into(), Value::String(t.to_string()));
+                    }
+                }
+            }
+            o
+        })
+        .collect()
+}
+
+/// Whether this row's credential has lapsed, and what can renew it.
+///
+/// The deadline used to be read from the slot DIRECTORY, so a saved copy - which
+/// has none - could never be seen to have expired, and the one source that goes
+/// stale by design was the one that could not say so. The deadline lives in the
+/// credential, and both sources hand one over.
+fn codex_row_source<'a>(
+    dir: Option<&std::path::Path>,
+    auth: &crate::proxy::codex::Auth,
+    name: &str,
+    healthy: &std::collections::BTreeMap<&'a str, &'a str>,
+    now: i64,
+) -> (bool, CodexSource<'a>) {
+    let expired = crate::proxy::codex::auth_token_expired(auth, now);
+    let src = match dir {
+        Some(_) => CodexSource::Slot,
+        None => CodexSource::Snapshot {
+            twin: healthy
+                .get(auth.account_id.as_str())
+                .filter(|t| ***t != *name)
+                .copied(),
+        },
+    };
+    (expired, src)
+}
+
+/// Which login on this machine answered, by account id.
+///
+/// A saved copy carries the same account id as the live login it was taken
+/// from, so this is what lets a stale copy say whose account it is a copy OF
+/// instead of reporting that account as rejected.
+fn codex_healthy_by_account(rows: &[CodexRow]) -> std::collections::BTreeMap<&str, &str> {
+    let mut out = std::collections::BTreeMap::new();
+    for r in rows {
+        if let (Some(auth), Some(crate::codex_usage::Fetch::Ok(_))) = (&r.auth, &r.fetch) {
+            out.entry(auth.account_id.as_str())
+                .or_insert(r.name.as_str());
+        }
+    }
+    out
 }
 
 /// What `swapdex quota` prints for one Codex account, beyond its name.
@@ -8009,21 +8277,20 @@ fn expiry_note(expires_at: Option<i64>, tool: &str) -> String {
 }
 
 fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
-    if tool != "claude-code" {
+    if !snapshot_is_stale(target, tool) {
         return;
     }
-    if let Some(cred) = target.part("credentials") {
-        if let Ok(v) = serde_json::from_slice::<Value>(cred.expose()) {
-            // Only warn for an ANCIENT snapshot (>30d) whose refresh token may
-            // be dead - a normally-expired access token (~1h) is refreshed
-            // silently, so warning every switch was noise.
-            if let Some(ms) = v["claudeAiOauth"]["expiresAt"].as_i64() {
-                if now_ms() - ms > STALE_DAYS * 86400 * 1000 {
-                    eprintln!("swapdex: note - this saved login is old; Claude may re-prompt for login if its refresh token has expired");
-                }
-            }
-        }
-    }
+    let who = match tool {
+        "claude-code" => "Claude",
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "antigravity" => "Antigravity",
+        other => other,
+    };
+    eprintln!(
+        "swapdex: note - this saved login is old; {who} may re-prompt for login if its \
+         refresh token has expired"
+    );
 }
 
 #[cfg(test)]
@@ -9015,7 +9282,7 @@ mod bar_age_tests {
         // Four slots on two machines were in exactly this state: the token had
         // simply run out - Codex renews it when Codex runs, and nobody had run
         // it - and `quota` called every one of them "token rejected".
-        let lapsed = codex_no_number(&Fetch::Unauthorized, "work", true);
+        let lapsed = codex_no_number(&Fetch::Unauthorized, "work", true, CodexSource::Slot);
         assert!(lapsed.contains("login expired"), "{lapsed}");
         assert!(
             lapsed.contains("swapdex run work --tool codex"),
@@ -9025,16 +9292,240 @@ mod bar_age_tests {
         // A 401 on a token that has NOT expired is a different fact, and the
         // endpoint's own word is the honest one for it.
         assert_eq!(
-            codex_no_number(&Fetch::Unauthorized, "work", false),
+            codex_no_number(&Fetch::Unauthorized, "work", false, CodexSource::Slot),
             "token rejected"
         );
         // Everything else is untouched by the deadline either way.
         for expired in [true, false] {
             assert_eq!(
-                codex_no_number(&Fetch::Throttled, "work", expired),
+                codex_no_number(&Fetch::Throttled, "work", expired, CodexSource::Slot),
                 "usage endpoint throttled"
             );
         }
+    }
+
+    /// Every tool records its last refresh somewhere different, and one reader
+    /// now answers for all four. A field name that drifts in any one of them
+    /// silently turns that tool's staleness off - in `ls` AND in the note the
+    /// switch prints, since both read through here.
+    #[test]
+    fn every_tool_reports_when_its_snapshot_was_last_refreshed() {
+        use crate::adapters::Snapshot;
+        use crate::secret::Secret;
+        let now = now_ms() / 1000;
+        let old_secs = now - 60 * 86400;
+        let old_ms = old_secs * 1000;
+        let stamp = |secs: i64| crate::refresh::rfc3339_utc(secs);
+        let snap = |tool: &'static str, part: &str, body: String| Snapshot {
+            tool,
+            blobs: vec![(part.into(), Secret::new(body.into_bytes()))],
+        };
+
+        let cases = [
+            snap(
+                "claude-code",
+                "credentials",
+                format!(r#"{{"claudeAiOauth":{{"expiresAt":{old_ms}}}}}"#),
+            ),
+            snap(
+                "codex",
+                "auth",
+                format!(r#"{{"last_refresh":"{}"}}"#, stamp(old_secs)),
+            ),
+            snap("gemini", "oauth", format!(r#"{{"expiry_date":{old_ms}}}"#)),
+            snap(
+                "antigravity",
+                "token",
+                format!(r#"{{"token":{{"expiry":"{}"}}}}"#, stamp(old_secs)),
+            ),
+        ];
+        for c in &cases {
+            let read = snapshot_refreshed_at(c, c.tool)
+                .unwrap_or_else(|| panic!("{} reports its refresh time", c.tool));
+            assert!(
+                (read - old_secs).abs() <= 1,
+                "{}: read {read}, expected {old_secs}",
+                c.tool
+            );
+            assert!(snapshot_is_stale(c, c.tool), "{} is 60 days old", c.tool);
+        }
+
+        // A snapshot refreshed today is not stale for any of them - the note
+        // exists because an access token lapsing hourly is not news.
+        let fresh_ms = now * 1000;
+        let fresh = [
+            snap(
+                "claude-code",
+                "credentials",
+                format!(r#"{{"claudeAiOauth":{{"expiresAt":{fresh_ms}}}}}"#),
+            ),
+            snap(
+                "codex",
+                "auth",
+                format!(r#"{{"last_refresh":"{}"}}"#, stamp(now)),
+            ),
+            snap(
+                "gemini",
+                "oauth",
+                format!(r#"{{"expiry_date":{fresh_ms}}}"#),
+            ),
+            snap(
+                "antigravity",
+                "token",
+                format!(r#"{{"token":{{"expiry":"{}"}}}}"#, stamp(now)),
+            ),
+        ];
+        for c in &fresh {
+            assert!(!snapshot_is_stale(c, c.tool), "{} is current", c.tool);
+        }
+    }
+
+    /// A saved copy is not the account, and `quota` said it was.
+    ///
+    /// Found on a real machine: `codex-main` printed "7d 100% left" and the row
+    /// under it, `codex`, printed "token rejected" - the SAME login, one live
+    /// and one a 42-day-old copy. The copy is the only thing that lapsed.
+    #[test]
+    fn a_stale_copy_of_a_live_login_does_not_report_that_login_as_rejected() {
+        use crate::codex_usage::Fetch;
+        let twin = codex_no_number(
+            &Fetch::Unauthorized,
+            "codex",
+            true,
+            CodexSource::Snapshot {
+                twin: Some("codex-main"),
+            },
+        );
+        assert!(
+            twin.contains("codex-main"),
+            "it names the account that answered: {twin}"
+        );
+        assert!(
+            !twin.starts_with("token rejected"),
+            "and does not lead with the account being rejected: {twin}"
+        );
+        // `swapdex run` on a name with no slot builds an EMPTY one and asks for
+        // a fresh sign-in, so it must not be offered as the way to renew a copy.
+        assert!(
+            !twin.contains("swapdex run"),
+            "a copy is not renewed by running it: {twin}"
+        );
+    }
+
+    /// A copy with no live twin still must not be told to run a slot it has not
+    /// got. The Claude half of this same command has always said "snapshot"; the
+    /// Codex half sent every stale copy to `swapdex run`.
+    #[test]
+    fn a_stale_copy_with_no_live_twin_is_told_how_a_copy_is_actually_refreshed() {
+        use crate::codex_usage::Fetch;
+        let lone = codex_no_number(
+            &Fetch::Unauthorized,
+            "old",
+            true,
+            CodexSource::Snapshot { twin: None },
+        );
+        assert!(lone.contains("expired"), "{lone}");
+        assert!(
+            lone.contains("swapdex add old --tool codex --update"),
+            "a copy is refreshed by capturing it again: {lone}"
+        );
+        assert!(
+            !lone.contains("swapdex run"),
+            "and not by running a slot that does not exist: {lone}"
+        );
+    }
+
+    /// The wiring the bug lived in: the deadline was read from the slot
+    /// DIRECTORY, so a snapshot - which has none - could never be seen to have
+    /// expired at all, and the source that goes stale by design was the one
+    /// source that could not say so.
+    #[test]
+    fn a_saved_copy_can_be_seen_to_have_expired() {
+        use crate::proxy::codex::{auth_token_expired, Auth};
+        let now = 1_788_743_000i64;
+        let jwt = |exp: i64| {
+            use base64::Engine;
+            let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+            format!(
+                "{}.{}.sig",
+                b64(b"{\"alg\":\"none\"}"),
+                b64(format!("{{\"exp\":{exp}}}").as_bytes())
+            )
+        };
+        let auth = |exp: i64| Auth {
+            token: crate::secret::Secret::new(jwt(exp).into_bytes()),
+            account_id: "acct".into(),
+        };
+        assert!(auth_token_expired(&auth(now - 1), now), "a lapsed copy");
+        assert!(!auth_token_expired(&auth(now + 3600), now), "a live one");
+        // Unknown is never "expired": swapdex must not condemn a login on a
+        // deadline it could not read.
+        assert!(!auth_token_expired(
+            &Auth {
+                token: crate::secret::Secret::new(b"not-a-jwt".to_vec()),
+                account_id: "acct".into(),
+            },
+            now
+        ));
+    }
+
+    /// The same wiring at the call site: a saved copy has no directory, and the
+    /// row must still learn both that it lapsed and whose account it copies.
+    #[test]
+    fn a_row_with_no_slot_directory_still_gets_its_deadline_and_its_twin() {
+        use crate::proxy::codex::Auth;
+        let now = 1_788_743_000i64;
+        let lapsed = |acct: &str| {
+            use base64::Engine;
+            let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+            Auth {
+                token: crate::secret::Secret::new(
+                    format!(
+                        "{}.{}.sig",
+                        b64(b"{\"alg\":\"none\"}"),
+                        b64(format!("{{\"exp\":{}}}", now - 1).as_bytes())
+                    )
+                    .into_bytes(),
+                ),
+                account_id: acct.into(),
+            }
+        };
+        let healthy = std::collections::BTreeMap::from([("acct-a", "codex-main")]);
+
+        let (expired, src) = codex_row_source(None, &lapsed("acct-a"), "codex", &healthy, now);
+        assert!(
+            expired,
+            "a saved copy has no directory but does have a deadline"
+        );
+        assert!(
+            matches!(
+                src,
+                CodexSource::Snapshot {
+                    twin: Some("codex-main")
+                }
+            ),
+            "and it is a copy of the login that answered"
+        );
+
+        // A copy of an account nothing else here holds has no twin to name.
+        let (_, lone) = codex_row_source(None, &lapsed("acct-b"), "old", &healthy, now);
+        assert!(matches!(lone, CodexSource::Snapshot { twin: None }));
+
+        // A row is never its own twin - that would tell the reader this account
+        // is a copy of itself.
+        let self_named = std::collections::BTreeMap::from([("acct-a", "codex")]);
+        let (_, own) = codex_row_source(None, &lapsed("acct-a"), "codex", &self_named, now);
+        assert!(matches!(own, CodexSource::Snapshot { twin: None }));
+
+        // A slot is still a slot: it is the copy Codex itself renews.
+        let (_, slot) = codex_row_source(
+            Some(std::path::Path::new("/nonexistent")),
+            &lapsed("acct-a"),
+            "work",
+            &healthy,
+            now,
+        );
+        assert!(matches!(slot, CodexSource::Slot));
     }
 
     #[test]

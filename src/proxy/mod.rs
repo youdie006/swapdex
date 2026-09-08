@@ -1033,12 +1033,24 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // locked Keychain, served for a full day before anyone noticed. Failing here
     // means the shim gets no port and the tool runs with no proxy, which is the
     // login the user already has, and it works.
-    if opts.tool != "codex" {
+    {
+        // Asking the question per tool. It used to be asked with Claude's reader
+        // only, which meant it could not be asked about Codex at all - so the
+        // refusal this note describes had no Codex half, and a Codex proxy with
+        // nothing readable did exactly what it warns about.
         let reads: Vec<_> = crate::slots::Slots::open_for(paths, &opts.tool)
             .map(|s| {
                 s.list()
                     .into_iter()
-                    .map(|r| creds::slot_token_detail(&r.config_dir).map(|_| ()))
+                    .map(|r| {
+                        if opts.tool == "codex" {
+                            codex::slot_auth(&r.config_dir)
+                                .map(|_| ())
+                                .ok_or(creds::TokenUnavailable::NoLogin)
+                        } else {
+                            creds::slot_token_detail(&r.config_dir).map(|_| ())
+                        }
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -1568,11 +1580,43 @@ fn forward_turn(
         // bearer and the account id it belongs to - and sends no account
         // identity in the body at all, so there is nothing to align there.
         if is_codex {
-            let Some(auth) = codex::slot_auth(&slot.config_dir) else {
+            // The Claude blocks above renew a lapsed token and step aside when
+            // they cannot, and both read Claude's credential - so for a Codex
+            // slot they are inert. `has_usable_login` names the consequence:
+            // asking only "is a login there" sends turns to a slot whose token
+            // expired days earlier and reports the 401 as a rejected account.
+            // That lesson reached the ROTATION candidates and not the account
+            // actually serving, which is the one that keeps sending the turn.
+            if codex::slot_token_expired(&slot.config_dir, now_secs()) {
+                match crate::refresh::refresh_codex_slot(&slot.config_dir, now_ms()) {
+                    Ok(()) => {
+                        // A new credential: any refusal the OLD one earned is
+                        // not about this one.
+                        sh.replaced_at.held().insert(slot.name.clone(), now_secs());
+                        println!("  {}: renewed its Codex login", slot.name);
+                    }
+                    // Another turn is renewing it; the credential it writes is
+                    // the one this turn will use.
+                    Err(crate::refresh::RefreshError::AlreadyRefreshing) => {}
+                    Err(why) => println!("  {}", why.remedy(&slot.name)),
+                }
+                std::io::stdout().flush().ok();
+            }
+            // Still past its deadline means renewing did not help. Sending it
+            // anyway buys a 401 and names this account as having paid for it.
+            let expired = codex::slot_token_expired(&slot.config_dir, now_secs());
+            let usable = codex::slot_auth(&slot.config_dir).filter(|_| !expired);
+            let Some(auth) = usable else {
                 println!(
-                    "account '{}' has no usable Codex login - passing your own through \
+                    "account '{}' {} - passing your own through \
                      (`swapdex run {} --tool codex` once signs it in)",
-                    slot.name, slot.name
+                    slot.name,
+                    if expired {
+                        "has a Codex login that expired and could not be renewed"
+                    } else {
+                        "has no usable Codex login"
+                    },
+                    slot.name
                 );
                 std::io::stdout().flush().ok();
                 note_client_serving(paths, &opts.tool);

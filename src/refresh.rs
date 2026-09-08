@@ -583,6 +583,129 @@ pub fn wants_keep_alive(blob: &[u8], now_ms: i64) -> bool {
         .is_some_and(|exp| exp - now_ms <= KEEP_ALIVE_WINDOW_MS)
 }
 
+/// How long before a Codex access token lapses the sweep renews it.
+///
+/// Claude's token lives an hour, so any daily use renews it and the sweep is a
+/// safety net. Codex's lives ten days and ONLY a Codex run renews it, so for an
+/// account nobody has opened the sweep is the only thing standing between it and
+/// a re-login. Two days is late enough that a daily sweep renews about once a
+/// week rather than every pass - each renewal rotates the refresh token, and
+/// rotating one more often than needed is its own risk.
+pub const KEEP_ALIVE_CODEX_WINDOW_SECS: i64 = 2 * 24 * 60 * 60;
+
+/// Should a keep-alive sweep renew this Codex credential now?
+///
+/// The deadline is in the access token's own `exp` claim. A credential with no
+/// refresh token cannot be renewed from here, and a deadline that could not be
+/// read is not an expired one - neither is grounds for spending a refresh token.
+pub fn wants_keep_alive_codex(blob: &[u8], now_secs: i64) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob) else {
+        return false;
+    };
+    if v["tokens"]["refresh_token"]
+        .as_str()
+        .is_none_or(str::is_empty)
+    {
+        return false;
+    }
+    v["tokens"]["access_token"]
+        .as_str()
+        .and_then(crate::proxy::codex::jwt_expiry)
+        .is_some_and(|exp| exp - now_secs <= KEEP_ALIVE_CODEX_WINDOW_SECS)
+}
+
+/// The Codex half of the keep-alive sweep.
+///
+/// The sweep was written because an idle account's refresh token goes stale, and
+/// it looked at Claude alone. A Codex account is idle BY DESIGN between runs -
+/// which is the case the sweep exists for, and the one it did not cover.
+pub fn keep_alive_sweep_codex(
+    slots: &[(String, std::path::PathBuf)],
+    now_ms: i64,
+) -> (Vec<String>, Vec<(String, RefreshError)>) {
+    let (mut renewed, mut failed) = (Vec::new(), Vec::new());
+    for (name, dir) in slots {
+        let Ok(blob) = std::fs::read(dir.join("auth.json")) else {
+            continue;
+        };
+        if !wants_keep_alive_codex(&blob, now_ms / 1000) {
+            continue;
+        }
+        match refresh_codex_slot(dir, now_ms) {
+            Ok(()) => renewed.push(name.clone()),
+            // Being in use is the guard doing its job, not a failure worth
+            // reporting: that account is alive by definition.
+            Err(RefreshError::InUse) => {}
+            Err(e) => failed.push((name.clone(), e)),
+        }
+    }
+    (renewed, failed)
+}
+
+#[cfg(test)]
+mod codex_keep_alive_tests {
+    use super::*;
+
+    fn jwt(exp: i64) -> String {
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        format!(
+            "{}.{}.sig",
+            b64(br#"{"alg":"none"}"#),
+            b64(format!(r#"{{"exp":{exp}}}"#).as_bytes())
+        )
+    }
+
+    fn blob(exp: i64, refresh: &str) -> Vec<u8> {
+        format!(
+            r#"{{"tokens":{{"access_token":"{}","account_id":"a","refresh_token":"{refresh}"}}}}"#,
+            jwt(exp)
+        )
+        .into_bytes()
+    }
+
+    /// The sweep exists because an idle account's refresh token goes stale. A
+    /// Codex account is idle BY DESIGN between runs - Codex renews only when
+    /// Codex runs, so the token dies exactly ten days later - which makes it the
+    /// case the sweep was written for, and it was the one tool the sweep did not
+    /// look at.
+    #[test]
+    fn a_codex_token_near_its_deadline_wants_renewing() {
+        let now = 1_788_743_000i64;
+        assert!(
+            wants_keep_alive_codex(&blob(now + 3600, "R"), now),
+            "an hour left"
+        );
+        assert!(
+            wants_keep_alive_codex(&blob(now - 86_400, "R"), now),
+            "already lapsed"
+        );
+        assert!(
+            !wants_keep_alive_codex(&blob(now + 9 * 86_400, "R"), now),
+            "nine days left is not the sweep's business yet"
+        );
+    }
+
+    /// Renewing needs a refresh token, and a deadline swapdex could not read is
+    /// not a deadline: neither is grounds for spending one.
+    #[test]
+    fn the_sweep_leaves_alone_what_it_cannot_renew() {
+        let now = 1_788_743_000i64;
+        assert!(
+            !wants_keep_alive_codex(&blob(now + 60, ""), now),
+            "no refresh token"
+        );
+        assert!(
+            !wants_keep_alive_codex(
+                br#"{"tokens":{"access_token":"not-a-jwt","refresh_token":"R"}}"#,
+                now
+            ),
+            "an unreadable deadline is not an expired one"
+        );
+        assert!(!wants_keep_alive_codex(b"not json", now));
+    }
+}
+
 #[cfg(test)]
 mod keep_alive_tests {
     use super::*;

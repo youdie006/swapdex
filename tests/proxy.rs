@@ -2688,3 +2688,230 @@ fn hold_seconds_actually_delays_a_spent_turn() {
         "the turn was held {waited:?} - far past the reset it was waiting for"
     );
 }
+
+const CODEX_JWT_LAPSED: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjEwMDAwMDAwMDB9.sig";
+const CODEX_JWT_LIVE: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
+
+/// A fake curl standing in for the OAuth token endpoint.
+fn fake_oauth_curl(root: &std::path::Path, answer: &str, status: u16) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = root.join("fake-oauth-curl");
+    std::fs::write(
+        &p,
+        format!("#!/bin/sh\ncat > /dev/null\nprintf '{answer}\\n{status}'\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+fn start_codex_proxy_env(
+    root: &std::path::Path,
+    upstream: &str,
+    envs: &[(&str, &str)],
+) -> (std::process::Child, u16) {
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .envs(envs.iter().copied())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.stdout.as_mut().unwrap();
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while out.read(&mut b).unwrap_or(0) == 1 {
+        if b[0] == b'\n' {
+            break;
+        }
+        line.push(b[0]);
+    }
+    let line = String::from_utf8_lossy(&line).to_string();
+    let port =
+        parse_port(&line).unwrap_or_else(|| panic!("codex proxy did not announce a port: {line}"));
+    (child, port)
+}
+
+/// The serving path asked only "is a login there".
+///
+/// swapdex already learned this once: `has_usable_login` says in as many words
+/// that "asking only 'is a login there' sent turns to a slot whose token had
+/// expired days earlier and reported the 401 that came back as a rejected
+/// account". That lesson reached the ROTATION candidates and not the account
+/// actually serving, so a lapsed Codex slot kept putting its dead bearer on
+/// every turn - which is exactly what a machine here did for days.
+#[test]
+fn a_lapsed_codex_slot_renews_itself_before_serving_a_turn() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LAPSED,
+        "acct-work",
+        true,
+    );
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE}","refresh_token":"RT2"}}"#),
+        200,
+    );
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+    let (mut proxy, port) = start_codex_proxy_env(
+        root.path(),
+        &upstream,
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let (status, _) = post_codex_turn(port);
+    proxy.kill().ok();
+    proxy.wait().ok();
+    assert_eq!(status, 200);
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "one turn reached the upstream: {seen:?}");
+    assert_eq!(
+        seen[0].0,
+        format!("Bearer {CODEX_JWT_LIVE}"),
+        "the renewed token served the turn, not the dead one: {seen:?}"
+    );
+}
+
+/// When renewal cannot help, the honest answer is to get out of the way - the
+/// same thing the Claude path does one branch above, and for the same reason:
+/// serving a turn with a token known to be dead earns a 401 and names this
+/// account as having paid for it.
+#[test]
+fn a_codex_slot_that_cannot_be_renewed_passes_your_own_login_through() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LAPSED,
+        "acct-work",
+        true,
+    );
+    // The refresh token is spent too: only a sign-in fixes this.
+    let curl = fake_oauth_curl(root.path(), r#"{"error":"invalid_grant"}"#, 400);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+    let (mut proxy, port) = start_codex_proxy_env(
+        root.path(),
+        &upstream,
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let (status, _) = post_codex_turn(port);
+    proxy.kill().ok();
+    proxy.wait().ok();
+    assert_eq!(status, 200);
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(
+        seen[0].0, "Bearer CLIENT-TOKEN",
+        "the client's own login carried the turn: {seen:?}"
+    );
+    assert_ne!(
+        seen[0].0,
+        format!("Bearer {CODEX_JWT_LAPSED}"),
+        "a token known to be dead is never sent: {seen:?}"
+    );
+}
+
+/// Run a proxy that is expected to REFUSE, with a deadline.
+///
+/// The deadline is the point: if the refusal is missing the proxy binds a port
+/// and serves forever, and a test that simply waited would hang rather than
+/// report the defect.
+fn proxy_refusal(root: &std::path::Path, args: &[&str]) -> String {
+    let child = Command::new(bin())
+        .args(args)
+        .env("SWAPDEX_ROOT", root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+        Ok(Ok(out)) => {
+            assert!(
+                !out.status.success(),
+                "a proxy with nothing to serve must not report success"
+            );
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        }
+        Ok(Err(e)) => panic!("could not run the proxy: {e}"),
+        Err(_) => {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            panic!("the proxy STARTED instead of refusing - it would forward your own login on every turn and never say so")
+        }
+    }
+}
+
+/// Register a Codex slot with no readable login at all.
+fn seed_codex_slot_without_login(root: &std::path::Path, name: &str, id: &str) {
+    seed_codex_slot(root, name, id, "T", "acct", true);
+    std::fs::remove_file(
+        root.join(".local/share/swapdex/slots")
+            .join(id)
+            .join("auth.json"),
+    )
+    .unwrap();
+}
+
+/// The startup refusal had no Codex half.
+///
+/// Its own note says a proxy that can read nothing "looks like it is working
+/// while doing nothing it exists to do", and that the state "cost a full day".
+/// The check reads Claude's credential, so it was skipped for Codex entirely -
+/// a Codex proxy with nothing readable bound the port and forwarded the client's
+/// own login on every turn, which is the very thing the refusal exists to stop.
+#[test]
+fn a_codex_proxy_with_nothing_readable_refuses_to_start() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot_without_login(root.path(), "work", "id-work");
+    let out = proxy_refusal(root.path(), &["proxy", "--port", "0", "--tool", "codex"]);
+    assert!(
+        out.contains("nothing to serve turns with"),
+        "and says why: {out}"
+    );
+}
+
+/// One readable Codex login is enough - the refusal must not lock out a machine
+/// that has a working account beside a signed-out one.
+#[test]
+fn a_codex_proxy_starts_when_one_account_is_readable() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot_without_login(root.path(), "dead", "id-dead");
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+    let (mut proxy, port) = start_codex_proxy(root.path(), &upstream, &[]);
+    let (status, _) = post_codex_turn(port);
+    proxy.kill().ok();
+    proxy.wait().ok();
+    assert_eq!(status, 200, "the readable account served the turn");
+}
