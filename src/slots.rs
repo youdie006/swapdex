@@ -195,6 +195,14 @@ impl Slots {
     }
 
     pub fn create(&mut self, name: &str) -> Result<SlotRecord> {
+        self.create_initialized(name, |_| Ok(()))
+    }
+
+    /// Create a slot only after its directory has been initialized successfully.
+    pub(crate) fn create_initialized<F>(&mut self, name: &str, initialize: F) -> Result<SlotRecord>
+    where
+        F: FnOnce(&std::path::Path) -> Result<()>,
+    {
         let name = name.trim();
         if name.is_empty() {
             bail!("a slot name is required");
@@ -210,6 +218,7 @@ impl Slots {
         let id = new_id(name);
         let config_dir = self.slots_dir.join(&id);
         std::fs::create_dir_all(&config_dir).context("create slot dir")?;
+        initialize(&config_dir)?;
         let rec = SlotRecord {
             name: name.to_string(),
             id,
@@ -218,7 +227,10 @@ impl Slots {
             tool: self.tool.clone(),
         };
         self.records.push(rec.clone());
-        self.persist()?;
+        if let Err(error) = self.persist() {
+            self.records.pop();
+            return Err(error);
+        }
         Ok(rec)
     }
 
@@ -988,6 +1000,21 @@ mod tests {
         s.create("work").unwrap();
         assert!(s.create("work").is_err(), "duplicate name rejected");
         assert!(s.create("   ").is_err(), "empty name rejected");
+    }
+
+    #[test]
+    fn failed_initialization_never_registers_the_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut slots = Slots::open(&paths).unwrap();
+
+        let error = slots
+            .create_initialized("work", |_| anyhow::bail!("marker write failed"))
+            .expect_err("initialization must fail");
+
+        assert!(error.to_string().contains("marker write failed"));
+        assert!(slots.get("work").is_none());
+        assert!(Slots::open(&paths).unwrap().get("work").is_none());
     }
 
     #[test]

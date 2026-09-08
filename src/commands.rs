@@ -79,6 +79,22 @@ impl ToolSel {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum MigrationToolSel {
+    #[value(alias = "claude-code")]
+    Claude,
+    Codex,
+}
+
+impl MigrationToolSel {
+    fn wants(self, tool: &str) -> bool {
+        match self {
+            MigrationToolSel::Claude => tool == "claude-code",
+            MigrationToolSel::Codex => tool == "codex",
+        }
+    }
+}
+
 /// The adapters a command targets. `None` and `Some(Both)` mean all; an explicit
 /// single tool narrows it.
 fn selected_adapters(sel: Option<ToolSel>) -> Vec<Box<dyn AuthTool>> {
@@ -98,6 +114,14 @@ fn is_explicit(sel: Option<ToolSel>) -> bool {
             | Some(ToolSel::Gemini)
             | Some(ToolSel::Antigravity)
     )
+}
+
+fn migration_tools(sel: Option<MigrationToolSel>) -> Vec<&'static str> {
+    crate::adapters::names()
+        .into_iter()
+        .filter(|tool| crate::slots::home_var(tool).is_some())
+        .filter(|tool| sel.map(|selected| selected.wants(tool)).unwrap_or(true))
+        .collect()
 }
 
 /// On macOS, Claude Code keeps its OAuth login in the Keychain rather than in
@@ -143,6 +167,88 @@ fn snapshot_account_id(snap: &crate::adapters::Snapshot, tool: &str) -> Option<S
 fn profile_account_id(store: &Store, name: &str, tool: &str) -> Option<String> {
     let snap = store.load(name, tool).ok()??;
     snapshot_account_id(&snap, tool)
+}
+
+const MIGRATED_ACCOUNT_MARKER: &str = ".swapdex-migrated-account";
+
+fn slot_account_id_for(tool: &str, dir: &std::path::Path) -> Option<String> {
+    let connected = match tool {
+        "claude-code" => crate::proxy::creds::slot_account_uuid(dir),
+        "codex" => crate::proxy::codex::slot_account_id(dir),
+        _ => None,
+    };
+    connected.or_else(|| {
+        std::fs::read_to_string(dir.join(MIGRATED_ACCOUNT_MARKER))
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MigrationClass {
+    AlreadySlotted,
+    CopyOfSlot(String),
+    NeedsSlot,
+    Unreadable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MigrationProfile {
+    name: String,
+    account_id: Option<String>,
+    class: MigrationClass,
+}
+
+fn classify_migration_profile(
+    profile_name: &str,
+    profile_account: Option<&str>,
+    slots: &[(String, Option<String>)],
+) -> MigrationClass {
+    let Some(account) = profile_account.filter(|id| !id.is_empty()) else {
+        return MigrationClass::Unreadable;
+    };
+    if slots
+        .iter()
+        .any(|(name, id)| name == profile_name && id.as_deref() == Some(account))
+    {
+        return MigrationClass::AlreadySlotted;
+    }
+    if let Some((name, _)) = slots.iter().find(|(_, id)| id.as_deref() == Some(account)) {
+        return MigrationClass::CopyOfSlot(name.clone());
+    }
+    MigrationClass::NeedsSlot
+}
+
+fn classify_migrations(
+    store: &Store,
+    slots: &crate::slots::Slots,
+    tool: &str,
+) -> Vec<MigrationProfile> {
+    let slot_accounts: Vec<(String, Option<String>)> = slots
+        .list()
+        .into_iter()
+        .map(|slot| {
+            let account = slot_account_id_for(tool, &slot.config_dir).filter(|id| !id.is_empty());
+            (slot.name, account)
+        })
+        .collect();
+    store
+        .list()
+        .into_iter()
+        .filter(|profile| profile.tools.iter().any(|saved| saved == tool))
+        .map(|profile| {
+            let account =
+                profile_account_id(store, &profile.name, tool).filter(|id| !id.is_empty());
+            let class =
+                classify_migration_profile(&profile.name, account.as_deref(), &slot_accounts);
+            MigrationProfile {
+                name: profile.name,
+                account_id: account,
+                class,
+            }
+        })
+        .collect()
 }
 
 /// Find the stored profile name whose snapshot matches this live account_id.
@@ -4883,10 +4989,7 @@ fn onboarded_marker(paths: &Paths) -> std::path::PathBuf {
     paths.store_dir().join("onboarded")
 }
 
-/// True when a bare `swapdex` should auto-run guided onboarding: it has not been
-/// shown before, AND there is something to set up (existing `~/.claude-*` dirs to
-/// register, or legacy copy-model Claude profiles to migrate). A brand-new user
-/// with nothing to migrate is left to the normal banner/hints.
+/// True when a bare `swapdex` has an unregistered Claude dir or an unslotted profile account.
 pub fn needs_onboarding(paths: &Paths) -> bool {
     if onboarded_marker(paths).exists() {
         return false;
@@ -4902,10 +5005,15 @@ pub fn needs_onboarding(paths: &Paths) -> bool {
         return true;
     }
     if let Ok(store) = Store::open(paths) {
-        return store
-            .list()
-            .iter()
-            .any(|p| p.tools.iter().any(|t| t == "claude-code") && slots.get(&p.name).is_none());
+        return migration_tools(None).into_iter().any(|tool| {
+            crate::slots::Slots::open_for(paths, tool)
+                .map(|tool_slots| {
+                    classify_migrations(&store, &tool_slots, tool)
+                        .iter()
+                        .any(|profile| profile.class == MigrationClass::NeedsSlot)
+                })
+                .unwrap_or(false)
+        });
     }
     false
 }
@@ -4945,23 +5053,47 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
         println!();
     }
 
-    // State 2: legacy copy-model Claude profiles without a slot.
+    // State 2: copy-model profiles classified against slot account identities.
     if let Ok(store) = Store::open(paths) {
-        let s = crate::slots::Slots::open(paths)?;
-        let legacy = store
-            .list()
-            .into_iter()
-            .filter(|p| p.tools.iter().any(|t| t == "claude-code") && s.get(&p.name).is_none())
-            .count();
+        let mut legacy = 0;
+        let mut copies = 0;
+        for tool in migration_tools(None) {
+            let slots = crate::slots::Slots::open_for(paths, tool)?;
+            for profile in classify_migrations(&store, &slots, tool) {
+                match profile.class {
+                    MigrationClass::NeedsSlot => legacy += 1,
+                    MigrationClass::CopyOfSlot(_) => copies += 1,
+                    MigrationClass::AlreadySlotted | MigrationClass::Unreadable => {}
+                }
+            }
+        }
+        let mut reported_copies = false;
         if legacy > 0 {
+            let profile_label = if legacy == 1 {
+                "profile login"
+            } else {
+                "profile logins"
+            };
             println!(
-                "You have {legacy} saved Claude profile(s) on the old copy-switch model \
+                "You have {legacy} saved Claude/Codex {profile_label} on the old copy-switch model \
                  (the one that could log you out)."
             );
             if ask_yes("Give each its own space now?") {
-                migrate(paths)?;
+                migrate(paths, None)?;
+                reported_copies = true;
                 println!();
             }
+        }
+        if copies > 0 && !reported_copies {
+            let copy_label = if copies == 1 {
+                "profile copy"
+            } else {
+                "profile copies"
+            };
+            println!(
+                "You also have {copies} saved {copy_label} whose account already lives in a \
+                 differently named slot; nothing needs to be migrated for those."
+            );
         }
     }
 
@@ -4995,55 +5127,113 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
-/// Create permanent slots for the legacy copy-model Claude profiles so they can
-/// be used via `run`/`use` with no credential copying. Does NOT import a token
-/// (a slot's login is created by a fresh sign-in - swapdex never writes a
-/// credential); it prints the accounts to log into once.
-pub fn migrate(paths: &Paths) -> Result<i32> {
+/// Create permanent slots for copy-model Claude and Codex profiles matched by
+/// account, so they can be used via `run`/`use` with no credential copying.
+///
+/// Still does NOT import a token: a slot's login is created by a fresh sign-in,
+/// and swapdex never writes a credential. What it writes for a slot it just made
+/// is the account id that slot is FOR, which is an identifier, not a secret -
+/// see the marker below.
+pub fn migrate(paths: &Paths, sel: Option<MigrationToolSel>) -> Result<i32> {
     let store = Store::open(paths)?;
-    let mut slots = crate::slots::Slots::open(paths)?;
-    let mut created = Vec::new();
-    for p in store.list() {
-        if !p.tools.iter().any(|t| t == "claude-code") {
-            continue;
+    let tools = migration_tools(sel);
+    if tools.is_empty() {
+        eprintln!("swapdex: migrate supports only claude and codex");
+        return Ok(2);
+    }
+    for (index, tool) in tools.into_iter().enumerate() {
+        if index > 0 {
+            println!();
         }
-        if slots.get(&p.name).is_some() {
-            continue;
-        }
-        // A profile named after the tool would become a slot named after the
-        // tool, which reads as the tool's own home and is not. This is where
-        // that collision was minted, so this is where it stops.
+        println!("{}:", pretty_tool(tool));
+        let mut slots = crate::slots::Slots::open_for(paths, tool)?;
+        let classified = classify_migrations(&store, &slots, tool);
+        let mut created = Vec::new();
+        let mut renamed = Vec::new();
+        let mut copies = Vec::new();
+        let mut unreadable = Vec::new();
+        let mut assigned_accounts: Vec<(String, String)> = Vec::new();
         let taken: Vec<String> = slots.list().into_iter().map(|r| r.name).collect();
-        let name = if crate::slots::name_reads_as_a_tool_home(&p.name) {
-            let safe = crate::slots::suggest_non_colliding(&p.name, &taken);
-            println!(
-                "  '{}' would read as the tool's own home, so the account is named '{safe}'",
-                p.name
-            );
-            safe
-        } else {
-            p.name.clone()
-        };
-        if let Ok(rec) = slots.create(&name) {
-            crate::slots::link_shared_config(&rec.config_dir, paths.claude_dir(), "claude-code");
-            created.push(name);
+        let mut taken = taken;
+        for profile in classified {
+            match profile.class {
+                MigrationClass::AlreadySlotted => {}
+                MigrationClass::CopyOfSlot(slot_name) => {
+                    copies.push((profile.name, slot_name));
+                }
+                MigrationClass::Unreadable => unreadable.push(profile.name),
+                MigrationClass::NeedsSlot => {
+                    if let Some((_, slot_name)) = assigned_accounts.iter().find(|(account, _)| {
+                        profile.account_id.as_deref() == Some(account.as_str())
+                    }) {
+                        copies.push((profile.name, slot_name.clone()));
+                        continue;
+                    }
+                    let collides = taken.iter().any(|name| name == &profile.name);
+                    let name = if crate::slots::name_reads_as_a_tool_home(&profile.name) || collides
+                    {
+                        crate::slots::suggest_non_colliding(&profile.name, &taken)
+                    } else {
+                        profile.name.clone()
+                    };
+                    if name != profile.name {
+                        renamed.push((profile.name, name.clone()));
+                    }
+                    let account = profile.account_id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("migration account disappeared after classification")
+                    })?;
+                    // Which account this slot is FOR, before anyone has signed
+                    // into it - otherwise the next run reads no account id here
+                    // and offers to create the same slot again. Written with the
+                    // secret writer for its atomicity, not its secrecy: a torn
+                    // write would name the wrong account, and it is the only
+                    // atomic writer there is. The id itself is an identifier,
+                    // and a real login always outranks it when one arrives.
+                    let rec = slots.create_initialized(&name, |dir| {
+                        crate::atomic::write_secret(
+                            &dir.join(MIGRATED_ACCOUNT_MARKER),
+                            account.as_bytes(),
+                        )
+                    })?;
+                    if let Some(account) = &profile.account_id {
+                        assigned_accounts.push((account.clone(), name.clone()));
+                    }
+                    crate::slots::link_shared_config(
+                        &rec.config_dir,
+                        &shared_source(paths, tool),
+                        tool,
+                    );
+                    taken.push(name.clone());
+                    created.push(name);
+                }
+            }
         }
-    }
-    if created.is_empty() {
-        println!("Nothing to migrate - every Claude account already has its own space.");
-        return Ok(0);
-    }
-    println!(
-        "Created slots for: {}. Each account now has its own space - the surprise\n\
-         logouts when switching are gone.",
-        created.join(", ")
-    );
-    println!("  Log into each once (creates its own login):");
-    for n in &created {
-        println!("    swapdex run {n}");
-    }
-    if !crate::shim::shim_path(paths).exists() {
-        println!("  Then `swapdex shim` so a plain `claude` follows `swapdex use`.");
+        if !created.is_empty() {
+            for (profile, slot_name) in renamed {
+                println!(
+                    "  '{profile}' cannot be used as this slot name, so the account is named '{slot_name}'"
+                );
+            }
+            println!("  Created slots for: {}", created.join(", "));
+            println!("  Sign in to each once:");
+            for name in &created {
+                println!("    swapdex run {name} --tool {}", pretty_tool_flag(tool));
+            }
+        }
+        for (profile, slot_name) in &copies {
+            println!(
+                "  Saved profile '{profile}' is a saved copy of slot '{slot_name}' - nothing to \
+                 do; leave it alone or remove it with `swapdex rm {profile} --tool {tool}`."
+            );
+        }
+        for profile in &unreadable {
+            println!(
+                "  Could not read the account ID from saved profile '{profile}'; no slot was created."
+            );
+        }
+        if created.is_empty() && copies.is_empty() && unreadable.is_empty() {
+            println!("  Nothing to migrate.");
+        }
     }
     Ok(0)
 }
@@ -6465,11 +6655,12 @@ pub fn list_slots(paths: &Paths) -> Result<i32> {
     // accounts from the command whose whole job is to show them.
     let mut any = false;
     for tool in crate::adapters::names() {
-        let list = crate::slots::Slots::open_for(paths, tool)?.list();
+        let slots = crate::slots::Slots::open_for(paths, tool)?;
+        let list = slots.list();
         if list.is_empty() {
             continue;
         }
-        let pointer = crate::slots::Slots::open_for(paths, tool)?.default_dir();
+        let pointer = slots.default_dir();
         println!("{tool}:");
         for r in list {
             // The default is what a plain launch of that tool will use, which is
@@ -6480,6 +6671,18 @@ pub fn list_slots(paths: &Paths) -> Result<i32> {
                 " "
             };
             println!("{mark} {}  {}", r.name, r.config_dir.display());
+        }
+        if crate::slots::home_var(tool).is_some() {
+            if let Ok(store) = Store::open(paths) {
+                for profile in classify_migrations(&store, &slots, tool) {
+                    if let MigrationClass::CopyOfSlot(slot_name) = profile.class {
+                        println!(
+                            "  saved profile '{}' is a copy of slot '{}'",
+                            profile.name, slot_name
+                        );
+                    }
+                }
+            }
         }
         any = true;
     }
@@ -8296,14 +8499,49 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        best_identity, codex_account_sources, codex_identity, codex_quota_lines, codex_row,
-        codex_usage_row, home_note, keychain_verdict, listable, payer_line, payer_note,
-        payer_of_any, pick_active, quota_brief, row_needs_login, row_suffix, sign_in_remedy,
-        stale_hint, stale_marker, switch_line, unhonoured_ask, unknown_account, win_line,
+        best_identity, classify_migration_profile, codex_account_sources, codex_identity,
+        codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict, listable,
+        payer_line, payer_note, payer_of_any, pick_active, quota_brief, row_needs_login,
+        row_suffix, sign_in_remedy, stale_hint, stale_marker, switch_line, unhonoured_ask,
+        unknown_account, win_line, MigrationClass,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn migration_classifier_matches_accounts_before_names() {
+        let slots = vec![
+            ("same".to_string(), Some("account-a".to_string())),
+            ("slot-b".to_string(), Some("account-b".to_string())),
+            ("unknown".to_string(), None),
+        ];
+
+        assert_eq!(
+            classify_migration_profile("same", Some("account-a"), &slots),
+            MigrationClass::AlreadySlotted
+        );
+        assert_eq!(
+            classify_migration_profile("copy", Some("account-b"), &slots),
+            MigrationClass::CopyOfSlot("slot-b".to_string())
+        );
+        assert_eq!(
+            classify_migration_profile("same", Some("account-b"), &slots),
+            MigrationClass::CopyOfSlot("slot-b".to_string())
+        );
+        assert_eq!(
+            classify_migration_profile("new", Some("account-c"), &slots),
+            MigrationClass::NeedsSlot
+        );
+        assert_eq!(
+            classify_migration_profile("broken", None, &slots),
+            MigrationClass::Unreadable
+        );
+        assert_eq!(
+            classify_migration_profile("empty", Some(""), &slots),
+            MigrationClass::Unreadable
+        );
     }
 
     #[test]

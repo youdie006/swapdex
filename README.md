@@ -69,7 +69,8 @@ no proxy, no client spoofing.
 <sub>swapdex still keeps the classic snapshot commands (`add` copies a live login
 into a profile, `use` on that profile swaps it back, guarded against the
 running-session logout) for the shared-slot workflow; `swapdex migrate` moves
-those profiles onto their own slots.</sub>
+Claude and Codex profiles whose accounts are not already slotted onto their own
+slots.</sub>
 
 ## Install
 
@@ -144,7 +145,8 @@ The classic snapshot commands still work for the shared-slot workflow: `swapdex
 add <name>` snapshots the current login, `swapdex use <name>` swaps it back
 (backed up first, and refused while a `claude` session is running on that login
 so it can't be logged out), `swapdex restore` undoes the last swap, and `swapdex
-ui` is the full-screen picker. `swapdex migrate` moves these onto their own slots.
+ui` is the full-screen picker. `swapdex migrate` matches Claude and Codex
+profiles to slots by account and creates spaces only for accounts without one.
 
 `status` shows the live account per tool, matched back to a saved profile:
 
@@ -256,7 +258,8 @@ your projects, MCP servers, and settings are untouched. That switch is refused
 while a `claude` session is running on the same login slot, since the session's
 next token refresh would otherwise revoke the saved copy. On macOS the Claude
 token lives in the login Keychain, one item per `CLAUDE_CONFIG_DIR`. `swapdex
-migrate` moves these profiles onto their own slots, retiring the shared slot.
+migrate [--tool claude|codex]` moves unslotted Claude and Codex profiles onto
+their own slots, retiring the shared homes.
 
 ## Safety
 

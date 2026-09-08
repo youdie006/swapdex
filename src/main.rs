@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use swapdex::commands::{self, ToolSel};
+use swapdex::commands::{self, MigrationToolSel, ToolSel};
 use swapdex::paths::Paths;
 
 #[derive(Parser)]
@@ -127,8 +127,12 @@ enum Cmd {
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
     },
-    /// Give each legacy Claude profile its own permanent slot
-    Migrate,
+    /// Give each legacy Claude/Codex profile account its own permanent slot
+    Migrate {
+        /// Limit migration to one slot-capable tool (default: claude and codex)
+        #[arg(long, value_enum)]
+        tool: Option<MigrationToolSel>,
+    },
     /// Guided setup: register/migrate your accounts into permanent slots
     Onboard,
     /// Share MCP servers (from ~/.claude.json) into every account slot
@@ -419,7 +423,7 @@ fn main() {
         Cmd::Slots => commands::list_slots(&paths),
         Cmd::Shim => commands::install_shim(&paths),
         Cmd::Adopt { name, dir, tool } => commands::adopt_slot(&paths, name, dir, *tool),
-        Cmd::Migrate => commands::migrate(&paths),
+        Cmd::Migrate { tool } => commands::migrate(&paths, *tool),
         Cmd::Onboard => commands::onboard(&paths),
         Cmd::SyncMcp => commands::sync_mcp(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),

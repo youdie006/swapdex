@@ -3893,3 +3893,329 @@ fn onboarding_an_empty_machine_names_both_tools() {
     assert!(all.contains("No accounts yet"), "{all}");
     assert!(all.contains("codex"), "Codex is a way in too: {all}");
 }
+
+fn registered_slot_names(root: &Path, tool: &str) -> Vec<String> {
+    std::fs::read(root.join(".local/share/swapdex/slots.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|record| record["tool"].as_str().unwrap_or("claude-code") == tool)
+        .filter_map(|record| record["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn migrate_claude_creates_a_slot_for_an_unmatched_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude_profile(root.path(), "claude-new", "uuid-new", "new@x.com", "AT");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("Claude Code:"), "grouped by tool: {o}");
+    assert!(o.contains("Created slots for: claude-new"), "{o}");
+    assert!(
+        o.contains("swapdex run claude-new --tool claude"),
+        "names the one-time sign-in: {o}"
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "claude-code"),
+        vec!["claude-new"]
+    );
+}
+
+#[test]
+fn migrate_codex_creates_a_slot_for_an_unmatched_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_snapshot(root.path(), "codex-new", "acct-new", "AT");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("Codex:"), "grouped by tool: {o}");
+    assert!(o.contains("Created slots for: codex-new"), "{o}");
+    assert!(
+        o.contains("swapdex run codex-new --tool codex"),
+        "names the one-time sign-in: {o}"
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["codex-new"]
+    );
+}
+
+#[test]
+fn migrate_claude_reports_a_differently_named_slot_copy_without_creating() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(
+        root.path(),
+        "claude-main",
+        &root.path().join("slot-claude-main"),
+        "AT",
+        "main@x.com",
+    );
+    seed_claude_profile(
+        root.path(),
+        "legacy-claude",
+        "u-claude-main",
+        "main@x.com",
+        "OLD",
+    );
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(
+        o.contains("saved copy of slot 'claude-main'"),
+        "names the matching slot: {o}"
+    );
+    assert!(
+        o.contains("swapdex rm legacy-claude --tool claude-code"),
+        "gives the optional cleanup command: {o}"
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "claude-code"),
+        vec!["claude-main"]
+    );
+}
+
+#[test]
+fn migrate_codex_reports_a_differently_named_slot_copy_without_creating() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "codex-main", "acct-main", "AT");
+    seed_codex_snapshot(root.path(), "legacy-codex", "acct-main", "OLD");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(
+        o.contains("saved copy of slot 'codex-main'"),
+        "names the matching slot: {o}"
+    );
+    assert!(
+        o.contains("swapdex rm legacy-codex --tool codex"),
+        "gives the optional cleanup command: {o}"
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["codex-main"]
+    );
+}
+
+#[test]
+fn migrate_codex_tool_home_profile_is_recognized_as_a_slot_copy() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "codex-main", "dcf87e80", "AT");
+    seed_codex_snapshot(root.path(), "codex", "dcf87e80", "OLD");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("saved copy of slot 'codex-main'"), "{o}");
+    assert!(!o.contains("would read as the tool's own home"), "{o}");
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["codex-main"]
+    );
+}
+
+#[test]
+fn migrate_claude_is_silent_for_a_profile_already_slotted_by_name_and_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(
+        root.path(),
+        "same-claude",
+        &root.path().join("slot-same-claude"),
+        "AT",
+        "same@x.com",
+    );
+    seed_claude_profile(
+        root.path(),
+        "same-claude",
+        "u-same-claude",
+        "same@x.com",
+        "OLD",
+    );
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("Claude Code:\n  Nothing to migrate."), "{o}");
+    assert!(
+        !o.contains("same-claude"),
+        "already slotted stays silent: {o}"
+    );
+}
+
+#[test]
+fn migrate_codex_is_silent_for_a_profile_already_slotted_by_name_and_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "same-codex", "acct-same", "AT");
+    seed_codex_snapshot(root.path(), "same-codex", "acct-same", "OLD");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("Codex:\n  Nothing to migrate."), "{o}");
+    assert!(
+        !o.contains("same-codex"),
+        "already slotted stays silent: {o}"
+    );
+}
+
+#[test]
+fn migrate_claude_reports_an_unreadable_snapshot_without_creating() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude_profile(root.path(), "broken-claude", "uuid-bad", "bad@x.com", "AT");
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/accounts/broken-claude/claude-code/oauth_account"),
+        b"not json",
+    )
+    .unwrap();
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(
+        o.contains("Could not read the account ID from saved profile 'broken-claude'"),
+        "{o}"
+    );
+    assert!(registered_slot_names(root.path(), "claude-code").is_empty());
+}
+
+#[test]
+fn migrate_codex_reports_an_unreadable_snapshot_without_creating() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_snapshot(root.path(), "broken-codex", "acct-bad", "AT");
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/accounts/broken-codex/codex/auth"),
+        b"not json",
+    )
+    .unwrap();
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(
+        o.contains("Could not read the account ID from saved profile 'broken-codex'"),
+        "{o}"
+    );
+    assert!(registered_slot_names(root.path(), "codex").is_empty());
+}
+
+#[test]
+fn migrate_tool_codex_leaves_claude_profiles_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude_profile(root.path(), "only-claude", "uuid-only", "only@x.com", "AT");
+    seed_codex_snapshot(root.path(), "only-codex", "acct-only", "AT");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("Codex:"), "{o}");
+    assert!(!o.contains("Claude Code:"), "scope excludes Claude: {o}");
+    assert!(
+        !o.contains("only-claude"),
+        "scope excludes its profile: {o}"
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["only-codex"]
+    );
+    assert!(registered_slot_names(root.path(), "claude-code").is_empty());
+}
+
+#[test]
+fn migrate_tool_flag_offers_only_slot_capable_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let (o, e, c) = run(root.path(), &["migrate", "--help"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("possible values: claude, codex"), "{o}");
+    assert!(!o.contains("gemini") && !o.contains("antigravity"), "{o}");
+    assert!(!o.contains("all:"), "{o}");
+}
+
+#[test]
+fn migrate_defaults_to_both_tools_and_orders_each_tool_categories() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude_profile(root.path(), "claude-new", "uuid-new", "new@x.com", "AT");
+    seed_codex_snapshot(root.path(), "codex-new", "acct-new", "AT");
+    seed_codex_slot(root.path(), "codex-main", "acct-main", "AT");
+    seed_codex_snapshot(root.path(), "codex-copy", "acct-main", "OLD");
+    seed_codex_snapshot(root.path(), "codex-broken", "acct-bad", "AT");
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/accounts/codex-broken/codex/auth"),
+        b"not json",
+    )
+    .unwrap();
+
+    let (o, e, c) = run(root.path(), &["migrate"]);
+    assert_eq!(c, 0, "{o}{e}");
+    let claude = o.find("Claude Code:").expect("Claude group");
+    let codex = o.find("Codex:").expect("Codex group");
+    assert!(claude < codex, "stable tool grouping: {o}");
+    let created = o.find("Created slots for: codex-new").expect("case C");
+    let copy = o.find("saved copy of slot 'codex-main'").expect("case B");
+    let unreadable = o
+        .find("account ID from saved profile 'codex-broken'")
+        .expect("case D");
+    assert!(
+        created < copy && copy < unreadable,
+        "C, then B, then D: {o}"
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "claude-code"),
+        vec!["claude-new"]
+    );
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["codex-main", "codex-new"]
+    );
+}
+
+#[test]
+fn migrate_does_not_duplicate_a_slot_that_is_waiting_for_sign_in() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_snapshot(root.path(), "pending", "acct-pending", "AT");
+
+    let (first, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{first}{e}");
+    let (second, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{second}{e}");
+    assert!(second.contains("Nothing to migrate"), "{second}");
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["pending"],
+        "an unsigned migrated slot must remain the only slot"
+    );
+}
+
+#[test]
+fn migrate_creates_one_slot_for_two_saved_profiles_of_one_account() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_snapshot(root.path(), "first-copy", "acct-shared", "AT-1");
+    seed_codex_snapshot(root.path(), "second-copy", "acct-shared", "AT-2");
+
+    let (o, e, c) = run(root.path(), &["migrate", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(o.contains("Created slots for: first-copy"), "{o}");
+    assert!(o.contains("saved copy of slot 'first-copy'"), "{o}");
+    assert_eq!(
+        registered_slot_names(root.path(), "codex"),
+        vec!["first-copy"],
+        "one account must require only one fresh sign-in"
+    );
+}
+
+#[test]
+fn onboard_counts_only_profiles_that_need_slots_and_mentions_copies_separately() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_snapshot(root.path(), "needs-slot", "acct-new", "AT");
+    seed_codex_slot(root.path(), "codex-main", "acct-main", "AT");
+    seed_codex_snapshot(root.path(), "saved-copy", "acct-main", "OLD");
+
+    let (o, e, c) = run_env(root.path(), &["onboard"], &[("SWAPDEX_ASSUME_TTY", "1")]);
+    assert_eq!(c, 0, "{o}{e}");
+    assert!(
+        o.contains("You have 1 saved"),
+        "only case C is counted: {o}"
+    );
+    assert!(
+        o.contains("1 saved profile copy") && o.contains("differently named slot"),
+        "case B gets its own sentence: {o}"
+    );
+}
