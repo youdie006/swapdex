@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/cli-banner.png" alt="swapdex - switch Claude Code and Codex login accounts, one command, all local" width="760" />
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/cli-banner.png" alt="swapdex - switch Claude Code, Codex, Gemini CLI and Antigravity login accounts, one command, all local" width="760" />
 
 [![CI](https://github.com/youdie006/swapdex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/youdie006/swapdex/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/swapdex?logo=rust&color=7a3be0)](https://crates.io/crates/swapdex)
+[![npm](https://img.shields.io/npm/v/%40youdie006%2Fswapdex?logo=npm&color=7a3be0)](https://www.npmjs.com/package/@youdie006/swapdex)
 [![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
 [![switcher: no network](https://img.shields.io/badge/switcher-no%20network-7a3be0.svg)](#what-it-will-not-do)
 
@@ -17,6 +19,15 @@ else does.)
 <div align="center">
 <img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls, use personal, status, restore, doctor" width="760" />
 </div>
+
+```sh
+brew install youdie006/tap/swapdex     # macOS / Linux
+npm  i -g @youdie006/swapdex           # or, if you have node
+cargo install swapdex                  # or, if you have rust
+```
+
+Then `swapdex add work`, `swapdex add personal`, and `swapdex use personal`.
+[Full install notes](#install) &middot; [what it will not do](#what-it-will-not-do).
 
 ---
 
