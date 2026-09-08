@@ -452,9 +452,14 @@ fn classify_kc_read(success: bool, code: Option<i32>, stdout: Vec<u8>) -> KcRead
 /// `Ok(None)` genuinely absent, `Err` a read we could not classify. apply
 /// aborts on `Err` BEFORE touching anything, so a rollback is always possible.
 fn keychain_prior() -> Result<Option<Vec<u8>>> {
-    let Some(service) = keychain_service() else {
+    // The env-DERIVED item, because that is the one the rollback writes back to
+    // (`keychain_write`, and the journal's `kc_service`). Reading through
+    // `keychain_service()`'s scan fallback would pair another profile's token
+    // with an instruction to restore it HERE.
+    if !keychain_enabled() {
         return Ok(None);
-    };
+    }
+    let service = effective_computed_service();
     let out = std::process::Command::new(SECURITY)
         .args([
             "find-generic-password",
@@ -527,6 +532,27 @@ fn keychain_write_service(service: &str, value: &[u8]) -> Result<()> {
 /// to - other CLAUDE_CONFIG_DIR profiles' items are other logins, and the old
 /// "also clear the bare name" extra could kill a LIVE default profile. No-op
 /// off macOS or when nothing resolves.
+/// Did the item a sign-out targeted survive it?
+///
+/// Pure, because the whole defect is which QUESTION gets asked. `present` asks
+/// "can any Claude credential be read", and after a sign-out that routes through
+/// `pick_service`'s fallback to a lone leftover item - so the delete succeeds and
+/// the check says it did not.
+fn managed_item_may_remain(_computed_service: &str, computed_exists: bool) -> bool {
+    computed_exists
+}
+
+/// Whether the login THIS environment manages is still here, ignoring items that
+/// belong to other `CLAUDE_CONFIG_DIR` profiles. The counterpart of
+/// `keychain_delete`, which targets exactly the same one.
+pub(crate) fn managed_present(paths: &Paths) -> bool {
+    if paths.claude_credentials().exists() {
+        return true;
+    }
+    let computed = effective_computed_service();
+    managed_item_may_remain(&computed, keychain_item_exists(&computed))
+}
+
 pub(crate) fn keychain_delete() {
     // Delete the env-DERIVED item only, never a discovered one: sign-out during
     // add-account must not remove some OTHER CLAUDE_CONFIG_DIR profile's login
@@ -722,6 +748,10 @@ impl AuthTool for Claude {
 
     fn present(&self, paths: &Paths) -> bool {
         cred_present(paths)
+    }
+
+    fn managed_present(&self, paths: &Paths) -> bool {
+        managed_present(paths)
     }
 
     fn capture(&self, paths: &Paths) -> Result<Snapshot> {
@@ -1013,6 +1043,42 @@ mod tests {
         );
         std::fs::write(dir.path().join(".credentials.json"), b"not json").unwrap();
         assert_eq!(slot_login(dir.path()), SlotLogin::Present(None));
+    }
+
+    /// After a sign-out, "is anything readable" is the wrong question.
+    ///
+    /// `keychain_delete` targets the ENV-DERIVED item only, on purpose - "never
+    /// a discovered one", or adding an account would remove some other
+    /// CLAUDE_CONFIG_DIR profile's login. `pick_service` then falls back to a
+    /// lone discovered item, which is right for reading in an alias-only setup
+    /// and wrong the instant it is used to check that the delete worked: the
+    /// item that was deleted is gone, the leftover answers instead, and the
+    /// sign-out reads as failed. On a machine with exactly one leftover item -
+    /// which `doctor` reports as "1 other Claude item(s)" - a second account
+    /// could never be added, however many times it was tried.
+    #[test]
+    fn the_check_after_a_sign_out_asks_about_the_item_that_was_deleted() {
+        // What the delete targeted is gone; one other profile's item remains.
+        let gone_but_others_remain = pick_service(
+            "Claude Code-credentials".to_string(),
+            false,
+            vec!["Claude Code-credentials-abc123".to_string()],
+        );
+        assert_eq!(
+            gone_but_others_remain,
+            Some("Claude Code-credentials-abc123".to_string()),
+            "reading still falls back, which is what alias-only setups need"
+        );
+        // ...so the sign-out check must not be asked through that fallback. It
+        // asks about the one name the delete used.
+        assert!(
+            !managed_item_may_remain("Claude Code-credentials", false),
+            "the deleted item is gone, so the sign-out took"
+        );
+        assert!(
+            managed_item_may_remain("Claude Code-credentials", true),
+            "and if it is still there, it did not"
+        );
     }
 
     // The resolution contract: manage the profile of the environment swapdex

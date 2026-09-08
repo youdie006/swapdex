@@ -1419,8 +1419,8 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
         return String::new();
     }
     let mut out = format!(
-        "  ({}: run that tool once and sign in - re-saving the profile cannot \
-         refresh a login that has already lapsed)",
+        "  ({}: this saved copy is old, so its token may no longer work - run that \
+         tool once, then `add --update` saves whatever it signed in as)",
         stale.join(", ")
     );
     if !healthy.is_empty() {
@@ -6903,7 +6903,7 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
         .ok()
         .flatten()
         .is_some_and(|still| still.account_id == cur.account_id);
-    if still_same || adapter.present(paths) {
+    if still_same || adapter.managed_present(paths) {
         adapter.apply(paths, &stash)?;
         drop(lock1);
         eprintln!(
@@ -9046,11 +9046,20 @@ mod tests {
         let h = stale_hint(&["gemini", "antigravity"], &["claude-code", "codex"]);
         assert!(h.contains("gemini"), "{h}");
         assert!(h.contains("antigravity"), "{h}");
-        // The fix is signing that tool in, not re-saving a snapshot.
+        // Re-saving alone is not offered as the fix: running the tool comes
+        // first, because that is what can produce a fresh login. (It used to
+        // assert that re-saving "cannot refresh a login that has already
+        // lapsed" - true only if it HAS lapsed, which is the thing swapdex
+        // cannot know and `status` is careful not to claim.)
         assert!(
-            !h.contains("add --update"),
-            "add --update cannot refresh a login that has lapsed: {h}"
+            h.contains("run that tool once"),
+            "signing the tool in is the first step: {h}"
         );
+        let (run_at, save_at) = (
+            h.find("run that tool once").unwrap(),
+            h.find("add --update").expect("and re-saving is the second"),
+        );
+        assert!(run_at < save_at, "in that order: {h}");
         // And it says the account still serves its healthy tools.
         assert!(
             h.contains("claude-code") && h.contains("codex"),
@@ -9062,6 +9071,31 @@ mod tests {
     #[test]
     fn no_stale_tool_means_no_hint() {
         assert!(stale_hint(&[], &["claude-code"]).is_empty());
+    }
+
+    /// It says the token is dead; it only knows the copy is old.
+    ///
+    /// `status`, looking at the same account, hedges - "login is old; MAY
+    /// re-prompt if its refresh token has expired" - and `profile_detail`'s own
+    /// note says the refresh token "may have rotated". Only the line the user
+    /// actually reads asserted the lapse as fact, next to a Codex login that was
+    /// answering the server perfectly well, which reads as "this account is
+    /// broken" about one that works.
+    #[test]
+    fn the_stale_hint_does_not_assert_a_lapse_it_cannot_know() {
+        let h = stale_hint(&["g-cli"], &["codex"]);
+        assert!(h.contains("g-cli"), "{h}");
+        assert!(
+            h.contains("may"),
+            "what is known is that the copy is old, not that the token is dead: {h}"
+        );
+        assert!(
+            !h.contains("has already lapsed"),
+            "a lapse swapdex has not established: {h}"
+        );
+        // The reassurance still has to be there: this is the line that stops an
+        // old login from reading as a broken account.
+        assert!(h.contains("still serves codex"), "{h}");
     }
 
     /// Every tool stale: there is nothing to reassure the reader about, and

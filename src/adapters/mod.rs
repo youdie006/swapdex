@@ -41,6 +41,15 @@ impl Snapshot {
 pub trait AuthTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn present(&self, paths: &Paths) -> bool;
+    /// Is the login THIS environment manages still here?
+    ///
+    /// `present` answers "is anyone signed in", which is right for a listing and
+    /// wrong for checking that a sign-out took: on macOS it can read another
+    /// profile's Keychain item, which a sign-out deliberately never deletes.
+    /// Defaults to `present` for the tools whose credential is a plain file.
+    fn managed_present(&self, paths: &Paths) -> bool {
+        self.present(paths)
+    }
     fn capture(&self, paths: &Paths) -> Result<Snapshot>;
     fn apply(&self, paths: &Paths, snap: &Snapshot) -> Result<()>;
     fn identity(&self, paths: &Paths) -> Result<Option<Account>>;

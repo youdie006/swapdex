@@ -984,6 +984,82 @@ fn the_proxy_refuses_a_tool_it_has_no_relay_for() {
 ///
 /// A string literal split across source lines needs a trailing `\`; without it
 /// the indentation of the next line lands in the middle of the sentence. Three
+/// apply's rollback must read the item it will write back to.
+///
+/// The journal records `kc_service: effective_computed_service()` and the
+/// rollback calls `keychain_write`, which targets that same env-derived item -
+/// but the PRIOR value was read through `keychain_service()`, whose fallback
+/// returns a lone discovered item when the derived one does not exist. So on a
+/// machine with one other profile's Keychain item and no item of its own - what
+/// happens right after a sign-out - a failed apply could roll back by writing
+/// ANOTHER ACCOUNT'S token into this environment's item. The `None` arm next to
+/// it already names that hazard: "a token/identity mismatch a later `use` would
+/// silently apply."
+///
+/// Only macOS has the Keychain, so the pairing is pinned where it is decided.
+#[test]
+fn the_rollback_reads_the_same_keychain_item_it_writes_back_to() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapters/claude.rs"),
+    )
+    .unwrap();
+    let at = src
+        .find("fn keychain_prior()")
+        .expect("the rollback's prior read");
+    let end = src[at..].find("\n}\n").expect("the end of that function") + at;
+    // Comments explain the hazard by name, so judge the CODE.
+    let body: String = src[at..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = body.as_str();
+    assert!(
+        body.contains("effective_computed_service()"),
+        "prior must read the env-derived item, the one the rollback writes: {body}"
+    );
+    assert!(
+        !body.contains("keychain_service()"),
+        "not through the fallback that can return another profile's item: {body}"
+    );
+}
+
+/// The check that a sign-out took must ask about the item the sign-out deleted.
+///
+/// `keychain_delete` targets the ENV-DERIVED Keychain item only - "never a
+/// discovered one", because removing another `CLAUDE_CONFIG_DIR` profile's login
+/// while adding an account would be a disaster. `present` reads through
+/// `pick_service`, which falls back to a lone discovered item when the derived
+/// one is gone - correct for an alias-only setup, and exactly wrong here: right
+/// after the delete the derived item IS gone, the leftover answers instead, and
+/// the sign-out reports failure. On a machine with one leftover - what `doctor`
+/// calls "1 other Claude item(s)" - no second account could ever be added.
+///
+/// Only macOS has the Keychain, so no runnable test can reach this on Linux CI.
+/// The wiring is what breaks, so the wiring is what is pinned.
+#[test]
+fn the_sign_out_check_asks_the_narrow_question() {
+    let src =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands.rs"))
+            .unwrap();
+    let at = src
+        .find("sign_out_locally(paths, tool);")
+        .expect("the local sign-out");
+    let after = &src[at..];
+    let check = after
+        .find("if still_same ||")
+        .expect("the verification that it took");
+    let line: String = after[check..].lines().next().unwrap().to_string();
+    assert!(
+        line.contains("managed_present"),
+        "the check must ask about the item the delete targeted: {line}"
+    );
+    assert!(
+        !line.contains(".present("),
+        "not whether ANY credential can be read: {line}"
+    );
+}
+
 /// had it, and two of those print on the proxy's request path - so an account
 /// with a lapsed subscription was told about it in a sentence with an
 /// eighteen-space hole in it, at the moment the tool most needs to be believed.
