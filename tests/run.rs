@@ -633,6 +633,91 @@ fn auto_setting_round_trips_and_rejects_nonsense() {
     assert_eq!(out.status.code(), Some(2), "a bad value is refused");
 }
 
+/// `status --json` called a healthy login expired, nearly always.
+///
+/// A Claude access token lives about an hour and the tool refreshes it silently.
+/// Two paths learned that - `ls`'s marker ("this was the constant 'expired'
+/// spam") and `status`'s own note - and both only speak past STALE_DAYS. The
+/// JSON kept the literal `expires_at < now`, so for most of every hour it
+/// reported `"expired": true` about an account that was working, while the
+/// human line right beside it said nothing was wrong.
+#[test]
+fn the_json_status_does_not_call_an_hourly_refresh_expired() {
+    let root = tempfile::tempdir().unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+    // The ordinary state: lapsed an hour ago, refreshes by itself.
+    std::fs::write(
+        root.path().join(".claude/.credentials.json"),
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"T","expiresAt":{},"subscriptionType":"max"}}}}"#,
+            now_ms - 3_600_000
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(".claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"a@x.com"}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args(["status", "--json"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status --json is JSON");
+    let row = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["tool"] == "claude-code")
+        .expect("the claude row");
+    assert_eq!(row["logged_in"], serde_json::json!(true), "{row}");
+    assert_eq!(
+        row["expired"],
+        serde_json::json!(false),
+        "an hourly refresh is not an expired login: {row}"
+    );
+}
+
+/// The JSON listing dropped the warning that it was incomplete.
+///
+/// A damaged `slots.json` means slot accounts are missing from the listing, and
+/// `ls` says so. `ls --json` returned before that line ever ran: a truncated
+/// array, exit 0, nothing on stderr - and every row carrying `"warning": null`,
+/// so the one field a consumer would check for trouble reported none. The
+/// status line and any script read this form.
+#[test]
+fn the_json_listing_says_when_it_is_incomplete() {
+    let root = tempfile::tempdir().unwrap();
+    seed_copy_profile(root.path(), "work");
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("slots.json"), b"{ not json").unwrap();
+
+    let out = Command::new(bin())
+        .args(["ls", "--json"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    // stdout stays parseable: a consumer mid-pipeline must not be handed prose.
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout is still JSON ({e}): {stdout}"));
+    assert!(parsed.is_array(), "the shape does not change: {stdout}");
+
+    assert!(
+        stderr.contains("could not be read") || stderr.contains("damaged"),
+        "and the incompleteness is said out loud: stderr={stderr:?}"
+    );
+}
+
 /// `rm --tool claude` could not drop a Claude login.
 ///
 /// Seven commands take `--tool` as the parsed `ToolSel`; `rm` alone took a raw

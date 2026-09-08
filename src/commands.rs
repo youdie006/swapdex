@@ -68,14 +68,11 @@ pub enum ToolSel {
 }
 
 impl ToolSel {
+    /// Asked through `one_tool`, so the selection maps to a tool name in exactly
+    /// one place: a tool added to this enum cannot be wired into one of them and
+    /// forgotten in the other.
     fn wants(self, tool: &str) -> bool {
-        match self {
-            ToolSel::Claude => tool == "claude-code",
-            ToolSel::Codex => tool == "codex",
-            ToolSel::Gemini => tool == "gemini",
-            ToolSel::Antigravity => tool == "antigravity",
-            ToolSel::All => true,
-        }
+        one_tool(self).is_none_or(|t| t == tool)
     }
 }
 
@@ -1286,6 +1283,18 @@ fn age_line(stamp_nanos: u128) -> String {
 /// refresh token can rotate; flag one that has not been refreshed in a while.
 const STALE_DAYS: i64 = 30;
 
+/// Is a login's access token old enough for its lapse to mean anything?
+///
+/// A Claude access token lives about an hour and the tool refreshes it silently,
+/// so "expired the moment it lapsed" is true for most of every hour and says
+/// nothing about whether the account works - `ls`'s marker calls that "the
+/// constant expired spam" and `status`'s note says the same. Past STALE_DAYS the
+/// refresh token itself may be gone, which is worth reporting. `None` stays
+/// None: a login with no deadline on it is not condemned.
+fn login_is_ancient(expires_at_ms: Option<i64>, now_ms: i64) -> Option<bool> {
+    expires_at_ms.map(|ms| now_ms - ms > STALE_DAYS * 86400 * 1000)
+}
+
 /// When a stored snapshot was last refreshed, in unix seconds.
 ///
 /// Every tool records it somewhere different, and each reader used to work that
@@ -1859,6 +1868,19 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         }
     }
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    // Before the `--json` branch, not after it: that branch returns, so the
+    // machine-readable listing was the one form that never said it was
+    // incomplete - and every row carries `"warning": null`, which reads as
+    // "nothing wrong". stderr, so stdout stays a parseable array.
+    if !unreadable_registry.is_empty() {
+        eprintln!(
+            "swapdex: the account registry could not be read ({}) - \
+             ~/.local/share/swapdex/slots.json is damaged, so accounts are missing \
+             from this listing. The slot directories still hold their logins; \
+             restore the file from a backup or re-register with `swapdex adopt`.",
+            unreadable_registry.join(", ")
+        );
+    }
     if json {
         let rows: Vec<Value> = profiles
             .iter()
@@ -1885,15 +1907,6 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             .collect();
         println!("{}", serde_json::to_string(&rows)?);
         return Ok(0);
-    }
-    if !unreadable_registry.is_empty() {
-        eprintln!(
-            "swapdex: the account registry could not be read ({}) - \
-             ~/.local/share/swapdex/slots.json is damaged, so accounts are missing \
-             from this listing. The slot directories still hold their logins; \
-             restore the file from a backup or re-register with `swapdex adopt`.",
-            unreadable_registry.join(", ")
-        );
     }
     if profiles.is_empty() {
         if unreadable_registry.is_empty() {
@@ -2155,7 +2168,7 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
                         "email": id.email,
                         "tier": id.tier,
                         "profile": matched_profile_name(&store, tool, &id.account_id),
-                        "expired": id.expires_at.map(|ms| ms < now_ms()),
+                        "expired": login_is_ancient(id.expires_at, now_ms()),
                     }),
                 }
             })
@@ -8638,8 +8651,8 @@ mod tests {
     use super::{
         best_identity, classify_migration_profile, codex_account_sources, codex_identity,
         codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
-        last_slot_warning, listable, new_account_prompt, payer_line, payer_note, payer_of_any,
-        pick_active, quota_brief, row_needs_login, row_suffix, sign_in_remedy,
+        last_slot_warning, listable, login_is_ancient, new_account_prompt, payer_line, payer_note,
+        payer_of_any, pick_active, quota_brief, row_needs_login, row_suffix, sign_in_remedy,
         sign_out_blocked_remedy, stale_hint, stale_marker, stale_proxy_note,
         suggested_profile_name, switch_line, unhonoured_ask, unknown_account, win_line,
         MigrationClass,
@@ -8762,6 +8775,29 @@ mod tests {
             last_slot_warning(0, false, "claude-code"),
             None,
             "no proxy running - nothing is pinned to it, so nothing breaks"
+        );
+    }
+
+    /// The boundary the other two paths already use.
+    #[test]
+    fn a_login_is_only_ancient_past_the_stale_window() {
+        let day = 86_400_000i64;
+        let now = 1_800_000_000_000i64;
+        assert_eq!(login_is_ancient(None, now), None, "no deadline, no verdict");
+        assert_eq!(
+            login_is_ancient(Some(now - 3_600_000), now),
+            Some(false),
+            "an hour ago is the ordinary state of a working login"
+        );
+        assert_eq!(
+            login_is_ancient(Some(now - 29 * day), now),
+            Some(false),
+            "still inside the window"
+        );
+        assert_eq!(
+            login_is_ancient(Some(now - 31 * day), now),
+            Some(true),
+            "past it the refresh token may be gone"
         );
     }
 
