@@ -633,6 +633,52 @@ fn auto_setting_round_trips_and_rejects_nonsense() {
     assert_eq!(out.status.code(), Some(2), "a bad value is refused");
 }
 
+/// `rm --tool claude` could not drop a Claude login.
+///
+/// Seven commands take `--tool` as the parsed `ToolSel`; `rm` alone took a raw
+/// `Option<String>` and handed it straight to `drop_tool`, which looks under
+/// `accounts/<name>/<tool>`. The directory is `claude-code`, and `ToolSel`'s own
+/// definition makes `claude` the canonical spelling with `claude-code` the alias,
+/// which `docs/COMMANDS.md` states too. So the documented spelling was the one
+/// that failed, and it failed by saying the profile "has no claude login" about
+/// a profile whose listing shows exactly that login. The unparsed string also
+/// let any word through: `--tool banana` answered "has no banana login" where
+/// every other command answers "invalid value".
+#[test]
+fn rm_drops_the_tool_the_documented_flag_names() {
+    let root = tempfile::tempdir().unwrap();
+    seed_copy_profile(root.path(), "work");
+    let path = std::env::var("PATH").unwrap_or_default();
+    assert!(
+        run_in(root.path(), &["ls"], &path).contains("claude-code"),
+        "precondition: the profile has that login"
+    );
+
+    let out = Command::new(bin())
+        .args(["rm", "work", "--tool", "claude"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "{all}");
+    assert!(
+        !run_in(root.path(), &["ls"], &path).contains("claude-code"),
+        "the login is gone"
+    );
+
+    // And a word that is not a tool is a usage error, as everywhere else.
+    let bad = Command::new(bin())
+        .args(["rm", "work", "--tool", "banana"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2), "invalid value is exit 2");
+}
+
 /// A refused rename that already happened to half the account.
 ///
 /// A name can be a registered slot AND a saved profile. `rename` renames the

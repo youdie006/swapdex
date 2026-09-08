@@ -3990,8 +3990,11 @@ fn migrate_claude_reports_a_differently_named_slot_copy_without_creating() {
         o.contains("saved copy of slot 'claude-main'"),
         "names the matching slot: {o}"
     );
+    // The flag spelling `--tool` actually takes, the way every other remedy in
+    // the tool spells it (`pretty_tool_flag`). This used to read `claude-code`
+    // back when that was the only spelling `rm --tool` accepted.
     assert!(
-        o.contains("swapdex rm legacy-claude --tool claude-code"),
+        o.contains("swapdex rm legacy-claude --tool claude"),
         "gives the optional cleanup command: {o}"
     );
     assert_eq!(

@@ -4601,7 +4601,12 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
-pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i32> {
+pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<i32> {
+    // The parsed selection, like every other command's `--tool`. Taking a raw
+    // string here meant `--tool claude` looked for `accounts/<name>/claude`
+    // while the directory is `claude-code`, so the documented spelling could not
+    // drop a Claude login - and any word at all was accepted.
+    let tool = sel.and_then(one_tool);
     if let Some(c) = reject_bad_name(name) {
         return Ok(c);
     }
@@ -5257,7 +5262,8 @@ pub fn migrate(paths: &Paths, sel: Option<MigrationToolSel>) -> Result<i32> {
         for (profile, slot_name) in &copies {
             println!(
                 "  Saved profile '{profile}' is a saved copy of slot '{slot_name}' - nothing to \
-                 do; leave it alone or remove it with `swapdex rm {profile} --tool {tool}`."
+                 do; leave it alone or remove it with `swapdex rm {profile} --tool {}`.",
+                pretty_tool_flag(tool)
             );
         }
         for profile in &unreadable {
@@ -5577,6 +5583,22 @@ pub(crate) fn tool_of_account(paths: &Paths, name: &str) -> &'static str {
 
 /// The tool a slot command means. Slots exist for the two tools that can be
 /// pointed at a per-account home; anything else is the caller's error to report.
+/// The one tool a `--tool` selection names, or None for "every tool" - which is
+/// what omitting the flag already means.
+///
+/// `slot_tool` answers a different question (which tool a SLOT defaults to, and
+/// that default is Claude), so it cannot stand in here: it would turn `--tool
+/// all` into `--tool claude`.
+pub(crate) fn one_tool(sel: ToolSel) -> Option<&'static str> {
+    match sel {
+        ToolSel::Claude => Some("claude-code"),
+        ToolSel::Codex => Some("codex"),
+        ToolSel::Gemini => Some("gemini"),
+        ToolSel::Antigravity => Some("antigravity"),
+        ToolSel::All => None,
+    }
+}
+
 pub(crate) fn slot_tool(sel: Option<ToolSel>) -> &'static str {
     match sel {
         Some(ToolSel::Codex) => "codex",
