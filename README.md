@@ -17,7 +17,7 @@ command, `swapdex quota`, reads your remaining balance from Anthropic; nothing
 else does.)
 
 <div align="center">
-<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls, use personal, status, restore, doctor" width="760" />
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls lists two saved accounts, use personal switches Claude Code and Codex together, status confirms both, restore puts the previous login back" width="760" />
 </div>
 
 ```sh
