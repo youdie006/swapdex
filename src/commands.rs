@@ -4482,9 +4482,12 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         let label = format!("service:{}", crate::commands::tool_binary(tool));
         match crate::service::unit_program(&body) {
             Some(prog) if std::path::Path::new(prog).exists() => {
-                let up = crate::proxy::running_proxy_for(paths, tool).is_some();
-                if up {
-                    report(&label, true, "installed and running".into());
+                let running = crate::proxy::running_proxy_for(paths, tool);
+                if let Some((_, _, build)) = &running {
+                    match stale_proxy_note(build, &crate::proxy::build_id(), tool) {
+                        Some(note) => report(&label, false, note),
+                        None => report(&label, true, "installed and running".into()),
+                    }
                 } else {
                     report(
                         &label,
@@ -7213,6 +7216,27 @@ fn prompt(question: &str, default: &str) -> Option<String> {
     })
 }
 
+/// What `doctor` should say about a proxy still running an older build.
+///
+/// `install_verdict` already notes that a proxy started outside the service
+/// "never picked up an upgrade" - and nothing checked. The build id sits beside
+/// the pid in the marker, so the comparison costs a read that already happens.
+fn stale_proxy_note(running: &str, current: &str, tool: &str) -> Option<String> {
+    fn ver(b: &str) -> &str {
+        b.rsplit_once('-').map_or(b, |(v, _)| v)
+    }
+    (!running.is_empty() && running != current).then(|| {
+        format!(
+            "running {} while this swapdex is {} - an upgrade does not restart it, \
+             so it still behaves like the older build: `swapdex service install \
+             --tool {}`",
+            ver(running),
+            ver(current),
+            crate::commands::tool_binary(tool)
+        )
+    })
+}
+
 /// What to offer as the name for an account you have NOT signed into yet.
 ///
 /// Nothing. The only identity to hand is the login being signed out of, so a
@@ -8535,7 +8559,7 @@ mod tests {
         best_identity, classify_migration_profile, codex_account_sources, codex_identity,
         codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict, listable,
         new_account_prompt, payer_line, payer_note, payer_of_any, pick_active, quota_brief,
-        row_needs_login, row_suffix, sign_in_remedy, stale_hint, stale_marker,
+        row_needs_login, row_suffix, sign_in_remedy, stale_hint, stale_marker, stale_proxy_note,
         suggested_profile_name, switch_line, unhonoured_ask, unknown_account, win_line,
         MigrationClass,
     };
@@ -8602,6 +8626,37 @@ mod tests {
         let line = win_line("7d", &full, 0);
         assert!(line.contains("100% left"), "{line}");
         assert!(!line.contains("resets"), "no reset when absent: {line}");
+    }
+
+    /// A proxy that never picked up the upgrade is reported as healthy.
+    ///
+    /// `install_verdict`'s own note already says a hand-started proxy "never
+    /// picked up an upgrade"; nothing checked for it. On a real machine the
+    /// Codex proxy ran five days on the build from BEFORE the fix for the very
+    /// symptom being reported, and `doctor` said "installed and running". The
+    /// build id is already written down beside the pid - only the comparison was
+    /// missing.
+    #[test]
+    fn a_proxy_running_an_older_build_is_not_called_healthy() {
+        let note = stale_proxy_note("0.141.0-1788417540", "0.153.0-1788850863", "codex")
+            .expect("an older build is worth saying out loud");
+        assert!(note.contains("0.141.0"), "names what is running: {note}");
+        assert!(note.contains("0.153.0"), "and what would start now: {note}");
+        assert!(
+            note.contains("swapdex service install --tool codex"),
+            "and the command that replaces it: {note}"
+        );
+
+        assert_eq!(
+            stale_proxy_note("0.153.0-1788850863", "0.153.0-1788850863", "codex"),
+            None,
+            "the current build is not news"
+        );
+        assert_eq!(
+            stale_proxy_note("", "0.153.0-1788850863", "codex"),
+            None,
+            "a marker with no build id says nothing about age"
+        );
     }
 
     /// The dashboard's "add an account" prompt offered the account you are leaving.
