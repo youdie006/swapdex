@@ -4676,6 +4676,15 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i3
                 crate::util::redact_path(&d.display().to_string())
             );
         }
+        if let Some(w) = last_slot_warning(
+            crate::slots::Slots::open_for(paths, slot_tool.unwrap_or("claude-code"))
+                .map(|s| s.list().len())
+                .unwrap_or(0),
+            crate::proxy::running_proxy_for(paths, slot_tool.unwrap_or("claude-code")).is_some(),
+            slot_tool.unwrap_or("claude-code"),
+        ) {
+            println!("{w}");
+        }
         // A profile of the same name is a separate thing; leave it alone - but
         // say so, or the name stays listed and the removal reads as failed.
         if is_profile {
@@ -6912,8 +6921,10 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             pretty_tool(tool),
             identity_line(&cur)
         );
-        eprintln!("  {}", same_account_hint(tool));
-        return Ok(0);
+        eprintln!("  {}", sign_out_blocked_remedy(still_same, tool));
+        // Exit 8 is the documented code for "login was started but the flow did
+        // not complete" - nothing was added, and 0 told a script otherwise.
+        return Ok(8);
     }
     // RELEASE the store lock before the interactive sign-in: it can take
     // minutes (or be left open), and holding it would block every other
@@ -6976,6 +6987,8 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
                      --tool {}`.)",
                     pretty_tool_flag(tool)
                 );
+                // 0, not 8: the login flow DID complete, it just landed on the
+                // account already saved - the documented no-op case.
                 return Ok(0);
             }
             // Same repoint rule as `add --update`: if '{name}' already has a
@@ -7213,6 +7226,39 @@ fn prompt(question: &str, default: &str) -> Option<String> {
         default.to_string()
     } else {
         t.to_string()
+    })
+}
+
+/// Why the sign-out did not take, and what actually fixes THAT.
+///
+/// Two independent checks guard it, and one remedy was printed for both. When a
+/// CREDENTIAL is still readable the account is not signed in anywhere - it is
+/// another profile's Keychain item answering - and sending the user to sign out
+/// in their browser cannot help.
+fn sign_out_blocked_remedy(identity_survived: bool, tool: &str) -> String {
+    if identity_survived {
+        return same_account_hint(tool);
+    }
+    "a credential is still readable after the sign-out, which usually means \
+     another CLAUDE_CONFIG_DIR profile's Keychain item is answering - signing out \
+     in a browser will not change that. `swapdex doctor` names what it found."
+        .to_string()
+}
+
+/// What removing this slot costs, when it is the last one a running proxy has.
+///
+/// The proxy refuses a turn it has no slot for, and sessions are pinned to its
+/// address rather than reaching the vendor directly - so the moment the last one
+/// goes, every session on it fails. `rm` reported only what it did to the slot.
+fn last_slot_warning(remaining: usize, proxy_running: bool, tool: &str) -> Option<String> {
+    (remaining == 0 && proxy_running).then(|| {
+        format!(
+            "  the {} proxy has no account left to serve - sessions on it will fail \
+             with \"no account slots yet\" until one is back (`swapdex run <name> \
+             --tool {}`, or `swapdex adopt <name> <dir>`)",
+            pretty_tool(tool),
+            pretty_tool_flag(tool)
+        )
     })
 }
 
@@ -8557,9 +8603,10 @@ fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
 mod tests {
     use super::{
         best_identity, classify_migration_profile, codex_account_sources, codex_identity,
-        codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict, listable,
-        new_account_prompt, payer_line, payer_note, payer_of_any, pick_active, quota_brief,
-        row_needs_login, row_suffix, sign_in_remedy, stale_hint, stale_marker, stale_proxy_note,
+        codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
+        last_slot_warning, listable, new_account_prompt, payer_line, payer_note, payer_of_any,
+        pick_active, quota_brief, row_needs_login, row_suffix, sign_in_remedy,
+        sign_out_blocked_remedy, stale_hint, stale_marker, stale_proxy_note,
         suggested_profile_name, switch_line, unhonoured_ask, unknown_account, win_line,
         MigrationClass,
     };
@@ -8626,6 +8673,62 @@ mod tests {
         let line = win_line("7d", &full, 0);
         assert!(line.contains("100% left"), "{line}");
         assert!(!line.contains("resets"), "no reset when absent: {line}");
+    }
+
+    /// The check fails two ways; the remedy named only one of them.
+    ///
+    /// `still_same || managed_present` - the account still resolving, or a
+    /// credential still readable - and the message printed the browser-session
+    /// story for both. On a machine blocked by the second, signing out at
+    /// claude.ai does nothing at all, which is the worst kind of advice: it
+    /// looks like a fix and costs the user a round trip to find out it is not.
+    #[test]
+    fn the_sign_out_remedy_names_the_check_that_actually_failed() {
+        let browser = sign_out_blocked_remedy(true, "claude-code");
+        assert!(
+            browser.contains("claude.ai") || browser.contains("browser"),
+            "the account is still signed in, so the session is the thing: {browser}"
+        );
+
+        let leftover = sign_out_blocked_remedy(false, "claude-code");
+        assert!(
+            leftover.contains("Keychain") || leftover.contains("doctor"),
+            "a credential still readable is not a browser session: {leftover}"
+        );
+        assert!(
+            !leftover.contains("claude.ai"),
+            "and must not send them somewhere that cannot help: {leftover}"
+        );
+    }
+
+    /// Removing the last slot takes every session with it, in silence.
+    ///
+    /// The proxy refuses a turn it has no slot for - "no account slots yet" -
+    /// and sessions are pinned to its address, so the moment the last slot goes
+    /// every one of them fails with a 502. `rm` says "stopped managing 'x'. its
+    /// login is untouched", which is true and is not the part that matters.
+    /// swapdex knows both halves already: the registry says how many remain, and
+    /// the marker file says whether a proxy is running.
+    #[test]
+    fn removing_the_last_slot_says_what_it_costs() {
+        let w = last_slot_warning(0, true, "claude-code")
+            .expect("the last one, with a proxy running on it");
+        assert!(w.contains("502") || w.contains("no account slots"), "{w}");
+        assert!(
+            w.contains("swapdex run") || w.contains("adopt"),
+            "and how to get one back: {w}"
+        );
+
+        assert_eq!(
+            last_slot_warning(1, true, "claude-code"),
+            None,
+            "another slot remains - the proxy still has something to serve"
+        );
+        assert_eq!(
+            last_slot_warning(0, false, "claude-code"),
+            None,
+            "no proxy running - nothing is pinned to it, so nothing breaks"
+        );
     }
 
     /// A proxy that never picked up the upgrade is reported as healthy.
