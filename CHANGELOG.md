@@ -4,6 +4,68 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.152.0
+
+Seven defects of one shape: a rule wired at some of its call sites. Every one of
+them left Codex holding the half that was never wired, and in five cases this
+repository had already written the lesson down in a comment beside the path that
+did get it.
+
+- **The release page says what changed.** Every version carried the same fixed
+  install blurb while CHANGELOG.md held the actual notes, so a reader on GitHub
+  could not tell one release from the next. The workflow now publishes the
+  version's CHANGELOG section, and refuses to create a release when that section
+  is missing rather than publishing a blank page. A test asserts the section
+  exists for the version Cargo declares, so a tag cannot ship without it.
+- **A saved copy is no longer reported as the account it is a copy of.** On a
+  real machine `quota` printed `codex-main ... 7d 100% left` and, directly under
+  it, `codex   token rejected` - the same login, one live and one a 42-day-old
+  copy in the store. The deadline was read from the slot DIRECTORY, and a
+  snapshot has none, so the one source that goes stale by design was the one
+  source that could not be seen to have expired. It now reads the deadline from
+  the credential, which both sources hand over, and a copy whose account is
+  signed in here under another name says so instead of condemning it. The remedy
+  changed too: a copy is not renewed by `swapdex run`, which would build an empty
+  slot and ask for a fresh sign-in.
+- **`quota --json` carries the Codex accounts its own advice points at.** A Codex
+  row with no windows says "`swapdex quota --json` to inspect" and
+  `Fetch::Unexpected` is documented "kept whole so `--json` can show what came
+  back" - but the JSON branch returned before Codex was read at all, so a
+  Codex-only machine reported `"accounts": []` and nothing else.
+- **Switching into an ancient login says so, for every tool.** `ls` marks a
+  snapshot older than 30 days "stale" for all four tools; the switch itself
+  warned about Claude alone, so `use` installed a Codex login whose refresh token
+  may be long revoked and printed only "switched". One reader now answers "when
+  was this snapshot last refreshed" for all four, so the marker and the note
+  cannot drift apart again.
+- **The unattended sweep keeps Codex accounts alive too.** `swapdex refresh
+  <name>` learned to renew Codex in 0.151.0; `refresh --keep-alive`, the half
+  meant to run unattended, did not - and reported "no Claude accounts to keep
+  alive" on a machine whose Codex account was days dead. A Codex token lives ten
+  days and only a Codex RUN renews it, which makes an idle Codex account the case
+  the sweep exists for. It renews inside two days of the deadline rather than on
+  every pass: each renewal rotates the refresh token, and rotating one more often
+  than needed is the risk this project exists to avoid.
+- **The proxy renews a lapsed Codex login before serving a turn, and steps aside
+  when it cannot.** `has_usable_login` states the consequence of getting this
+  wrong - "asking only 'is a login there' sent turns to a slot whose token had
+  expired days earlier and reported the 401 that came back as a rejected account"
+  - and that lesson had reached the rotation candidates but not the account
+  actually serving. The two blocks above it that renew and step aside read
+  Claude's credential, so on a Codex slot both were inert. Measured through the
+  proxy: a token that expired in 2001 went upstream on every turn and that
+  account was recorded as having paid for it.
+- **A Codex proxy with nothing readable refuses to start.** The refusal exists
+  because "a proxy that can read nothing still binds the port, still answers, and
+  forwards the CLIENT's own login on every turn - so it looks like it is working
+  while doing nothing it exists to do", a state that once cost a full day. It
+  read Claude's credential, so it was skipped for Codex entirely.
+- **Onboarding counts the accounts this machine actually has.** `Slots::open` is
+  an alias for Claude's registry, so a Codex-only machine finished the guided
+  setup with "No accounts yet. Log into Claude" while its Codex account was
+  registered and working. An empty machine is now told about both tools, since
+  either can be the only one someone uses.
+
 ## 0.151.0
 
 - **An upstream that never answers no longer hangs the client.** The relay
