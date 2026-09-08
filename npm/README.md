@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/cli-banner.png" alt="swapdex - switch Claude Code and Codex login accounts, one command, all local" width="760" />
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/cli-banner.png" alt="swapdex - switch Claude Code, Codex, Gemini CLI and Antigravity login accounts, one command, all local" width="760" />
 
 [![CI](https://github.com/youdie006/swapdex/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/youdie006/swapdex/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/swapdex?logo=rust&color=7a3be0)](https://crates.io/crates/swapdex)
+[![npm](https://img.shields.io/npm/v/%40youdie006%2Fswapdex?logo=npm&color=7a3be0)](https://www.npmjs.com/package/@youdie006/swapdex)
 [![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
 [![switcher: no network](https://img.shields.io/badge/switcher-no%20network-7a3be0.svg)](#what-it-will-not-do)
 
@@ -15,8 +17,17 @@ command, `swapdex quota`, reads your remaining balance from Anthropic; nothing
 else does.)
 
 <div align="center">
-<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls, use personal, status, restore, doctor" width="760" />
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls lists two saved accounts, use personal switches Claude Code and Codex together, status confirms both, restore puts the previous login back" width="760" />
 </div>
+
+```sh
+brew install youdie006/tap/swapdex     # macOS / Linux
+npm  i -g @youdie006/swapdex           # or, if you have node
+cargo install swapdex                  # or, if you have rust
+```
+
+Then `swapdex add work`, `swapdex add personal`, and `swapdex use personal`.
+[Full install notes](#install) &middot; [what it will not do](#what-it-will-not-do).
 
 ---
 
@@ -58,7 +69,8 @@ no proxy, no client spoofing.
 <sub>swapdex still keeps the classic snapshot commands (`add` copies a live login
 into a profile, `use` on that profile swaps it back, guarded against the
 running-session logout) for the shared-slot workflow; `swapdex migrate` moves
-those profiles onto their own slots.</sub>
+Claude and Codex profiles whose accounts are not already slotted onto their own
+slots.</sub>
 
 ## Install
 
@@ -133,7 +145,8 @@ The classic snapshot commands still work for the shared-slot workflow: `swapdex
 add <name>` snapshots the current login, `swapdex use <name>` swaps it back
 (backed up first, and refused while a `claude` session is running on that login
 so it can't be logged out), `swapdex restore` undoes the last swap, and `swapdex
-ui` is the full-screen picker. `swapdex migrate` moves these onto their own slots.
+ui` is the full-screen picker. `swapdex migrate` matches Claude and Codex
+profiles to slots by account and creates spaces only for accounts without one.
 
 `status` shows the live account per tool, matched back to a saved profile:
 
@@ -204,6 +217,17 @@ has expired reports so rather than showing a stale number (swapdex never
 refreshes tokens -- that is the line between a switcher and a rotator). It is
 also in `swapdex ui` under the `%` key.
 
+### The dashboard
+
+`swapdex ui` is the same thing without the commands: your accounts, which one is
+active, and how much each has left. On a machine with no profiles yet it opens on
+what you are *already* signed into and offers to save that as your first one, so
+setup is one keystroke and a name.
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/ui-demo.gif" alt="swapdex ui on a fresh machine: it finds the Claude Code and Codex logins already present, saves them as a profile named main, and shows the account with its 5h and 7d usage bars" width="760" />
+</div>
+
 ## How it works
 
 **Slots (the model swapdex uses now).** Each account gets its own
@@ -234,7 +258,8 @@ your projects, MCP servers, and settings are untouched. That switch is refused
 while a `claude` session is running on the same login slot, since the session's
 next token refresh would otherwise revoke the saved copy. On macOS the Claude
 token lives in the login Keychain, one item per `CLAUDE_CONFIG_DIR`. `swapdex
-migrate` moves these profiles onto their own slots, retiring the shared slot.
+migrate [--tool claude|codex]` moves unslotted Claude and Codex profiles onto
+their own slots, retiring the shared homes.
 
 ## Safety
 
