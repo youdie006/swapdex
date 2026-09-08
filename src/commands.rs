@@ -453,6 +453,18 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             }
         };
         store.save(name, &snap)?;
+        // The mirror of the --update guard above: that one refuses to repoint a
+        // NAME at another account, while a second name on the SAME account went
+        // unremarked and listed as two logins to switch between.
+        if let Some(id) = snapshot_account_id(&snap, tool) {
+            let twin =
+                store.list().into_iter().map(|p| p.name).find(|n| {
+                    n != name && profile_account_id(&store, n, tool).as_deref() == Some(&id)
+                });
+            if let Some(twin) = twin {
+                println!("  note: that account is already saved as '{twin}'");
+            }
+        }
         // Surface the captured identity so a stale oauthAccount (saving 'rnd'
         // while bsgong is the live account) is caught at save, not discovered
         // later when `use` connects the wrong account.
@@ -4670,7 +4682,14 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, tool: Option<&str>) -> Result<i3
                 crate::util::redact_path(&d.display().to_string())
             );
         }
-        // A profile of the same name is a separate thing; leave it alone.
+        // A profile of the same name is a separate thing; leave it alone - but
+        // say so, or the name stays listed and the removal reads as failed.
+        if is_profile {
+            println!(
+                "  a saved profile named '{name}' is still here - `swapdex rm {name} --yes` \
+                 again removes it"
+            );
+        }
         return Ok(0);
     }
     if !yes {

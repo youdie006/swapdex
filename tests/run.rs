@@ -633,6 +633,46 @@ fn auto_setting_round_trips_and_rejects_nonsense() {
     assert_eq!(out.status.code(), Some(2), "a bad value is refused");
 }
 
+/// One name, two halves - and `rm` says only what it did to the first.
+///
+/// A name can be a registered slot AND a saved profile at once. `rm` unregisters
+/// the slot and deliberately leaves the profile ("a profile of the same name is a
+/// separate thing"), then prints a plain success. On a real machine the account
+/// was still listed afterwards, so the removal read as failed, and the next
+/// `swapdex add <name>` refused with "already has a claude-code login" - which is
+/// where the user ends up: told it exists after being told it was removed.
+#[test]
+fn rm_says_when_a_saved_profile_of_the_same_name_is_still_there() {
+    let root = tempfile::tempdir().unwrap();
+    let existing = root.path().join("dot-claude-kong");
+    std::fs::create_dir_all(&existing).unwrap();
+    std::fs::write(existing.join(".credentials.json"), b"{}").unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    run_in(
+        root.path(),
+        &["adopt", "kong", existing.to_str().unwrap()],
+        &path,
+    );
+    seed_copy_profile(root.path(), "kong");
+
+    let out = run_in(root.path(), &["rm", "kong", "--yes"], &path);
+    assert!(out.contains("stopped managing"), "the slot went: {out}");
+    assert!(
+        out.contains("saved profile"),
+        "and it says the other half is still here: {out}"
+    );
+    assert!(
+        out.contains("rm kong"),
+        "naming the command that removes it: {out}"
+    );
+    // The listing still shows the name, which is the whole reason this has to
+    // be said out loud.
+    assert!(
+        run_in(root.path(), &["ls"], &path).contains("kong"),
+        "the profile is still listed"
+    );
+}
+
 /// Removing a slot account means "stop managing it", never "lose it": the mapping
 /// goes, the directory and the login inside it stay, and `adopt` can bring it back.
 #[test]
@@ -651,6 +691,13 @@ fn rm_unregisters_a_slot_and_leaves_its_login_alone() {
 
     let out = run_in(root.path(), &["rm", "company", "--yes"], &path);
     assert!(out.contains("stopped managing"), "{out}");
+    // ...and does not invent a leftover: nothing named 'company' was ever saved,
+    // so pointing at a saved profile would send the user after a thing that is
+    // not there.
+    assert!(
+        !out.contains("saved profile"),
+        "no snapshot exists, so none is claimed: {out}"
+    );
     assert!(
         !run_in(root.path(), &["slots"], &path).contains("company"),
         "the mapping is gone"

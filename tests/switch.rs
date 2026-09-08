@@ -3671,6 +3671,29 @@ esac
 }
 
 /// A live Codex login at `~/.codex/auth.json` under the sandbox root.
+/// Saving the account you already have, under a second name, says nothing.
+///
+/// `add --update` refuses to REPOINT a name at a different account, because
+/// "that changes what the name means". The reverse - pointing a second NAME at
+/// the same account - had no such check, so a machine ended up with two profiles
+/// whose credentials were byte-identical, listed as two accounts. The listing
+/// then reads as two logins to switch between when there is one.
+#[test]
+fn add_says_when_this_account_is_already_saved_under_another_name() {
+    let root = tempfile::tempdir().unwrap();
+    seed_live_codex(root.path(), "acct-1");
+    let (out, _e, code) = run(root.path(), &["add", "work", "--tool", "codex"]);
+    assert_eq!(code, 0, "the first save is ordinary: {out}");
+
+    let (out, err, code) = run(root.path(), &["add", "personal", "--tool", "codex"]);
+    assert_eq!(code, 0, "saving it twice is allowed, not refused");
+    let both = format!("{out}{err}");
+    assert!(
+        both.contains("already saved as") && both.contains("work"),
+        "and it names the profile that already holds this account: {both}"
+    );
+}
+
 fn seed_live_codex(root: &Path, account: &str) {
     let d = root.join(".codex");
     std::fs::create_dir_all(&d).unwrap();
