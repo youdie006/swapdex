@@ -303,8 +303,17 @@ pub fn remember(
     let Some(a) = from_headers(headers) else {
         return false;
     };
+    crate::quota_cache::update_for(paths, "codex", &[(serving.to_string(), entry_of(&a, at))]);
+    true
+}
+
+/// What one account's answer means for the cache the status bar reads.
+///
+/// Shared by the two ways an answer arrives - carried on a served response, and
+/// asked for directly - so the two cannot record the same account differently.
+fn entry_of(a: &Account, at: i64) -> crate::quota_cache::Entry {
     let p = crate::codex_limits::place(&a.limits);
-    let entry = crate::quota_cache::Entry {
+    crate::quota_cache::Entry {
         five_h: p.five_h.map(|w| w.used_pct),
         five_h_reset: p.five_h.and_then(|w| w.resets_at),
         seven_d: p.seven_d.map(|w| w.used_pct),
@@ -323,9 +332,22 @@ pub fn remember(
         refused: a.refused.as_deref().map(refusal_words),
         // A reading arrived, so the token works.
         token_rejected_at: None,
-    };
-    crate::quota_cache::update_for(paths, "codex", &[(serving.to_string(), entry)]);
-    true
+    }
+}
+
+/// Write down whatever the endpoint said about this account.
+///
+/// `note_token_outcome` recorded only refusals, so a successful read had to
+/// reach the cache some other way - and for Codex the only other way was a
+/// response that happened to carry the headers. An account nobody served, or one
+/// whose responses carried nothing, kept whatever number it had last.
+pub fn note_reading(paths: &crate::paths::Paths, name: &str, f: &Fetch, at: i64) {
+    match f {
+        Fetch::Ok(a) => {
+            crate::quota_cache::update_for(paths, "codex", &[(name.to_string(), entry_of(a, at))]);
+        }
+        _ => note_token_outcome(paths, name, f, at),
+    }
 }
 
 /// A reset time as either form it arrives in: unix seconds, or a timestamp.
@@ -735,6 +757,43 @@ mod tests {
         ]))
         .expect("a reading");
         assert!(got.scoped.is_empty(), "{:?}", got.scoped);
+    }
+
+    /// A successful read has to reach the cache, not only a refused one.
+    ///
+    /// `note_token_outcome` wrote down refusals and nothing else, so the only
+    /// way a NUMBER reached the status bar was a served response that happened
+    /// to carry the headers. An account whose responses carried none kept
+    /// whatever it had last - and one that had been refused once kept saying
+    /// "token rejected" until some later response cleared it.
+    #[test]
+    fn a_successful_read_is_written_down_and_clears_an_earlier_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let now = 1_788_900_000i64;
+
+        // The account was refused, which is what the bar shows.
+        note_reading(&paths, "work", &Fetch::Unauthorized, now - 600);
+        let e = crate::quota_cache::load_for(&paths, "codex");
+        assert_eq!(
+            e.get("work").and_then(|x| x.token_rejected_at),
+            Some(now - 600)
+        );
+
+        // Then it answers. The numbers land, and the refusal stops being the
+        // last thing that happened.
+        let body = r#"{"email":"a@x.com","plan_type":"pro","rate_limit":{"primary_window":{"used_percent":24.0,"limit_window_seconds":604800,"reset_at":1893456000}}}"#;
+        let a = parse(body).expect("the endpoint's own shape");
+        note_reading(&paths, "work", &Fetch::Ok(Box::new(a)), now);
+
+        let c = crate::quota_cache::load_for(&paths, "codex");
+        let e = c.get("work").expect("the account is still in the cache");
+        assert_eq!(e.seven_d, Some(24.0), "the number is written down");
+        assert_eq!(e.at, now);
+        assert_eq!(
+            e.token_rejected_at, None,
+            "a reading arrived, so the token works"
+        );
     }
 
     /// A response that says the account still has credits must record that

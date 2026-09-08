@@ -7859,7 +7859,7 @@ fn read_codex_accounts(paths: &Paths, now: i64) -> Vec<CodexRow> {
                 // This command already says "token rejected" on screen. Writing
                 // it down is what lets the status line say the same thing
                 // without a network read of its own.
-                crate::codex_usage::note_token_outcome(paths, &name, f, now);
+                crate::codex_usage::note_reading(paths, &name, f, now);
             }
             CodexRow {
                 name,

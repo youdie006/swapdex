@@ -510,6 +510,29 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
 /// any account could want - it is not how often any single one is read.
 const MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How often the Codex proxy re-reads its accounts for the status bar.
+///
+/// Five minutes rather than Claude's one: the number a Codex bar shows is the
+/// seven-day window, and this read does not feed a rotation threshold the way
+/// Claude's does. It stays inside `bar_age`'s ten-minute floor, so a reading is
+/// never old enough to be called old - which is the entire job.
+const CODEX_MEASURE_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How often this tool's accounts are re-read to keep its status bar current,
+/// or None for a tool the proxy does not carry.
+///
+/// Separate from `should_measure`, which answers a different question: whether a
+/// REQUEST should stop to measure. Codex answers no there - it has no threshold
+/// to steer by - and that no was read as "never measure Codex", which left its
+/// status bar with nothing refreshing it at all.
+fn measure_interval(tool: &str) -> Option<std::time::Duration> {
+    match tool {
+        "claude-code" => Some(MEASURE_EVERY),
+        "codex" => Some(CODEX_MEASURE_EVERY),
+        _ => None,
+    }
+}
+
 /// How often idle accounts are renewed so their refresh tokens never go stale.
 ///
 /// An OAuth refresh token rotates when used; leave an account alone long enough
@@ -599,6 +622,20 @@ fn stamp_at(local_secs: i64) -> String {
 /// The stamp for right now, in the machine's own time zone.
 fn stamp() -> String {
     stamp_at(now_secs() + tz_offset())
+}
+
+/// Ask the Codex usage endpoint about each account and write down the answer.
+///
+/// The Claude path keeps its readings in memory as well, because a rotation
+/// threshold reads them on the request path. Codex has no such threshold, so
+/// the cache the status bar reads is the only place this needs to reach.
+fn measure_codex(paths: &Paths, slots: &[crate::slots::SlotRecord]) {
+    for r in slots {
+        if let Some(auth) = codex::slot_auth(&r.config_dir) {
+            let f = crate::codex_usage::fetch(&auth);
+            crate::codex_usage::note_reading(paths, &r.name, &f, now_secs());
+        }
+    }
 }
 
 fn refresh_measured(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Arc<Shared>) {
@@ -1176,13 +1213,18 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // arrive. Measurement used to ride along with traffic, so a quiet stretch
     // froze every number on screen at whatever it was when the last turn ran -
     // the status bar showed a reading fifteen minutes old and looked broken.
-    if should_measure(true, &opts.tool) {
+    if let Some(every) = measure_interval(&opts.tool) {
         let paths_m = paths.clone();
         let sh_m = Arc::clone(&sh);
         let tool_m = opts.tool.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(MEASURE_EVERY);
-            if let Ok(sl) = crate::slots::Slots::open_for(&paths_m, &tool_m) {
+            std::thread::sleep(every);
+            let Ok(sl) = crate::slots::Slots::open_for(&paths_m, &tool_m) else {
+                continue;
+            };
+            if tool_m == "codex" {
+                measure_codex(&paths_m, &sl.list());
+            } else {
                 refresh_measured(&paths_m, &sl.list(), &sh_m);
             }
         });
@@ -2513,6 +2555,35 @@ mod measure_without_auto_tests {
         // measured this way whatever the rotation setting says.
         assert!(!should_measure(true, "codex"));
         assert!(!should_measure(false, "codex"));
+    }
+
+    /// The timer that keeps a status bar's number from freezing.
+    ///
+    /// Its own note says measurement riding along with traffic meant "a quiet
+    /// stretch froze every number on screen ... the status bar showed a reading
+    /// fifteen minutes old and looked broken". The timer that fixed it was wired
+    /// for Claude only, so on Codex nothing refreshed the number at all - the
+    /// same failure on the other tool, reported from a real machine.
+    #[test]
+    fn every_tool_the_proxy_carries_has_a_timer_behind_its_status_bar() {
+        assert_eq!(measure_interval("claude-code"), Some(MEASURE_EVERY));
+        assert_eq!(measure_interval("codex"), Some(CODEX_MEASURE_EVERY));
+
+        // Codex is asked less often on purpose: the number its bar shows is the
+        // seven-day window, and this endpoint is not the one Claude's rotation
+        // turns on. Less often is a choice; never is what looked broken.
+        assert!(CODEX_MEASURE_EVERY > MEASURE_EVERY);
+        // `bar_age` calls a reading old after twice its own interval, with a
+        // ten-minute floor. Staying inside that floor is the whole point.
+        assert!(CODEX_MEASURE_EVERY.as_secs() * 2 <= 600);
+
+        // The proxy relays these two and nothing else, so nothing else has a bar
+        // to keep current.
+        assert_eq!(measure_interval("gemini"), None);
+        assert_eq!(measure_interval("antigravity"), None);
+        for t in ["claude-code", "codex"] {
+            assert!(carries(t), "{t} is carried, so it needs the timer");
+        }
     }
 }
 
