@@ -72,3 +72,83 @@ fn the_pinned_platform_packages_carry_that_version_too() {
         );
     }
 }
+
+/// The GitHub release must say what changed.
+///
+/// The release page carried the same fixed install blurb on every version while
+/// CHANGELOG.md held the actual notes, so a reader on GitHub could not tell one
+/// release from the next - and sessionwiki, built the same way, published its
+/// releases with an empty body outright. The workflow reads the version's
+/// CHANGELOG section now, which makes a MISSING section the new way to ship a
+/// blank page. This is the check that catches that on the tag.
+#[test]
+fn the_changelog_has_notes_for_the_version_cargo_declares() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let version = toml
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|l| l.split('"').next())
+        .expect("Cargo.toml declares a version");
+
+    let out = std::process::Command::new("sh")
+        .arg(root.join("scripts/release-notes.sh"))
+        .arg(version)
+        .arg(root.join("CHANGELOG.md"))
+        .output()
+        .expect("run scripts/release-notes.sh");
+    assert!(
+        out.status.success(),
+        "release-notes.sh failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let notes = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !notes.trim().is_empty(),
+        "CHANGELOG.md has no section for {version}, so the release would be a blank page"
+    );
+    // A heading with nothing under it is the same blank page with extra steps.
+    assert!(
+        notes.lines().filter(|l| !l.trim().is_empty()).count() >= 2,
+        "the section for {version} has no content: {notes:?}"
+    );
+}
+
+/// The extractor must not answer for a version it was not asked about.
+///
+/// A prefix match would hand 0.15's notes to 0.150.0 and every release after it
+/// would carry the wrong text - worse than a blank page, because it reads as
+/// deliberate.
+#[test]
+fn release_notes_match_one_version_exactly() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let run = |v: &str| {
+        let out = std::process::Command::new("sh")
+            .arg(root.join("scripts/release-notes.sh"))
+            .arg(v)
+            .arg(root.join("CHANGELOG.md"))
+            .output()
+            .expect("run scripts/release-notes.sh");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(
+        run("0.15").trim().is_empty(),
+        "a prefix of a real version must match nothing"
+    );
+    assert!(
+        run("9.999.0").trim().is_empty(),
+        "a version with no section must match nothing"
+    );
+    // A `v` prefix is what the tag carries, and it names the same release.
+    let toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let version = toml
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|l| l.split('"').next())
+        .unwrap();
+    assert_eq!(
+        run(version),
+        run(&format!("v{version}")),
+        "the tag name and the bare version name the same section"
+    );
+}
