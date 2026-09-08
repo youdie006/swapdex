@@ -4,6 +4,43 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.153.0
+
+- **The Codex status bar keeps its number.** The proxy runs a timer so a quiet
+  stretch does not freeze what is on screen - its own note says measurement used
+  to ride along with traffic and "the status bar showed a reading fifteen minutes
+  old and looked broken". That timer started only when `should_measure` said yes,
+  which is false for Codex, so on Codex nothing refreshed the bar at all and the
+  number moved only when a served response happened to carry the rate-limit
+  headers. `should_measure` answers a different question - whether a REQUEST
+  should stop to measure - and Codex answers no there for a good reason; that no
+  was doing double duty. Codex is now read every five minutes: `bar_age` calls a
+  reading old after twice its interval with a ten-minute floor, so five minutes
+  never trips it, and it is the interval `measure_after` already uses for an
+  account with half its quota left. `swapdex quota` also writes down what it
+  read - it had been recording refusals and discarding successful readings, so a
+  machine with no Codex proxy never got a number into the cache at all.
+- **`migrate` decides by account, and covers Codex.** It counted only Claude
+  profiles, though this repository states the same rotation-logout hazard for
+  Codex; and it asked whether a slot shared the profile's NAME, which is the
+  wrong question even for Claude. A profile whose ACCOUNT already lives in a slot
+  under another name is already safe. On a real machine, profile `codex` holds
+  the account in slot `codex-main`: name-based logic called that unmigrated and
+  told the user to create a slot named `codex`, which is unnecessary and also
+  impossible, since that name reads as a tool's own home and is refused.
+  Profiles are classified by account now - already slotted, a saved copy of a
+  slot under another name, needs a slot, or unreadable - and `migrate --tool`
+  scopes it. Onboarding reads the same classifier instead of its own copy. A
+  migrated slot still gets no credential; it gets the account id it was made
+  for, so a second run does not offer to create it again, and a real login always
+  outranks that marker.
+- **The README leads with the promise, the demo and the install.** Installing was
+  three sections down, behind the argument for the tool. The recordings are vhs
+  tapes now (`docs/tapes/`), regenerable and recorded against a throwaway store
+  whose every account and address is invented, and the dashboard - which the page
+  mentioned three times without ever showing - has a section and the recording
+  that had been sitting unreferenced in the repository.
+
 ## 0.152.0
 
 Seven defects of one shape: a rule wired at some of its call sites. Every one of
