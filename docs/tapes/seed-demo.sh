@@ -8,7 +8,10 @@
 # Usage: seed-demo.sh <root>
 set -eu
 
-root=${1:?usage: seed-demo.sh <root>}
+# `--fresh` leaves the live logins but saves no profiles, which is the state the
+# first-run recording needs: swapdex has something to offer and nothing yet.
+root=${1:?usage: seed-demo.sh <root> [--fresh]}
+fresh=${2:-}
 rm -rf "$root"
 store="$root/.local/share/swapdex"
 mkdir -p "$store/accounts"
@@ -64,4 +67,8 @@ printf '{"auth_mode":"chatgpt","last_refresh":"%s","tokens":{"access_token":"dem
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(jwt you@work.com)" > "$root/.codex/auth.json"
 chmod 600 "$root/.codex/auth.json"
 
-echo "seeded $root"
+if [ "$fresh" = "--fresh" ]; then
+  rm -rf "$store/accounts"
+fi
+
+echo "seeded $root${fresh:+ (}${fresh}${fresh:+)}"

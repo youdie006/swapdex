@@ -215,6 +215,17 @@ has expired reports so rather than showing a stale number (swapdex never
 refreshes tokens -- that is the line between a switcher and a rotator). It is
 also in `swapdex ui` under the `%` key.
 
+### The dashboard
+
+`swapdex ui` is the same thing without the commands: your accounts, which one is
+active, and how much each has left. On a machine with no profiles yet it opens on
+what you are *already* signed into and offers to save that as your first one, so
+setup is one keystroke and a name.
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/ui-demo.gif" alt="swapdex ui on a fresh machine: it finds the Claude Code and Codex logins already present, saves them as a profile named main, and shows the account with its 5h and 7d usage bars" width="760" />
+</div>
+
 ## How it works
 
 **Slots (the model swapdex uses now).** Each account gets its own
