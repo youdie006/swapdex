@@ -633,6 +633,46 @@ fn auto_setting_round_trips_and_rejects_nonsense() {
     assert_eq!(out.status.code(), Some(2), "a bad value is refused");
 }
 
+/// A refused rename that already happened to half the account.
+///
+/// A name can be a registered slot AND a saved profile. `rename` renames the
+/// slot first and persists it, THEN checks whether a profile already claims the
+/// new name - and refuses with exit 6. So the slot is left renamed under a
+/// message saying the rename did not happen: the mirror of `rm`, which did half
+/// the job and called it success. Nothing may move unless all of it can.
+#[test]
+fn a_rename_that_is_refused_leaves_the_slot_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("dir-a");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    run_in(
+        root.path(),
+        &["adopt", "bsgong", dir.to_str().unwrap()],
+        &path,
+    );
+    seed_copy_profile(root.path(), "bsgong");
+    seed_copy_profile(root.path(), "kong");
+
+    let out = Command::new(bin())
+        .args(["rename", "bsgong", "kong"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(6), "the target name is taken");
+
+    // ...and the slot still answers to its old name.
+    let slots = run_in(root.path(), &["slots"], &path);
+    assert!(
+        slots.contains("bsgong"),
+        "a refused rename moved nothing: {slots}"
+    );
+    assert!(
+        !slots.contains("kong"),
+        "the slot must not carry the name the rename was refused: {slots}"
+    );
+}
+
 /// One name, two halves - and `rm` says only what it did to the first.
 ///
 /// A name can be a registered slot AND a saved profile at once. `rm` unregisters

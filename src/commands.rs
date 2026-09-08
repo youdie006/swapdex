@@ -4763,6 +4763,18 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     // Claude and a Codex slot came out split in two - one login under two
     // names. 0.88.0 fixed the slot-vs-snapshot half of this; this is the
     // slot-vs-slot half.
+    // Refuse BEFORE moving anything. The slot rename persists immediately, so
+    // checking the profile collision afterwards left the slot renamed under a
+    // message saying the rename had not happened. Only once the source is known
+    // to exist: "there is nothing by that name" outranks "the new name is taken".
+    let old_exists = Store::open(paths).is_ok_and(|st| st.list().iter().any(|p| p.name == old))
+        || crate::adapters::names()
+            .into_iter()
+            .any(|t| crate::slots::Slots::open_for(paths, t).is_ok_and(|s| s.get(old).is_some()));
+    if old_exists && Store::open(paths).is_ok_and(|st| st.profile_dir_exists(new)) {
+        eprintln!("swapdex: a profile named '{new}' already exists");
+        return Ok(6);
+    }
     let mut slot_renamed = false;
     for tool in adapters::all().iter().map(|a| a.name()) {
         if let Ok(mut slots) = crate::slots::Slots::open_for(paths, tool) {
