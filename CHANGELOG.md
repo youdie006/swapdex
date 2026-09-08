@@ -4,6 +4,49 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.155.0
+
+A machine that could not add a second Claude account, however many times it was
+tried, and the four smaller things found while working out why.
+
+- **The delete was narrow and the check was wide.** `keychain_delete` targets the
+  ENV-DERIVED Keychain item only - "never a discovered one", because removing
+  another `CLAUDE_CONFIG_DIR` profile's login while adding an account would be a
+  disaster. But the check that the sign-out took called `present`, which reads
+  through `pick_service`, and that falls back to a lone discovered item when the
+  derived one is gone. Right after the delete the derived item IS gone, so the
+  leftover answered instead and the sign-out reported failure. On a machine with
+  exactly one other item - what `doctor` calls "1 other Claude item(s)" - adding
+  a second account was impossible, and no amount of retrying could change it.
+  The check now asks about the item the delete targeted.
+- **A rollback could restore another account's token.** The same asymmetry sat in
+  `apply`: the journal records `kc_service: effective_computed_service()` and the
+  rollback calls `keychain_write`, which targets that item - while the PRIOR
+  value was read through the fallback. So a failed apply could write ANOTHER
+  ACCOUNT'S token into this environment's item. The `None` arm beside it already
+  names the hazard: "a token/identity mismatch a later `use` would silently
+  apply." Prior now reads the item it will be written back to.
+- **The remedy blamed the browser for a problem the browser cannot fix.** That
+  guard fails two independent ways - the account still resolving, or a credential
+  still readable - and printed the same "sign out at claude.ai first" for both.
+  For the second there is nothing signed in to sign out of. Each cause gets its
+  own remedy now, and the dead end returns 8, the documented code for a login
+  that did not complete, instead of 0.
+- **Removing the last slot took every session with it, in silence.** The proxy
+  refuses a turn it has no slot for, and sessions are pinned to its address, so
+  the moment the last one goes they all fail with "no account slots yet". `rm`
+  reported only that the login was untouched. Both facts were already at hand:
+  the registry knows what remains, the marker knows the proxy is up.
+- **It said a login had lapsed; it only knew the copy was old.** `stale_hint`
+  asserted "a login that has already lapsed" beside a Codex login that was
+  answering the server perfectly well. What swapdex knows is that the saved copy
+  is older than STALE_DAYS - `status` hedges on the same account, and
+  `profile_detail`'s own note says the refresh token "may have rotated".
+
+Only macOS has a Keychain, so no runnable test reaches those paths on Linux CI:
+the decisions are pinned where they are made, and the wiring in
+`tests/agreement.rs`, which this repository already uses for exactly this.
+
 ## 0.154.0
 
 Six defects, every one of them found by using the tool on a real machine
