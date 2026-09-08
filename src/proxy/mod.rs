@@ -1996,6 +1996,16 @@ fn forward_turn(
         }
         std::io::stdout().flush().ok();
         if let Some(q) = quota {
+            // The response says when each window turns over. The endpoint is the
+            // only other source and it reports nothing for a seat whose usage is
+            // accounted elsewhere, so without this the bar has no reset on it.
+            crate::quota_cache::note_resets(
+                paths,
+                &opts.tool,
+                &slot.name,
+                q.reset_of("5h"),
+                q.reset_of("7d"),
+            );
             sh.quota.held().insert(slot.name.clone(), (q, now_secs()));
         }
         if up.status == 403 {

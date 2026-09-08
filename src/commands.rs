@@ -332,12 +332,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
                 );
                 return Ok(2);
             }
-            let who = adapters::all()
-                .iter()
-                .find_map(|a| a.identity(paths).ok().flatten())
-                .map(|id| id.email.unwrap_or(id.display))
-                .unwrap_or_else(|| "account".into());
-            let suggestion = suggest_name(&who);
+            let suggestion = suggested_profile_name(paths);
             match ask_name(
                 &store,
                 &format!("name for this account [{suggestion}]: "),
@@ -3702,6 +3697,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .map(|a| pretty_tool(a.name()).to_string())
                 .collect()
         }
+        fn suggested_name(&mut self) -> String {
+            suggested_profile_name(self.paths)
+        }
         fn sessions(
             &mut self,
             name: &str,
@@ -3795,16 +3793,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     "gemini" => Some(ToolSel::Gemini),
                     _ => Some(ToolSel::Antigravity),
                 };
-                let who = adapters::by_name(tool)
-                    .and_then(|a| a.identity(paths).ok().flatten())
-                    .and_then(|id| id.email)
-                    .unwrap_or_else(|| "account".into());
                 let store = Store::open(paths)?;
-                let Some(name) = ask_name(
-                    &store,
-                    &format!("name for the new account [{}]: ", suggest_name(&who)),
-                    &suggest_name(&who),
-                ) else {
+                let Some(name) = ask_name(&store, new_account_prompt(), "") else {
+                    println!("nothing added.");
                     continue;
                 };
                 drop(store);
@@ -7222,6 +7213,29 @@ fn prompt(question: &str, default: &str) -> Option<String> {
     })
 }
 
+/// What to offer as the name for an account you have NOT signed into yet.
+///
+/// Nothing. The only identity to hand is the login being signed out of, so a
+/// suggestion built from it names the new profile after the old account - and
+/// that name is usually already saved, so Enter answered "already exists -
+/// replace it?" instead of adding anything.
+fn new_account_prompt() -> &'static str {
+    "name for the new account (e.g. personal): "
+}
+
+/// The name to offer for a profile that will hold the login you are signed into.
+///
+/// The CLI prompt worked this out inline and the dashboard's box had nothing, so
+/// the same question came with an answer in one place and a blank in the other.
+fn suggested_profile_name(paths: &Paths) -> String {
+    let who = adapters::all()
+        .iter()
+        .find_map(|a| a.identity(paths).ok().flatten())
+        .map(|id| id.email.unwrap_or(id.display))
+        .unwrap_or_else(|| "account".into());
+    suggest_name(&who)
+}
+
 /// A default profile name from an email/display (its local part, sanitized).
 fn suggest_name(who: &str) -> String {
     let base = who.split('@').next().unwrap_or(who);
@@ -8520,9 +8534,10 @@ mod tests {
     use super::{
         best_identity, classify_migration_profile, codex_account_sources, codex_identity,
         codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict, listable,
-        payer_line, payer_note, payer_of_any, pick_active, quota_brief, row_needs_login,
-        row_suffix, sign_in_remedy, stale_hint, stale_marker, switch_line, unhonoured_ask,
-        unknown_account, win_line, MigrationClass,
+        new_account_prompt, payer_line, payer_note, payer_of_any, pick_active, quota_brief,
+        row_needs_login, row_suffix, sign_in_remedy, stale_hint, stale_marker,
+        suggested_profile_name, switch_line, unhonoured_ask, unknown_account, win_line,
+        MigrationClass,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -8587,6 +8602,59 @@ mod tests {
         let line = win_line("7d", &full, 0);
         assert!(line.contains("100% left"), "{line}");
         assert!(!line.contains("resets"), "no reset when absent: {line}");
+    }
+
+    /// The dashboard's "add an account" prompt offered the account you are leaving.
+    ///
+    /// Pressing `a` leaves the dashboard and asks for a name, and the only
+    /// identity to hand there is the CURRENT login - the one the new account is
+    /// meant to sit beside. On a real machine that name was already saved, so
+    /// Enter answered "'bsgong' already exists - replace it? [y/N]" instead of
+    /// adding anything, every time, because the suggestion never changed.
+    #[test]
+    fn the_new_account_prompt_does_not_offer_the_account_you_are_leaving() {
+        let p = new_account_prompt();
+        assert!(
+            !p.contains('['),
+            "no default, because the only one available is the wrong account: {p}"
+        );
+        assert!(
+            p.contains("e.g."),
+            "it still says what shape a name takes: {p}"
+        );
+    }
+
+    /// The dashboard's name box and the CLI's name prompt ask the same question.
+    ///
+    /// The CLI computed a suggestion from the live login and took Enter as
+    /// acceptance; the dashboard opened the same question with an empty box, and
+    /// an empty box plus Enter closes without a word - which its own note already
+    /// records people doing. One function now, so the answer cannot exist in one
+    /// place and not the other.
+    #[test]
+    fn the_name_to_offer_comes_from_the_login_you_are_signed_into() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(dir.path());
+        // Nobody signed in: a name is still offered, because the box has to
+        // start somewhere.
+        assert_eq!(suggested_profile_name(&paths), "account");
+
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        std::fs::write(
+            dir.path().join(".claude/.credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"T","expiresAt":9999999999000}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            br#"{"oauthAccount":{"accountUuid":"u","emailAddress":"you@example.com"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            suggested_profile_name(&paths),
+            "you",
+            "the local part of the address you are signed in as"
+        );
     }
 
     /// The two row builders asked this question differently, and the lossy one

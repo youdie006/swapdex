@@ -14,6 +14,9 @@ pub struct Quota {
     pub statuses: Vec<(String, String)>,
     /// Soonest reported reset, epoch seconds.
     pub reset_secs: Option<i64>,
+    /// Each window's own reset, by window name (`5h`, `7d`, ...). The soonest is
+    /// what the rotation needs; the bar needs to know WHICH window it belongs to.
+    pub resets: Vec<(String, i64)>,
 }
 
 /// How long a refusal holds an account out when the response named no reset.
@@ -38,6 +41,14 @@ impl Quota {
             Some(_) => self.still_spent(now),
             None => self.rejected && now < marked_at + SPENT_FOR_SECS,
         }
+    }
+
+    /// When one named window resets, from that window's own header.
+    pub fn reset_of(&self, window: &str) -> Option<i64> {
+        self.resets
+            .iter()
+            .find(|(w, _)| w == window)
+            .map(|(_, at)| *at)
     }
 
     /// Which windows reported `rejected` (e.g. `5h-status`, `7d-status`). Named in
@@ -72,6 +83,8 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Quota> {
         } else if rest == "reset" || rest.ends_with("-reset") {
             if let Ok(n) = value.trim().parse::<i64>() {
                 q.reset_secs = Some(q.reset_secs.map_or(n, |cur| cur.min(n)));
+                q.resets
+                    .push((rest.trim_end_matches("-reset").to_string(), n));
             }
         }
     }
@@ -175,6 +188,27 @@ mod tests {
         );
     }
 
+    /// The response says WHICH window resets when; only the soonest survived.
+    ///
+    /// Codex's header reader keeps a reset per window and the dashboard shows
+    /// both. This one folded every `*-reset` into one minimum used to decide
+    /// when a spent account may be retried, so the 5h reset arriving on every
+    /// turn could never reach the bar - and on an account whose usage endpoint
+    /// reports no window of its own, that was the only copy there was.
+    #[test]
+    fn each_window_keeps_its_own_reset() {
+        let q = from_headers(&h(&[
+            ("anthropic-ratelimit-unified-5h-reset", "1800000000"),
+            ("anthropic-ratelimit-unified-7d-reset", "1800600000"),
+        ]))
+        .expect("quota seen");
+        assert_eq!(q.reset_of("5h"), Some(1_800_000_000));
+        assert_eq!(q.reset_of("7d"), Some(1_800_600_000));
+        assert_eq!(q.reset_of("overage"), None, "a window nobody reported");
+        // The rotation still reads the soonest, unchanged.
+        assert_eq!(q.reset_secs, Some(1_800_000_000));
+    }
+
     #[test]
     fn rejected_windows_names_only_the_closed_ones() {
         let q = from_headers(&h(&[
@@ -255,6 +289,7 @@ mod spent_expiry_tests {
             rejected: true,
             statuses: Vec::new(),
             reset_secs: Some(1_000),
+            resets: Vec::new(),
         };
         assert!(q.still_spent(999), "before the reset it is out");
         assert!(!q.still_spent(1_000), "at the reset it is back");
@@ -270,6 +305,7 @@ mod spent_expiry_tests {
             rejected: true,
             statuses: Vec::new(),
             reset_secs: None,
+            resets: Vec::new(),
         };
         assert!(q.still_spent_since(100, 100), "just now");
         assert!(q.still_spent_since(100, 100 + SPENT_FOR_SECS - 1));

@@ -188,6 +188,50 @@ pub fn update_for(paths: &Paths, tool: &str, fresh: &[(String, Entry)]) {
     }
 }
 
+/// Merge the resets a served response reported onto what is remembered.
+///
+/// The numbers come from the usage endpoint; the RESETS also ride on every
+/// response the user's own traffic earns. An account whose endpoint reports no
+/// window of its own - a team seat, whose consumption is accounted elsewhere -
+/// therefore had a bar with no reset time on it, while the response that just
+/// came back said exactly when the window turns over. Merged, never replacing:
+/// a reset is not a reading, and must not erase one.
+pub fn note_resets(
+    paths: &Paths,
+    tool: &str,
+    name: &str,
+    five_h: Option<i64>,
+    seven_d: Option<i64>,
+) {
+    if five_h.is_none() && seven_d.is_none() {
+        return;
+    }
+    let path = file_for(paths, tool);
+    let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
+    // This runs on every served response; rewriting the file to store what it
+    // already says would be a write per turn for nothing.
+    if let Some(e) = c.get(name) {
+        let same = |cur: Option<i64>, new: Option<i64>| new.is_none() || cur == new;
+        if same(e.five_h_reset, five_h) && same(e.seven_d_reset, seven_d) {
+            return;
+        }
+    }
+    let e = c.entry(name.to_string()).or_insert_with(|| Entry {
+        at: now_secs(),
+        ..Default::default()
+    });
+    if let Some(r) = five_h {
+        e.five_h_reset = Some(r);
+    }
+    if let Some(r) = seven_d {
+        e.seven_d_reset = Some(r);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
+        let _ = std::fs::create_dir_all(paths.store_dir());
+        let _ = crate::atomic::write_secret(&path, &bytes);
+    }
+}
+
 /// Record that a live read of `name` was rejected by the account's own token.
 ///
 /// Merged onto whatever is remembered rather than replacing it: the numbers
@@ -208,6 +252,40 @@ pub fn note_token_rejected(paths: &Paths, tool: &str, name: &str, at: i64) {
 
 #[cfg(test)]
 mod tests {
+    /// A reset that arrives on traffic must reach the bar without erasing the
+    /// numbers that came from the endpoint.
+    ///
+    /// On a team seat the usage endpoint answers `utilization 0, resets_at null`
+    /// for the account's own windows - consumption is accounted elsewhere - so
+    /// the 5h gauge had no reset time on it while every served response carried
+    /// one. Merged, because a reset is not a reading.
+    #[test]
+    fn a_reset_from_traffic_lands_without_erasing_the_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(dir.path());
+        super::update(
+            &paths,
+            &[(
+                "work".to_string(),
+                super::Entry {
+                    five_h: Some(22.0),
+                    seven_d: Some(21.0),
+                    at: 1_000,
+                    ..Default::default()
+                },
+            )],
+        );
+
+        super::note_resets(&paths, "claude-code", "work", Some(9_000_000_000), None);
+
+        let c = super::load_for(&paths, "claude-code");
+        let e = c.get("work").expect("the account is still there");
+        assert_eq!(e.five_h, Some(22.0), "the reading survives");
+        assert_eq!(e.five_h_reset, Some(9_000_000_000), "and the reset landed");
+        assert_eq!(e.seven_d, Some(21.0), "the other window is untouched");
+        assert_eq!(e.seven_d_reset, None, "nothing invented for it");
+    }
+
     use super::*;
 
     fn entry(pct: f64, at: i64) -> Entry {

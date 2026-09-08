@@ -900,6 +900,11 @@ pub trait TuiCtx {
     /// Display names of the tools you're logged into RIGHT NOW (for the
     /// empty-state onboarding: "save these as a profile").
     fn live_tools(&mut self) -> Vec<String>;
+    /// The name to start the save-current box on, the way the CLI's prompt
+    /// starts on one. Empty means "no idea", and the box opens blank.
+    fn suggested_name(&mut self) -> String {
+        String::new()
+    }
 }
 
 /// What finally leaves the UI. Executed by the caller AFTER the terminal is
@@ -2260,7 +2265,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         // into as your first profile.
                         screen = Screen::Input {
                             kind: InputKind::SaveCurrent,
-                            value: String::new(),
+                            value: ctx.suggested_name(),
                         };
                     }
                     KeyCode::Char('n') if !rows.is_empty() => {
