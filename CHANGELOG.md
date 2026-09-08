@@ -4,6 +4,58 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.154.0
+
+Six defects, every one of them found by using the tool on a real machine
+rather than by reading the code.
+
+- **Told it was removed, then told it exists.** A name can be a registered
+  slot AND a saved profile at once. `rm` unregisters the slot, deliberately
+  leaves the profile - "a profile of the same name is a separate thing" - and
+  prints a plain success. The name is still in `ls` afterwards, so the removal
+  reads as failed, and the next `add` refuses with "already has a claude-code
+  login". Two runs were always needed and nothing said so. It now names the
+  half that is still there and the command that removes it. It still removes
+  only what it removed before.
+- **The dashboard's "add an account" offered the account you are leaving.**
+  Pressing `a` leaves the dashboard and asks for a name, and the only identity
+  to hand there is the CURRENT login - the one the new account is meant to sit
+  beside. It suggested that name, which on a real machine was already saved,
+  so pressing Enter answered "'bsgong' already exists - replace it?" instead
+  of adding anything, every time, because the suggestion never changed. It
+  asks for a name with an example now, and says "nothing added" rather than
+  returning in silence.
+- **Saving the account you already have, under a second name, said nothing.**
+  `add --update` refuses to REPOINT a name at a different account because
+  "that changes what the name means", and `setup` already prints "already
+  saved as '<name>'" - so the reverse, a second NAME on the same account, was
+  one caller short of the rule. A machine ended up with two profiles whose
+  credentials were byte-identical, listed as two accounts to switch between
+  when there was one. Saving it twice is still allowed; it is no longer
+  silent.
+- **The dashboard's name box opened empty.** The CLI's equivalent prompt
+  offers a name built from the live login and takes Enter as acceptance; the
+  box offered nothing, and its own note already records what that does -
+  "people pressed Enter to get out of it and reported that nothing happened".
+  One function answers that question for both now.
+- **The 5h reset was thrown away on arrival.**
+  `anthropic-ratelimit-unified-<window>-reset` rides on every served response,
+  and the reader folded every one of them into a single minimum - the soonest
+  - keeping no record of WHICH window each described. Codex's reader has kept
+  a reset per window all along and its bar shows them. So on an account whose
+  usage endpoint reports no window of its own, the 5h gauge had no reset time
+  on it while the response that had just come back carried one. Each window
+  keeps its own reset now, and the serving path merges it onto what is
+  remembered - never replacing a reading, and not rewriting the file to store
+  what it already says.
+- **`doctor` called a five-day-old proxy healthy.** An upgrade replaces the
+  binary and leaves the running proxy alone; `install_verdict` says as much
+  about a hand-started one - "which is also why it never picked up an upgrade"
+  - and nothing checked. On a real machine the Codex proxy ran five days on
+  the build from before the fix for the symptom being reported, while `doctor`
+  printed "installed and running". The build id is written beside the pid and
+  read back on every check, so only the comparison was missing.
+
 ## 0.153.0
 
 - **The Codex status bar keeps its number.** The proxy runs a timer so a quiet
