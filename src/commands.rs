@@ -4815,15 +4815,20 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
 
 /// Move everything an account is known by NAME to its new name.
 ///
-/// Two stores key an account by name and match it exactly: its rotation
-/// preferences (`disabled`, `priority`) and its remembered usage readings. A
-/// rename that leaves the first behind silently un-pauses the account; one that
-/// leaves the second behind draws a usage row for a name nothing answers to.
-/// They move together here so a third store cannot be wired to one and not the
-/// other. None of it is worth failing a rename that already happened on disk.
+/// Three stores key an account by name and match it exactly: its rotation
+/// preferences (`disabled`, `priority`), its remembered usage readings, and the
+/// timeline that credits sessions and tokens. A rename that leaves the first
+/// behind silently un-pauses the account; one that leaves either of the others
+/// behind draws a row for a name nothing answers to. They move together here
+/// because the timeline used to move inside `Store::rename`, which the
+/// slot-only rename never reaches. None of it is worth failing a rename that
+/// already happened on disk.
 fn carry_side_state(paths: &Paths, old: &str, new: &str) {
     let _ = crate::settings::update(paths, |s| s.rename_account(old, new));
     crate::quota_cache::rename_account(paths, old, new);
+    if let Ok(st) = Store::open(paths) {
+        let _ = st.rename_timeline_account(old, new);
+    }
 }
 
 /// Drop the same two stores. They outlive the account otherwise, and the next

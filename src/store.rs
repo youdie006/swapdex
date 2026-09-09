@@ -329,9 +329,15 @@ impl Store {
             anyhow::bail!("a profile named '{new}' already exists");
         }
         fs::rename(&from, &to).with_context(|| format!("rename profile {old} -> {new}"))?;
-        // The timeline attributes sessions/usage by profile NAME - leaving the
-        // old name there makes `usage`/`sessions` report a profile that no
-        // longer exists, forever. Rewrite events in place (atomic).
+        Ok(true)
+    }
+
+    /// Move the ledger's attribution to the account's new name.
+    ///
+    /// The timeline attributes sessions/usage by account NAME - leaving the old
+    /// name there makes `usage`/`sessions` report an account that no longer
+    /// exists, forever. Rewrite events in place (atomic).
+    pub fn rename_timeline_account(&self, old: &str, new: &str) -> Result<()> {
         let tl = self.dir.join("timeline.jsonl");
         if let Ok(text) = fs::read_to_string(&tl) {
             let mut changed = false;
@@ -355,7 +361,7 @@ impl Store {
                 crate::atomic::write_secret(&tl, out.as_bytes())?;
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Back up a live snapshot before a switch; keep only the newest 2 per tool.

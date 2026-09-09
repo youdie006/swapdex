@@ -1350,3 +1350,49 @@ fn dropping_one_tool_keeps_the_side_state_the_account_still_owns() {
         "dropping one tool blanked a reading the account still owns: {after}"
     );
 }
+
+/// The ledger that attributes usage must answer to the same name the account
+/// does - whether or not the account ever saved a snapshot.
+///
+/// `timeline.jsonl` credits every session and every token to a name, and
+/// `Store::rename` rewrites it for exactly that reason: leaving the old name
+/// there makes `usage`/`sessions` report an account that no longer exists,
+/// forever. But `rename` reaches that rewrite only when a profile moves. A
+/// slot-only account takes the earlier branch, which carries its rotation
+/// preferences and its remembered usage and nothing else, so the ledger goes
+/// on naming an account the listing no longer knows.
+#[test]
+fn the_ledger_follows_a_slot_only_rename() {
+    let t = fixture();
+    let root = t.path();
+    let timeline = root.join(".local/share/swapdex/timeline.jsonl");
+
+    seed_claude(root, "uuid-live", "live@example.com");
+    seed_slot(root, "before", "b@example.com");
+
+    let (_, err, code) = run(root, &["use", "before"]);
+    assert_eq!(code, 0, "switching to the slot failed: {err}");
+    let ledger = std::fs::read_to_string(&timeline).unwrap();
+    assert!(
+        ledger.contains("\"before\""),
+        "the switch left no record to carry: {ledger}"
+    );
+
+    let (_, err, code) = run(root, &["rename", "before", "after"]);
+    assert_eq!(code, 0, "rename failed: {err}");
+
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(
+        !listing.contains("before") && listing.contains("after"),
+        "the listing did not follow the rename:\n{listing}"
+    );
+    let ledger = std::fs::read_to_string(&timeline).unwrap();
+    assert!(
+        !ledger.contains("\"before\""),
+        "the ledger still credits a name nothing answers to: {ledger}"
+    );
+    assert!(
+        ledger.contains("\"after\""),
+        "the ledger did not follow the account: {ledger}"
+    );
+}
