@@ -442,6 +442,35 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             skipped.push(tool);
             continue;
         }
+        // A slot holds the name as surely as a profile does: `use <name>` selects
+        // it, and `ls` fills that row from the profile. Saving another account
+        // under it mints the state `ls` warns about on every listing.
+        let slot_id = crate::slots::Slots::open_for(paths, tool)
+            .ok()
+            .and_then(|sl| {
+                sl.list()
+                    .into_iter()
+                    .find(|r| r.name == name)
+                    .and_then(|r| slot_account_id_for(tool, &r.config_dir))
+            });
+        let live_id = adapter
+            .identity(paths)
+            .ok()
+            .flatten()
+            .map(|i| i.account_id)
+            .filter(|s| !s.is_empty());
+        if name_means_two_accounts(live_id.as_deref(), slot_id.as_deref()) {
+            eprintln!(
+                "swapdex: '{name}' is already a {tool} slot holding a different account \
+                 than the one you're logged into."
+            );
+            eprintln!(
+                "  keep both: swapdex add <new-name> --tool {}  |  free the name: \
+                 swapdex rename {name} <other-name>",
+                pretty_tool_flag(tool)
+            );
+            return Ok(7);
+        }
         let snap = match adapter.capture(paths) {
             Ok(s) => s,
             Err(e) => {

@@ -2270,3 +2270,72 @@ fn the_menu_numbers_every_account_ls_shows() {
         "the menu pick did not switch to the slot account:\n{ls_out}\n{out2}{err2}"
     );
 }
+
+/// `add` must not mint a name that means two different accounts.
+///
+/// `ls` warns on every listing when one name holds a profile and a slot of a
+/// DIFFERENT account, because the row shows one and `use` selects the other.
+/// `add` is what creates that state, and its own guards against a name meaning
+/// two accounts - exit 6 for an occupied profile, exit 7 for a repoint - only
+/// ever asked the store.
+#[test]
+fn add_refuses_a_name_a_different_account_already_holds() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    seed_claude(root, "work-uuid", "work@example.com");
+
+    let (out, err, code) = run(root, &["add", "personal", "--tool", "claude-code"]);
+    assert_ne!(
+        code, 0,
+        "add saved over a name a different account's slot already holds:\n{out}{err}"
+    );
+
+    // Ask a different command whether the state it left is sound.
+    let (ls_out, ls_err, _) = run(root, &["ls"]);
+    assert!(
+        !ls_err.contains("DIFFERENT"),
+        "add created the very state `ls` warns about:\n{ls_out}{ls_err}"
+    );
+}
+
+/// One name on ONE account is the ordinary case, not a collision.
+///
+/// `swapdex run <name>` registers a slot, and snapshotting that same login
+/// under that same name is what `add` is for. A guard that refused every name a
+/// slot holds would break it.
+#[test]
+fn add_still_snapshots_a_slot_holding_the_same_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    seed_claude(root, "personal", "personal@example.com");
+
+    let (out, err, code) = run(root, &["add", "personal", "--tool", "claude-code"]);
+    assert_eq!(
+        code, 0,
+        "add refused to snapshot the account its own slot holds:\n{out}{err}"
+    );
+}
+
+/// A slot swapdex cannot read holds no account to collide with.
+///
+/// `swapdex run <name>` registers the slot before anyone logs into it, so the
+/// directory is there and empty. Refusing on the bare registry entry would
+/// block the first save on every freshly-made slot.
+#[test]
+fn add_accepts_a_name_whose_slot_holds_nothing_readable() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    let dir = root.join(".local/share/swapdex/slots/personal");
+    std::fs::remove_file(dir.join(".credentials.json")).unwrap();
+    std::fs::remove_file(dir.join(".claude.json")).unwrap();
+    seed_claude(root, "work-uuid", "work@example.com");
+
+    let (out, err, code) = run(root, &["add", "personal", "--tool", "claude-code"]);
+    assert_eq!(
+        code, 0,
+        "add refused over a slot holding no readable account:\n{out}{err}"
+    );
+}
