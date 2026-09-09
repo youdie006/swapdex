@@ -562,6 +562,24 @@ pub fn use_account(
     dry_run: bool,
     force: bool,
 ) -> Result<i32> {
+    use_account_switch(paths, name, sel, dry_run, force, false, None)
+}
+
+/// The switch itself, with or without a launch after it. `--open` had its own
+/// copy of this, which asked the snapshot store alone: it rejected the
+/// slot-only accounts `use` switches fine, and for an account holding both a
+/// slot and a snapshot it copied a credential over the slot it should have
+/// repointed.
+#[allow(clippy::too_many_arguments)]
+fn use_account_switch(
+    paths: &Paths,
+    name: &str,
+    sel: Option<ToolSel>,
+    dry_run: bool,
+    force: bool,
+    open: bool,
+    open_dir: Option<&std::path::Path>,
+) -> Result<i32> {
     // Permanent-slot account: `use` just repoints that tool's default pointer
     // (the shim follows it) - no credential copy, so no rotation logout. EVERY
     // selected registry is asked, not Claude's alone: `ls` draws one row per
@@ -586,36 +604,48 @@ pub fn use_account(
                 .unwrap_or(false)
         })
         .collect();
+    let mut code = 0;
     if held.is_empty() {
         // A legacy copy-model profile (in no slot registry) falls through to
         // the old guarded switch.
-        return use_account_inner(paths, name, sel, dry_run, false, None, force, &[]);
+        code = use_account_inner(paths, name, sel, dry_run, force, &[])?;
     }
-    let mut code = 0;
     for tool in &held {
         let c = use_slot_default(paths, name, tool, dry_run)?;
         if c != 0 {
             code = c;
         }
     }
-    // A name can be a slot under one tool and a saved profile under another,
-    // and `ls` draws that as one row. Fall through only when the profile
-    // covers a tool no slot took: otherwise the copy-model switch matches
-    // nothing and reports the account it just moved as unknown. `held` is
-    // passed as skips - a credential copy onto a slot is what the slot model
-    // exists to prevent.
-    let rest: Vec<&str> = crate::adapters::names()
-        .into_iter()
-        .filter(|t| wanted(t) && !held.contains(t))
-        .collect();
-    let spans_more = store
-        .list()
-        .iter()
-        .any(|p| p.name == name && p.tools.iter().any(|t| rest.contains(&t.as_str())));
-    if spans_more {
-        let c = use_account_inner(paths, name, sel, dry_run, false, None, force, &held)?;
-        if c != 0 {
-            code = c;
+    if !held.is_empty() {
+        // A name can be a slot under one tool and a saved profile under
+        // another, and `ls` draws that as one row. Fall through only when the
+        // profile covers a tool no slot took: otherwise the copy-model switch
+        // matches nothing and reports the account it just moved as unknown.
+        // `held` is passed as skips - a credential copy onto a slot is what the
+        // slot model exists to prevent.
+        let rest: Vec<&str> = crate::adapters::names()
+            .into_iter()
+            .filter(|t| wanted(t) && !held.contains(t))
+            .collect();
+        let spans_more = store
+            .list()
+            .iter()
+            .any(|p| p.name == name && p.tools.iter().any(|t| rest.contains(&t.as_str())));
+        if spans_more {
+            let c = use_account_inner(paths, name, sel, dry_run, force, &held)?;
+            if c != 0 {
+                code = c;
+            }
+        }
+    }
+    // The launch belongs after the whole switch, and only to a switch that
+    // worked: a tool that failed to switch would otherwise open on the account
+    // the user was leaving.
+    if open && code == 0 {
+        if let Some(adapter) = selected_adapters(sel).into_iter().next() {
+            let tool = adapter.name();
+            println!("opening {}...", pretty_tool(tool));
+            return Err(exec_tool(tool, open_dir));
         }
     }
     Ok(code)
@@ -640,19 +670,16 @@ pub fn use_account_open(
             return Ok(2);
         }
     }
-    use_account_inner(paths, name, sel, false, true, dir, force, &[])
+    use_account_switch(paths, name, sel, false, force, true, dir)
 }
 
 /// `skip`: tools this switch has already handled as slots, so the copy-model
 /// path leaves them alone.
-#[allow(clippy::too_many_arguments)]
 fn use_account_inner(
     paths: &Paths,
     name: &str,
     sel: Option<ToolSel>,
     dry_run: bool,
-    open: bool,
-    open_dir: Option<&std::path::Path>,
     force: bool,
     skip: &[&str],
 ) -> Result<i32> {
@@ -972,13 +999,6 @@ fn use_account_inner(
             failed.join(", ")
         );
         return Ok(1);
-    }
-    if open {
-        if let Some(adapter) = selected_adapters(sel).into_iter().next() {
-            let tool = adapter.name();
-            println!("opening {}...", pretty_tool(tool));
-            return Err(exec_tool(tool, open_dir));
-        }
     }
     Ok(0)
 }

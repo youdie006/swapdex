@@ -2019,3 +2019,143 @@ fn a_prefix_resolves_only_against_the_selected_tool() {
         "the codex account the prefix names should be paying:\n{after}"
     );
 }
+
+/// A stub tool binary on PATH, so `--open` has something to exec. Returns the
+/// PATH to run with.
+fn fake_tool(root: &Path, bin_name: &str, marker: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join("fakebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(bin_name);
+    std::fs::write(&p, format!("#!/bin/sh\necho {marker}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// `run`, with the stub tools ahead of everything on PATH.
+fn run_on_path(root: &Path, args: &[&str], path: &str) -> (String, String, i32) {
+    let out = Command::new(bin())
+        .args(args)
+        .env("SWAPDEX_ROOT", root)
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// `--open` switches the same accounts a plain `use` switches.
+///
+/// A slot-only account is what the slot model produces: registered under a
+/// tool, holding no snapshot. `use <name>` repoints its pointer, and `--open`
+/// is that same switch plus a launch - but it went straight to the copy-model
+/// path, which asks the snapshot store alone. So the account `ls` lists and
+/// `use` had just switched to was rejected as a profile that does not exist.
+#[test]
+fn open_reaches_a_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    seed_slot(root, "workacct", "workacct@example.com");
+    let path = fake_tool(root, "claude", "CLAUDE-OPENED");
+
+    let (out, err, code) = run_on_path(
+        root,
+        &["use", "workacct", "--tool", "claude", "--open"],
+        &path,
+    );
+    assert_eq!(code, 0, "`use --open` on a listed account: {err}{out}");
+    assert!(
+        out.contains("CLAUDE-OPENED"),
+        "claude should launch after the switch:\n{out}{err}"
+    );
+    let (after, _, _) = run(root, &["ls"]);
+    assert!(
+        after
+            .lines()
+            .any(|l| l.contains("workacct") && l.contains("pays")),
+        "`--open` must make the switch `use` makes:\n{after}"
+    );
+}
+
+/// `--open` must not copy a credential over the slot it just repointed.
+///
+/// An account that came through `migrate` holds both a slot and a snapshot, so
+/// there are two ways to move the same tool. `use` asks the slot registry and
+/// repoints the pointer; `--open` never asked it, so the snapshot was written
+/// over whoever was signed in - the very copy the slot model exists to avoid -
+/// and the pointer the switch was supposed to move stayed where it was.
+#[test]
+fn open_does_not_copy_over_the_slot_it_switched() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-dual", "dual@example.com");
+    run(root, &["add", "dual"]);
+    run(root, &["migrate", "--tool", "claude"]);
+    // Someone else is signed in to Claude, so a copy would be visible.
+    seed_claude(root, "uuid-oth", "oth@example.com");
+    run(root, &["add", "other"]);
+    let path = fake_tool(root, "claude", "CLAUDE-OPENED");
+
+    let (out, err, code) = run_on_path(root, &["use", "dual", "--tool", "claude", "--open"], &path);
+    assert_eq!(code, 0, "`use dual --open` failed: {err}{out}");
+
+    let (after, _, _) = run(root, &["ls"]);
+    let marked: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(marked.len(), 1, "exactly one row should pay:\n{after}");
+    assert!(
+        marked[0].contains("dual"),
+        "the paying row names someone else:\n{}",
+        marked[0]
+    );
+    let other = after
+        .lines()
+        .find(|l| l.trim_start_matches(['*', ' ']).starts_with("other "))
+        .unwrap_or_else(|| panic!("no row for other:\n{after}"));
+    assert!(
+        other.contains("claude-code*"),
+        "the live claude login was overwritten:\n{after}"
+    );
+}
+
+/// A switch that did not work does not launch anything.
+///
+/// `--open` is a switch and then a launch, in that order. Landing in a live
+/// session on the account the user was trying to leave is worse than not
+/// launching: the next message is billed to the wrong account, and nothing on
+/// screen says so.
+#[test]
+fn open_does_not_launch_a_failed_switch() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    run(root, &["add", "alpha"]);
+    seed_claude(root, "uuid-b", "b@example.com");
+    run(root, &["add", "beta"]);
+    let path = fake_tool(root, "claude", "CLAUDE-OPENED");
+    // The live login cannot be written, so the switch cannot happen.
+    let live = root.join(".claude");
+    std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let (out, err, code) =
+        run_on_path(root, &["use", "alpha", "--tool", "claude", "--open"], &path);
+    std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_ne!(
+        code, 0,
+        "a switch that could not write should not report success:\n{out}{err}"
+    );
+    assert!(
+        !out.contains("CLAUDE-OPENED"),
+        "claude launched after a failed switch:\n{out}{err}"
+    );
+}
