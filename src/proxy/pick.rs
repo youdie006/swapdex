@@ -511,7 +511,7 @@ pub fn reset_clock(at: i64, now: i64, tz_offset: i64) -> String {
 /// The account identities already ruled out this turn.
 ///
 /// Everything else here keys off a slot NAME, but a rate limit belongs to the
-/// ACCOUNT - and one account can sit in two slots. 병승's Mac has exactly that:
+/// ACCOUNT - and one account can sit in two slots. One real store has exactly that:
 /// `~/.claude` and `~/.claude-company` are both `8dd1a9aa-...`. Handing the next
 /// turn from one to the other looks like a rotation and buys nothing, because
 /// the wall it just hit is the same wall.
@@ -802,7 +802,7 @@ mod window_left_tests {
 
     /// The line printed the percentage USED with no word while every other
     /// surface said what was LEFT, so "5h 0%" meant a full window and read as
-    /// an empty one. 병승 read it exactly that way.
+    /// an empty one. Its reader took it exactly that way.
     #[test]
     fn a_window_reports_what_is_left_not_what_is_used() {
         assert_eq!(window_left("5h", 0.0, None), "5h 100% left");
@@ -941,7 +941,7 @@ mod identity_tests {
         ]
     }
 
-    /// The real shape of 병승's Mac: two slots, one account. Once one has hit the
+    /// The real shape of one real store: two slots, one account. Once one has hit the
     /// wall, the other is behind the same wall.
     #[test]
     fn one_account_in_two_slots_is_burned_once_either_is() {

@@ -416,8 +416,8 @@ mod retry_after_tests {
 /// 403 was missing, and it is the one that says a subscription lapsed. One
 /// unentitled account then answered for the whole fleet: every turn hit it, got
 /// a 403, and stopped, while accounts with quota sat unused. The upstream
-/// project fixed the same hole on 2026-08-04 ("한 계정의 구독 만료가 전체
-/// 트래픽을 막던 문제").
+/// project fixed the same hole on 2026-08-04 ("one account's lapsed
+/// subscription was blocking all traffic").
 ///
 /// 400 and 404 are deliberately NOT here: those are the request's fault, and
 /// retrying them on another account just spends a second account's quota to get

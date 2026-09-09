@@ -1435,10 +1435,10 @@ fn seed_gemini(root: &Path, sub: &str, email: &str) {
 #[test]
 fn gemini_add_use_roundtrip() {
     let root = tempfile::tempdir().unwrap();
-    seed_gemini(root.path(), "sub-A", "a@gmail.com");
+    seed_gemini(root.path(), "sub-A", "a@example.com");
     let (_o, e, c) = run(root.path(), &["add", "gwork", "--tool", "gemini"]);
     assert_eq!(c, 0, "add failed: {e}");
-    seed_gemini(root.path(), "sub-B", "b@gmail.com");
+    seed_gemini(root.path(), "sub-B", "b@example.com");
     run(root.path(), &["add", "ghome", "--tool", "gemini"]);
 
     let (o, e, c) = run(root.path(), &["use", "gwork", "--tool", "gemini"]);
@@ -1456,12 +1456,12 @@ fn gemini_add_use_roundtrip() {
     )
     .unwrap();
     assert_eq!(
-        accounts["active"], "a@gmail.com",
+        accounts["active"], "a@example.com",
         "accounts swapped together"
     );
 
     let (ls, _e, _c) = run(root.path(), &["ls"]);
-    assert!(ls.contains("a@gmail.com"), "identity shown: {ls}");
+    assert!(ls.contains("a@example.com"), "identity shown: {ls}");
     assert!(ls.contains("[gemini") || ls.contains("gemini"), "{ls}");
     for args in [vec!["ls"], vec!["status"], vec!["ls", "--json"]] {
         let (o, e, _c) = run(root.path(), &args);
@@ -1479,11 +1479,11 @@ fn three_tool_profile_switches_together() {
     let root = tempfile::tempdir().unwrap();
     seed_claude(root.path(), "uuid-A", "a@x.com");
     seed_codex(root.path(), "acct-A");
-    seed_gemini(root.path(), "sub-A", "a@gmail.com");
+    seed_gemini(root.path(), "sub-A", "a@example.com");
     run(root.path(), &["add", "all-a"]);
     seed_claude(root.path(), "uuid-B", "b@x.com");
     seed_codex(root.path(), "acct-B");
-    seed_gemini(root.path(), "sub-B", "b@gmail.com");
+    seed_gemini(root.path(), "sub-B", "b@example.com");
     run(root.path(), &["add", "all-b"]);
 
     let (o, e, c) = run(root.path(), &["use", "all-a"]);
@@ -1497,7 +1497,7 @@ fn three_tool_profile_switches_together() {
         &std::fs::read(root.path().join(".gemini/google_accounts.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(g["active"], "a@gmail.com");
+    assert_eq!(g["active"], "a@example.com");
     assert_eq!(o.matches("switched").count(), 3, "all three switched: {o}");
 }
 

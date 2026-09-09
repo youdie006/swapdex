@@ -34,7 +34,7 @@ facts remain:
 - An **idle** slot is refreshed by no one. Its access token expires in hours; its
   refresh token survives — until a possible server-side **absolute** expiry (its
   exact lifetime is unknown to us).
-- The real, observed pain ("자꾸 만료되네") was rotation-collision in the classic
+- The real, observed pain ("it keeps expiring") was rotation-collision in the classic
   model, which slots already remove. So this layer is a **safety margin for
   long-idle accounts**, not the main fix.
 
@@ -101,8 +101,8 @@ on slots:
 ### 4.1 Feasibility gate (verify before building)
 
 Does `claude --resume` continue on a **different** account, or is the session
-bound server-side to its creating org? rnd and bsgong are the **same org**
-(polarisai.co.kr), so within-org handoff is expected to work; cross-org is the
+bound server-side to its creating org? rnd and bsgong are in the **same
+org**, so within-org handoff is expected to work; cross-org is the
 uncertain case and falls back to sessionwiki `brief` (a fresh session on B seeded
 with a markdown summary). Confirm with a real two-account resume test **before**
 building `continue`.

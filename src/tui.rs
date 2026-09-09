@@ -2997,8 +2997,8 @@ mod tests {
             also: Vec::new(),
         };
         let out = dedupe_by_identity(vec![
-            row("claude", "you@gmail.com [max]", false, false),
-            row("personal", "you@gmail.com", true, true),
+            row("claude", "you@example.com [max]", false, false),
+            row("personal", "you@example.com", true, true),
         ]);
         assert_eq!(out.len(), 1, "still one account, one row");
         assert_eq!(out[0].name, "personal", "named after what serves");
@@ -3029,13 +3029,13 @@ mod tests {
             also: Vec::new(),
         };
         let out = dedupe_by_identity(vec![
-            row("work", "polarisairnd@gmail.com [chatgpt]", false, false),
+            row("work", "work@example.com [chatgpt]", false, false),
             row("work", "", true, true),
         ]);
         let names: Vec<&str> = out.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(out.len(), 1, "one account, one row: {names:?}");
         assert!(
-            out[0].ident.contains("polarisairnd@gmail.com"),
+            out[0].ident.contains("work@example.com"),
             "the half that knows who it is wins the label: {:?}",
             out[0].ident
         );
@@ -3230,7 +3230,7 @@ mod tests {
 
     /// The gauge holds ONE reading and nothing else. The reset time lives
     /// beside it now: crammed inside, "62% left 6d" read as two quantities of
-    /// quota - 병승 asked whether the 6d was remaining allowance - and it forced
+    /// quota - a reader asked whether the 6d was remaining allowance - and it forced
     /// the bar wide enough to hold a sentence.
     #[test]
     fn the_gauge_carries_only_what_is_left() {
@@ -3566,11 +3566,8 @@ mod tests {
         };
         // " N " + dot(2) + name + 2 + ident + 2 + status(8) + 2, using the WIDEST
         // name and identity so every bar starts at the same column.
-        let rows = vec![
-            row("rnd", "rnd@x.co"),
-            row("bsgong", "bsgong@polarisai.co.kr"),
-        ];
-        assert_eq!(usage_bar_column(&rows), 3 + 2 + 6 + 2 + 22 + 2 + 8 + 2);
+        let rows = vec![row("rnd", "rnd@x.co"), row("bsgong", "bsgong@example.com")];
+        assert_eq!(usage_bar_column(&rows), 3 + 2 + 6 + 2 + 18 + 2 + 8 + 2);
         // One narrow row: the column shrinks with it.
         assert_eq!(
             usage_bar_column(&[row("a", "b")]),

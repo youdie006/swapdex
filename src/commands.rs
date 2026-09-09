@@ -8916,8 +8916,9 @@ fn win_line(label: &str, w: &crate::quota::Window, now: i64) -> String {
     let bar: String = "\u{2593}".repeat(filled) + &"\u{2591}".repeat(10 - filled);
     // The time, not the wait. A countdown has to be recomputed to stay true, so
     // it decays the moment this output is scrolled back to or piped to a file,
-    // while a clock stays right - and 몇시에 리셋인지가 몇시간 남았는지보다
-    // 머리에 남는다. Both first-party CLIs print reset times this way.
+    // while a clock stays right - and the hour it resets at stays in the head
+    // better than the hours left do. Both first-party CLIs print reset times
+    // this way.
     let reset = match w.resets_at {
         Some(ts) => format!(
             "   resets {}",
@@ -9381,13 +9382,13 @@ mod tests {
     /// Codex prints the provider name and nothing else about identity, so that
     /// one field has to answer "which account am I on". It carried the SLOT
     /// NAME - `swapdex: work` - which is a label its owner chose and says
-    /// nothing about the login being billed. 병승 asked exactly that question
+    /// nothing about the login being billed. Its owner asked exactly that question
     /// looking straight at the line meant to answer it.
     #[test]
     fn the_payer_line_names_the_account_not_just_the_slot() {
         assert_eq!(
-            payer_line("work", Some("polarisairnd@gmail.com"), true),
-            "work (polarisairnd@gmail.com)"
+            payer_line("work", Some("work@example.com"), true),
+            "work (work@example.com)"
         );
         // No email to show (Codex slot never signed in, or Claude before its
         // first read): the name alone, never a blank or a lie.
@@ -9405,7 +9406,7 @@ mod tests {
     /// Two pointers on purpose - `serve` decides who pays, `use` decides where
     /// sessions live - but Codex shows ONE field, so a session billed to `work`
     /// while its history piled up in `codex-main` read as though it were running
-    /// as `work`. 병승 asked whether it had actually gone into that slot.
+    /// as `work`. Its owner asked whether it had actually gone into that slot.
     #[test]
     fn the_home_is_named_only_when_it_differs_from_the_payer() {
         assert_eq!(home_note("work", Some("codex-main")), " - home: codex-main");

@@ -74,7 +74,7 @@ mod unavailable_tests {
     /// A locked keychain and an account with no login must never read the same.
     /// Over ssh every macOS account reports as tokenless, and three separate
     /// times this session that output was nearly taken for the truth about
-    /// 병승's accounts.
+    /// a real machine's accounts.
     #[test]
     fn a_locked_keychain_does_not_read_as_a_missing_login() {
         assert_eq!(TokenUnavailable::NoLogin.short(), "no saved token");
@@ -383,9 +383,9 @@ mod tests {
         // including the organisation Anthropic names after the address itself,
         // which every personal account has and which is not a team.
         cred("max");
-        id("me@gmail.com", "");
+        id("me@example.com", "");
         assert!(identity_contradicts_login(dir.path()).is_none());
-        id("me@gmail.com", "me@gmail.com's Organization");
+        id("me@example.com", "me@example.com's Organization");
         assert!(
             identity_contradicts_login(dir.path()).is_none(),
             "an account named after its own address is not an organisation"

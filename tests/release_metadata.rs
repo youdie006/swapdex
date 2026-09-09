@@ -152,3 +152,122 @@ fn release_notes_match_one_version_exactly() {
         "the tag name and the bare version name the same section"
     );
 }
+
+/// The placeholder mail domains this project invents for its fixtures. None of
+/// them is a mail provider, which is the whole point of the list.
+const PLACEHOLDER_DOMAINS: &[&str] = &[
+    "example.com",
+    "x.com",
+    "x.co",
+    "y.com",
+    "b.com",
+    "g.com",
+    "company.com",
+    "work.com",
+    "personal.com",
+    "personal.dev",
+];
+
+/// A published file must not name a real mailbox.
+///
+/// Release notes and display fixtures were written by pasting a real machine's
+/// output, and two people's addresses came with it - into CHANGELOG.md, which
+/// the release workflow publishes as the release page body, and into src/,
+/// which crates.io packages verbatim. `exclude` in Cargo.toml drops docs/ and
+/// npm/ from the tarball; it drops neither of those.
+///
+/// A test cannot tell a real address from an invented one, so it checks the one
+/// thing that separates them here: an invented address lives on an invented
+/// domain. A paste carries a provider's domain and fails.
+#[test]
+fn no_tracked_file_names_a_real_mailbox() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .expect("run git ls-files");
+    assert!(out.status.success(), "git ls-files failed");
+    let listing = String::from_utf8(out.stdout).expect("git ls-files prints utf-8 paths");
+    let files: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
+    assert!(!files.is_empty(), "no tracked files found to check");
+
+    let mut found: Vec<String> = Vec::new();
+    for rel in files {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        for (n, line) in text.lines().enumerate() {
+            for domain in addresses(line) {
+                if !PLACEHOLDER_DOMAINS.contains(&domain.as_str()) {
+                    // The domain, never the address: this assertion's output is
+                    // a public CI log, and printing the mailbox would publish
+                    // the thing the test exists to keep unpublished.
+                    found.push(format!("{rel}:{} (on {domain})", n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "these lines name a mailbox outside the placeholder domains:\n{}",
+        found.join("\n")
+    );
+}
+
+/// The domain of every address-shaped run in one line.
+fn addresses(line: &str) -> Vec<String> {
+    let b: Vec<char> = line.chars().collect();
+    let local = |c: char| c.is_ascii_alphanumeric() || "._%+-".contains(c);
+    let host = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
+    let mut out = Vec::new();
+    for (i, c) in b.iter().enumerate() {
+        if *c != '@' || i == 0 || !local(b[i - 1]) {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < b.len() && host(b[j]) {
+            j += 1;
+        }
+        let domain: String = b[i + 1..j].iter().collect();
+        let domain = domain.trim_end_matches('.').to_string();
+        // A domain is a dotted name whose last label is alphabetic; that is what
+        // separates `a@example.com` from `swapdex@0.155.0`.
+        match domain.rsplit_once('.') {
+            Some((_, tld)) if tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()) => {
+                out.push(domain)
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The scanner reads mailboxes, not version pins.
+///
+/// Tracked files are full of `@` that is not mail - `swapdex@0.155.0`,
+/// `actions/checkout@v4`, the npm scope in `@youdie006/swapdex-linux-x64`. A
+/// scanner that called those addresses would report every release note as a
+/// leak and get switched off, so the dotted-name-with-an-alphabetic-last-label
+/// rule is what keeps it usable. This pins that rule: without it `pkg@1.2.10`
+/// reads as a mailbox on the domain `1.2.10`.
+#[test]
+fn version_pins_and_scoped_packages_are_not_addresses() {
+    assert_eq!(addresses("kong (a@example.com) - 5h"), vec!["example.com"]);
+    for line in [
+        "swapdex@0.155.0",
+        "pkg@1.2.10",
+        "uses: actions/checkout@v4",
+        "npm i @youdie006/swapdex-linux-x64",
+        "a @ b",
+    ] {
+        assert!(
+            addresses(line).is_empty(),
+            "not a mailbox: {line:?} read as {:?}",
+            addresses(line)
+        );
+    }
+}

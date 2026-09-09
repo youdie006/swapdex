@@ -779,7 +779,7 @@ mod sharing_tests {
             .collect()
     }
 
-    /// The real shape of 병승's Mac, found only by reading uuids by hand:
+    /// The real shape of one real store, found only by reading uuids by hand:
     /// ~/.claude and ~/.claude-company are one login in two directories.
     #[test]
     fn two_directories_holding_one_login_are_reported_together() {
