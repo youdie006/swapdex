@@ -109,7 +109,12 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> S
          # swapdex existed matches none. A sign-in is excluded for its own reason -\n\
          # the OAuth exchange is between the browser and the real backend, and a\n\
          # proxy in the middle answers with whichever account it already holds.\n\
+         # Start these empty. The branch below only ever SETS them, so a caller\n\
+         # who exported a variable of the same name would answer for it - and the\n\
+         # override this guard exists to withhold would go on anyway.\n\
          sx_plain=no\n\
+         port=\n\
+         sx_who=\n\
          for a in \"$@\"; do\n\
          \tcase \"$a\" in login|/login|logout|/logout|resume|/resume|history|sessions) sx_plain=yes ;; esac\n\
          done\n\

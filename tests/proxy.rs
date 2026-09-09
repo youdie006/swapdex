@@ -1650,6 +1650,80 @@ mod codex_status_names_the_payer {
     }
 }
 
+/// A reading command has to reach the real backend. `resume` lists only the
+/// conversations that match the configured provider, so an override empties the
+/// picker; `login` runs an OAuth exchange that a proxy answers with whichever
+/// account it already holds. The shim guards both by skipping the override - but
+/// it decides from `port`, which the guarded branch only ever SETS. A caller who
+/// exports a variable of that name has already filled it in, and the guard waves
+/// the override straight through. The claude shim reads `port` inside the branch
+/// that sets it and is unaffected.
+mod a_reading_command_keeps_the_real_backend {
+    use swapdex::shim::codex_shim_script;
+
+    /// Run the generated shim with stubs and return the argument line the tool
+    /// was handed. `env` is prepended to the command as `name=value` pairs, so
+    /// it arrives the way a caller's exported variable would.
+    fn args_tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> String {
+        let tmp = std::env::temp_dir().join(format!("sx-guard-{}-{nonce}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let sx = tmp.join("swapdex");
+        std::fs::write(
+            &sx,
+            "#!/bin/sh\nfor a in \"$@\"; do\n\tcase \"$a\" in\n\t--ensure) echo 8788; exit 0 ;;\n\tserve) shift; printf '%s' work; exit 0 ;;\n\tesac\ndone\nexit 0\n",
+        )
+        .unwrap();
+        let tool = tmp.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        let shim = tmp.join("shim");
+        std::fs::write(&shim, codex_shim_script(&tmp.join("ptr"), &tool, &sx)).unwrap();
+        for f in [&sx, &tool, &shim] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg(&shim).args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn an_inherited_port_does_not_reopen_the_override_on_resume() {
+        let got = args_tool_receives("resume", &[("port", "3000")], &["resume"]);
+        assert!(
+            !got.contains("model_provider"),
+            "resume must carry no provider override, got:\n{got}"
+        );
+        assert_eq!(got.trim_end(), "resume", "and nothing else, got:\n{got}");
+    }
+
+    #[test]
+    fn an_inherited_port_does_not_reopen_the_override_on_login() {
+        let got = args_tool_receives("login", &[("port", "3000")], &["login"]);
+        assert!(
+            !got.contains("model_provider"),
+            "a sign-in must reach the real backend, got:\n{got}"
+        );
+    }
+
+    /// The other direction: a turn that DOES talk to the model still gets the
+    /// override, so the fix cannot be "never apply it".
+    #[test]
+    fn a_talking_turn_still_gets_the_override() {
+        let got = args_tool_receives("talk", &[("port", "3000")], &["hello"]);
+        assert!(
+            got.lines()
+                .any(|l| l == "model_providers.swapdex.base_url=http://127.0.0.1:8788/v1"),
+            "a turn routes through the proxy swapdex reported, got:\n{got}"
+        );
+    }
+}
+
 /// The proxy, handed an account with no login, gets out of the way: it forwards
 /// the CLIENT's own credential so the turn still works. That is right for a turn
 /// and wrong for everything around it - the dashboard, `serve`, and the Codex
