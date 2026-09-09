@@ -567,6 +567,15 @@ pub fn use_account(
     // selected registry is asked, not Claude's alone: `ls` draws one row per
     // account across all of them, so asking one left a Codex-only account
     // listed and then rejected as "no profile named".
+    // Resolve the NAME first: a prefix or `-` names an account, and asking the
+    // registries about the raw argument answered for a name nobody has - which
+    // sent an account that owns a slot down the copy-model path instead.
+    let store = Store::open(paths)?;
+    let name = match resolve_use_name(&store, paths, name, sel)? {
+        Some(n) => n,
+        None => return Ok(5),
+    };
+    let name = name.as_str();
     let wanted = |t: &str| sel.map(|s| s.wants(t)).unwrap_or(true);
     let held: Vec<&'static str> = crate::adapters::names()
         .into_iter()
@@ -599,7 +608,7 @@ pub fn use_account(
         .into_iter()
         .filter(|t| wanted(t) && !held.contains(t))
         .collect();
-    let spans_more = Store::open(paths)?
+    let spans_more = store
         .list()
         .iter()
         .any(|p| p.name == name && p.tools.iter().any(|t| rest.contains(&t.as_str())));
@@ -1181,6 +1190,25 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
     Ok(0)
 }
 
+/// Every account `use` can name: the saved profiles plus each selected tool's
+/// registered slots. `ls` draws one row per account across both registries, so
+/// resolution has to see both - drawing candidates from the store alone left a
+/// slot-only owner's prefix and `-` rejected as a profile that does not exist.
+fn use_candidates(store: &Store, paths: &Paths, sel: Option<ToolSel>) -> Vec<String> {
+    let mut names: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
+    for tool in crate::adapters::names() {
+        if !sel.map(|s| s.wants(tool)).unwrap_or(true) {
+            continue;
+        }
+        if let Ok(slots) = crate::slots::Slots::open_for(paths, tool) {
+            names.extend(slots.list().into_iter().map(|r| r.name));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Resolve `use`'s NAME argument. `-` means "the profile I was on before":
 /// with exactly two profiles it is simply the other one; otherwise the most
 /// recent timeline switch to a profile that is not currently active. A unique
@@ -1199,7 +1227,7 @@ fn resolve_use_name(
     if raw.is_empty() {
         return Ok(Some(raw.to_string()));
     }
-    let profiles: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
+    let profiles = use_candidates(store, paths, sel);
     if raw == "-" {
         // Scope "previous" to the selected tool(s): `use - --tool codex` asks
         // about codex history, not claude's.

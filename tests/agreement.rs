@@ -1897,3 +1897,125 @@ fn restore_reaches_past_a_slot_switch_that_changed_nothing() {
         "`restore` stopped at the switch that changed nothing:\n{after}"
     );
 }
+
+/// A slot account answers to the prefix its own row is listed under.
+///
+/// `ls` draws one row per account across every registry and `use <exact-name>`
+/// repoints a slot fine, but the name resolver drew its candidates from the
+/// snapshot store alone. A slot-only owner - the whole point of the slot model -
+/// therefore had the short name they type every day rejected as a profile that
+/// does not exist.
+#[test]
+fn a_slot_only_account_answers_to_its_prefix() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    seed_slot(root, "workacct", "workacct@example.com");
+
+    let (listed, _, _) = run(root, &["ls"]);
+    assert!(
+        listed.contains("personal"),
+        "the slot is listed under this name:\n{listed}"
+    );
+
+    let (out, err, code) = run(root, &["use", "pers"]);
+    assert_eq!(code, 0, "a unique prefix should switch: {err}{out}");
+    let (after, _, _) = run(root, &["ls"]);
+    let pays: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(pays.len(), 1, "exactly one row should pay:\n{after}");
+    assert!(
+        pays[0].contains("personal"),
+        "the prefix should have switched the account it matched:\n{after}"
+    );
+}
+
+/// `-` toggles between slot accounts too, and says which ones when it cannot.
+///
+/// The toggle reads the switch timeline, which a slot switch writes like any
+/// other - but it then dropped every candidate the snapshot store did not know.
+/// With no store profile at all the remedy it printed named an empty set,
+/// `swapdex use <>`, a command nobody can type.
+#[test]
+fn the_toggle_reaches_a_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    seed_slot(root, "workacct", "workacct@example.com");
+
+    let (_, err, code) = run(root, &["use", "-"]);
+    assert_ne!(
+        code, 0,
+        "nothing has been switched yet, so '-' means nothing"
+    );
+    assert!(
+        err.contains("personal") && err.contains("workacct"),
+        "the remedy has to name the accounts that exist:\n{err}"
+    );
+
+    run(root, &["use", "personal"]);
+    run(root, &["use", "workacct"]);
+    let (out, err, code) = run(root, &["use", "-"]);
+    assert_eq!(
+        code, 0,
+        "'-' should go back to the previous slot: {err}{out}"
+    );
+    let (after, _, _) = run(root, &["ls"]);
+    let pays: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(pays.len(), 1, "exactly one row should pay:\n{after}");
+    assert!(
+        pays[0].contains("personal"),
+        "'-' should have gone back to the account before this one:\n{after}"
+    );
+}
+
+/// A prefix on an account that owns a slot still moves the pointer.
+///
+/// `use` asked the slot registries about the raw argument, so a prefix - which
+/// no registry has a row for - looked like a legacy copy-model profile and took
+/// the copy path. That path writes a credential over the very slot the account
+/// already has, which is what the slot model exists to prevent.
+#[test]
+fn a_prefix_on_a_migrated_account_repoints_its_slot() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "alpha@example.com");
+    run(root, &["add", "alpha"]);
+    seed_claude(root, "uuid-b", "beta@example.com");
+    run(root, &["add", "beta"]);
+    run(root, &["migrate", "--tool", "claude"]);
+
+    let (exact, _, _) = run(root, &["use", "alpha"]);
+    let (prefix, err, code) = run(root, &["use", "bet"]);
+    assert_eq!(code, 0, "a unique prefix should switch: {err}{prefix}");
+    assert_eq!(
+        prefix.lines().next().map(|l| l.replace("beta", "alpha")),
+        exact.lines().next().map(|l| l.to_string()),
+        "the prefix took a different path than the name it expands to:\n\
+         exact:  {exact}\nprefix: {prefix}"
+    );
+}
+
+/// A prefix is resolved against the tool the switch is for.
+///
+/// Name resolution reaches into the slot registries, and has to stay inside the
+/// selection `--tool` made. An account only Claude holds a slot for is not a
+/// candidate for a Codex switch: counting it makes the Codex account's own
+/// prefix read as two accounts, so the short name stops working the moment a
+/// neighbour is registered for some other tool.
+#[test]
+fn a_prefix_resolves_only_against_the_selected_tool() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "shared-claude", "claude@example.com");
+    seed_codex_slot(root, "shared-codex", "codex@example.com");
+
+    let (out, err, code) = run(root, &["use", "shared", "--tool", "codex"]);
+    assert_eq!(code, 0, "'shared' names one codex account: {err}{out}");
+    let (after, _, _) = run(root, &["ls"]);
+    assert!(
+        after
+            .lines()
+            .any(|l| l.contains("shared-codex") && l.contains("pays")),
+        "the codex account the prefix names should be paying:\n{after}"
+    );
+}
