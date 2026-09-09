@@ -250,6 +250,54 @@ pub fn note_token_rejected(paths: &Paths, tool: &str, name: &str, at: i64) {
     }
 }
 
+/// Carry an account's remembered readings to its new name, in EVERY tool's
+/// file - the cache is sharded per tool, and an account can hold a slot under
+/// more than one.
+///
+/// The readings are keyed by name and every display looks them up by exact
+/// name, so a rename that leaves them behind draws a row for a name no account
+/// answers to and shows the renamed account as never read.
+///
+/// Read and written raw: the filters `load` applies decide what to SHOW, and a
+/// rename must not be the thing that discards another account's history.
+pub fn rename_account(paths: &Paths, old: &str, new: &str) {
+    for tool in crate::adapters::names() {
+        let path = file_for(paths, tool);
+        let mut c = read_raw(&path);
+        if let Some(e) = c.remove(old) {
+            c.insert(new.to_string(), e);
+            write_raw(&path, &c);
+        }
+    }
+}
+
+/// Drop an account's remembered readings. They outlive the account otherwise,
+/// and the next account registered under that name inherits its percentages,
+/// its credit status and its rejected token - every one of them a statement
+/// about somebody else.
+pub fn forget_account(paths: &Paths, name: &str) {
+    for tool in crate::adapters::names() {
+        let path = file_for(paths, tool);
+        let mut c = read_raw(&path);
+        if c.remove(name).is_some() {
+            write_raw(&path, &c);
+        }
+    }
+}
+
+fn read_raw(path: &std::path::Path) -> Cache {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_raw(path: &std::path::Path, c: &Cache) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(c) {
+        let _ = crate::atomic::write_secret(path, &bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A reset that arrives on traffic must reach the bar without erasing the
@@ -545,5 +593,59 @@ mod resets_survive_tests {
         let gone = load_file_at(&f, 6_000, false);
         assert_eq!(gone["acct"].five_h_reset, None);
         assert_eq!(gone["acct"].seven_d_reset, Some(9_000));
+    }
+}
+
+#[cfg(test)]
+mod name_change_tests {
+    use super::*;
+
+    fn entry(pct: f64, at: i64) -> Entry {
+        Entry {
+            five_h: Some(pct),
+            at,
+            ..Default::default()
+        }
+    }
+
+    /// The remembered readings are keyed by account name, so a rename has to
+    /// carry them - in EVERY tool's file, because the cache is sharded per tool
+    /// and an account can hold a slot in more than one.
+    #[test]
+    fn a_rename_carries_the_remembered_readings_of_every_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        update_for(&paths, "claude-code", &[("work".into(), entry(10.0, 1))]);
+        update_for(&paths, "codex", &[("work".into(), entry(90.0, 1))]);
+        update_for(&paths, "codex", &[("other".into(), entry(30.0, 1))]);
+
+        rename_account(&paths, "work", "work2");
+
+        let claude = load_for(&paths, "claude-code");
+        assert!(!claude.contains_key("work"), "the old name is gone");
+        assert_eq!(claude["work2"].five_h, Some(10.0), "the reading followed");
+        let codex = load_for(&paths, "codex");
+        assert!(!codex.contains_key("work"), "and in the second tool's file");
+        assert_eq!(codex["work2"].five_h, Some(90.0));
+        assert_eq!(codex["other"].five_h, Some(30.0), "others are untouched");
+    }
+
+    /// Without this the numbers outlive the account and are shown under its
+    /// name - and then handed to whatever account is registered under that name
+    /// next.
+    #[test]
+    fn forgetting_an_account_drops_its_remembered_readings() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        update_for(&paths, "claude-code", &[("work".into(), entry(10.0, 1))]);
+        update_for(&paths, "codex", &[("work".into(), entry(90.0, 1))]);
+        update_for(&paths, "codex", &[("keep".into(), entry(30.0, 1))]);
+
+        forget_account(&paths, "work");
+
+        assert!(load_for(&paths, "claude-code").is_empty());
+        let codex = load_for(&paths, "codex");
+        assert!(!codex.contains_key("work"), "gone from every tool's file");
+        assert_eq!(codex["keep"].five_h, Some(30.0), "others are untouched");
     }
 }

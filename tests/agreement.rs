@@ -1224,3 +1224,129 @@ fn rotation_preferences_follow_a_rename_and_leave_with_a_removal() {
         "a removed account left its preferences for the next account of that name: {after}"
     );
 }
+
+/// A remembered usage reading must answer to the same name the account does.
+///
+/// `quota-cache.json` keys the last-known windows by account name and every
+/// display looks them up by exact name. `rename` moved the account and left the
+/// reading behind, so the old name went on drawing a row - a phantom account
+/// with numbers - while the renamed one showed as never read. `rm` left it
+/// behind entirely, so the next account registered under that name inherited a
+/// stranger's percentages, its credit status and its sign-out.
+///
+/// The cache is sharded per tool, so this has to walk EVERY tool's file - the
+/// same lesson `rename` already learned about the slot registries.
+#[test]
+fn remembered_usage_follows_a_rename_and_leaves_with_a_removal() {
+    let t = fixture();
+    let root = t.path();
+    let store = root.join(".local/share/swapdex");
+    let claude_cache = store.join("quota-cache.json");
+    let codex_cache = store.join("codex-quota-cache.json");
+
+    seed_claude(root, "uuid-a", "a@example.com");
+    run(root, &["add", "alpha"]);
+    seed_slot(root, "alpha", "a@example.com");
+
+    let reading = |pct: f64| {
+        serde_json::to_vec(&serde_json::json!({"alpha": {
+            "five_h": pct, "five_h_reset": 9_000_000_000i64,
+            "seven_d": pct, "seven_d_reset": 9_000_000_000i64, "at": 1_700_000_000i64}}))
+        .unwrap()
+    };
+    std::fs::write(&claude_cache, reading(22.0)).unwrap();
+    std::fs::write(&codex_cache, reading(44.0)).unwrap();
+
+    let (_, err, code) = run(root, &["rename", "alpha", "alpha2"]);
+    assert_eq!(code, 0, "rename failed: {err}");
+    for f in [&claude_cache, &codex_cache] {
+        let after = std::fs::read_to_string(f).unwrap();
+        assert!(
+            !after.contains("\"alpha\""),
+            "{}: the old name still holds the reading: {after}",
+            f.display()
+        );
+        assert!(
+            after.contains("alpha2"),
+            "{}: the reading did not follow the account: {after}",
+            f.display()
+        );
+    }
+
+    // `alpha2` is both a slot and a saved profile, so the first `rm` retires
+    // only the slot - the profile still answers to the name, and so does its
+    // remembered usage.
+    let (out, err, code) = run(root, &["rm", "alpha2", "--yes"]);
+    assert_eq!(code, 0, "rm failed: {err}");
+    assert!(
+        out.contains("still here"),
+        "expected a partial removal: {out}"
+    );
+    assert!(
+        std::fs::read_to_string(&claude_cache)
+            .unwrap()
+            .contains("alpha2"),
+        "a partial removal dropped a reading the profile still owns"
+    );
+
+    // The second retires the profile, and now nothing answers to the name.
+    let (_, err, code) = run(root, &["rm", "alpha2", "--yes"]);
+    assert_eq!(code, 0, "rm failed: {err}");
+    for f in [&claude_cache, &codex_cache] {
+        let after = std::fs::read_to_string(f).unwrap();
+        assert!(
+            !after.contains("alpha2"),
+            "{}: a removed account left its numbers for the next account of that name: {after}",
+            f.display()
+        );
+    }
+}
+
+/// Dropping ONE tool from an account is a partial removal: the account is still
+/// here, so everything keyed by its name stays with it.
+///
+/// `rm --tool` unregisters one slot and leaves the rest of the account alone,
+/// and both name-keyed stores - its rotation preferences and its remembered
+/// usage - still have an owner. Forgetting them here would silently un-pause an
+/// account that is still listed and blank a reading it still answers to, from a
+/// command that never claimed to remove the account at all.
+#[test]
+fn dropping_one_tool_keeps_the_side_state_the_account_still_owns() {
+    let t = fixture();
+    let root = t.path();
+    let store = root.join(".local/share/swapdex");
+    let settings = store.join("settings.json");
+    let claude_cache = store.join("quota-cache.json");
+
+    seed_slot(root, "both", "b@example.com");
+    seed_codex_slot(root, "both", "b@example.com");
+    std::fs::write(
+        &settings,
+        br#"{"disabled":["both"],"priority":["other","both"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &claude_cache,
+        serde_json::to_vec(&serde_json::json!({"both": {
+            "five_h": 22.0, "five_h_reset": 9_000_000_000i64,
+            "seven_d": 22.0, "seven_d_reset": 9_000_000_000i64, "at": 1_700_000_000i64}}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (out, err, code) = run(root, &["rm", "both", "--tool", "codex", "--yes"]);
+    assert_eq!(code, 0, "dropping the codex slot failed: {err}{out}");
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(listing.contains("both"), "the account vanished:\n{listing}");
+
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        after.contains("both"),
+        "dropping one tool un-paused an account that is still listed: {after}"
+    );
+    let after = std::fs::read_to_string(&claude_cache).unwrap();
+    assert!(
+        after.contains("both"),
+        "dropping one tool blanked a reading the account still owns: {after}"
+    );
+}

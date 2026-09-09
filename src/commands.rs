@@ -4703,7 +4703,7 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
         }
         println!("dropped {t} from '{name}' (its live login keeps running, now unsaved)");
         if !name_still_known(paths, name) {
-            drop_preferences(paths, name);
+            drop_side_state(paths, name);
         }
         return Ok(0);
     }
@@ -4758,7 +4758,7 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
                  again removes it"
             );
         } else {
-            drop_preferences(paths, name);
+            drop_side_state(paths, name);
         }
         return Ok(0);
     }
@@ -4808,24 +4808,30 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
     // one process conflicts, so hand it back before forgetting the name.
     drop(_lock);
     if !name_still_known(paths, name) {
-        drop_preferences(paths, name);
+        drop_side_state(paths, name);
     }
     Ok(0)
 }
 
-/// Move an account's rotation preferences to its new name.
+/// Move everything an account is known by NAME to its new name.
 ///
-/// `disabled` and `priority` are keyed by name and matched exactly, so a rename
-/// that leaves them behind silently un-pauses the account. A preference is never
-/// worth failing a rename that already happened on disk, so this cannot fail.
-fn carry_preferences(paths: &Paths, old: &str, new: &str) {
+/// Two stores key an account by name and match it exactly: its rotation
+/// preferences (`disabled`, `priority`) and its remembered usage readings. A
+/// rename that leaves the first behind silently un-pauses the account; one that
+/// leaves the second behind draws a usage row for a name nothing answers to.
+/// They move together here so a third store cannot be wired to one and not the
+/// other. None of it is worth failing a rename that already happened on disk.
+fn carry_side_state(paths: &Paths, old: &str, new: &str) {
     let _ = crate::settings::update(paths, |s| s.rename_account(old, new));
+    crate::quota_cache::rename_account(paths, old, new);
 }
 
-/// Drop an account's rotation preferences. They outlive the account otherwise,
-/// and the next account registered under that name inherits them.
-fn drop_preferences(paths: &Paths, name: &str) {
+/// Drop the same two stores. They outlive the account otherwise, and the next
+/// account registered under that name inherits its pause, its rank and a
+/// stranger's usage numbers.
+fn drop_side_state(paths: &Paths, name: &str) {
     let _ = crate::settings::update(paths, |s| s.forget_account(name));
+    crate::quota_cache::forget_account(paths, name);
 }
 
 /// Whether anything still answers to this name - a slot under any tool, or a
@@ -4892,7 +4898,7 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
             .map(|st| !st.list().iter().any(|p| p.name == old))
             .unwrap_or(true)
     {
-        carry_preferences(paths, old, new);
+        carry_side_state(paths, old, new);
         println!("renamed account '{old}' to '{new}'");
         return Ok(0);
     }
@@ -4934,7 +4940,7 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
         // `settings::update` takes this same store lock, and a second open of it
         // in one process conflicts, so hand it back before carrying the names.
         drop(_lock);
-        carry_preferences(paths, old, new);
+        carry_side_state(paths, old, new);
         println!("renamed profile '{old}' -> '{new}'");
         Ok(0)
     } else {
