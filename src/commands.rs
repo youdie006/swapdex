@@ -1811,14 +1811,6 @@ fn identity_column(email: Option<String>, tier: Option<String>) -> String {
 
 pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     let store = Store::open(paths)?;
-    if names {
-        // Bare names, one per line (store.list() is sorted) - for scripts and
-        // the profile-name tab-completion snippet in the docs.
-        for p in store.list() {
-            println!("{}", p.name);
-        }
-        return Ok(0);
-    }
     let active = active_by_tool(&store, paths);
     let active_tools_for = |name: &str| -> Vec<&'static str> {
         active
@@ -1868,6 +1860,18 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         }
     }
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    if names {
+        // The SAME accounts the listing shows, slot accounts included: this is
+        // the form written for scripts and tab-completion, and it printed only
+        // `store.list()` - so a name `use` accepts, and `ls` displays, could not
+        // be completed. Every account `swapdex run <name>` makes is that shape.
+        let mut out: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+        out.sort_unstable();
+        for n in out {
+            println!("{n}");
+        }
+        return Ok(0);
+    }
     // Before the `--json` branch, not after it: that branch returns, so the
     // machine-readable listing was the one form that never said it was
     // incomplete - and every row carries `"warning": null`, which reads as

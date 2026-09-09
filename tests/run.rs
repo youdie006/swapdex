@@ -633,6 +633,42 @@ fn auto_setting_round_trips_and_rejects_nonsense() {
     assert_eq!(out.status.code(), Some(2), "a bad value is refused");
 }
 
+/// `--names` could not see a slot account, which `use` accepts.
+///
+/// The docs call it the form "for scripts and completion". It printed
+/// `store.list()` and returned before the block that merges slot accounts into
+/// the listing - so the human `ls` showed the account, `use <name>` switched to
+/// it, and the one form written for tab-completion left it out. Every account
+/// made by `swapdex run <name>` is exactly that shape.
+#[test]
+fn names_lists_the_accounts_use_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("slotdir");
+    std::fs::create_dir_all(&dir).unwrap();
+    seed_copy_profile(root.path(), "saved");
+    let path = std::env::var("PATH").unwrap_or_default();
+    run_in(
+        root.path(),
+        &["adopt", "slotonly", dir.to_str().unwrap()],
+        &path,
+    );
+
+    // Precondition: it is a real account - `use` takes it, an invented name is 5.
+    let used = Command::new(bin())
+        .args(["use", "slotonly"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(used.status.code(), Some(0), "the slot account is usable");
+
+    let names = run_in(root.path(), &["ls", "--names"], &path);
+    assert!(names.contains("saved"), "the profile: {names}");
+    assert!(
+        names.lines().any(|l| l.trim() == "slotonly"),
+        "and the slot account completion would need: {names}"
+    );
+}
+
 /// `status --json` called a healthy login expired, nearly always.
 ///
 /// A Claude access token lives about an hour and the tool refreshes it silently.
