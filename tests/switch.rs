@@ -4245,3 +4245,74 @@ fn onboard_counts_only_profiles_that_need_slots_and_mentions_copies_separately()
         "case B gets its own sentence: {o}"
     );
 }
+
+/// `serve` changes who pays, and it wrote that down without taking the lock.
+///
+/// The switch timeline is the only record of which account a turn was billed
+/// to, and it is read-modify-written whole: two writers that do not both ask
+/// for the store lock lose one of the two events. `use` and `restore` take it
+/// before writing, and `login` retries for it rather than write unlocked -
+/// its own comment names that as the bug it fixed. `serve` took nothing.
+#[test]
+fn serve_takes_the_store_lock_the_other_payer_writers_take() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "u-a", "a@x.com");
+    run(root.path(), &["add", "pa", "--tool", "claude"]);
+    let store = root.path().join(".local/share/swapdex");
+    seed_slot(
+        root.path(),
+        "work",
+        &store.join("slots/work"),
+        "AT2",
+        "w@x.com",
+    );
+    let timeline = store.join("timeline.jsonl");
+    std::fs::remove_file(&timeline).ok();
+
+    // Make the lock impossible to take while leaving the rest of the store
+    // writable, so a command that skips the lock still gets its write through.
+    let lock = store.join(".lock");
+    std::fs::remove_file(&lock).ok();
+    std::fs::create_dir(&lock).unwrap();
+
+    let (_, _, code) = run(root.path(), &["use", "pa", "--tool", "claude"]);
+    assert_eq!(code, 4, "`use` refuses when the store lock cannot be taken");
+
+    let (o, e, code) = run(root.path(), &["serve", "work", "--tool", "claude"]);
+    assert_eq!(
+        code, 4,
+        "and so must `serve`, which writes the same record: {o}{e}"
+    );
+    assert!(
+        !timeline.exists(),
+        "nothing may reach the timeline unlocked: {}",
+        std::fs::read_to_string(&timeline).unwrap_or_default()
+    );
+}
+
+/// A payer change that could not be recorded is not a success.
+///
+/// `serve` printed "now work" and exited 0 whether or not the event reached the
+/// timeline, so the pointer could move with nothing saying when. The slot
+/// pointer write on the line above already raises its failures.
+#[test]
+fn serve_does_not_report_success_when_the_payer_record_could_not_be_written() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "u-a", "a@x.com");
+    run(root.path(), &["add", "pa", "--tool", "claude"]);
+    let store = root.path().join(".local/share/swapdex");
+    seed_slot(
+        root.path(),
+        "work",
+        &store.join("slots/work"),
+        "AT2",
+        "w@x.com",
+    );
+    // The timeline cannot be written, while everything else still can.
+    let timeline = store.join("timeline.jsonl");
+    std::fs::remove_file(&timeline).ok();
+    std::fs::create_dir(&timeline).unwrap();
+
+    let (o, e, code) = run(root.path(), &["serve", "work", "--tool", "claude"]);
+    assert_ne!(code, 0, "the failure must reach the exit code: {o}{e}");
+}

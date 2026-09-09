@@ -6040,14 +6040,37 @@ pub fn serve(
         );
         return Ok(6);
     }
+    // Changing the payer is a store-global write, so take the store lock the way
+    // every other writer of that record does. The timeline is read-modify-written
+    // whole: a writer that skips the lock drops the event of one that took it.
+    // `use` and `restore` take it, and `login` retries for it rather than write
+    // the timeline unlocked.
+    let store = Store::open(paths)?;
+    let _lock = match store.lock() {
+        Ok(g) => g,
+        Err(crate::store::LockError::Busy) => {
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
+            return Ok(4);
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
+            return Ok(4);
+        }
+    };
     slots.set_serving(name)?;
     // Record WHO PAYS from here on. Only `use` and `restore` were written, so the
     // action that changes the payer left no trace - and Codex usage, which comes
     // out of a transcript written in whichever home was running, has no other way
-    // to know whose token produced those numbers.
-    if let Ok(store) = Store::open(paths) {
-        let _ = store.append_timeline(tool, name, crate::session_link::SERVE);
-    }
+    // to know whose token produced those numbers. Raise a failure here the way the
+    // pointer write above does: a payer that changed with no record is the state
+    // this event exists to prevent.
+    store.append_timeline(tool, name, crate::session_link::SERVE)?;
     // Start the proxy this needs. Directing turns with nothing to carry them is
     // a setting that quietly does nothing, and telling someone to run a second
     // command to make the first one take effect is the same as not doing it.
