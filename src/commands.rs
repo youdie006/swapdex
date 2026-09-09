@@ -4831,12 +4831,17 @@ fn carry_side_state(paths: &Paths, old: &str, new: &str) {
     }
 }
 
-/// Drop the same two stores. They outlive the account otherwise, and the next
+/// Drop the same three stores. They outlive the account otherwise, and the next
 /// account registered under that name inherits its pause, its rank and a
 /// stranger's usage numbers.
+///
+/// The ledger is retired rather than dropped - see `retire_timeline_account`.
 fn drop_side_state(paths: &Paths, name: &str) {
     let _ = crate::settings::update(paths, |s| s.forget_account(name));
     crate::quota_cache::forget_account(paths, name);
+    if let Ok(st) = Store::open(paths) {
+        let _ = st.retire_timeline_account(name);
+    }
 }
 
 /// Whether anything still answers to this name - a slot under any tool, or a

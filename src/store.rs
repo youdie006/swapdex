@@ -364,6 +364,16 @@ impl Store {
         Ok(())
     }
 
+    /// Retire a removed account's name in the ledger.
+    ///
+    /// The events cannot simply be dropped: `usage` credits each transcript to
+    /// the account active at its timestamp, so erasing them moves the removed
+    /// account's tokens onto whichever account switched before it. Rename the
+    /// events to a marker no future account can be matched against instead.
+    pub fn retire_timeline_account(&self, name: &str) -> Result<()> {
+        self.rename_timeline_account(name, &crate::session_link::retired(name))
+    }
+
     /// Back up a live snapshot before a switch; keep only the newest 2 per tool.
     pub fn backup(&self, snap: &Snapshot) -> Result<()> {
         let base = self.dir.join("backups").join(snap.tool);

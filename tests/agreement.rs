@@ -1396,3 +1396,72 @@ fn the_ledger_follows_a_slot_only_rename() {
         "the ledger did not follow the account: {ledger}"
     );
 }
+
+/// A removed account must not hand its sessions and tokens to the next account
+/// that takes its name.
+///
+/// Both of the other name-keyed stores drop their account on removal and both
+/// say why in the source: what stays behind is inherited by whatever is
+/// registered under that name next. `timeline.jsonl` is the third store keyed
+/// by name, and `rm` leaves it untouched - so a stranger who registers the
+/// freed name is credited with a removed account's history.
+///
+/// Deleting the events is not the fix. `usage` attributes each transcript to
+/// the account active at its timestamp, so erasing the removed account's switch
+/// hands its tokens to whichever account switched BEFORE it - a different,
+/// innocent account. The name has to be retired in place.
+#[test]
+fn a_removed_account_does_not_hand_its_usage_to_the_next_account_of_that_name() {
+    let t = fixture();
+    let root = t.path();
+    let timeline = root.join(".local/share/swapdex/timeline.jsonl");
+
+    seed_claude(root, "uuid-live", "live@example.com");
+    seed_slot(root, "keeper", "keeper@example.com");
+    seed_slot(root, "ghost", "ghost@example.com");
+
+    // `keeper` switches first, so erasing `ghost` would move ghost's tokens
+    // onto keeper rather than off the books.
+    for name in ["keeper", "ghost"] {
+        let (_, err, code) = run(root, &["use", name]);
+        assert_eq!(code, 0, "switching to {name} failed: {err}");
+    }
+
+    // Tokens spent a minute after the switch to `ghost`, so the ledger has
+    // something to attribute.
+    let ledger = std::fs::read_to_string(&timeline).unwrap();
+    let last: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+    let spent_at = last["ts"].as_i64().unwrap() + 60;
+    let proj = root.join(".claude/projects/p");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("s.jsonl"),
+        serde_json::to_vec(&serde_json::json!({
+            "timestamp": swapdex::refresh::rfc3339_utc(spent_at),
+            "message": {"usage": {"input_tokens": 12000, "output_tokens": 3000}}}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (out, _, _) = run(root, &["usage"]);
+    assert!(
+        out.contains("@ghost"),
+        "the switch did not attribute the tokens to ghost:\n{out}"
+    );
+
+    let (_, err, code) = run(root, &["rm", "ghost", "--yes"]);
+    assert_eq!(code, 0, "rm failed: {err}");
+
+    // A different person registers the freed name.
+    seed_slot(root, "ghost", "stranger@example.com");
+
+    let (out, _, _) = run(root, &["usage"]);
+    assert!(
+        !out.contains("@ghost"),
+        "a removed account handed its tokens to the next account of that name:\n{out}"
+    );
+    assert!(
+        !out.contains("@keeper"),
+        "erasing the removed account moved its tokens onto the account before it:\n{out}"
+    );
+}

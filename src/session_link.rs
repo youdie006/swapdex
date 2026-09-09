@@ -9,6 +9,13 @@ use std::collections::BTreeMap;
 
 pub const UNATTRIBUTED: &str = "(unattributed)";
 
+/// The ledger's name for an account that has been removed. Parenthesised like
+/// `UNATTRIBUTED` so it reads as a bucket rather than an account, and so no
+/// account that later takes the freed name can be matched against it.
+pub fn retired(name: &str) -> String {
+    format!("(removed: {name})")
+}
+
 pub struct Event {
     pub ts: i64,
     pub tool: String,
