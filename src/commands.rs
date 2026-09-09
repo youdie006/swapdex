@@ -3596,9 +3596,11 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             run_self(&[crate::tui::switch_verb(is_slot), name, "--tool", tool])
         }
         fn toggle_rotation(&mut self, name: &str) -> String {
-            let mut cfg = crate::settings::load(self.paths);
-            let paused = cfg.toggle_disabled(name);
-            match crate::settings::save(self.paths, &cfg) {
+            // Through `update`, not load-then-save: this was the last caller
+            // reading and writing the settings unlocked, which is exactly the
+            // lost update `update` exists to prevent.
+            let mut paused = false;
+            match crate::settings::update(self.paths, |cfg| paused = cfg.toggle_disabled(name)) {
                 Ok(()) if paused => {
                     format!("{name} paused - the proxy will not pick it (Enter still switches)")
                 }
