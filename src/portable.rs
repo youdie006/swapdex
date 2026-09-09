@@ -87,7 +87,7 @@ mod tests {
     fn nothing_a_credential_could_hide_in_survives_the_round_trip() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let rec = crate::slots::Slots::open_for(&paths, "claude-code")
+        let rec = crate::slots::Slots::open_for_update(&paths, "claude-code")
             .unwrap()
             .create("work")
             .unwrap();
@@ -118,11 +118,11 @@ mod tests {
     fn the_names_and_their_tools_travel() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        crate::slots::Slots::open_for(&paths, "claude-code")
+        crate::slots::Slots::open_for_update(&paths, "claude-code")
             .unwrap()
             .create("work")
             .unwrap();
-        crate::slots::Slots::open_for(&paths, "codex")
+        crate::slots::Slots::open_for_update(&paths, "codex")
             .unwrap()
             .create("work")
             .unwrap();

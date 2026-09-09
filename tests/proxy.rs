@@ -1667,7 +1667,7 @@ mod an_account_that_cannot_pay {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.create("work").unwrap();
         }
         let code = commands::serve(&paths, Some("work"), false, Some(ToolSel::Codex), false)
@@ -1687,7 +1687,7 @@ mod an_account_that_cannot_pay {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.create("work").unwrap();
             s.set_default("work").unwrap();
         }
@@ -1702,7 +1702,7 @@ mod an_account_that_cannot_pay {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         let dir = {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             let rec = s.create("work").unwrap();
             s.set_default("work").unwrap();
             rec.config_dir
@@ -1755,7 +1755,7 @@ mod the_active_mark_follows_who_pays {
             let root = tempfile::tempdir().unwrap();
             let paths = Paths::rooted(root.path());
             {
-                let mut s = Slots::open_for(&paths, tool).unwrap();
+                let mut s = Slots::open_for_update(&paths, tool).unwrap();
                 s.create("first").unwrap();
                 s.create("second").unwrap();
                 s.set_default("first").unwrap();
@@ -1793,7 +1793,7 @@ mod accounts_worth_opening_the_dashboard_for {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         assert!(!has_any_account(&paths), "nothing yet");
-        Slots::open_for(&paths, "codex")
+        Slots::open_for_update(&paths, "codex")
             .unwrap()
             .create("work")
             .unwrap();
@@ -1804,7 +1804,7 @@ mod accounts_worth_opening_the_dashboard_for {
     fn and_so_is_a_claude_one() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        Slots::open_for(&paths, "claude-code")
+        Slots::open_for_update(&paths, "claude-code")
             .unwrap()
             .create("work")
             .unwrap();
@@ -1836,7 +1836,7 @@ mod who_was_paying_is_its_own_history {
 
     fn store_with_two_codex_accounts(root: &std::path::Path) -> Paths {
         let paths = Paths::rooted(root);
-        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        let mut s = Slots::open_for_update(&paths, "codex").unwrap();
         for name in ["home", "payer"] {
             let rec = s.create(name).unwrap();
             std::fs::write(
@@ -1902,7 +1902,7 @@ mod a_sandboxed_run_starts_no_daemon {
     fn serve_under_a_test_root_leaves_nothing_running() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let rec = Slots::open_for(&paths, "codex")
+        let rec = Slots::open_for_update(&paths, "codex")
             .unwrap()
             .create("work")
             .unwrap();
@@ -2000,7 +2000,7 @@ mod codex_usage_belongs_to_whoever_paid {
     fn a_slot_only_account_still_gets_its_numbers() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let rec = Slots::open_for(&paths, "codex")
+        let rec = Slots::open_for_update(&paths, "codex")
             .unwrap()
             .create("work")
             .unwrap();
@@ -2017,7 +2017,7 @@ mod codex_usage_belongs_to_whoever_paid {
     fn each_home_reports_its_own() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        let mut s = Slots::open_for_update(&paths, "codex").unwrap();
         let a = s.create("a").unwrap();
         let b = s.create("b").unwrap();
         transcript(&a.config_dir, 10.0);
@@ -2222,7 +2222,7 @@ mod the_mark_follows_serve_on_every_kind_of_row {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut s = Slots::open_for(&paths, "claude-code").unwrap();
+            let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
             s.create("bsgong").unwrap();
             s.create("rnd").unwrap();
             s.set_default("bsgong").unwrap();
@@ -2261,7 +2261,7 @@ mod an_instruction_outranks_what_already_happened {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut s = Slots::open_for(&paths, "claude-code").unwrap();
+            let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
             s.create("bsgong").unwrap();
             s.create("rnd").unwrap();
             s.set_default("bsgong").unwrap();

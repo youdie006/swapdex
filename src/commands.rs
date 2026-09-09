@@ -4692,7 +4692,7 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
         // about a slot the listing was showing, and left no way to remove it
         // short of editing slots.json by hand.
         let dropped_snapshot = store.drop_tool(name, t)?;
-        let dropped_slot = crate::slots::Slots::open_for(paths, t)
+        let dropped_slot = crate::slots::Slots::open_for_update(paths, t)
             .and_then(|mut sl| sl.remove(name))
             .unwrap_or(false);
         if !dropped_snapshot && !dropped_slot {
@@ -4725,7 +4725,8 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
                 return Ok(0);
             }
         }
-        let mut slots = crate::slots::Slots::open_for(paths, slot_tool.unwrap_or("claude-code"))?;
+        let mut slots =
+            crate::slots::Slots::open_for_update(paths, slot_tool.unwrap_or("claude-code"))?;
         let dir = slots.get(name).map(|r| r.config_dir);
         slots.remove(name)?;
         println!("stopped managing '{name}'.");
@@ -4836,7 +4837,7 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     }
     let mut slot_renamed = false;
     for tool in adapters::all().iter().map(|a| a.name()) {
-        if let Ok(mut slots) = crate::slots::Slots::open_for(paths, tool) {
+        if let Ok(mut slots) = crate::slots::Slots::open_for_update(paths, tool) {
             match slots.rename(old, new) {
                 Ok(true) => slot_renamed = true,
                 Ok(false) => {}
@@ -5164,7 +5165,7 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
             println!("  {}", d.display());
         }
         if ask_yes("Register them as swapdex accounts?") {
-            let mut s = crate::slots::Slots::open(paths)?;
+            let mut s = crate::slots::Slots::open_for_update(paths, "claude-code")?;
             for d in &unregistered {
                 let name = d
                     .file_name()
@@ -5274,7 +5275,7 @@ pub fn migrate(paths: &Paths, sel: Option<MigrationToolSel>) -> Result<i32> {
             println!();
         }
         println!("{}:", pretty_tool(tool));
-        let mut slots = crate::slots::Slots::open_for(paths, tool)?;
+        let mut slots = crate::slots::Slots::open_for_update(paths, tool)?;
         let classified = classify_migrations(&store, &slots, tool);
         let mut created = Vec::new();
         let mut renamed = Vec::new();
@@ -5424,7 +5425,7 @@ pub fn adopt_slot(
     sel: Option<ToolSel>,
 ) -> Result<i32> {
     let tool = slot_tool(sel);
-    let mut slots = crate::slots::Slots::open_for(paths, tool)?;
+    let mut slots = crate::slots::Slots::open_for_update(paths, tool)?;
     let rec = slots.adopt(name, dir)?;
     println!(
         "registered '{}' ({tool}) -> {}",
@@ -5453,7 +5454,7 @@ pub fn run_account(
         );
         return Ok(2);
     };
-    let mut slots = crate::slots::Slots::open_for(paths, tool)?;
+    let mut slots = crate::slots::Slots::open_for_update(paths, tool)?;
     let rec = match slots.get(name) {
         Some(r) => r,
         None => {
@@ -5462,6 +5463,10 @@ pub fn run_account(
             r
         }
     };
+    // The registry write is done. What follows launches the tool and never
+    // returns, so the lock must be given back here rather than at a scope end
+    // that `exec` will not reach.
+    drop(slots);
     if no_launch {
         println!("account '{name}' is ready ({tool})");
         println!(
@@ -5543,7 +5548,7 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
             format!("{tool} has no per-account home to sign into"),
         );
     };
-    let mut slots = match crate::slots::Slots::open_for(paths, tool) {
+    let mut slots = match crate::slots::Slots::open_for_update(paths, tool) {
         Ok(s) => s,
         Err(e) => return (false, format!("cannot open the account list: {e}")),
     };
@@ -5557,6 +5562,10 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
             Err(e) => return (false, format!("could not make a space for '{name}': {e}")),
         },
     };
+    // The registry write is done, and the sign-in below waits on a human at a
+    // browser. Holding the registry lock across that would stall every other
+    // account registration for as long as the person takes.
+    drop(slots);
     let bin = tool_binary(tool);
     if !command_exists(bin) {
         return (false, format!("`{bin}` isn't on your PATH"));
@@ -6470,7 +6479,9 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
             println!("would create {} ({})", a.name, tool_binary(&a.tool));
             continue;
         }
-        match crate::slots::Slots::open_for(paths, &a.tool).and_then(|mut s| s.create(&a.name)) {
+        match crate::slots::Slots::open_for_update(paths, &a.tool)
+            .and_then(|mut s| s.create(&a.name))
+        {
             Ok(rec) => {
                 crate::slots::link_shared_config(
                     &rec.config_dir,

@@ -33,6 +33,25 @@ pub enum LockError {
 
 pub struct LockGuard(#[allow(dead_code)] fs::File);
 
+/// Exclusive lock around a read-modify-write of the slot registry.
+///
+/// `slots.json` holds every account of every tool and is rewritten whole, so a
+/// writer that read it before another writer's write puts that view back and
+/// drops the other's account. Held from the read to the write, not just across
+/// the write. Separate from [`Store::lock`] so it never contends with a switch.
+pub fn registry_lock(store_dir: &std::path::Path) -> std::result::Result<LockGuard, LockError> {
+    let path = store_dir.join(".slots.lock");
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| LockError::Unwritable(format!("{e}")))?;
+    f.try_lock_exclusive().map_err(|_| LockError::Busy)?;
+    Ok(LockGuard(f))
+}
+
 /// chmod 0700/0600 everything under `dir` (dirs/files), best-effort.
 fn tighten_tree(dir: &std::path::Path) {
     let Ok(rd) = fs::read_dir(dir) else { return };

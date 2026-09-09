@@ -3453,8 +3453,10 @@ fn a_slot_switch_says_whether_anything_running_actually_moved() {
 fn renaming_a_codex_slot_actually_renames_it() {
     let dir = tempfile::tempdir().unwrap();
     let paths = swapdex::paths::Paths::rooted(dir.path());
-    let mut slots = swapdex::slots::Slots::open_for(&paths, "codex").unwrap();
+    let mut slots = swapdex::slots::Slots::open_for_update(&paths, "codex").unwrap();
     slots.create("A").unwrap();
+    // `rename` takes the registry lock for itself, so give it back first.
+    drop(slots);
 
     assert_eq!(
         swapdex::commands::rename(&paths, "A", "codex-main").unwrap(),

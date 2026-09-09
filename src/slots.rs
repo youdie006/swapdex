@@ -42,6 +42,8 @@ pub struct Slots {
     /// Just this tool's, in registry order.
     records: Vec<SlotRecord>,
     tool: String,
+    /// Held from the read to the write on a handle opened to change something.
+    lock: Option<crate::store::LockGuard>,
 }
 
 /// The environment variable a tool reads to find the home it should use.
@@ -183,7 +185,42 @@ impl Slots {
             all,
             records,
             tool: tool.to_string(),
+            lock: None,
         })
+    }
+
+    /// Open the registry for a change, holding its lock from the read to the write.
+    ///
+    /// Reading first and locking later is the bug this exists to prevent: one
+    /// file holds every account of every tool and is rewritten whole, so two
+    /// writers that both read it first each put their own view back and one
+    /// account is lost - with both saying they registered it. Read-only callers
+    /// use [`open_for`](Self::open_for) and never wait for this.
+    pub fn open_for_update(paths: &Paths, tool: &str) -> Result<Slots> {
+        let dir = paths.store_dir();
+        std::fs::create_dir_all(&dir).context("create store dir")?;
+        // Registrations are short, so waiting beats failing; the bound is there
+        // so a stuck holder cannot hang the caller forever.
+        let mut taken = crate::store::registry_lock(&dir);
+        for _ in 0..25 {
+            if taken.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            taken = crate::store::registry_lock(&dir);
+        }
+        let lock = match taken {
+            Ok(g) => g,
+            Err(crate::store::LockError::Busy) => {
+                bail!("another swapdex is registering an account - retry in a moment")
+            }
+            Err(crate::store::LockError::Unwritable(e)) => {
+                bail!("the account registry cannot be locked ({e}) - check the store directory")
+            }
+        };
+        let mut slots = Self::open_for(paths, tool)?;
+        slots.lock = Some(lock);
+        Ok(slots)
     }
 
     pub fn get(&self, name: &str) -> Option<SlotRecord> {
@@ -283,6 +320,11 @@ impl Slots {
     }
 
     fn persist(&mut self) -> Result<()> {
+        // Every writer must have come through `open_for_update`, or it is
+        // writing a view of the registry that may already be stale.
+        if self.lock.is_none() {
+            bail!("internal error: the account registry was changed without its lock");
+        }
         if let Some(parent) = self.file.parent() {
             std::fs::create_dir_all(parent).context("create store dir")?;
         }
@@ -728,7 +770,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.create("company").unwrap();
             s.set_serving("company").unwrap();
         }
@@ -740,7 +782,7 @@ mod tests {
             "the pointer answers while the account is there"
         );
         {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.remove("company").unwrap();
         }
         assert_eq!(
@@ -757,13 +799,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         let dir = {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             let rec = s.create("company").unwrap();
             s.set_serving("company").unwrap();
             s.remove("company").unwrap();
             rec.config_dir
         };
-        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        let mut s = Slots::open_for_update(&paths, "codex").unwrap();
         s.adopt("company", &dir).unwrap();
         assert_eq!(
             Slots::open_for(&paths, "codex").unwrap().serving_dir(),
@@ -782,7 +824,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.create("main").unwrap();
             s.create("company").unwrap();
             s.set_default("main").unwrap();
@@ -799,7 +841,10 @@ mod tests {
             Some("company"),
             "and the account directing turns takes over"
         );
-        open().remove("company").unwrap();
+        Slots::open_for_update(&paths, "codex")
+            .unwrap()
+            .remove("company")
+            .unwrap();
         assert_eq!(
             open().payer().as_deref(),
             Some("main"),
@@ -822,7 +867,7 @@ mod tests {
         std::fs::write(s.serving_file(), orphan.to_string_lossy().as_bytes()).unwrap();
         drop(s);
 
-        let mut s = Slots::open_for(&paths, "codex").unwrap();
+        let mut s = Slots::open_for_update(&paths, "codex").unwrap();
         s.adopt("company", &orphan).unwrap();
         assert_eq!(
             Slots::open_for(&paths, "codex").unwrap().serving_dir(),
@@ -836,7 +881,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         let rec = {
-            let mut s = Slots::open(&paths).unwrap();
+            let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
             s.create("work").unwrap()
         };
         // config_dir is absolute and under the store's slots dir; the dir exists.
@@ -858,12 +903,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         {
-            let mut c = Slots::open_for(&paths, "claude-code").unwrap();
+            let mut c = Slots::open_for_update(&paths, "claude-code").unwrap();
             c.create("work").unwrap();
         }
         {
             // The SAME name on another tool is a different account, not a clash.
-            let mut x = Slots::open_for(&paths, "codex").unwrap();
+            let mut x = Slots::open_for_update(&paths, "codex").unwrap();
             x.create("work").unwrap();
         }
         let c = Slots::open_for(&paths, "claude-code").unwrap();
@@ -918,7 +963,7 @@ mod tests {
     fn where_you_start_and_who_serves_are_separate_answers() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         let home = s.create("home").unwrap();
         let payer = s.create("payer").unwrap();
 
@@ -947,7 +992,7 @@ mod tests {
     fn a_name_that_reads_as_a_tools_home_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         for bad in ["claude", "Claude", "codex", "claude-code", ".claude"] {
             let e = s.create(bad).expect_err("refused");
             let msg = e.to_string();
@@ -996,7 +1041,7 @@ mod tests {
     fn duplicate_and_empty_names_are_rejected() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         s.create("work").unwrap();
         assert!(s.create("work").is_err(), "duplicate name rejected");
         assert!(s.create("   ").is_err(), "empty name rejected");
@@ -1006,7 +1051,7 @@ mod tests {
     fn failed_initialization_never_registers_the_slot() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut slots = Slots::open(&paths).unwrap();
+        let mut slots = Slots::open_for_update(&paths, "claude-code").unwrap();
 
         let error = slots
             .create_initialized("work", |_| anyhow::bail!("marker write failed"))
@@ -1022,7 +1067,7 @@ mod tests {
         // Two slots created back-to-back get different ids (id is not the name).
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         let a = s.create("alpha").unwrap();
         let b = s.create("beta").unwrap();
         assert_ne!(a.id, b.id);
@@ -1033,7 +1078,7 @@ mod tests {
     fn set_default_points_at_the_slot_dir() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         let rec = s.create("work").unwrap();
         assert_eq!(s.default_dir(), None, "no default until set");
         s.set_default("work").unwrap();
@@ -1050,7 +1095,7 @@ mod tests {
     fn rename_keeps_the_directory_so_the_login_survives() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         let before = s.create("company2").unwrap();
         assert!(s.rename("company2", "rnd").unwrap());
         let after = s.get("rnd").expect("renamed");
@@ -1074,7 +1119,7 @@ mod tests {
     fn remove_unregisters_but_never_deletes_the_directory() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         let rec = s.create("work").unwrap();
         s.set_default("work").unwrap();
         assert!(s.remove("work").unwrap());
@@ -1100,7 +1145,7 @@ mod tests {
         let paths = Paths::rooted(root.path());
         let existing = root.path().join("dot-claude-company");
         std::fs::create_dir_all(&existing).unwrap();
-        let mut s = Slots::open(&paths).unwrap();
+        let mut s = Slots::open_for_update(&paths, "claude-code").unwrap();
         let rec = s.adopt("company", &existing).unwrap();
         assert_eq!(rec.config_dir, existing, "config dir is the existing path");
         assert!(rec.adopted);
@@ -1209,7 +1254,7 @@ mod rename_any_tool_tests {
     fn a_slot_of_any_tool_can_be_found_by_name() {
         let t = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(t.path());
-        let mut codex = Slots::open_for(&paths, "codex").unwrap();
+        let mut codex = Slots::open_for_update(&paths, "codex").unwrap();
         codex.create("A").unwrap();
 
         assert!(
@@ -1218,7 +1263,8 @@ mod rename_any_tool_tests {
         );
         assert!(find_any_tool(&paths, "nope").is_none());
 
-        let mut claude = Slots::open_for(&paths, "claude-code").unwrap();
+        drop(codex);
+        let mut claude = Slots::open_for_update(&paths, "claude-code").unwrap();
         claude.create("bsgong").unwrap();
         assert_eq!(
             find_any_tool(&paths, "bsgong").map(|(t, _)| t),
@@ -1237,6 +1283,26 @@ mod registry_durability_tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
+    /// Two writers must not both hold a view of the registry one is replacing.
+    ///
+    /// `slots.json` holds every account of every tool and is rewritten whole,
+    /// so two swapdex processes registering at the same time each write their
+    /// own view back and one account is lost - while BOTH report it registered.
+    /// Its directory and its login stay on disk, unknown to swapdex.
+    #[test]
+    fn a_registry_change_holds_the_registry_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let first = Slots::open_for_update(&p, "claude-code").unwrap();
+        assert!(
+            Slots::open_for_update(&p, "claude-code").is_err(),
+            "a second writer must wait, not read a view the first is about to replace"
+        );
+        drop(first);
+        Slots::open_for_update(&p, "claude-code")
+            .expect("and it goes through once the first is done");
+    }
+
     /// The account registry must be replaced, never truncated in place.
     ///
     /// One file holds every tool's slots. `fs::write` truncates the destination
@@ -1250,14 +1316,14 @@ mod registry_durability_tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         let file = {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.create("company").unwrap();
             s.file.clone()
         };
         let before = std::fs::metadata(&file).unwrap().ino();
 
         {
-            let mut s = Slots::open_for(&paths, "codex").unwrap();
+            let mut s = Slots::open_for_update(&paths, "codex").unwrap();
             s.create("second").unwrap();
         }
         let after = std::fs::metadata(&file).unwrap().ino();
