@@ -2339,3 +2339,98 @@ fn add_accepts_a_name_whose_slot_holds_nothing_readable() {
         "add refused over a slot holding no readable account:\n{out}{err}"
     );
 }
+
+/// Drive the interactive wizard over a pipe. `SWAPDEX_ASSUME_TTY` is the escape
+/// hatch `setup` already carries for exactly this.
+fn run_stdin(root: &Path, args: &[&str], input: &str) -> (String, String, i32) {
+    use std::io::Write;
+    let mut child = Command::new(bin())
+        .args(args)
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// `setup` must not mint the name `ls` warns about either.
+///
+/// `add` learned to refuse a name a slot holds for a different account, but the
+/// wizard names accounts through `ask_name`, which asks the snapshot store
+/// alone. It is the worse door: the name it collides on is the one it SUGGESTS
+/// as the default, so pressing Enter is enough.
+#[test]
+fn setup_refuses_a_name_a_different_account_already_holds() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "personal@example.com");
+    seed_claude(root, "work-uuid", "work@example.com");
+
+    // Enter accepts the suggested [work]; 'skip' leaves the tool unsaved.
+    let (out, err, code) = run_stdin(root, &["setup"], "\nskip\n");
+    assert_eq!(code, 0, "setup failed:\n{out}{err}");
+
+    let (ls_out, ls_err, _) = run(root, &["ls"]);
+    assert!(
+        !ls_err.contains("DIFFERENT"),
+        "setup minted the crossed name ls warns about:\n{out}\n--- ls ---\n{ls_out}{ls_err}"
+    );
+}
+
+/// One name on ONE account is still the ordinary case.
+///
+/// A slot registered by `swapdex run <name>` and the login you are sitting on
+/// are usually the same account. Saving a snapshot of it under that name is
+/// what the wizard is for; a guard that refused every name a slot holds would
+/// break the common path.
+#[test]
+fn setup_still_saves_under_a_slot_holding_the_same_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    seed_claude(root, "work", "work@example.com");
+
+    let (out, err, code) = run_stdin(root, &["setup"], "\n");
+    assert_eq!(code, 0, "setup failed:\n{out}{err}");
+    assert!(
+        out.contains("saved as 'work'"),
+        "setup refused a slot holding the SAME account:\n{out}{err}"
+    );
+}
+
+/// A slot swapdex cannot read holds no account to collide with.
+///
+/// `swapdex run <name>` registers the slot before anyone logs into it. Treating
+/// an unreadable slot as a different account would refuse the wizard's own
+/// suggestion on every freshly-made slot, with no name it would accept.
+#[test]
+fn setup_accepts_a_name_whose_slot_holds_nothing_readable() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let dir = root.join(".local/share/swapdex/slots/work");
+    std::fs::remove_file(dir.join(".credentials.json")).unwrap();
+    std::fs::remove_file(dir.join(".claude.json")).unwrap();
+    seed_claude(root, "work-uuid", "work@example.com");
+
+    let (out, err, code) = run_stdin(root, &["setup"], "\n");
+    assert_eq!(code, 0, "setup failed:\n{out}{err}");
+    assert!(
+        out.contains("saved as 'work'"),
+        "setup refused over a slot holding no readable account:\n{out}{err}"
+    );
+}

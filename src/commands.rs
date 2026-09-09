@@ -168,6 +168,25 @@ fn profile_account_id(store: &Store, name: &str, tool: &str) -> Option<String> {
 
 const MIGRATED_ACCOUNT_MARKER: &str = ".swapdex-migrated-account";
 
+/// The account a registered slot of `name` holds, if one is readable.
+fn slot_account_under(paths: &Paths, tool: &str, name: &str) -> Option<String> {
+    crate::slots::Slots::open_for(paths, tool)
+        .ok()
+        .and_then(|sl| {
+            sl.list()
+                .into_iter()
+                .find(|r| r.name == name)
+                .and_then(|r| slot_account_id_for(tool, &r.config_dir))
+        })
+}
+
+/// The account that will come to hold the name being asked for.
+struct NameHolder<'a> {
+    paths: &'a Paths,
+    tool: &'a str,
+    account_id: &'a str,
+}
+
 fn slot_account_id_for(tool: &str, dir: &std::path::Path) -> Option<String> {
     let connected = match tool {
         "claude-code" => crate::proxy::creds::slot_account_uuid(dir),
@@ -340,6 +359,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
                 &store,
                 &format!("name for this account [{suggestion}]: "),
                 &suggestion,
+                None,
             ) {
                 Some(n) => {
                     asked = n;
@@ -445,14 +465,7 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
         // A slot holds the name as surely as a profile does: `use <name>` selects
         // it, and `ls` fills that row from the profile. Saving another account
         // under it mints the state `ls` warns about on every listing.
-        let slot_id = crate::slots::Slots::open_for(paths, tool)
-            .ok()
-            .and_then(|sl| {
-                sl.list()
-                    .into_iter()
-                    .find(|r| r.name == name)
-                    .and_then(|r| slot_account_id_for(tool, &r.config_dir))
-            });
+        let slot_id = slot_account_under(paths, tool, name);
         let live_id = adapter
             .identity(paths)
             .ok()
@@ -4058,7 +4071,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     _ => Some(ToolSel::Antigravity),
                 };
                 let store = Store::open(paths)?;
-                let Some(name) = ask_name(&store, new_account_prompt(), "") else {
+                let Some(name) = ask_name(&store, new_account_prompt(), "", None) else {
                     println!("nothing added.");
                     continue;
                 };
@@ -7313,6 +7326,11 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
             &store,
             &format!("name to keep the CURRENT account under [{suggestion}]: "),
             &suggestion,
+            Some(NameHolder {
+                paths,
+                tool,
+                account_id: &cur.account_id,
+            }),
         ) {
             if keep == name {
                 // '{name}' is reserved for the NEW account - accepting it here
@@ -7449,6 +7467,11 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
                     &store,
                     "save the NEW account under a different name instead (Enter discards it): ",
                     "",
+                    Some(NameHolder {
+                        paths,
+                        tool,
+                        account_id: &new.account_id,
+                    }),
                 ) {
                     if rescue != name {
                         let snap = adapter.capture(paths)?;
@@ -7791,7 +7814,12 @@ fn yes_no(question: &str, default_yes: bool) -> bool {
 
 /// Ask for a profile name, re-prompting until it is valid (or the user skips).
 /// An existing name asks whether to replace it. Returns None on skip.
-fn ask_name(store: &Store, question: &str, default: &str) -> Option<String> {
+fn ask_name(
+    store: &Store,
+    question: &str,
+    default: &str,
+    holder: Option<NameHolder<'_>>,
+) -> Option<String> {
     loop {
         let ans = prompt(question, default)?; // EOF -> skip, never loop
         if ans.eq_ignore_ascii_case("skip") || ans.is_empty() {
@@ -7811,6 +7839,21 @@ fn ask_name(store: &Store, question: &str, default: &str) -> Option<String> {
                 "  '-' is reserved (`swapdex use -` toggles to the previous profile). Try again."
             );
             continue;
+        }
+        // A slot holds a name as surely as a profile does, and `ls` warns on
+        // every listing when one name means two accounts. Refuse and re-ask,
+        // the way an invalid name is handled - aborting mid-wizard is worse.
+        if let Some(h) = &holder {
+            let mine = Some(h.account_id).filter(|s| !s.is_empty());
+            let slot = slot_account_under(h.paths, h.tool, &ans);
+            if name_means_two_accounts(mine, slot.as_deref()) {
+                println!(
+                    "  '{ans}' is already a {} slot holding a different account \
+                     (`swapdex slots` shows it). Try again.",
+                    pretty_tool(h.tool)
+                );
+                continue;
+            }
         }
         if store.list().iter().any(|p| p.name == ans)
             && !yes_no(
@@ -7895,6 +7938,11 @@ pub fn setup(paths: &Paths) -> Result<i32> {
             &store,
             &format!("  save it as [{default}] (Enter to accept, 'skip' to skip): "),
             &default,
+            Some(NameHolder {
+                paths,
+                tool,
+                account_id: &id.account_id,
+            }),
         ) {
             Some(name) => match adapter.capture(paths) {
                 Ok(snap) => {
@@ -7931,7 +7979,7 @@ pub fn setup(paths: &Paths) -> Result<i32> {
             println!("  skipped.\n");
             continue;
         };
-        let name = match ask_name(&store, "  name for it (e.g. personal): ", "") {
+        let name = match ask_name(&store, "  name for it (e.g. personal): ", "", None) {
             Some(n) => n,
             None => {
                 println!("  skipped.\n");
