@@ -1413,6 +1413,57 @@ fn dropping_one_tool_keeps_the_side_state_the_account_still_owns() {
     );
 }
 
+/// A bare `rm <name>` must remove the account under EVERY tool, not the first
+/// registry that happens to hold the name.
+///
+/// One name is one account across tools - `ls` draws a two-tool account as a
+/// single row, and the prompt asks to "stop managing account '<name>'". The
+/// removal opened one registry, so `rm both --yes` printed "stopped managing
+/// 'both'." and left `both [codex]` listed, silently: the profile case prints
+/// a "run it again" note, the second-tool case printed nothing. It also
+/// dropped the account's preferences, readings and ledger row on the way out,
+/// because the code below it assumed the account was now gone.
+///
+/// `mv` already loops every registry for this exact split - "an account holding
+/// both a Claude and a Codex slot came out split in two - one login under two
+/// names".
+#[test]
+fn removing_an_account_removes_it_under_every_tool() {
+    let t = fixture();
+    let root = t.path();
+    let store = root.join(".local/share/swapdex");
+    let settings = store.join("settings.json");
+
+    seed_slot(root, "both", "b@example.com");
+    seed_codex_slot(root, "both", "b@example.com");
+    std::fs::write(
+        &settings,
+        br#"{"disabled":["both"],"priority":["other","both"]}"#,
+    )
+    .unwrap();
+
+    let (out, err, code) = run(root, &["rm", "both", "--yes"]);
+    assert_eq!(code, 0, "removing the account failed: {err}{out}");
+
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(
+        !listing.contains("both"),
+        "one `rm` left half the account listed under the other tool:\n{listing}"
+    );
+    let (slots, _, _) = run(root, &["slots"]);
+    assert!(
+        !slots.contains("both"),
+        "the slot survived under a tool `rm` never opened:\n{slots}"
+    );
+
+    // Nothing answers to the name now, so its side state goes with it.
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        !after.contains("both"),
+        "a fully removed account kept its rotation preferences: {after}"
+    );
+}
+
 /// The ledger that attributes usage must answer to the same name the account
 /// does - whether or not the account ever saved a snapshot.
 ///

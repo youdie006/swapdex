@@ -4679,12 +4679,11 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
     // Both tools keep accounts here. Looking only in Claude's registry meant a
     // Codex account could not be removed at all, and the dashboard - which lists
     // both - reported "no account named X" for something it was showing.
-    let slot_tool = crate::adapters::names().into_iter().find(|t| {
+    let is_slot = crate::adapters::names().into_iter().any(|t| {
         crate::slots::Slots::open_for(paths, t)
             .map(|s| s.get(name).is_some())
             .unwrap_or(false)
     });
-    let is_slot = slot_tool.is_some();
     let is_profile = store.list().iter().any(|p| p.name == name);
     if !is_slot && !is_profile {
         eprintln!("swapdex: no account named '{name}'");
@@ -4736,24 +4735,39 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
                 return Ok(0);
             }
         }
-        let mut slots =
-            crate::slots::Slots::open_for_update(paths, slot_tool.unwrap_or("claude-code"))?;
-        let dir = slots.get(name).map(|r| r.config_dir);
-        slots.remove(name)?;
+        // Every tool's registry, not the first one holding the name: one name
+        // is one account across tools, and `mv` loops for the same reason.
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        for tool in crate::adapters::names() {
+            let Ok(mut slots) = crate::slots::Slots::open_for_update(paths, tool) else {
+                continue;
+            };
+            let Some(dir) = slots.get(name).map(|r| r.config_dir) else {
+                continue;
+            };
+            slots.remove(name)?;
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+            if let Some(w) = last_slot_warning(
+                crate::slots::Slots::open_for(paths, tool)
+                    .map(|s| s.list().len())
+                    .unwrap_or(0),
+                crate::proxy::running_proxy_for(paths, tool).is_some(),
+                tool,
+            ) {
+                warnings.push(w);
+            }
+        }
         println!("stopped managing '{name}'.");
-        if let Some(d) = dir {
+        for d in &dirs {
             println!(
                 "  its login is untouched at {}",
                 crate::util::redact_path(&d.display().to_string())
             );
         }
-        if let Some(w) = last_slot_warning(
-            crate::slots::Slots::open_for(paths, slot_tool.unwrap_or("claude-code"))
-                .map(|s| s.list().len())
-                .unwrap_or(0),
-            crate::proxy::running_proxy_for(paths, slot_tool.unwrap_or("claude-code")).is_some(),
-            slot_tool.unwrap_or("claude-code"),
-        ) {
+        for w in &warnings {
             println!("{w}");
         }
         // A profile of the same name is a separate thing; leave it alone - but
@@ -4763,7 +4777,9 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
                 "  a saved profile named '{name}' is still here - `swapdex rm {name} --yes` \
                  again removes it"
             );
-        } else {
+        }
+        // The preferences belong to whatever still answers to the name.
+        if !name_still_known(paths, name) {
             drop_side_state(paths, name);
         }
         return Ok(0);
