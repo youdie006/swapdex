@@ -1983,6 +1983,55 @@ fn identity_column(email: Option<String>, tier: Option<String>) -> String {
     }
 }
 
+/// Every account a switch can name: saved snapshots and registered slots in one
+/// sorted list, plus the directory each slot lives in and the registries that
+/// would not parse.
+///
+/// Slots are switchable too, and on a machine whose accounts live as slots they
+/// are the only accounts there are. `ls` and the dashboard each learned that
+/// separately and the numbered menu was left behind; one merge so they cannot
+/// drift again. An unparseable registry is reported, not counted as empty.
+pub(crate) fn merged_accounts(
+    paths: &Paths,
+    store: &Store,
+) -> (
+    Vec<crate::store::ProfileInfo>,
+    std::collections::HashMap<String, std::path::PathBuf>,
+    Vec<&'static str>,
+) {
+    let mut profiles = store.list();
+    let mut slot_dirs: std::collections::HashMap<String, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    let mut unreadable: Vec<&'static str> = Vec::new();
+    for tool in crate::adapters::names() {
+        let Ok(sl) = crate::slots::Slots::open_for(paths, tool) else {
+            unreadable.push(tool);
+            continue;
+        };
+        for r in sl.list() {
+            match profiles.iter_mut().find(|p| p.name == r.name) {
+                Some(p) => {
+                    if !p.tools.iter().any(|t| t == tool) {
+                        p.tools.push(tool.to_string());
+                    }
+                }
+                None => profiles.push(crate::store::ProfileInfo {
+                    name: r.name.clone(),
+                    tools: vec![tool.to_string()],
+                }),
+            }
+            // Remember where this slot lives, so a row with no snapshot can
+            // still say whose login it is - the slot's own .claude.json knows,
+            // and an empty name column left switching unverifiable.
+            slot_dirs
+                .entry(r.name.clone())
+                .or_insert_with(|| r.config_dir.clone());
+        }
+    }
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    (profiles, slot_dirs, unreadable)
+}
+
 pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     let store = Store::open(paths)?;
     let active = active_by_tool(&store, paths);
@@ -1994,46 +2043,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             .collect()
     };
 
-    let mut profiles = store.list();
-    let mut slot_dirs: std::collections::HashMap<String, std::path::PathBuf> =
-        std::collections::HashMap::new();
-    // Slots are switchable too. `ls` listed saved snapshots only, so on a
-    // machine whose accounts live as slots, `serve personal` moved the turns
-    // correctly and there was no row for `personal` to mark - two of three
-    // switches looked like they did nothing.
-    // A registry that will not parse is not an empty one. Until 0.103.0 this
-    // file was written with a plain truncate-then-write, so an interrupted
-    // write could leave it unreadable - and reporting that as "no accounts"
-    // tells someone whose credentials are all still on disk to start over.
-    let mut unreadable_registry: Vec<&str> = Vec::new();
-    for tool in crate::adapters::names() {
-        if let Err(e) = crate::slots::Slots::open_for(paths, tool) {
-            let _ = e;
-            unreadable_registry.push(tool);
-        }
-        if let Ok(sl) = crate::slots::Slots::open_for(paths, tool) {
-            for r in sl.list() {
-                match profiles.iter_mut().find(|p| p.name == r.name) {
-                    Some(p) => {
-                        if !p.tools.iter().any(|t| t == tool) {
-                            p.tools.push(tool.to_string());
-                        }
-                    }
-                    None => profiles.push(crate::store::ProfileInfo {
-                        name: r.name.clone(),
-                        tools: vec![tool.to_string()],
-                    }),
-                }
-                // Remember where this slot lives, so a row with no snapshot can
-                // still say whose login it is - the slot's own .claude.json
-                // knows, and an empty name column left switching unverifiable.
-                slot_dirs
-                    .entry(r.name.clone())
-                    .or_insert_with(|| r.config_dir.clone());
-            }
-        }
-    }
-    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    let (profiles, slot_dirs, unreadable_registry) = merged_accounts(paths, &store);
     if names {
         // The SAME accounts the listing shows, slot accounts included: this is
         // the form written for scripts and tab-completion, and it printed only
@@ -2919,7 +2929,7 @@ pub fn ui(paths: &Paths) -> Result<i32> {
         return ui_tui(paths);
     }
     let store = Store::open(paths)?;
-    let profiles = store.list();
+    let (profiles, slot_dirs, _) = merged_accounts(paths, &store);
     if profiles.is_empty() {
         println!("No accounts saved yet.");
         println!("  guided setup:  swapdex setup");
@@ -2930,6 +2940,13 @@ pub fn ui(paths: &Paths) -> Result<i32> {
     println!();
     for (i, p) in profiles.iter().enumerate() {
         let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+        // A slot-only row has no snapshot to name it; its own config does.
+        let email = best_identity(
+            email,
+            slot_dirs
+                .get(&p.name)
+                .and_then(|d| crate::proxy::creds::any_slot_email(d)),
+        );
         let at: Vec<&str> = active
             .iter()
             .filter(|(_, n)| n == &p.name)

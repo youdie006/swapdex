@@ -2159,3 +2159,114 @@ fn open_does_not_launch_a_failed_switch() {
         "claude launched after a failed switch:\n{out}{err}"
     );
 }
+
+/// Drive the plain numbered menu over a pipe. `TERM=dumb` is what a terminal
+/// that cannot render ANSI reports (Emacs shell, some CI), and it is what sends
+/// `ui` down this path instead of the full-screen picker.
+fn run_ui(root: &Path, keys: &str) -> (String, String, i32) {
+    use std::io::Write;
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("TERM", "dumb")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(keys.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// The number the menu printed beside `name`, so a test can pick that row
+/// without assuming what order the menu sorts in.
+fn menu_number(out: &str, name: &str) -> String {
+    out.lines()
+        .find(|l| l.contains(name))
+        .and_then(|l| l.trim().split(')').next().map(str::to_string))
+        .unwrap_or_else(|| panic!("no menu row for {name}:\n{out}"))
+}
+
+/// The menu offers the accounts that exist, not the saved snapshots.
+///
+/// A slot-only install is what the slot model produces, and `ls` lists it and
+/// `use` switches it. The menu asked the snapshot store alone, so it told an
+/// owner with a working account to start over - and `setup`, the command it
+/// sends them to, is not where you go when you already have one.
+#[test]
+fn the_menu_lists_a_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+
+    let (ls_out, _, _) = run(root, &["ls"]);
+    assert!(
+        ls_out.contains("personal"),
+        "fixture check - `ls` should list the slot:\n{ls_out}"
+    );
+
+    let (out, err, code) = run_ui(root, "\n");
+    assert_eq!(code, 0, "menu should open:\n{out}{err}");
+    assert!(
+        !out.contains("No accounts saved yet"),
+        "an install with a registered slot was told it has nothing:\n{out}{err}"
+    );
+    assert!(
+        out.contains("personal"),
+        "the account `ls` lists is missing from the menu:\n{out}{err}"
+    );
+    // A row you cannot check is a row you cannot trust: the slot's own config
+    // is the only thing that names it, and `ls` already reads it for this.
+    assert!(
+        out.contains("personal@example.com"),
+        "the slot row named nobody, so a switch to it is unverifiable:\n{out}{err}"
+    );
+}
+
+/// A snapshot account must not crowd a slot account off the menu.
+///
+/// With one of each, the menu numbered only the snapshot - so the slot account
+/// had no number, and a menu row is the only way to pick one here. `ls` shows
+/// both, and the pick itself already goes through the same switch `use` does.
+#[test]
+fn the_menu_numbers_every_account_ls_shows() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    run(root, &["add", "alpha"]);
+    seed_slot(root, "beta", "b@example.com");
+
+    let (out, err, code) = run_ui(root, "\n");
+    assert_eq!(code, 0, "menu should open:\n{out}{err}");
+    assert!(
+        out.contains("alpha"),
+        "the snapshot account is missing from the menu:\n{out}{err}"
+    );
+    assert!(
+        out.contains("beta"),
+        "the slot account is missing from the menu:\n{out}{err}"
+    );
+
+    // Listed is not enough: the number beside the row has to switch to it.
+    let n = menu_number(&out, "beta");
+    let (out2, err2, code2) = run_ui(root, &format!("{n}\n"));
+    assert_eq!(code2, 0, "picking the slot row failed:\n{out2}{err2}");
+    let (ls_out, _, _) = run(root, &["ls"]);
+    assert!(
+        ls_out
+            .lines()
+            .any(|l| l.contains("beta") && l.contains("<- pays")),
+        "the menu pick did not switch to the slot account:\n{ls_out}\n{out2}{err2}"
+    );
+}
