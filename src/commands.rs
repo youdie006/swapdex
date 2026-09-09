@@ -4700,6 +4700,9 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
             return Ok(5);
         }
         println!("dropped {t} from '{name}' (its live login keeps running, now unsaved)");
+        if !name_still_known(paths, name) {
+            drop_preferences(paths, name);
+        }
         return Ok(0);
     }
     if is_slot {
@@ -4752,6 +4755,8 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
                 "  a saved profile named '{name}' is still here - `swapdex rm {name} --yes` \
                  again removes it"
             );
+        } else {
+            drop_preferences(paths, name);
         }
         return Ok(0);
     }
@@ -4797,7 +4802,38 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
         return Ok(5);
     }
     println!("removed profile '{name}' (any live login it matched keeps running, now unsaved)");
+    // `settings::update` takes this same store lock, and a second open of it in
+    // one process conflicts, so hand it back before forgetting the name.
+    drop(_lock);
+    if !name_still_known(paths, name) {
+        drop_preferences(paths, name);
+    }
     Ok(0)
+}
+
+/// Move an account's rotation preferences to its new name.
+///
+/// `disabled` and `priority` are keyed by name and matched exactly, so a rename
+/// that leaves them behind silently un-pauses the account. A preference is never
+/// worth failing a rename that already happened on disk, so this cannot fail.
+fn carry_preferences(paths: &Paths, old: &str, new: &str) {
+    let _ = crate::settings::update(paths, |s| s.rename_account(old, new));
+}
+
+/// Drop an account's rotation preferences. They outlive the account otherwise,
+/// and the next account registered under that name inherits them.
+fn drop_preferences(paths: &Paths, name: &str) {
+    let _ = crate::settings::update(paths, |s| s.forget_account(name));
+}
+
+/// Whether anything still answers to this name - a slot under any tool, or a
+/// saved profile. A removal that leaves either behind is a partial one, and the
+/// account's preferences still have an owner.
+fn name_still_known(paths: &Paths, name: &str) -> bool {
+    Store::open(paths).is_ok_and(|st| st.list().iter().any(|p| p.name == name))
+        || crate::adapters::names()
+            .into_iter()
+            .any(|t| crate::slots::Slots::open_for(paths, t).is_ok_and(|s| s.get(name).is_some()))
 }
 
 pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
@@ -4854,6 +4890,7 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
             .map(|st| !st.list().iter().any(|p| p.name == old))
             .unwrap_or(true)
     {
+        carry_preferences(paths, old, new);
         println!("renamed account '{old}' to '{new}'");
         return Ok(0);
     }
@@ -4892,6 +4929,10 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
         return Ok(6);
     }
     if store.rename(old, new)? {
+        // `settings::update` takes this same store lock, and a second open of it
+        // in one process conflicts, so hand it back before carrying the names.
+        drop(_lock);
+        carry_preferences(paths, old, new);
         println!("renamed profile '{old}' -> '{new}'");
         Ok(0)
     } else {

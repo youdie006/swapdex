@@ -87,6 +87,24 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Carry this account's preferences to its new name. They are keyed by name
+    /// and matched exactly, so a rename that skips them silently un-pauses the
+    /// account and drops it out of the ranking.
+    pub fn rename_account(&mut self, old: &str, new: &str) {
+        for n in self.disabled.iter_mut().chain(self.priority.iter_mut()) {
+            if n == old {
+                *n = new.to_string();
+            }
+        }
+    }
+
+    /// Drop an account's preferences. Without this they outlive the account and
+    /// are inherited by whatever is registered under that name next.
+    pub fn forget_account(&mut self, name: &str) {
+        self.disabled.retain(|n| n != name);
+        self.priority.retain(|n| n != name);
+    }
+
     pub fn rank(&self, name: &str) -> usize {
         self.priority
             .iter()
@@ -305,5 +323,34 @@ mod concurrent_update_tests {
             Some(true),
             "the other writer's change was lost"
         );
+    }
+
+    #[test]
+    fn renaming_an_account_carries_its_rotation_preferences() {
+        let mut s = Settings {
+            disabled: vec!["work".into()],
+            priority: vec!["other".into(), "work".into()],
+            ..Default::default()
+        };
+        s.rename_account("work", "work2");
+        assert!(!s.is_disabled("work"), "the old name is gone");
+        assert!(s.is_disabled("work2"), "the pause followed the account");
+        assert_eq!(s.priority, vec!["other".to_string(), "work2".to_string()]);
+    }
+
+    #[test]
+    fn forgetting_an_account_drops_its_rotation_preferences() {
+        let mut s = Settings {
+            disabled: vec!["work".into(), "keep".into()],
+            priority: vec!["work".into(), "keep".into()],
+            ..Default::default()
+        };
+        s.forget_account("work");
+        assert!(
+            !s.is_disabled("work"),
+            "a later account of this name starts clean"
+        );
+        assert!(s.is_disabled("keep"), "other accounts are untouched");
+        assert_eq!(s.priority, vec!["keep".to_string()]);
     }
 }

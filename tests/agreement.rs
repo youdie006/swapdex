@@ -1162,3 +1162,65 @@ fn a_name_no_command_would_accept_cannot_be_registered_by_another() {
         "the refusal echoed the control character: {err:?}"
     );
 }
+
+/// An account's rotation preferences must answer to the same name the account does.
+///
+/// `settings.json` keys `disabled` and `priority` by account name, and the proxy
+/// filters on exact string equality. `rename` moved the slot registries and the
+/// stored profile but left the preferences pointing at a name that no longer
+/// exists, so a paused account quietly rejoined rotation - the one thing pausing
+/// it was meant to prevent. `rm` left the entry behind entirely, so a later
+/// account that happened to reuse the name was born paused and pre-ranked, with
+/// nothing on any screen to say why.
+#[test]
+fn rotation_preferences_follow_a_rename_and_leave_with_a_removal() {
+    let t = fixture();
+    let root = t.path();
+    let settings = root.join(".local/share/swapdex/settings.json");
+
+    seed_claude(root, "uuid-a", "a@example.com");
+    run(root, &["add", "alpha"]);
+    seed_slot(root, "alpha", "a@example.com");
+
+    std::fs::write(
+        &settings,
+        br#"{"disabled":["alpha"],"priority":["other","alpha"]}"#,
+    )
+    .unwrap();
+
+    let (_, err, code) = run(root, &["rename", "alpha", "alpha2"]);
+    assert_eq!(code, 0, "rename failed: {err}");
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        !after.contains("\"alpha\""),
+        "the old name still holds the preferences after a rename: {after}"
+    );
+    assert!(
+        after.contains("alpha2"),
+        "the pause did not follow the account: {after}"
+    );
+
+    // This name is both a slot and a saved profile, so the first `rm` retires
+    // only the slot - the profile still answers to the name, and so do its
+    // preferences.
+    let (out, err, code) = run(root, &["rm", "alpha2", "--yes"]);
+    assert_eq!(code, 0, "rm failed: {err}");
+    assert!(
+        out.contains("still here"),
+        "expected a partial removal: {out}"
+    );
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        after.contains("alpha2"),
+        "a partial removal dropped preferences the profile still owns: {after}"
+    );
+
+    // The second retires the profile, and now nothing answers to the name.
+    let (_, err, code) = run(root, &["rm", "alpha2", "--yes"]);
+    assert_eq!(code, 0, "rm failed: {err}");
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        !after.contains("alpha2"),
+        "a removed account left its preferences for the next account of that name: {after}"
+    );
+}
