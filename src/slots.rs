@@ -96,8 +96,16 @@ pub fn slots_sharing_an_account(named: &[(String, Option<String>)]) -> Vec<Vec<S
 }
 
 /// A name that will not be mistaken for a tool's home, built from one that is.
+///
+/// Leading `-` is dropped: the suggestion is printed as a command to type back,
+/// and a name starting with `-` is read there as an option, not as the account.
 pub fn suggest_non_colliding(name: &str, taken: &[String]) -> String {
-    let base = format!("{}-account", name.trim().to_ascii_lowercase());
+    let stem = name.trim().trim_start_matches('-').to_ascii_lowercase();
+    let base = if stem.is_empty() {
+        "account".to_string()
+    } else {
+        format!("{stem}-account")
+    };
     if !taken.iter().any(|t| t == &base) {
         return base;
     }
@@ -157,6 +165,23 @@ fn reject_invalid_name(name: &str) -> Result<()> {
                 .take(64)
                 .collect::<String>()
         );
+    }
+    Ok(())
+}
+
+/// The extra rule the two creators owe. `swapdex use -` toggles to the previous
+/// account, so a new account must never take that name; `valid_profile_name`
+/// keeps allowing it so a legacy one can still be renamed out of it or removed.
+///
+/// Public because `migrate` has to ask the question BEFORE it creates: a legacy
+/// profile carrying this name is renamed, the way a tool-home name already is.
+pub fn name_is_reserved(name: &str) -> bool {
+    name.trim() == "-"
+}
+
+fn reject_reserved_name(name: &str) -> Result<()> {
+    if name_is_reserved(name) {
+        bail!("'-' is reserved (`swapdex use -` toggles to the previous account)");
     }
     Ok(())
 }
@@ -252,6 +277,7 @@ impl Slots {
         // answers. The general rule catches everything else.
         reject_tool_home_name(name)?;
         reject_invalid_name(name)?;
+        reject_reserved_name(name)?;
         let id = new_id(name);
         let config_dir = self.slots_dir.join(&id);
         std::fs::create_dir_all(&config_dir).context("create slot dir")?;
@@ -364,6 +390,7 @@ impl Slots {
         // answers. The general rule catches everything else.
         reject_tool_home_name(name)?;
         reject_invalid_name(name)?;
+        reject_reserved_name(name)?;
         if !config_dir.is_absolute() {
             bail!("config dir must be an absolute path");
         }
@@ -1047,6 +1074,16 @@ mod tests {
             suggest_non_colliding("Codex", &["codex-account".into(), "codex-account2".into()]),
             "codex-account3"
         );
+    }
+
+    /// A suggestion is printed as `swapdex run <name>` and typed back by hand,
+    /// so it has to be a name a command line can carry: a leading `-` is read
+    /// as an option, and the remedy fails where it is pasted.
+    #[test]
+    fn a_suggested_name_can_be_typed_back() {
+        assert_eq!(suggest_non_colliding("-", &[]), "account");
+        assert_eq!(suggest_non_colliding("-x", &[]), "x-account");
+        assert_eq!(suggest_non_colliding("-", &["account".into()]), "account2");
     }
 
     #[test]

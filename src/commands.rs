@@ -5358,7 +5358,9 @@ pub fn migrate(paths: &Paths, sel: Option<MigrationToolSel>) -> Result<i32> {
                         continue;
                     }
                     let collides = taken.iter().any(|name| name == &profile.name);
-                    let name = if crate::slots::name_reads_as_a_tool_home(&profile.name) || collides
+                    let name = if crate::slots::name_reads_as_a_tool_home(&profile.name)
+                        || crate::slots::name_is_reserved(&profile.name)
+                        || collides
                     {
                         crate::slots::suggest_non_colliding(&profile.name, &taken)
                     } else {

@@ -1163,6 +1163,58 @@ fn a_name_no_command_would_accept_cannot_be_registered_by_another() {
     );
 }
 
+/// A name reserved where accounts are CREATED is reserved for every creator.
+///
+/// `add` refuses `-` because `swapdex use -` toggles to the previous account.
+/// `adopt` and `run` register accounts too, and they check only the permanent
+/// rule, which deliberately ALLOWS `-` so a legacy account carrying that name
+/// stays rm-able. So `adopt - <dir>` registered it, and `use -` then selected
+/// that account instead of toggling - the harm the reservation exists to stop.
+#[test]
+fn a_name_reserved_at_creation_is_refused_by_every_creator() {
+    let t = fixture();
+    let root = t.path();
+    let dir = root.join("adopted");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (out, err, code) = run(root, &["adopt", "-", dir.to_str().unwrap()]);
+    assert_ne!(code, 0, "adopt accepted '-': {out}{err}");
+    let (out, err, code) = run(root, &["run", "-", "--no-launch"]);
+    assert_ne!(code, 0, "run accepted '-': {out}{err}");
+
+    let rows: Vec<serde_json::Value> = std::fs::read(root.join(".local/share/swapdex/slots.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    for r in &rows {
+        assert_ne!(
+            r["name"].as_str(),
+            Some("-"),
+            "a name reserved at creation was registered: {rows:?}"
+        );
+    }
+}
+
+/// The reservation is at creation only: an account already named `-` stays
+/// manageable.
+///
+/// That is why the permanent rule allows the name, and why the refusal above
+/// must not move into it - a 0.2.x account named `-` would otherwise be stuck,
+/// unable to be renamed out of the name or removed.
+#[test]
+fn an_account_already_named_dash_can_still_be_renamed_and_removed() {
+    let t = fixture();
+    let root = t.path();
+
+    seed_slot(root, "-", "dash@example.com");
+    let (out, err, code) = run(root, &["rename", "-", "dash"]);
+    assert_eq!(code, 0, "a legacy '-' could not be renamed: {out}{err}");
+
+    seed_slot(root, "-", "dash2@example.com");
+    let (out, err, code) = run(root, &["rm", "-", "--yes"]);
+    assert_eq!(code, 0, "a legacy '-' could not be removed: {out}{err}");
+}
+
 /// An account's rotation preferences must answer to the same name the account does.
 ///
 /// `settings.json` keys `disabled` and `priority` by account name, and the proxy

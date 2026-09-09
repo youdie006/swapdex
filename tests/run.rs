@@ -290,6 +290,50 @@ fn migrate_gives_each_legacy_profile_a_slot() {
     );
 }
 
+/// A legacy profile carrying a name no creator will accept must not take the
+/// rest of the migration down with it.
+///
+/// `migrate` already renames a profile whose name a creator would refuse - a
+/// tool-home name, or one a slot already holds - via `suggest_non_colliding`.
+/// `-` is refused for the same kind of reason (`use -` toggles), and it is
+/// neither of those two, so it reached `create_initialized` and the `?` there
+/// aborted the whole command: every profile after it in the sweep was skipped.
+#[test]
+fn migrate_renames_a_legacy_profile_whose_name_no_creator_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    // "-" sorts before "work", so an abort here loses "work" too.
+    seed_copy_profile(root.path(), "-");
+    seed_copy_profile(root.path(), "work");
+    let out = Command::new(bin())
+        .args(["migrate"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "migrate failed: {o}{e}");
+
+    // The profile after the bad name still got its slot.
+    let listed = Command::new(bin())
+        .args(["slots"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let l = String::from_utf8_lossy(&listed.stdout);
+    assert!(l.contains("work"), "later profile was skipped: {l}");
+
+    // And the refused name was renamed, not registered.
+    let rows: Vec<serde_json::Value> =
+        std::fs::read(root.path().join(".local/share/swapdex/slots.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+    assert!(
+        rows.iter().any(|r| r["name"] == "account"),
+        "the refused name was not renamed: {rows:?}"
+    );
+}
+
 #[test]
 fn doctor_reports_slots_default_and_shim() {
     let root = tempfile::tempdir().unwrap();
