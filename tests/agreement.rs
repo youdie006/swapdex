@@ -1465,3 +1465,73 @@ fn a_removed_account_does_not_hand_its_usage_to_the_next_account_of_that_name() 
         "erasing the removed account moved its tokens onto the account before it:\n{out}"
     );
 }
+
+/// One directory is one account, or a pointer cannot name a payer.
+///
+/// `Slots::payer` resolves a pointer back to a name with `.find` - the pointer
+/// files hold PATHS - and its doc says it lives in one place so that what a
+/// screen claims and what the proxy does cannot drift apart. That holds only
+/// while a directory belongs to one account. `adopt` rejected a duplicate NAME
+/// and never a duplicate DIRECTORY, while onboarding - which calls that same
+/// `adopt` - filters out the directories already registered before it does. Two
+/// records on one directory made `use beta` write "beta" into the ledger while
+/// `ls` and `serve --quiet` both credited alpha.
+#[test]
+fn one_directory_is_one_account() {
+    let t = fixture();
+    let root = t.path();
+    let shared = root.join("home/.claude-shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let shared = shared.to_str().unwrap();
+
+    let (out, err, code) = run(root, &["adopt", "alpha", shared]);
+    assert_eq!(code, 0, "the first adopt was refused: {out}{err}");
+
+    let (out, err, code) = run(root, &["adopt", "beta", shared]);
+    assert_ne!(
+        code, 0,
+        "a second account was registered on alpha's directory: {out}{err}"
+    );
+    assert!(
+        err.contains("alpha"),
+        "the refusal has to name the account already holding it: {err}"
+    );
+
+    // Nothing half-written: the refused name reaches no screen, and the account
+    // that does hold the directory is still the one every screen credits.
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(
+        !listing.contains("beta"),
+        "a refused adopt still left a row:\n{listing}"
+    );
+    run(root, &["use", "alpha"]);
+    let (quiet, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        quiet.starts_with("alpha"),
+        "the status bar credits '{}' after `use alpha`",
+        quiet.trim()
+    );
+}
+
+/// The refusal is about ambiguity, not about seeing a directory twice.
+///
+/// A registry is opened FOR one tool and resolves pointers among that tool's
+/// records only, and each tool keeps its own pointer files. A directory that is
+/// a home for claude and a home for codex therefore names one account on each
+/// side, and adopting it for the second tool has to keep working.
+#[test]
+fn each_tool_may_adopt_the_same_directory() {
+    let t = fixture();
+    let root = t.path();
+    let shared = root.join("home/.shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let shared = shared.to_str().unwrap();
+
+    let (out, err, code) = run(root, &["adopt", "alpha", shared]);
+    assert_eq!(code, 0, "the claude adopt was refused: {out}{err}");
+    let (out, err, code) = run(root, &["adopt", "alpha", shared, "--tool", "codex"]);
+    assert_eq!(
+        code, 0,
+        "codex could not adopt the directory claude holds: {out}{err}"
+    );
+}

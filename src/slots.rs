@@ -370,6 +370,18 @@ impl Slots {
         if !config_dir.is_dir() {
             bail!("config dir does not exist: {}", config_dir.display());
         }
+        // One directory is one account. The pointers hold PATHS and `payer`
+        // resolves one back with `.find`, so a second record on the same
+        // directory is never reached: the account a switch names stops being
+        // the account the screens credit. Onboarding filters these out before
+        // it calls this; a hand-typed `adopt` did not.
+        if let Some(other) = self.records.iter().find(|r| r.config_dir == config_dir) {
+            bail!(
+                "'{}' already holds that directory: {}",
+                other.name,
+                config_dir.display()
+            );
+        }
         // Before this directory is registered, drop a serving pointer that names
         // nothing. Registering is what would turn such a pointer from inert back
         // into a live instruction to pay, and nobody asked for that.
