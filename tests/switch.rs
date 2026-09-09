@@ -4316,3 +4316,50 @@ fn serve_does_not_report_success_when_the_payer_record_could_not_be_written() {
     let (o, e, code) = run(root.path(), &["serve", "work", "--tool", "claude"]);
     assert_ne!(code, 0, "the failure must reach the exit code: {o}{e}");
 }
+
+/// A slot switch is a switch, and it left no record of itself.
+///
+/// Slots share one conversation store, so nothing in a transcript says which
+/// account produced it - `usage` credits every token by the switch timeline
+/// alone. `use <profile>` writes an event there. `use <slot>` - and every
+/// account `setup` makes is a slot - wrote nothing, so the tokens that followed
+/// went on being credited to whoever the previous event named.
+#[test]
+fn a_slot_switch_is_recorded_the_way_a_profile_switch_is() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    seed_slot(
+        root.path(),
+        "work",
+        &store.join("slots/work"),
+        "AT-W",
+        "w@x.com",
+    );
+    seed_slot(
+        root.path(),
+        "personal",
+        &store.join("slots/personal"),
+        "AT-P",
+        "p@x.com",
+    );
+
+    let (o, e, c) = run(root.path(), &["use", "work", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    let (o, e, c) = run(root.path(), &["use", "personal", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+
+    let timeline = std::fs::read_to_string(store.join("timeline.jsonl")).unwrap_or_default();
+    let named: Vec<&str> = timeline
+        .lines()
+        .filter(|l| l.contains("claude-code"))
+        .collect();
+    assert_eq!(
+        named.len(),
+        2,
+        "both slot switches are on the record: {timeline:?}"
+    );
+    assert!(
+        named[0].contains("\"work\"") && named[1].contains("\"personal\""),
+        "in the order they happened: {named:?}"
+    );
+}

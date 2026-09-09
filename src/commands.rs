@@ -4943,6 +4943,30 @@ pub fn switch_outcome_line(
     }
 }
 
+/// Take the whole-store lock, or say which way it could not be taken.
+///
+/// `Err` carries the exit code the other store writers already use for both
+/// causes, so a caller only has to hand it back.
+fn store_lock_or_exit(store: &Store) -> std::result::Result<crate::store::LockGuard, i32> {
+    match store.lock() {
+        Ok(g) => Ok(g),
+        Err(crate::store::LockError::Busy) => {
+            eprintln!(
+                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
+                 for a sign-in). Finish or close it, then retry."
+            );
+            Err(4)
+        }
+        Err(crate::store::LockError::Unwritable(e)) => {
+            eprintln!(
+                "swapdex: the store is not writable ({e}) - check permissions/mount of \
+                 the store directory"
+            );
+            Err(4)
+        }
+    }
+}
+
 fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Result<i32> {
     let bin = tool_binary(tool);
     if dry_run {
@@ -4950,7 +4974,18 @@ fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Res
         return Ok(0);
     }
     let slots = crate::slots::Slots::open_for(paths, tool)?;
+    // Slots share one conversation store, so nothing in a transcript says which
+    // account produced it - the switch timeline is the only record, and `usage`
+    // credits every token by it. Repointing the default IS a switch, so write
+    // the same event `use <profile>` writes, under the same store lock.
+    let store = Store::open(paths)?;
+    let lock = match store_lock_or_exit(&store) {
+        Ok(g) => g,
+        Err(code) => return Ok(code),
+    };
     slots.set_default(name)?;
+    store.append_timeline(tool, name, "use")?;
+    drop(lock);
     let proxy = crate::proxy::running_proxy_for(paths, tool).is_some();
     println!(
         "{}",
@@ -6046,22 +6081,9 @@ pub fn serve(
     // `use` and `restore` take it, and `login` retries for it rather than write
     // the timeline unlocked.
     let store = Store::open(paths)?;
-    let _lock = match store.lock() {
+    let _lock = match store_lock_or_exit(&store) {
         Ok(g) => g,
-        Err(crate::store::LockError::Busy) => {
-            eprintln!(
-                "swapdex: another swapdex is busy (a switch, or a `swapdex login` waiting \
-                 for a sign-in). Finish or close it, then retry."
-            );
-            return Ok(4);
-        }
-        Err(crate::store::LockError::Unwritable(e)) => {
-            eprintln!(
-                "swapdex: the store is not writable ({e}) - check permissions/mount of \
-                 the store directory"
-            );
-            return Ok(4);
-        }
+        Err(code) => return Ok(code),
     };
     slots.set_serving(name)?;
     // Record WHO PAYS from here on. Only `use` and `restore` were written, so the
