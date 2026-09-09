@@ -1283,6 +1283,18 @@ fn age_line(stamp_nanos: u128) -> String {
 /// refresh token can rotate; flag one that has not been refreshed in a while.
 const STALE_DAYS: i64 = 30;
 
+/// One name, two different accounts: the saved profile holds one and the slot
+/// registered under that same name holds another.
+///
+/// It matters because the two are not interchangeable. `use <name>` moves the
+/// slot pointer, so the account it selects is the SLOT's, while the listing
+/// fills that row from the profile's snapshot - the row names one account and
+/// switching produces the other. Unknown on either side is not a conflict:
+/// swapdex does not condemn a pairing it could not read.
+fn name_means_two_accounts(profile: Option<&str>, slot: Option<&str>) -> bool {
+    matches!((profile, slot), (Some(a), Some(b)) if a != b)
+}
+
 /// Is a login's access token old enough for its lapse to mean anything?
 ///
 /// A Claude access token lives about an hour and the tool refreshes it silently,
@@ -1876,6 +1888,31 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // machine-readable listing was the one form that never said it was
     // incomplete - and every row carries `"warning": null`, which reads as
     // "nothing wrong". stderr, so stdout stays a parseable array.
+    // A name that means two accounts: the row is built from the profile while
+    // `use` selects the slot. swapdex already reports the harmless direction
+    // (same account, two names) and said nothing about this one.
+    let mut crossed: Vec<String> = Vec::new();
+    if let Ok(st) = Store::open(paths) {
+        for tool in crate::adapters::names() {
+            if let Ok(sl) = crate::slots::Slots::open_for(paths, tool) {
+                for r in sl.list() {
+                    let p_id = profile_account_id(&st, &r.name, tool);
+                    let s_id = slot_account_id_for(tool, &r.config_dir);
+                    if name_means_two_accounts(p_id.as_deref(), s_id.as_deref()) {
+                        crossed.push(format!("{} ({tool})", r.name));
+                    }
+                }
+            }
+        }
+    }
+    if !crossed.is_empty() {
+        eprintln!(
+            "swapdex: {} names a saved profile AND a slot holding a DIFFERENT \
+             account. The row above is the profile's; `swapdex use <name>` selects \
+             the slot's. `swapdex slots` shows which directory each one is.",
+            crossed.join(", ")
+        );
+    }
     if !unreadable_registry.is_empty() {
         eprintln!(
             "swapdex: the account registry could not be read ({}) - \
@@ -8655,11 +8692,11 @@ mod tests {
     use super::{
         best_identity, classify_migration_profile, codex_account_sources, codex_identity,
         codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
-        last_slot_warning, listable, login_is_ancient, new_account_prompt, payer_line, payer_note,
-        payer_of_any, pick_active, quota_brief, row_needs_login, row_suffix, sign_in_remedy,
-        sign_out_blocked_remedy, stale_hint, stale_marker, stale_proxy_note,
-        suggested_profile_name, switch_line, unhonoured_ask, unknown_account, win_line,
-        MigrationClass,
+        last_slot_warning, listable, login_is_ancient, name_means_two_accounts, new_account_prompt,
+        payer_line, payer_note, payer_of_any, pick_active, quota_brief, row_needs_login,
+        row_suffix, sign_in_remedy, sign_out_blocked_remedy, stale_hint, stale_marker,
+        stale_proxy_note, suggested_profile_name, switch_line, unhonoured_ask, unknown_account,
+        win_line, MigrationClass,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -8779,6 +8816,36 @@ mod tests {
             last_slot_warning(0, false, "claude-code"),
             None,
             "no proxy running - nothing is pinned to it, so nothing breaks"
+        );
+    }
+
+    /// The listing shows one account and `use` selects the other.
+    ///
+    /// A name can be a saved profile AND a registered slot. `use <name>` sets the
+    /// slot pointer, so the account it selects is the SLOT's; `ls` fills the row
+    /// from the profile's snapshot. When those two hold different accounts the
+    /// row names one account and switching produces the other, silently. swapdex
+    /// already reports the harmless direction - "saved profile 'k' is a copy of
+    /// slot 'y'", the same account under two names - and said nothing about this
+    /// one.
+    #[test]
+    fn a_name_that_means_two_accounts_is_worth_saying() {
+        assert!(name_means_two_accounts(Some("uuid-a"), Some("uuid-b")));
+        assert!(
+            !name_means_two_accounts(Some("uuid-a"), Some("uuid-a")),
+            "the same account under one name is the ordinary case"
+        );
+        assert!(
+            !name_means_two_accounts(Some("uuid-a"), None),
+            "a profile with no slot of that name is not a conflict"
+        );
+        assert!(
+            !name_means_two_accounts(None, Some("uuid-b")),
+            "nor a slot with no profile"
+        );
+        assert!(
+            !name_means_two_accounts(None, None),
+            "and unknown is never a conflict - swapdex does not condemn on a blank"
         );
     }
 
