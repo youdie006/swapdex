@@ -562,18 +562,54 @@ pub fn use_account(
     dry_run: bool,
     force: bool,
 ) -> Result<i32> {
-    // Permanent-slot account: `use` just repoints the default pointer (the
-    // claude shim follows it) - no credential copy, so no rotation logout. A
-    // legacy copy-model profile (not in the slot registry) falls through to the
-    // old guarded switch.
-    let tool = slot_tool(sel);
-    if crate::slots::Slots::open_for(paths, tool)?
-        .get(name)
-        .is_some()
-    {
-        return use_slot_default(paths, name, tool, dry_run);
+    // Permanent-slot account: `use` just repoints that tool's default pointer
+    // (the shim follows it) - no credential copy, so no rotation logout. EVERY
+    // selected registry is asked, not Claude's alone: `ls` draws one row per
+    // account across all of them, so asking one left a Codex-only account
+    // listed and then rejected as "no profile named".
+    let wanted = |t: &str| sel.map(|s| s.wants(t)).unwrap_or(true);
+    let held: Vec<&'static str> = crate::adapters::names()
+        .into_iter()
+        .filter(|t| wanted(t))
+        .filter(|t| {
+            crate::slots::Slots::open_for(paths, t)
+                .map(|s| s.get(name).is_some())
+                .unwrap_or(false)
+        })
+        .collect();
+    if held.is_empty() {
+        // A legacy copy-model profile (in no slot registry) falls through to
+        // the old guarded switch.
+        return use_account_inner(paths, name, sel, dry_run, false, None, force, &[]);
     }
-    use_account_inner(paths, name, sel, dry_run, false, None, force)
+    let mut code = 0;
+    for tool in &held {
+        let c = use_slot_default(paths, name, tool, dry_run)?;
+        if c != 0 {
+            code = c;
+        }
+    }
+    // A name can be a slot under one tool and a saved profile under another,
+    // and `ls` draws that as one row. Fall through only when the profile
+    // covers a tool no slot took: otherwise the copy-model switch matches
+    // nothing and reports the account it just moved as unknown. `held` is
+    // passed as skips - a credential copy onto a slot is what the slot model
+    // exists to prevent.
+    let rest: Vec<&str> = crate::adapters::names()
+        .into_iter()
+        .filter(|t| wanted(t) && !held.contains(t))
+        .collect();
+    let spans_more = Store::open(paths)?
+        .list()
+        .iter()
+        .any(|p| p.name == name && p.tools.iter().any(|t| rest.contains(&t.as_str())));
+    if spans_more {
+        let c = use_account_inner(paths, name, sel, dry_run, false, None, force, &held)?;
+        if c != 0 {
+            code = c;
+        }
+    }
+    Ok(code)
 }
 
 /// `open`: after a successful switch, exec the tool (the --open flag; needs an
@@ -595,9 +631,12 @@ pub fn use_account_open(
             return Ok(2);
         }
     }
-    use_account_inner(paths, name, sel, false, true, dir, force)
+    use_account_inner(paths, name, sel, false, true, dir, force, &[])
 }
 
+/// `skip`: tools this switch has already handled as slots, so the copy-model
+/// path leaves them alone.
+#[allow(clippy::too_many_arguments)]
 fn use_account_inner(
     paths: &Paths,
     name: &str,
@@ -606,6 +645,7 @@ fn use_account_inner(
     open: bool,
     open_dir: Option<&std::path::Path>,
     force: bool,
+    skip: &[&str],
 ) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     let store = Store::open(paths)?;
@@ -679,6 +719,7 @@ fn use_account_inner(
                 .ok()
                 .as_deref(),
             std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
             &crate::proc::running_claude_procs(),
         )
     };
@@ -688,6 +729,11 @@ fn use_account_inner(
     let switch_inv = now_nanos();
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
+        // Already repointed as a slot: copying a credential over it would undo
+        // the very thing the slot model buys.
+        if skip.contains(&tool) {
+            continue;
+        }
         // A Keychain-mode Claude install (macOS) cannot be switched yet. In
         // the default both-tools case SKIP it with a note so Codex still
         // switches; the adapter's own refusal stays for an explicit --tool.
@@ -932,7 +978,8 @@ fn use_account_inner(
 /// backs up the outgoing login before every switch; this is the command that
 /// brings a backup back, so a bad switch is a one-command recovery even when
 /// the outgoing account was never saved as a profile. It backs up the current
-/// login first, so running `restore` twice toggles between the two.
+/// login first, so running `restore` twice toggles between the two. A slot
+/// switch moves no credential, so its undo is repointing the default back.
 pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     let store = Store::open(paths)?;
@@ -969,6 +1016,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
     let restore_inv = now_nanos();
     let mut found = 0; // a backup existed for this tool
     let mut changed = 0; // an actual restore was written
+    let mut repointed = 0; // a slot switch was put back (no credential moved)
     for adapter in selected_adapters(sel) {
         let tool = adapter.name();
         if !is_explicit(sel) {
@@ -986,6 +1034,52 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
                 );
                 continue;
             }
+        }
+        // A slot switch moved a pointer, not a credential, so its undo is
+        // repointing the default back. The newest credential backup belongs to
+        // some OLDER copy-model switch: reaching for it here would leave the
+        // slot switch standing and write a third account over the live login.
+        let names = switch_names_for(paths, tool);
+        let last_dest = names.last().cloned().unwrap_or_default();
+        let slot_undo = crate::slots::Slots::open_for(paths, tool)
+            .ok()
+            .filter(|s| !last_dest.is_empty() && s.get(&last_dest).is_some());
+        if let Some(slots) = slot_undo {
+            let bin = tool_binary(tool);
+            let prev = names
+                .iter()
+                .rev()
+                .skip(1)
+                .find(|n| **n != last_dest && slots.get(n).is_some());
+            let Some(prev) = prev else {
+                eprintln!(
+                    "swapdex: {tool}: the last switch repointed the default to {last_dest}, \
+                     and no earlier slot is on record to put back"
+                );
+                if is_explicit(sel) {
+                    return Ok(5);
+                }
+                repointed += 1;
+                continue;
+            };
+            if dry_run {
+                println!("would put the default {bin} account back to {prev}");
+                repointed += 1;
+                continue;
+            }
+            slots.set_default(prev)?;
+            store.append_timeline_inv(tool, prev, "restore", restore_ts, restore_inv)?;
+            println!(
+                "{}",
+                switch_outcome_line(
+                    tool,
+                    prev,
+                    crate::proxy::running_proxy_for(paths, tool).is_some(),
+                    crate::slots::history_is_shared(paths, tool)
+                )
+            );
+            repointed += 1;
+            continue;
         }
         let Some((stamp, target)) = store.load_backup(tool)? else {
             if is_explicit(sel) {
@@ -1077,7 +1171,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         }
         changed += 1;
     }
-    if found == 0 {
+    if found == 0 && repointed == 0 {
         eprintln!("swapdex: no backup to restore (a backup is taken on every `use`)");
         return Ok(5);
     }
@@ -1222,6 +1316,20 @@ fn last_switch_name_excluding(
         }
     }
     best.map(|(_, n)| n)
+}
+
+/// The `use`/`restore` destinations recorded for one tool, oldest first.
+fn switch_names_for(paths: &Paths, tool: &str) -> Vec<String> {
+    let path = paths.store_dir().join("timeline.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| matches!(v["action"].as_str(), Some("use") | Some("restore")))
+        .filter(|v| v["tool"].as_str() == Some(tool))
+        .filter_map(|v| v["account"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// The tool(s) the most recent switch (`use` or `restore`) touched, from the

@@ -371,11 +371,8 @@ fn a_slot_without_a_credential_is_not_reported_as_active() {
     }
 }
 
-/// A registered CODEX slot: the shape that can actually pay for Codex turns.
-fn seed_codex_slot(root: &Path, name: &str, email: &str) {
-    let dir = root.join(".local/share/swapdex/slots").join(name);
-    std::fs::create_dir_all(dir.join("sessions")).unwrap();
-    // A minimal id_token whose payload carries the email, the way Codex stores it.
+/// A minimal id_token whose payload carries the email, the way Codex stores it.
+fn codex_id_token(email: &str) -> String {
     let payload = serde_json::json!({"email": email});
     let b64 = |b: &[u8]| {
         const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -390,10 +387,33 @@ fn seed_codex_slot(root: &Path, name: &str, email: &str) {
         }
         o
     };
-    let tok = format!(
+    format!(
         "h.{}.s",
         b64(serde_json::to_string(&payload).unwrap().as_bytes())
-    );
+    )
+}
+
+/// A live Codex login in the tool's own dir - what `add` captures from.
+fn seed_live_codex(root: &Path, email: &str) {
+    let dir = root.join(".codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {"id_token": codex_id_token(email), "access_token": "AT",
+                       "refresh_token": "RT", "account_id": "acct-live"}}))
+        .unwrap(),
+    )
+    .unwrap();
+    chmod600(&dir.join("auth.json"));
+}
+
+/// A registered CODEX slot: the shape that can actually pay for Codex turns.
+fn seed_codex_slot(root: &Path, name: &str, email: &str) {
+    let dir = root.join(".local/share/swapdex/slots").join(name);
+    std::fs::create_dir_all(dir.join("sessions")).unwrap();
+    let tok = codex_id_token(email);
     std::fs::write(
         dir.join("auth.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -1646,5 +1666,234 @@ fn each_tool_may_adopt_the_same_directory() {
     assert_eq!(
         code, 0,
         "codex could not adopt the directory claude holds: {out}{err}"
+    );
+}
+
+/// `use` has to reach every account the listing shows, whatever tool holds it.
+///
+/// `use` asked ONE registry - the helper that reads `--tool` collapses "no
+/// --tool given" to claude-code - while `ls` asks every registry. A Codex-only
+/// account was therefore listed and then rejected: `use cxonly` printed "no
+/// profile named 'cxonly'" and exited 5, and only `--tool codex` moved it.
+/// `use --help` promises the opposite: "default: every tool the profile has".
+#[test]
+fn a_codex_only_account_is_reachable_by_a_bare_use() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cxonly", "cx@example.com");
+
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(
+        listing.contains("cxonly"),
+        "`ls` does not list it:\n{listing}"
+    );
+
+    let (_, err, code) = run(root, &["use", "cxonly"]);
+    assert_eq!(
+        code, 0,
+        "`use cxonly` rejected an account `ls` shows: {err}"
+    );
+
+    // The default is who pays while nobody is serving, so the listing has to
+    // name it - the same check every other switch here makes.
+    let (after, _, _) = run(root, &["ls"]);
+    let marked: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(
+        marked.len(),
+        1,
+        "after `use cxonly` exactly one row should pay:\n{after}"
+    );
+    assert!(
+        marked[0].contains("cxonly"),
+        "the paying row names someone else:\n{}",
+        marked[0]
+    );
+}
+
+/// One row in `ls` is one account, so `use` moves all of it.
+///
+/// A name can be a saved Claude profile and a Codex slot at once, and `ls`
+/// draws that as a single row. `use mix` reported success having moved only
+/// the Claude half: the Codex default was left where it was, with nothing on
+/// any screen saying so.
+#[test]
+fn use_moves_every_tool_of_an_account_that_spans_two() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-mix", "mix@example.com");
+    run(root, &["add", "mix"]);
+    seed_codex_slot(root, "mix", "mix@example.com");
+    // Claude is signed in as someone else, so the Claude half is a real move.
+    seed_claude(root, "uuid-oth", "oth@example.com");
+    run(root, &["add", "other"]);
+
+    let (_, err, code) = run(root, &["use", "mix"]);
+    assert_eq!(code, 0, "`use mix` failed: {err}");
+
+    let (after, _, _) = run(root, &["ls"]);
+    let row = after
+        .lines()
+        .find(|l| l.trim_start_matches(['*', ' ']).starts_with("mix "))
+        .unwrap_or_else(|| panic!("no row for mix:\n{after}"));
+    assert!(
+        row.contains("claude-code*"),
+        "the claude half did not move:\n{after}"
+    );
+    assert!(
+        row.contains("pays"),
+        "the codex half did not move:\n{after}"
+    );
+}
+
+/// A slot switch must not also copy a credential over the live login.
+///
+/// `migrate --tool claude` leaves an account holding both a Claude slot and a
+/// Claude snapshot, so `use` had two ways to move the same tool and took both:
+/// it repointed the default AND wrote the snapshot over whoever was signed in.
+/// A credential copy is what the slot model buys its way out of - it is what
+/// makes a rotating token log the other session out.
+#[test]
+fn a_slot_switch_does_not_copy_over_the_live_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-dual", "dual@example.com");
+    seed_live_codex(root, "dual@example.com");
+    run(root, &["add", "dual"]);
+    // Claude gets a slot, Codex does not, so the profile still covers a tool no
+    // slot took and the copy-model path still has something to do.
+    run(root, &["migrate", "--tool", "claude"]);
+    // Someone else is signed in to Claude, so a copy would be visible.
+    seed_claude(root, "uuid-oth", "oth@example.com");
+    run(root, &["add", "other"]);
+
+    let (_, err, code) = run(root, &["use", "dual"]);
+    assert_eq!(code, 0, "`use dual` failed: {err}");
+
+    let (after, _, _) = run(root, &["ls"]);
+    // The slot did move: the default pays while nobody is serving.
+    let marked: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(marked.len(), 1, "exactly one row should pay:\n{after}");
+    assert!(
+        marked[0].contains("dual"),
+        "the paying row names someone else:\n{}",
+        marked[0]
+    );
+    // Nothing was written to the live Claude dir: the star has not moved.
+    let other = after
+        .lines()
+        .find(|l| l.trim_start_matches(['*', ' ']).starts_with("other "))
+        .unwrap_or_else(|| panic!("no row for other:\n{after}"));
+    assert!(
+        other.contains("claude-code*"),
+        "the live claude login was overwritten:\n{after}"
+    );
+}
+
+/// `restore` undoes the LAST switch. A slot switch moves a pointer, not a
+/// credential, so its undo is repointing the default back - the copy-model
+/// backup belongs to some older switch. Reaching for that backup left the slot
+/// switch standing and wrote a third account, saved nowhere, over the live
+/// login instead.
+#[test]
+fn restore_undoes_a_slot_switch_not_an_older_backup() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "alpha@example.com");
+    run(root, &["add", "alpha"]);
+    seed_claude(root, "uuid-b", "beta@example.com");
+    run(root, &["add", "beta"]);
+    run(root, &["migrate", "--tool", "claude"]);
+    // Added after the migration, so it is a profile and no slot: `use` still
+    // has a copy-model path to take, and that path leaves a backup.
+    seed_claude(root, "uuid-g", "gamma@example.com");
+    run(root, &["add", "gamma"]);
+    // Signed in by hand and saved nowhere - what the stale backup holds.
+    seed_claude(root, "uuid-d", "delta@example.com");
+
+    run(root, &["use", "gamma"]);
+    run(root, &["use", "beta"]);
+    run(root, &["use", "alpha"]);
+
+    let (_, err, code) = run(root, &["restore"]);
+    assert_eq!(code, 0, "`restore` failed: {err}");
+
+    let (after, _, _) = run(root, &["ls"]);
+    let marked: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(marked.len(), 1, "exactly one row should pay:\n{after}");
+    assert!(
+        marked[0].contains("beta"),
+        "the slot switch was not undone:\n{after}"
+    );
+    let live = after
+        .lines()
+        .find(|l| l.contains("claude-code*"))
+        .unwrap_or_else(|| panic!("nothing holds the live login:\n{after}"));
+    assert!(
+        live.contains("gamma"),
+        "the live login was overwritten from an older backup:\n{live}"
+    );
+}
+
+/// The other side of the same seam: in a store that holds slots, a switch that
+/// went the copy model still has to come back from the credential backup.
+/// Repointing a default there would leave the live login where the bad switch
+/// put it.
+#[test]
+fn restore_of_a_copy_model_switch_still_uses_the_backup() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "alpha@example.com");
+    run(root, &["add", "alpha"]);
+    seed_claude(root, "uuid-b", "beta@example.com");
+    run(root, &["add", "beta"]);
+    run(root, &["migrate", "--tool", "claude"]);
+    seed_claude(root, "uuid-g", "gamma@example.com");
+    run(root, &["add", "gamma"]);
+    seed_claude(root, "uuid-d", "delta@example.com");
+
+    let (before, _, _) = run(root, &["ls"]);
+    let payer_before: Vec<&str> = before.lines().filter(|l| l.contains("pays")).collect();
+
+    run(root, &["use", "gamma"]);
+    let (out, err, code) = run(root, &["restore"]);
+    assert_eq!(code, 0, "`restore` failed: {err}");
+    assert!(
+        out.contains("delta@example.com"),
+        "the backed-up login did not come back:\n{out}"
+    );
+
+    let (after, _, _) = run(root, &["ls"]);
+    let payer_after: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(
+        payer_before, payer_after,
+        "a copy-model restore moved the default pointer:\n{after}"
+    );
+}
+
+/// Selecting the account that is already the default records a switch that
+/// changed nothing. Undoing that one has to reach past it, or `restore` puts
+/// back what is already there and the switch before it is stranded.
+#[test]
+fn restore_reaches_past_a_slot_switch_that_changed_nothing() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "alpha@example.com");
+    run(root, &["add", "alpha"]);
+    seed_claude(root, "uuid-b", "beta@example.com");
+    run(root, &["add", "beta"]);
+    run(root, &["migrate", "--tool", "claude"]);
+
+    run(root, &["use", "beta"]);
+    run(root, &["use", "alpha"]);
+    run(root, &["use", "alpha"]);
+
+    let (_, err, code) = run(root, &["restore"]);
+    assert_eq!(code, 0, "`restore` failed: {err}");
+    let (after, _, _) = run(root, &["ls"]);
+    let marked: Vec<&str> = after.lines().filter(|l| l.contains("pays")).collect();
+    assert_eq!(marked.len(), 1, "exactly one row should pay:\n{after}");
+    assert!(
+        marked[0].contains("beta"),
+        "`restore` stopped at the switch that changed nothing:\n{after}"
     );
 }

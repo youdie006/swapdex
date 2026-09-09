@@ -187,7 +187,7 @@ fn claim_refresh_at(dir: &Path, now_secs: i64) -> bool {
 
 pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
     // A slot the tool is using is never touched - see the module note.
-    if slot_in_use(dir) {
+    if slot_in_use(dir, "claude-code") {
         return Err(RefreshError::InUse);
     }
     // Claimed HERE, not at a caller: every path that spends this token passes
@@ -244,8 +244,8 @@ fn short_reason(body: &str) -> String {
 /// Is a tool currently running with this slot as its home? Checked by the
 /// environment of the running processes, since that is what actually decides
 /// which credential a process holds.
-fn slot_in_use(dir: &Path) -> bool {
-    crate::proc::config_dir_in_use(dir)
+fn slot_in_use(dir: &Path, tool: &str) -> bool {
+    crate::proc::config_dir_in_use(dir, tool)
 }
 
 /// The credential blob wherever this slot keeps it.
@@ -395,7 +395,7 @@ pub fn rfc3339_utc(secs: i64) -> String {
 /// would break the session's own next renewal), and the claim is taken here -
 /// where the token is SPENT - so two callers cannot spend it twice.
 pub fn refresh_codex_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
-    if slot_in_use(dir) {
+    if slot_in_use(dir, "codex") {
         return Err(RefreshError::InUse);
     }
     if !claim_refresh_at(dir, now_ms / 1000) {
@@ -866,5 +866,58 @@ mod point_of_effect_tests {
             "nobody needs to sign in: {r}"
         );
         assert!(r.contains("rnd"), "name the account: {r}");
+    }
+}
+
+#[cfg(test)]
+mod codex_in_use_tests {
+    use super::*;
+
+    /// The Codex renewal refuses a slot a live session is on.
+    ///
+    /// This is the guard `refresh_codex_slot` documents, and the reason the
+    /// keep-alive sweep cannot log an account out: the session in that slot
+    /// holds the refresh token the renewal retires, so its own next renewal
+    /// would fail. The slot deliberately has no `auth.json`, so a renewal that
+    /// gets past the guard stops at `NoCredential` - what this asserts against -
+    /// without reaching the network.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_running_session_refuses_the_renewal() {
+        let root = std::env::temp_dir().join(format!("swapdex_cx_ref_{}", std::process::id()));
+        let slot = root.join("slot");
+        std::fs::create_dir_all(&slot).unwrap();
+        let bin = root.join("codex");
+        std::fs::copy("/bin/sleep", &bin)
+            .or_else(|_| std::fs::copy("/usr/bin/sleep", &bin))
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+
+        let mut child = std::process::Command::new(&bin)
+            .arg("30")
+            .env("CODEX_HOME", &slot)
+            .spawn()
+            .unwrap();
+        // Wait for the exec, not for the code under test: a process is only on
+        // its slot once its environment exists.
+        let environ = format!("/proc/{}/environ", child.id());
+        for _ in 0..300 {
+            if std::fs::read(&environ).is_ok_and(|b| !b.is_empty()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let verdict = refresh_codex_slot(&slot, 1_700_000_000_000);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            matches!(verdict, Err(RefreshError::InUse)),
+            "renewed a slot a live session holds: {verdict:?}"
+        );
     }
 }
