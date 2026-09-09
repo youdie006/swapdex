@@ -1182,14 +1182,24 @@ fn a_name_reserved_at_creation_is_refused_by_every_creator() {
     let (out, err, code) = run(root, &["run", "-", "--no-launch"]);
     assert_ne!(code, 0, "run accepted '-': {out}{err}");
 
+    // The whole leading-dash range, not just the toggle. clap refuses these as
+    // bare positionals, so they arrive the only way they can - after `--`, the
+    // form migrate and a 0.2.x store can still hand over.
+    let (out, err, code) = run(root, &["adopt", "--", "-x", dir.to_str().unwrap()]);
+    assert_ne!(code, 0, "adopt accepted '-x': {out}{err}");
+    let (out, err, code) = run(root, &["run", "--no-launch", "--", "-x"]);
+    assert_ne!(code, 0, "run accepted '-x': {out}{err}");
+    let (out, err, code) = run(root, &["add", "--", "-x"]);
+    assert_ne!(code, 0, "add accepted '-x': {out}{err}");
+
     let rows: Vec<serde_json::Value> = std::fs::read(root.join(".local/share/swapdex/slots.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     for r in &rows {
-        assert_ne!(
-            r["name"].as_str(),
-            Some("-"),
+        let n = r["name"].as_str().unwrap_or_default();
+        assert!(
+            !n.starts_with('-'),
             "a name reserved at creation was registered: {rows:?}"
         );
     }

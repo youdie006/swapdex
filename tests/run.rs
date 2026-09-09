@@ -334,6 +334,48 @@ fn migrate_renames_a_legacy_profile_whose_name_no_creator_accepts() {
     );
 }
 
+/// The sign-in line migrate prints has to be a line that runs.
+///
+/// Every remedy this tool prints - about thirty of them - puts the slot name
+/// where clap expects a positional, so a name beginning with `-` is read there
+/// as an option and the command exits 2 before it reaches the account. Nothing
+/// refused such a name where an account is born, so migrate registered it and
+/// then handed out a command that cannot work.
+#[test]
+fn the_sign_in_line_migrate_prints_can_be_run() {
+    let root = tempfile::tempdir().unwrap();
+    seed_copy_profile(root.path(), "-x");
+    let out = Command::new(bin())
+        .args(["migrate"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let o = String::from_utf8_lossy(&out.stdout);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "migrate failed: {o}{e}");
+
+    let line = o
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("swapdex run "))
+        .unwrap_or_else(|| panic!("migrate printed no sign-in line: {o}"));
+    let args: Vec<&str> = line.split_whitespace().skip(1).collect();
+
+    let ran = Command::new(bin())
+        .args(&args)
+        .arg("--no-launch")
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "the line migrate printed does not run: `{line}`\n{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
 #[test]
 fn doctor_reports_slots_default_and_shim() {
     let root = tempfile::tempdir().unwrap();

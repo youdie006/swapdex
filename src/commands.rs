@@ -294,11 +294,17 @@ fn reject_bad_name(name: &str) -> Option<i32> {
     }
 }
 
-/// Additionally reject "-" where a profile is CREATED (`use -` toggles, so a
-/// new profile must never take that name; a legacy one stays manageable).
+/// Additionally reject a leading "-" where a profile is CREATED - the same rule
+/// `Slots::name_is_reserved` enforces one layer down, and for the same reasons:
+/// `use -` toggles, and every remedy this tool prints reads a leading "-" as an
+/// option. A legacy profile carrying one stays manageable.
 fn reject_reserved_name(name: &str) -> Option<i32> {
-    if name == "-" {
-        eprintln!("swapdex: '-' is reserved (`swapdex use -` toggles to the previous profile)");
+    if name.trim().starts_with('-') {
+        eprintln!(
+            "swapdex: '{name}' cannot start with '-': every command that names a \
+             profile reads it there as an option, and `swapdex use -` toggles to \
+             the previous profile"
+        );
         Some(2)
     } else if name.trim().is_empty() {
         // CREATION-time only (like '-'): a legacy all-whitespace profile from

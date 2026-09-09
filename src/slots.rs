@@ -169,19 +169,31 @@ fn reject_invalid_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The extra rule the two creators owe. `swapdex use -` toggles to the previous
-/// account, so a new account must never take that name; `valid_profile_name`
-/// keeps allowing it so a legacy one can still be renamed out of it or removed.
+/// The extra rule the two creators owe: an account name may not begin with `-`.
+///
+/// `swapdex use -` toggles to the previous account, so a new one must never take
+/// that exact name. The rest of the range is refused because every message this
+/// tool prints about an account - some thirty of them - puts the name where clap
+/// expects a positional, and a leading `-` is read there as an option: the
+/// remedy exits 2 before it reaches the account it names.
+///
+/// `valid_profile_name` keeps allowing the whole range so a legacy account
+/// carrying such a name stays renamable and removable (as `-- <name>`).
 ///
 /// Public because `migrate` has to ask the question BEFORE it creates: a legacy
-/// profile carrying this name is renamed, the way a tool-home name already is.
+/// profile carrying such a name is renamed, the way a tool-home name already is.
 pub fn name_is_reserved(name: &str) -> bool {
-    name.trim() == "-"
+    name.trim().starts_with('-')
 }
 
 fn reject_reserved_name(name: &str) -> Result<()> {
     if name_is_reserved(name) {
-        bail!("'-' is reserved (`swapdex use -` toggles to the previous account)");
+        bail!(
+            "'{name}' cannot start with '-': every command that names an account \
+             reads it there as an option, and `swapdex use -` toggles to the \
+             previous account. Try '{}'",
+            suggest_non_colliding(name, &[])
+        );
     }
     Ok(())
 }
