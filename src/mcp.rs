@@ -160,8 +160,11 @@ fn list_accounts(paths: &Paths) -> Value {
     // Allowlist: name, tools, active_tools. NEVER email/uuid/path/token (A13).
     // Per-tool active so a mixed cross-tool state is representable.
     let active = crate::commands::active_by_tool(&store, paths);
-    let rows: Vec<Value> = store
-        .list()
+    // Slots are accounts too, and the only ones on a machine set up with `run`.
+    // `ls`, `use` and `rm` merge both registries; this listing did not, so an
+    // agent asking swapdex what accounts exist was told there were none.
+    let (profiles, _slot_dirs, _unreadable) = crate::commands::merged_accounts(paths, &store);
+    let rows: Vec<Value> = profiles
         .iter()
         .map(|p| {
             let active_tools: Vec<&str> = active

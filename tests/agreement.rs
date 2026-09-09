@@ -2434,3 +2434,83 @@ fn setup_accepts_a_name_whose_slot_holds_nothing_readable() {
         "setup refused over a slot holding no readable account:\n{out}{err}"
     );
 }
+
+/// Ask the MCP server for its account list the way an agent would.
+fn mcp_list_accounts(root: &Path) -> Vec<serde_json::Value> {
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_accounts"}}"#,
+        "\n",
+    );
+    let (out, err, code) = run_stdin(root, &["mcp"], input);
+    assert_eq!(code, 0, "mcp exited {code}:\n{out}{err}");
+    let reply = out
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no reply to list_accounts:\n{out}{err}"));
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("list_accounts returned no text: {reply}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("not a JSON array: {text}: {e}"))
+}
+
+/// The MCP list must name the accounts a switch can name.
+///
+/// An account can live as a registered slot alone - `swapdex run <name>` makes
+/// exactly that - and `ls`, `use` and `rm` all merge both registries. The tool
+/// read the snapshot store alone, so an agent asking swapdex what accounts
+/// exist was told none on a machine whose accounts are slots.
+#[test]
+fn mcp_lists_a_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+
+    let rows = mcp_list_accounts(root);
+    assert!(
+        rows.iter().any(|r| r["name"] == "work"),
+        "list_accounts hid a slot-only account: {rows:?}"
+    );
+}
+
+/// An account held as both a snapshot and a slot is still one account.
+///
+/// The two registries overlap, so a listing that merges them by concatenation
+/// names the same account twice and an agent counts two logins where there is
+/// one.
+#[test]
+fn mcp_lists_an_account_held_both_ways_once() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "work-uuid", "work@example.com");
+    let (o, e, c) = run(root, &["add", "work"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    seed_slot(root, "work", "work@example.com");
+
+    let rows = mcp_list_accounts(root);
+    let held: Vec<_> = rows.iter().filter(|r| r["name"] == "work").collect();
+    assert_eq!(held.len(), 1, "'work' listed twice: {rows:?}");
+}
+
+/// Widening the source must not cost the field that says which one is live.
+#[test]
+fn mcp_still_reports_active_tools_for_a_live_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "home-uuid", "me@example.com");
+    let (o, e, c) = run(root, &["add", "home"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+
+    let rows = mcp_list_accounts(root);
+    let row = rows
+        .iter()
+        .find(|r| r["name"] == "home")
+        .unwrap_or_else(|| panic!("'home' missing: {rows:?}"));
+    assert_eq!(
+        row["active_tools"],
+        serde_json::json!(["claude-code"]),
+        "active_tools lost: {row}"
+    );
+}
