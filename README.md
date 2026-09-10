@@ -280,6 +280,16 @@ their own slots, retiring the shared homes.
 like `~/.ssh`, and do not sync it across machines (it is single-machine,
 single-user by design).
 
+**Do not copy a credential out of the store for something else to use.** These
+refresh tokens are single-use: the server retires the outgoing one whenever a
+holder renews, so two programs holding one account's credential silently
+retire each other's. The copy that missed a renewal keeps working until its
+access token lapses, which is why the failure arrives hours or days after the
+change that caused it -- one such split cost a scheduled job 42 hours. A
+program that needs its own Codex or Claude access should sign in for itself;
+`swapdex` is for accounts a person switches between, not a credential source
+for other software.
+
 ### What it will not do
 
 These are structural properties, not promises -- the code is built so they

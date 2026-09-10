@@ -4,6 +4,37 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.156.0
+
+Two accounts of what is active disagreed on a real machine for six days, and
+the disagreement cost a scheduled job 42 hours before anything said a word.
+
+- **`ls` marks the account swapdex is actually pointing the tool at.** The
+  per-tool mark was read from the tool's own config dir, which the slot model
+  deliberately never writes -- a switch repoints a pointer and leaves that dir
+  alone. So on a machine whose dir was left behind by an earlier copy-model
+  switch, `ls` marked the abandoned account active while `serve`, the proxy and
+  the serving pointer all named a different one; the same listing printed
+  `<- pays` next to one account and the active mark next to another. The mark
+  now follows the pointer, and the login left behind gets a line of its own,
+  because it is still the one a plain `claude` or `codex` launches on when the
+  shim is not in the way.
+- **A saved login whose refresh token was retired elsewhere is refused, not
+  restored.** These tokens are single-use: the server retires the outgoing one
+  the moment a holder renews. Two holders of one account that differ in the
+  refresh token are therefore not two copies of a login -- one is dead. The
+  staleness check could not see this: it asks how long ago a snapshot was
+  written and calls thirty days old, while a rotation can retire a token
+  minutes after it is saved. `use` now compares the snapshot against the live
+  slots for the same account and refuses when a rotation has passed it by,
+  naming what happened rather than handing the tool credentials it cannot
+  renew.
+- **`serve --quiet` says what it prints.** The help promised just a name; it has
+  emitted the login and the remaining windows since 0.84.0, which is what the
+  shim labels its provider with.
+- The README now says not to copy a credential out of the store for another
+  program to use, and why the resulting failure arrives days later.
+
 ## 0.155.0
 
 A machine that could not add a second Claude account, however many times it was

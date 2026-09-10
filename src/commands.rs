@@ -865,6 +865,21 @@ fn use_account_inner(
             continue;
         }
         warn_if_expired(&target, tool);
+        // A retired token is not a stale one: restoring it does not give a
+        // worse login, it gives a dead one, and the tool discovers that only
+        // when its next renewal is refused.
+        if snapshot_rotated_away(paths, &target, tool) {
+            eprintln!(
+                "swapdex: {tool}: this saved login's refresh token was retired when another \
+                 holder of the same account renewed it - these tokens are single-use, so the \
+                 copy that missed a renewal is dead. Restoring it would leave {tool} unable to \
+                 renew. Switch to the slot that holds the current token, or sign in again and \
+                 re-save with `swapdex add {name} --tool {} --update`.",
+                pretty_tool_flag(tool)
+            );
+            failed.push(tool);
+            continue;
+        }
         if dry_run {
             match profile_detail(&store, name, tool).and_then(|(email, _, _)| email) {
                 Some(email) => println!("would switch {tool} -> {name} ({email})"),
@@ -1979,13 +1994,52 @@ pub(crate) fn active_by_tool(store: &Store, paths: &Paths) -> Vec<(&'static str,
     adapters::all()
         .iter()
         .filter_map(|a| {
+            let tool = a.name();
+            // Under the slot model the pointer IS the answer: a switch repoints
+            // it and deliberately never writes the tool's own config dir. So
+            // reading that dir reports whatever an earlier copy-model switch
+            // left behind - on a real machine an account abandoned six days
+            // earlier, marked active while `serve`, the proxy and the serving
+            // pointer all named a different one.
+            if let Some(name) = slot_default_name(paths, tool) {
+                return Some((tool, name));
+            }
             a.identity(paths)
                 .ok()
                 .flatten()
-                .and_then(|id| matched_profile_name(store, a.name(), &id.account_id))
-                .map(|name| (a.name(), name))
+                .and_then(|id| matched_profile_name(store, tool, &id.account_id))
+                .map(|name| (tool, name))
         })
         .collect()
+}
+
+/// The name of the slot a tool's default pointer names, when it has one.
+pub(crate) fn slot_default_name(paths: &Paths, tool: &str) -> Option<String> {
+    let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+    let dir = slots.default_dir()?;
+    slots
+        .list()
+        .into_iter()
+        .find(|r| r.config_dir == dir)
+        .map(|r| r.name)
+}
+
+/// The profile whose login sits in the tool's OWN config dir, when that is not
+/// the one the pointer names.
+///
+/// Both are true at once and they answer different questions: the pointer says
+/// who swapdex serves, the tool's dir says who an unshimmed launch would use.
+/// Reporting only the first hides exactly the state this returns.
+pub(crate) fn tool_dir_disagrees(
+    store: &Store,
+    paths: &Paths,
+    tool: &str,
+    pointed_at: &str,
+) -> Option<String> {
+    let adapter = adapters::all().into_iter().find(|a| a.name() == tool)?;
+    let id = adapter.identity(paths).ok().flatten()?;
+    let live = matched_profile_name(store, tool, &id.account_id)?;
+    (live != pointed_at).then_some(live)
 }
 
 /// Pad-or-truncate to `w` DISPLAY columns (CJK chars occupy two; counting
@@ -2344,6 +2398,25 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         > 1
     {
         println!("  (* marks the active account per tool)");
+    }
+    // The mark follows the pointer, so a login left behind in the tool's own
+    // config dir would otherwise be invisible - and it is the one an unshimmed
+    // launch still lands on. Saying both is the only honest answer here.
+    for (tool, pointed_at) in &active {
+        // Only the pointer can disagree with the tool's dir. Without one the
+        // mark was READ from that dir, so comparing the two compares a value
+        // with itself - and, since each side reads the file separately, a tool
+        // rewriting it mid-listing made that self-comparison briefly fail.
+        if slot_default_name(paths, tool).is_none() {
+            continue;
+        }
+        if let Some(live) = tool_dir_disagrees(&store, paths, tool, pointed_at) {
+            println!(
+                "  (a plain `{}` would launch on '{live}', not the account marked here - \
+                 run `swapdex shim` so it follows your switches)",
+                tool_binary(tool)
+            );
+        }
     }
     Ok(0)
 }
@@ -9058,6 +9131,56 @@ fn expiry_note(expires_at: Option<i64>, tool: &str) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// The (account, refresh token) a Codex credential blob carries, when both read.
+fn codex_cred_pair(bytes: &[u8]) -> Option<(String, String)> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    let t = v.get("tokens")?;
+    Some((
+        t["account_id"].as_str()?.to_string(),
+        t["refresh_token"].as_str()?.to_string(),
+    ))
+}
+
+/// Whether a rotation some live slot redeemed has already retired this
+/// snapshot's refresh token.
+///
+/// These tokens are single-use: the server retires the outgoing one the moment
+/// a holder redeems it. So two holders of ONE account that differ in the
+/// refresh token are not two copies of a login - one of them is dead, and
+/// restoring it hands the tool credentials it cannot renew. The slot need not
+/// belong to this profile; what matters is that some slot redeemed a rotation
+/// this copy did not get.
+///
+/// This is what the wall-clock staleness check cannot see. That one asks how
+/// long ago the snapshot was written, and a rotation can retire a token minutes
+/// later - a real machine sat six days between the rotation and the failure,
+/// because the access token kept working until it lapsed and only the renewal
+/// it then attempted was refused.
+///
+/// Codex only: it is the tool that keeps both halves of the pair in one
+/// readable blob. An unreadable file on either side is not a verdict - a switch
+/// must never be blocked by something that could not be parsed.
+fn snapshot_rotated_away(paths: &Paths, target: &crate::adapters::Snapshot, tool: &str) -> bool {
+    if tool != "codex" {
+        return false;
+    }
+    let Some((account, refresh)) = target
+        .part("auth")
+        .and_then(|s| codex_cred_pair(s.expose()))
+    else {
+        return false;
+    };
+    let Ok(slots) = crate::slots::Slots::open_for(paths, tool) else {
+        return false;
+    };
+    slots.list().into_iter().any(|r| {
+        std::fs::read(r.config_dir.join("auth.json"))
+            .ok()
+            .and_then(|b| codex_cred_pair(&b))
+            .is_some_and(|(a, rt)| a == account && rt != refresh)
+    })
 }
 
 fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {

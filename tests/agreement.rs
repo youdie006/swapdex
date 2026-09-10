@@ -60,6 +60,20 @@ fn seed_claude(root: &Path, uuid: &str, email: &str) {
     chmod600(&root.join(".claude.json"));
 }
 
+/// The email the LIVE Claude login carries, read from the tool's own file.
+///
+/// A test about what a switch WROTE has to read the file. The mark in `ls`
+/// follows the slot pointer, which answers who pays - a different question, and
+/// under the slot model the two are routinely different accounts.
+fn live_claude_email(root: &Path) -> String {
+    let bytes = std::fs::read(root.join(".claude.json")).expect("read the live .claude.json");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("parse the live .claude.json");
+    v["oauthAccount"]["emailAddress"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// A registered SLOT: an account that can actually pay for turns. `add` saves a
 /// snapshot, which is a different thing - serving reads a slot's own credential
 /// directory, so a snapshot cannot serve until it has been run once.
@@ -1778,13 +1792,10 @@ fn a_slot_switch_does_not_copy_over_the_live_login() {
         "the paying row names someone else:\n{}",
         marked[0]
     );
-    // Nothing was written to the live Claude dir: the star has not moved.
-    let other = after
-        .lines()
-        .find(|l| l.trim_start_matches(['*', ' ']).starts_with("other "))
-        .unwrap_or_else(|| panic!("no row for other:\n{after}"));
-    assert!(
-        other.contains("claude-code*"),
+    // Nothing was written to the live Claude dir.
+    assert_eq!(
+        live_claude_email(root),
+        "oth@example.com",
         "the live claude login was overwritten:\n{after}"
     );
 }
@@ -1824,13 +1835,10 @@ fn restore_undoes_a_slot_switch_not_an_older_backup() {
         marked[0].contains("beta"),
         "the slot switch was not undone:\n{after}"
     );
-    let live = after
-        .lines()
-        .find(|l| l.contains("claude-code*"))
-        .unwrap_or_else(|| panic!("nothing holds the live login:\n{after}"));
-    assert!(
-        live.contains("gamma"),
-        "the live login was overwritten from an older backup:\n{live}"
+    assert_eq!(
+        live_claude_email(root),
+        "gamma@example.com",
+        "the live login was overwritten from an older backup:\n{after}"
     );
 }
 
@@ -2116,12 +2124,9 @@ fn open_does_not_copy_over_the_slot_it_switched() {
         "the paying row names someone else:\n{}",
         marked[0]
     );
-    let other = after
-        .lines()
-        .find(|l| l.trim_start_matches(['*', ' ']).starts_with("other "))
-        .unwrap_or_else(|| panic!("no row for other:\n{after}"));
-    assert!(
-        other.contains("claude-code*"),
+    assert_eq!(
+        live_claude_email(root),
+        "oth@example.com",
         "the live claude login was overwritten:\n{after}"
     );
 }
@@ -2512,5 +2517,201 @@ fn mcp_still_reports_active_tools_for_a_live_account() {
         row["active_tools"],
         serde_json::json!(["claude-code"]),
         "active_tools lost: {row}"
+    );
+}
+
+/// A codex slot with its account and refresh token spelled out.
+///
+/// `seed_codex_slot` fixes both, which is what most tests want. A rotation is
+/// only visible when two holders of ONE account differ in the refresh token, so
+/// these tests have to set the pair themselves.
+fn seed_codex_slot_as(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
+    let dir = root.join(".local/share/swapdex/slots").join(name);
+    std::fs::create_dir_all(dir.join("sessions")).unwrap();
+    std::fs::write(
+        dir.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-09-03T02:56:06Z",
+            "tokens": {"id_token": codex_id_token(email), "access_token": "AT",
+                       "refresh_token": refresh, "account_id": account_id}}))
+        .unwrap(),
+    )
+    .unwrap();
+    chmod600(&dir.join("auth.json"));
+
+    let reg = root.join(".local/share/swapdex/slots.json");
+    let mut rows: Vec<serde_json::Value> = std::fs::read(&reg)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    rows.push(serde_json::json!({
+        "name": name, "id": name, "config_dir": dir.to_string_lossy(),
+        "adopted": false, "tool": "codex"}));
+    std::fs::write(&reg, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+}
+
+/// A saved copy-model codex snapshot in the store.
+fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
+    let d = root
+        .join(".local/share/swapdex/accounts")
+        .join(name)
+        .join("codex");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("auth"),
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-09-03T02:56:06Z",
+            "tokens": {"id_token": codex_id_token(email), "access_token": "AT",
+                       "refresh_token": refresh, "account_id": account_id}}))
+        .unwrap(),
+    )
+    .unwrap();
+    chmod600(&d.join("auth"));
+}
+
+/// A snapshot whose refresh token was rotated away is dead, not merely old.
+///
+/// These refresh tokens are single-use: redeeming one retires the copy every
+/// other holder is carrying. So when a live slot and a saved snapshot name the
+/// SAME account but differ in the refresh token, the snapshot's token is one
+/// the server has already retired, and restoring it hands the tool a login that
+/// cannot renew itself. The wall-clock staleness check cannot see this - it
+/// measures how long ago the snapshot was written, and a rotation can retire a
+/// token minutes after it is saved.
+///
+/// A real machine sat in exactly this state for six days with nothing said: the
+/// slot held a live pair, the snapshot and the tool's own dir held the retired
+/// one, and the failure surfaced only when the access token lapsed and the
+/// renewal it then attempted was refused.
+#[test]
+fn use_refuses_a_codex_snapshot_whose_refresh_token_was_rotated_away() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
+    seed_codex_snapshot(root, "stale", "shared@example.com", "acct-shared", "RT-OLD");
+
+    let (out, err, code) = run(root, &["use", "stale", "--tool", "codex"]);
+    let said = format!("{out}{err}");
+    assert_ne!(
+        code, 0,
+        "a retired snapshot was restored as a success:\n{said}"
+    );
+    assert!(
+        said.contains("rotated") || said.contains("retired") || said.contains("revoked"),
+        "nothing said the refresh token was retired by another holder:\n{said}"
+    );
+}
+
+/// The rotation check must not fire on the copy that IS current.
+///
+/// Two holders of one account are normal - a slot and the snapshot it was
+/// captured from agree until something rotates. A check that refused those too
+/// would refuse every healthy switch and get taken back out.
+#[test]
+fn a_codex_snapshot_holding_the_live_refresh_token_still_switches() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-SAME");
+    seed_codex_snapshot(root, "twin", "shared@example.com", "acct-shared", "RT-SAME");
+
+    let (out, err, code) = run(root, &["use", "twin", "--tool", "codex"]);
+    assert_eq!(
+        code, 0,
+        "a snapshot holding the live token was refused:\n{out}{err}"
+    );
+}
+
+/// `ls` must mark the account swapdex is actually pointing the tool at.
+///
+/// The per-tool mark was read from the tool's OWN config dir, which the slot
+/// model does not write: switching repoints a pointer and leaves the tool's dir
+/// alone. On a machine whose dir was left behind by an earlier copy-model
+/// switch, `ls` therefore marked the abandoned account active while every
+/// switch, the proxy and the serving pointer all named a different one.
+#[test]
+fn the_codex_active_marker_follows_the_slot_pointer() {
+    let t = fixture();
+    let root = t.path();
+    // An orphan login in the tool's own dir, saved as a profile so the mark has
+    // a name to land on.
+    seed_live_codex(root, "orphan@example.com");
+    let (o, e, c) = run(root, &["add", "orphan"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    seed_codex_slot(root, "cx-one", "one@example.com");
+    let (_, err, code) = run(root, &["use", "cx-one", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, _, _) = run(root, &["ls"]);
+    let row = |n: &str| {
+        out.lines()
+            .find(|l| l.contains(n))
+            .unwrap_or("")
+            .to_string()
+    };
+    assert!(
+        row("cx-one").contains("codex*"),
+        "the pointer names cx-one but ls does not mark it:\n{out}"
+    );
+    assert!(
+        !row("orphan").contains("codex*"),
+        "ls marks an orphaned tool dir as the active codex account:\n{out}"
+    );
+}
+
+/// A tool dir that disagrees with the pointer is news, not something to hide.
+///
+/// Reading the mark off the pointer alone would make the orphan invisible - and
+/// an unshimmed launch still lands on whatever the tool's own dir holds. The
+/// disagreement is the thing a reader needs, since it is the state in which the
+/// account swapdex reports and the account that actually pays are different.
+#[test]
+fn a_tool_dir_that_disagrees_with_the_pointer_is_reported() {
+    let t = fixture();
+    let root = t.path();
+    seed_live_codex(root, "orphan@example.com");
+    let (o, e, c) = run(root, &["add", "orphan"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    seed_codex_slot(root, "cx-one", "one@example.com");
+    let (_, err, code) = run(root, &["use", "cx-one", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err, _) = run(root, &["ls"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("orphan"),
+        "the abandoned login in the tool's own dir is never mentioned:\n{said}"
+    );
+    assert!(
+        said.contains("not the account") || said.contains("would launch") || said.contains("stale"),
+        "nothing explains that an unshimmed launch lands somewhere else:\n{said}"
+    );
+}
+
+/// The disagreement note must stay silent when the two agree.
+///
+/// It fires on a comparison, and a note that also fired when the pointer and
+/// the tool's own dir named the SAME account would tell every healthy machine
+/// that a plain launch goes somewhere else. That reads as a warning about
+/// nothing, and a warning about nothing is what gets a real one ignored.
+#[test]
+fn a_tool_dir_that_agrees_with_the_pointer_is_not_reported() {
+    let t = fixture();
+    let root = t.path();
+    seed_live_codex(root, "same@example.com");
+    let (o, e, c) = run(root, &["add", "same"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    // The slot carries the profile's own name, so the pointer and the tool's
+    // dir resolve to one account.
+    seed_codex_slot(root, "same", "same@example.com");
+    let (_, err, code) = run(root, &["use", "same", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err, _) = run(root, &["ls"]);
+    let said = format!("{out}{err}");
+    assert!(
+        !said.contains("would launch"),
+        "the note fired although the pointer and the tool's dir agree:\n{said}"
     );
 }

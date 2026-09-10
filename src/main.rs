@@ -94,7 +94,7 @@ enum Cmd {
         /// Which tool (default: claude)
         #[arg(long, value_enum)]
         tool: Option<ToolSel>,
-        /// Print just the name of the account that pays the next turn
+        /// One line for a status bar: who pays, their login, and what is left
         #[arg(long)]
         quiet: bool,
     },
