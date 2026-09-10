@@ -4470,3 +4470,92 @@ fn quota_marks_only_the_pointed_at_slot_active() {
         "the pointer names 'two' and exactly one row should be active: {v}"
     );
 }
+
+/// Register a codex slot at `dir`, without touching its conversation store.
+fn seed_codex_slot_bare(root: &Path, name: &str, dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let store = root.join(".local/share/swapdex");
+    std::fs::create_dir_all(&store).unwrap();
+    let file = store.join("slots.json");
+    let mut list: Vec<serde_json::Value> = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    list.push(serde_json::json!({
+        "name": name, "id": format!("id-{name}"), "config_dir": dir,
+        "adopted": true, "tool": "codex"
+    }));
+    std::fs::write(&file, serde_json::to_vec(&list).unwrap()).unwrap();
+}
+
+/// `share-history` must share the store the resume picker reads, not only the
+/// transcripts.
+///
+/// Codex keeps its conversation LIST in a thread history store beside the
+/// rollout files. Sharing `sessions/` alone left a switched account with every
+/// transcript on disk and an empty picker, and `share-history` reported success
+/// while doing it - the same "not lost, but invisible" the Claude side fixed
+/// for `projects/`. A slot that had never run Codex had no store at all.
+#[test]
+fn share_history_links_the_codex_thread_store() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = root.path().join(".codex");
+    std::fs::create_dir_all(bare.join("sessions")).unwrap();
+    std::fs::write(bare.join("thread_history_1.sqlite"), b"shared-db").unwrap();
+    std::fs::write(bare.join("session_index.jsonl"), b"{}\n").unwrap();
+    let slot = root.path().join("slot-fresh");
+    seed_codex_slot_bare(root.path(), "fresh", &slot);
+
+    let (o, e, c) = run(root.path(), &["share-history", "--tool", "codex"]);
+    assert_eq!(c, 0, "share-history failed:\n{o}{e}");
+
+    let linked = slot.join("thread_history_1.sqlite");
+    assert!(
+        std::fs::symlink_metadata(&linked)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "the thread store was not shared:\n{o}{e}"
+    );
+    assert_eq!(
+        std::fs::read(&linked).unwrap(),
+        b"shared-db",
+        "the link does not reach the shared store"
+    );
+}
+
+/// A slot holding its own store is never linked over.
+///
+/// Its store holds conversations the shared one may not, and replacing it with
+/// a link would put them out of reach - the exact harm this command exists to
+/// undo. On a real machine the slot holding every conversation for one project
+/// was the one that would have been overwritten.
+#[test]
+fn share_history_never_replaces_a_slots_own_thread_store() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = root.path().join(".codex");
+    std::fs::create_dir_all(bare.join("sessions")).unwrap();
+    std::fs::write(bare.join("thread_history_1.sqlite"), b"shared-db").unwrap();
+    let slot = root.path().join("slot-own");
+    seed_codex_slot_bare(root.path(), "own", &slot);
+    std::fs::write(slot.join("thread_history_1.sqlite"), b"ITS-OWN").unwrap();
+
+    let (o, e, c) = run(root.path(), &["share-history", "--tool", "codex"]);
+    assert_eq!(c, 0, "share-history failed:\n{o}{e}");
+
+    let kept = slot.join("thread_history_1.sqlite");
+    assert!(
+        !std::fs::symlink_metadata(&kept)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "a slot's own thread store was replaced by a link:\n{o}{e}"
+    );
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        b"ITS-OWN",
+        "its own conversations were overwritten"
+    );
+    assert!(
+        o.contains("left alone"),
+        "nothing said why it was skipped:\n{o}{e}"
+    );
+}

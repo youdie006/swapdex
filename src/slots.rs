@@ -599,7 +599,16 @@ pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md", "projec
 /// funded it. Note swapdex also READS rate limits out of there, and sharing
 /// means a reading found in one slot describes whichever account wrote it;
 /// `codex_usage` asks the account directly and no longer depends on that.
-pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &["config.toml", "AGENTS.md", "sessions"];
+/// `sessions` holds the transcripts; the two files after it hold the list the
+/// resume picker actually reads. Sharing only the directory gave a new slot
+/// every conversation on disk and none of them on screen.
+pub const SHARED_CONFIG_FILES_CODEX: &[&str] = &[
+    "config.toml",
+    "AGENTS.md",
+    "sessions",
+    "thread_history_1.sqlite",
+    "session_index.jsonl",
+];
 
 /// Do this tool's accounts all read one conversation history?
 ///
