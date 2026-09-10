@@ -38,6 +38,17 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   slots-only machine. An agent that asked what accounts existed and then who
   was signed in got a list and a denial. `whoami` reads the pointer now, and
   still reports the live login where no pointer exists.
+- **`doctor` stops contradicting itself four rows apart.** It reported
+  `claude-code ok - not logged in` and then `default ok - plain claude ->
+  'work'` in the same screen, whose entire job is to say whether a setup is
+  sound. The per-tool row follows the pointer, and names a login abandoned in
+  the tool's own dir when there is one.
+- **`quota` marks the account that is actually paying.** Whether a row was
+  active came from comparing each slot against the login in the tool's own
+  config dir, so on a slots-only machine every row was inactive -- including
+  the one paying for every turn. Worse than the missing marker: a rejected
+  token was then explained as a dead snapshot, curable with `swapdex use
+  <name>`, which for a slot moves a pointer and refreshes nothing.
 - **A saved login whose refresh token was retired elsewhere is refused, not
   restored.** These tokens are single-use: the server retires the outgoing one
   the moment a holder renews. Two holders of one account that differ in the

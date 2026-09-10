@@ -64,7 +64,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Launch Claude in an account's own permanent slot (concurrent-safe)
+    /// Launch a tool in an account's own permanent slot (concurrent-safe)
     Run {
         /// The account to launch
         name: String,
@@ -115,7 +115,7 @@ enum Cmd {
     },
     /// List the permanent account slots
     Slots,
-    /// Install the `claude` shim so a plain `claude` follows `swapdex use`
+    /// Install the shims so a plain `claude` or `codex` follows `swapdex use`
     Shim,
     /// Register an existing CLAUDE_CONFIG_DIR directory as a slot (in place)
     Adopt {
@@ -137,7 +137,7 @@ enum Cmd {
     Onboard,
     /// Share MCP servers (from ~/.claude.json) into every account slot
     SyncMcp,
-    /// List saved profiles (active marked from the live login)
+    /// List accounts, marking the one each tool is pointed at
     Ls {
         #[arg(long)]
         json: bool,

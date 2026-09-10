@@ -4365,3 +4365,108 @@ fn a_slot_switch_is_recorded_the_way_a_profile_switch_is() {
         "in the order they happened: {named:?}"
     );
 }
+
+/// `quota` must call the account the pointer serves the active one.
+///
+/// Whether a row is active was decided by comparing each slot's uuid against
+/// the login in the tool's own config dir. A slot switch never writes that dir,
+/// so on a machine whose accounts live only as slots there was no live uuid to
+/// match and every row came back inactive - including the one paying for every
+/// turn. The label lost its `(active)` marker, and a rejected token was
+/// explained as a dead snapshot with `swapdex use <name>` as the cure, which
+/// for a slot only moves a pointer and refreshes nothing.
+#[test]
+fn quota_marks_the_pointed_at_slot_active() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("slot-work");
+    seed_slot(root.path(), "work", &dir, "AT", "work@x.com");
+    let (o, e, c) = run(root.path(), &["use", "work", "--tool", "claude"]);
+    assert_eq!(c, 0, "use failed:\n{o}{e}");
+
+    let curl = write_fake_curl(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let accounts = v["accounts"].as_array().unwrap();
+    let row = accounts
+        .iter()
+        .find(|a| a["name"] == "work")
+        .unwrap_or_else(|| panic!("no row for work: {v}"));
+    assert_eq!(
+        row["active"],
+        serde_json::json!(true),
+        "quota does not call the pointed-at slot active: {v}"
+    );
+}
+
+/// The marker must still follow the live login where no pointer exists.
+///
+/// A copy-model machine has no slot pointer and its live dir IS the answer.
+/// Preferring the pointer must not cost it the marker, or the fix would be the
+/// same defect facing the other way.
+#[test]
+fn quota_still_marks_the_live_login_active_without_a_pointer() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "main", "--tool", "claude"]);
+
+    let curl = write_fake_curl(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let accounts = v["accounts"].as_array().unwrap();
+    let row = accounts
+        .iter()
+        .find(|a| a["name"] == "main")
+        .unwrap_or_else(|| panic!("no row for main: {v}"));
+    assert_eq!(
+        row["active"],
+        serde_json::json!(true),
+        "quota lost the active marker on a machine with no slots: {v}"
+    );
+}
+
+/// Exactly the pointed-at slot is active, not every slot.
+///
+/// The marker is what tells a reader which account the numbers below belong to
+/// and which one a rejected token is a problem for. Two slots and one pointer
+/// is the ordinary shape of this tool, so a check that answered "a slot exists"
+/// rather than "this slot is the one" would mark both and say nothing at all.
+#[test]
+fn quota_marks_only_the_pointed_at_slot_active() {
+    let root = tempfile::tempdir().unwrap();
+    let one = root.path().join("slot-one");
+    let two = root.path().join("slot-two");
+    seed_slot(root.path(), "one", &one, "AT", "one@x.com");
+    seed_slot(root.path(), "two", &two, "AT", "two@x.com");
+    let (o, e, c) = run(root.path(), &["use", "two", "--tool", "claude"]);
+    assert_eq!(c, 0, "use failed:\n{o}{e}");
+
+    let curl = write_fake_curl(root.path());
+    let (o, e, c) = run_env(
+        root.path(),
+        &["quota", "--json"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let v: serde_json::Value = serde_json::from_str(o.trim()).unwrap();
+    let accounts = v["accounts"].as_array().unwrap();
+    let active: Vec<&str> = accounts
+        .iter()
+        .filter(|a| a["active"] == serde_json::json!(true))
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    assert_eq!(
+        active,
+        vec!["two"],
+        "the pointer names 'two' and exactly one row should be active: {v}"
+    );
+}

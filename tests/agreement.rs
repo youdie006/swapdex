@@ -2993,3 +2993,37 @@ fn mcp_whoami_still_reports_a_live_login_when_no_slot_points_anywhere() {
         "whoami does not name the live login: {claude}"
     );
 }
+
+/// `doctor` must not deny the account its own next line names.
+///
+/// The per-tool row was read from the tool's own config dir, so on a machine
+/// whose accounts live only as slots `doctor` printed `claude-code ok - not
+/// logged in` and, four rows down, `default ok - plain claude -> 'work'`. Both
+/// lines are in one screen whose whole job is to tell somebody whether their
+/// setup is sound, and they said opposite things about the same machine.
+#[test]
+fn doctor_agrees_with_the_default_it_reports() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, _, _) = run(root, &["doctor"]);
+    assert!(
+        out.contains("-> 'work'"),
+        "doctor does not report the default it is being checked against:\n{out}"
+    );
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("claude-code"))
+        .unwrap_or_else(|| panic!("doctor has no claude-code row:\n{out}"));
+    assert!(
+        !row.contains("not logged in"),
+        "doctor calls the tool logged out while naming its default account:\n{out}"
+    );
+    assert!(
+        row.contains("work"),
+        "doctor's claude-code row does not name the active account: {row:?}"
+    );
+}

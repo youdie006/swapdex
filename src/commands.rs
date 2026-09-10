@@ -4383,6 +4383,21 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     // Live logins per tool.
     for adapter in adapters::all() {
         let tool = adapter.name();
+        // The pointer first: this screen exists to tell somebody whether their
+        // setup is sound, and reading the tool's own config dir made it print
+        // "not logged in" four rows above its own "default -> 'work'".
+        if let Some((name, email)) = slot_active_identity(paths, tool) {
+            let who = email.unwrap_or_else(|| "login unreadable in the slot".into());
+            report(tool, true, format!("{who} (profile '{name}')"));
+            if let Some(live) = tool_dir_disagrees(&store, paths, tool, &name) {
+                report(
+                    tool,
+                    true,
+                    format!("a plain `{}` would launch on '{live}'", tool_binary(tool)),
+                );
+            }
+            continue;
+        }
         match adapter.identity(paths) {
             Ok(Some(id)) => {
                 let saved = matched_profile_name(&store, tool, &id.account_id)
@@ -8359,7 +8374,17 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 .ok()
                 .map(|t| String::from_utf8_lossy(t.expose()).to_string());
             let uuid = crate::proxy::creds::slot_account_uuid(&r.config_dir);
-            let active = live_uuid.is_some() && uuid == live_uuid;
+            // The pointer decides this wherever there is one. Matching against
+            // the tool's own config dir - which a slot switch never writes -
+            // called every slot inactive on a machine that has only slots, so
+            // the account paying for every turn lost its `(active)` marker and
+            // a rejected token was explained as a dead snapshot curable with
+            // `swapdex use <name>`, which for a slot moves a pointer and
+            // refreshes nothing.
+            let active = match slot_default_name(paths, "claude-code") {
+                Some(pointed) => pointed == r.name,
+                None => live_uuid.is_some() && uuid == live_uuid,
+            };
             matched_live |= active;
             rows.push(Row {
                 label: if active {

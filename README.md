@@ -148,15 +148,27 @@ so it can't be logged out), `swapdex restore` undoes the last swap, and `swapdex
 ui` is the full-screen picker. `swapdex migrate` matches Claude and Codex
 profiles to slots by account and creates spaces only for accounts without one.
 
-`status` shows the live account per tool, matched back to a saved profile:
+`status` shows the active account per tool, matched back to a saved profile:
 
 ```
 claude-code: you@work.com [max] (profile 'work')
 codex: you@personal.com [chatgpt] (profile 'personal')
 ```
 
-The active account is always read from the **live** login, so if you `/login`
-directly in the CLI, swapdex reports the truth rather than a stale guess.
+The active account is read from the **pointer** a switch sets, and falls back
+to the live login on a machine that has no slots. Where the tool's own config
+dir holds a different account -- you signed in directly without the shim, or an
+old copy-model switch left one behind -- that gets its own line rather than
+being shown as the active account:
+
+```
+codex: you@work.com (profile 'work')
+  (a plain `codex` would launch on 'personal' instead - `swapdex shim`
+   makes it follow your switches)
+```
+
+Both are true and they answer different questions, so swapdex prints both
+instead of picking one. A machine sat in exactly that state for six days.
 
 For your shell prompt or statusline, `status --short` prints one compact line:
 
