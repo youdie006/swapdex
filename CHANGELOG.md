@@ -22,6 +22,16 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   answer, so a machine whose accounts live only as slots stops reporting every
   row as active nowhere -- until now nothing reading the JSON could name the
   account that pays.
+- **`status` answers the question it advertises.** It is documented as the
+  active account per tool and read the tool's own config dir, so on a machine
+  whose accounts live only as slots it printed `not logged in` for every tool
+  while `ls` starred an account and `serve` was serving it, and on an older
+  machine it named an account abandoned there weeks ago. Both `status --short`
+  and `serve --quiet` ship as statusline commands and they disagreed, which put
+  the contradiction in people's prompts. All three forms -- the screen, `--short`
+  and `--json` -- now follow the pointer, and the screen names the login left in
+  the tool's own dir when that is somebody else, since it is what an unshimmed
+  launch still uses.
 - **A saved login whose refresh token was retired elsewhere is refused, not
   restored.** These tokens are single-use: the server retires the outgoing one
   the moment a holder renews. Two holders of one account that differ in the

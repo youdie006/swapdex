@@ -2024,6 +2024,21 @@ pub(crate) fn slot_default_name(paths: &Paths, tool: &str) -> Option<String> {
         .map(|r| r.name)
 }
 
+/// The account a tool's pointer names, with whatever identity the slot carries.
+///
+/// `status` is documented as the active account per tool, and under the slot
+/// model that is the pointer: a switch repoints it and never writes the tool's
+/// own config dir. Reading that dir answers a different question - what an
+/// unshimmed launch would use, which on a slots-only machine is nothing at all
+/// and on an older one is whatever a copy-model switch abandoned there.
+fn slot_active_identity(paths: &Paths, tool: &str) -> Option<(String, Option<String>)> {
+    let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+    let dir = slots.default_dir()?;
+    let rec = slots.list().into_iter().find(|r| r.config_dir == dir)?;
+    let email = crate::proxy::creds::any_slot_email(&rec.config_dir);
+    Some((rec.name, email))
+}
+
 /// The profile whose login sits in the tool's OWN config dir, when that is not
 /// the one the pointer names.
 ///
@@ -2443,11 +2458,17 @@ pub fn short_line(paths: &Paths) -> Option<String> {
     let parts: Vec<String> = adapters::all()
         .iter()
         .filter_map(|a| {
-            let id = a.identity(paths).ok().flatten()?;
             let tool = match a.name() {
                 "claude-code" => "claude",
                 t => t,
             };
+            // The pointer wherever there is one: this line goes in a prompt,
+            // and a prompt naming the account swapdex is not serving is worse
+            // than no line at all.
+            if let Some((name, _)) = slot_active_identity(paths, a.name()) {
+                return Some(format!("{tool}:{name}"));
+            }
+            let id = a.identity(paths).ok().flatten()?;
             let who = matched_profile_name(&store, a.name(), &id.account_id)
                 .or(id.email)
                 .unwrap_or_else(|| "?".into());
@@ -2480,6 +2501,15 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
                 let tool = adapter.name();
                 // Stable shape: every key present on every row, null when
                 // unknown, so `jq .[].email` never needs guards.
+                if let Some((name, email)) = slot_active_identity(paths, tool) {
+                    // The slot carries the login; its tier is not recorded
+                    // anywhere the pointer can reach, and null already means
+                    // unknown here.
+                    return serde_json::json!({
+                        "tool": tool, "logged_in": true, "unreadable": false,
+                        "email": email, "tier": null, "profile": name, "expired": null,
+                    });
+                }
                 match adapter.identity(paths) {
                     Err(_) => serde_json::json!({
                         "tool": tool, "logged_in": false, "unreadable": true,
@@ -2506,6 +2536,20 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     }
     for adapter in adapters::all() {
         let tool = adapter.name();
+        if let Some((name, email)) = slot_active_identity(paths, tool) {
+            let who = email.unwrap_or_else(|| "login unreadable in the slot".into());
+            println!("{tool}: {who} (profile '{name}')");
+            // The abandoned login is the one an unshimmed launch still uses, so
+            // it belongs on the screen that claims to say who is active.
+            if let Some(live) = tool_dir_disagrees(&store, paths, tool, &name) {
+                println!(
+                    "  (a plain `{}` would launch on '{live}' instead - `swapdex shim` \
+                     makes it follow your switches)",
+                    tool_binary(tool)
+                );
+            }
+            continue;
+        }
         match adapter.identity(paths) {
             Err(_) => println!(
                 "{tool}: login file unreadable - `swapdex use <profile>` can replace it \

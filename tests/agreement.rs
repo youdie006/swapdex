@@ -2762,3 +2762,135 @@ fn every_listing_names_the_same_active_tool() {
         "the MCP account list does not name it either: {mrow}"
     );
 }
+
+/// `status` and `ls` must name the same active account.
+///
+/// `status` is documented as "the active account per tool" - the question `ls`
+/// answers with its star. It read the tool's own config dir, which the slot
+/// model never writes, so on a machine whose accounts live only as slots it
+/// said "not logged in" while `ls` starred an account and `serve` was serving
+/// it. Both ship as statusline commands, so the contradiction went straight
+/// into people's prompts.
+#[test]
+fn status_names_the_account_ls_marks_active() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (human, _, _) = run(root, &["ls"]);
+    assert!(
+        human.contains("claude-code*"),
+        "ls marks no active account:\n{human}"
+    );
+
+    let (st, _, _) = run(root, &["status"]);
+    assert!(
+        !st.contains("claude-code: not logged in"),
+        "status says not logged in while ls marks an account active:\n{st}"
+    );
+    assert!(
+        st.contains("work"),
+        "status does not name the active account:\n{st}"
+    );
+}
+
+/// The compact line is the one that lands in a shell prompt.
+#[test]
+fn status_short_names_the_slot_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (short, _, _) = run(root, &["status", "--short"]);
+    assert!(
+        short.contains("claude:work"),
+        "the compact line does not name the active account: {short:?}"
+    );
+}
+
+/// Anything parsing `status --json` needs the same answer the screen gives.
+#[test]
+fn status_json_reports_the_slot_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (json, _, _) = run(root, &["status", "--json"]);
+    let rows: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("status --json is not json ({e}): {json}"));
+    let row = rows
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["tool"] == "claude-code"))
+        .unwrap_or_else(|| panic!("no claude-code row: {json}"));
+    assert_eq!(
+        row["logged_in"],
+        serde_json::json!(true),
+        "status --json calls an active slot account logged out: {row}"
+    );
+    assert_eq!(
+        row["profile"],
+        serde_json::json!("work"),
+        "status --json does not name the active profile: {row}"
+    );
+}
+
+/// A machine with no slots must still report what its tool dir holds.
+///
+/// The pointer is the better answer only where there is one. Reading it in
+/// preference must not cost the copy-model machine its own answer, nor the
+/// honest "not logged in" on a machine that really has no login.
+#[test]
+fn status_still_reports_a_live_login_when_no_slot_points_anywhere() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-live", "live@example.com");
+    let (o, e, c) = run(root, &["add", "live"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+
+    let (st, _, _) = run(root, &["status"]);
+    assert!(
+        st.contains("live@example.com"),
+        "status lost the live login on a machine with no slots:\n{st}"
+    );
+    let (short, _, _) = run(root, &["status", "--short"]);
+    assert!(
+        short.contains("claude:live"),
+        "the compact line lost it too: {short:?}"
+    );
+}
+
+/// Following the pointer must not hide what the tool's own dir holds.
+///
+/// The two answer different questions and both are true: the pointer says who
+/// swapdex serves, the tool's dir says who an unshimmed launch would use. A
+/// `status` that printed only the first would be exactly as misleading as the
+/// one that printed only the second - it would just be wrong in the other
+/// direction, and the abandoned login that cost a scheduled job 42 hours would
+/// stay off the screen that claims to say who is active.
+#[test]
+fn status_names_the_abandoned_login_too() {
+    let t = fixture();
+    let root = t.path();
+    seed_live_codex(root, "orphan@example.com");
+    let (o, e, c) = run(root, &["add", "orphan"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    seed_codex_slot(root, "cx-one", "one@example.com");
+    let (_, err, code) = run(root, &["use", "cx-one", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (st, _, _) = run(root, &["status"]);
+    assert!(
+        st.contains("cx-one"),
+        "status does not name the account the pointer serves:\n{st}"
+    );
+    assert!(
+        st.contains("orphan"),
+        "status hides the login the tool's own dir still holds:\n{st}"
+    );
+}
