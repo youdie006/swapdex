@@ -2715,3 +2715,50 @@ fn a_tool_dir_that_agrees_with_the_pointer_is_not_reported() {
         "the note fired although the pointer and the tool's dir agree:\n{said}"
     );
 }
+
+/// Every reader of the listing must name the same active account.
+///
+/// On a machine whose accounts live only as slots, the human listing starred a
+/// row and marked it `<- pays` while `ls --json` reported every row with an
+/// empty `active_tools`, and the MCP account list said the same nothing. The
+/// per-tool mark was read from the tool's own config dir, which such a machine
+/// does not have - so the two listings disagreed about whether any account was
+/// active at all, and anything reading the JSON could not name the one paying.
+#[test]
+fn every_listing_names_the_same_active_tool() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (human, _, _) = run(root, &["ls"]);
+    assert!(
+        human.contains("claude-code*"),
+        "the human listing marks no active tool:\n{human}"
+    );
+
+    let (json, _, _) = run(root, &["ls", "--json"]);
+    let rows: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("ls --json is not json ({e}): {json}"));
+    let row = rows
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["name"] == "work"))
+        .unwrap_or_else(|| panic!("no row for work: {json}"));
+    assert_eq!(
+        row["active_tools"],
+        serde_json::json!(["claude-code"]),
+        "`ls --json` does not name the tool the human listing marks: {row}"
+    );
+
+    let mcp = mcp_list_accounts(root);
+    let mrow = mcp
+        .iter()
+        .find(|r| r["name"] == "work")
+        .unwrap_or_else(|| panic!("no mcp row for work: {mcp:?}"));
+    assert_eq!(
+        mrow["active_tools"],
+        serde_json::json!(["claude-code"]),
+        "the MCP account list does not name it either: {mrow}"
+    );
+}

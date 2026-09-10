@@ -18,7 +18,10 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   `<- pays` next to one account and the active mark next to another. The mark
   now follows the pointer, and the login left behind gets a line of its own,
   because it is still the one a plain `claude` or `codex` launches on when the
-  shim is not in the way.
+  shim is not in the way. `ls --json` and the MCP account list read that same
+  answer, so a machine whose accounts live only as slots stops reporting every
+  row as active nowhere -- until now nothing reading the JSON could name the
+  account that pays.
 - **A saved login whose refresh token was retired elsewhere is refused, not
   restored.** These tokens are single-use: the server retires the outgoing one
   the moment a holder renews. Two holders of one account that differ in the
