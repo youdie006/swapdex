@@ -544,3 +544,87 @@ fn slots_on_different_accounts_are_each_renewed() {
         "two accounts, two renewals:\n{said}"
     );
 }
+
+/// The keep-alive sweep must renew an account once, however many directories
+/// hold it.
+///
+/// The account guard was added to the `refresh` command's own loop, and this
+/// sweep reaches `refresh_slot` by another road - the same mistake the gate's
+/// note in refresh.rs records: "a rule enforced at one caller is a rule the
+/// next caller does not know exists". Two slots on one login, and the sweep
+/// spent the token the first renewal had already retired.
+#[test]
+fn the_keep_alive_sweep_renews_an_account_once() {
+    let root = tempfile::tempdir().unwrap();
+    seed_lapsed_twins(
+        root.path(),
+        &[
+            ("work", "aaaa1111", "u-shared"),
+            ("work-copy", "bbbb2222", "u-shared"),
+        ],
+    );
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = rotating_oauth(asked.clone());
+
+    let out = Command::new(bin())
+        .args(["refresh", "--keep-alive"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_OAUTH_URL", &url)
+        .env("HOME", root.path())
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+
+    let bodies = asked.lock().unwrap().clone();
+    let spends = bodies.iter().filter(|b| b.contains("OLD-RT")).count();
+    assert_eq!(
+        spends, 1,
+        "the sweep spent the retired refresh token {spends} times:\n{said}\nrequests: {bodies:?}"
+    );
+}
+
+/// Two slots whose identity cannot be read are not one account.
+///
+/// The claim key falls back to the path when a slot's login cannot be
+/// identified. Collapsing unknowns onto one key instead would let the first
+/// unreadable slot claim the renewal for every other unreadable slot, and a
+/// fleet where identity files are missing would renew exactly one account.
+#[test]
+fn slots_with_unreadable_identity_are_each_renewed() {
+    let root = tempfile::tempdir().unwrap();
+    seed_lapsed_twins(
+        root.path(),
+        &[("one", "aaaa1111", "u-one"), ("two", "bbbb2222", "u-two")],
+    );
+    // Take the identity away from both: only the credential is left.
+    for id in ["aaaa1111", "bbbb2222"] {
+        std::fs::remove_file(
+            root.path()
+                .join(".local/share/swapdex/slots")
+                .join(id)
+                .join(".claude.json"),
+        )
+        .unwrap();
+    }
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = fake_oauth(
+        asked.clone(),
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+    );
+
+    let out = Command::new(bin())
+        .args(["refresh"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_OAUTH_URL", &url)
+        .env("HOME", root.path())
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        2,
+        "two unidentifiable slots were treated as one account:\n{said}"
+    );
+}

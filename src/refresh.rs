@@ -180,9 +180,39 @@ fn gate() -> &'static RefreshGate {
     GATE.get_or_init(RefreshGate::default)
 }
 
-/// Claim the right to renew this slot now. False when another caller has it.
+/// The account a slot holds, however its tool records it.
+fn account_of(dir: &Path) -> Option<String> {
+    if let Some(u) = crate::proxy::creds::slot_account_uuid(dir) {
+        return Some(u);
+    }
+    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v["tokens"]["account_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The key a claim is held under: the ACCOUNT, not the directory.
+///
+/// Two directories can hold one login - `doctor` reports exactly that - and
+/// these tokens are single-use, so one claim per directory let a sweep spend
+/// one account's token once per copy. That is the double-spend this gate
+/// exists to stop, reached from the other side: the gate was made per-caller
+/// once already, and the note above records why that failed.
+///
+/// An identity that cannot be read falls back to the path. Two unknowns are
+/// not one account, and per-path is the stricter answer anyway.
+fn claim_key(dir: &Path) -> std::path::PathBuf {
+    match account_of(dir) {
+        Some(a) => std::path::PathBuf::from(format!("account:{a}")),
+        None => dir.to_path_buf(),
+    }
+}
+
+/// Claim the right to renew this account now. False when another caller has it.
 fn claim_refresh_at(dir: &Path, now_secs: i64) -> bool {
-    gate().claim(dir, now_secs)
+    gate().claim(&claim_key(dir), now_secs)
 }
 
 pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {

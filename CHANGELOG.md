@@ -43,6 +43,15 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   'work'` in the same screen, whose entire job is to say whether a setup is
   sound. The per-tool row follows the pointer, and names a login abandoned in
   the tool's own dir when there is one.
+- **The one-renewal-per-account rule lives where the token is spent.** It was
+  added to the `refresh` command's own loop, and four other paths reach
+  `refresh_slot` by another road -- the keep-alive sweep, two proxy sweeps and
+  the row build in `quota`. The gate in refresh.rs already records why that
+  fails: "a rule enforced at one caller is a rule the next caller does not know
+  exists". The claim is keyed by the ACCOUNT now rather than the directory, so
+  every path that spends the token is covered by the same line. A slot whose
+  identity cannot be read falls back to its path: two unknowns are not one
+  account.
 - **`swapdex refresh` renews an account once, not once per directory.** This
   command's own remedy for a concurrent renewal says it: "spending its refresh
   token twice is what logs an account out". The guard was per DIRECTORY. Two
