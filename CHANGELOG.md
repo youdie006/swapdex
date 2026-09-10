@@ -43,6 +43,23 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   'work'` in the same screen, whose entire job is to say whether a setup is
   sound. The per-tool row follows the pointer, and names a login abandoned in
   the tool's own dir when there is one.
+- **`swapdex refresh` renews an account once, not once per directory.** This
+  command's own remedy for a concurrent renewal says it: "spending its refresh
+  token twice is what logs an account out". The guard was per DIRECTORY. Two
+  slots holding one login are the same double-spend, so the loop renewed the
+  first, the server retired the token both were carrying, and the second spent
+  the retired one -- refused, and reported as an account idle too long, seconds
+  after its own account had been renewed. `doctor` already reports slots that
+  share a login, so this was reachable on a machine swapdex itself described.
+- **`share-history` shares the store the Codex resume picker reads.** Codex
+  keeps its conversation list in a paginated thread history beside the rollout
+  files. Sharing `sessions/` shared the transcripts and not the list, so a
+  switched account had every conversation on disk and an empty picker, and a
+  slot that had never run Codex had no store at all -- while the command
+  reported success. `thread_history_1.sqlite` and `session_index.jsonl` are
+  shared now, and a slot holding its own store is reported and left alone
+  rather than linked over: that store holds conversations the shared one may
+  not, and replacing it is the harm this command exists to undo.
 - **`doctor`'s default row says which tool it is about.** One `match`: the arm
   that finds a default says ``plain `claude` -> 'work'``, the arm that does not
   said "no default account set" with no tool in it. On a machine with a Codex

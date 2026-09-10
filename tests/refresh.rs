@@ -389,3 +389,158 @@ fn a_codex_renewal_the_server_refuses_changes_nothing() {
         "an answer with no access token must leave the credential alone"
     );
 }
+
+/// An OAuth server that retires a refresh token when it is spent, the way the
+/// real one does. The first request carrying OLD-RT is answered; every later
+/// one is refused, because by then the server has retired it.
+fn rotating_oauth(sink: Arc<Mutex<Vec<String>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        let mut spent = false;
+        for mut rq in server.incoming_requests() {
+            let mut body = String::new();
+            std::io::Read::read_to_string(rq.as_reader(), &mut body).ok();
+            let holds_retired = body.contains("OLD-RT");
+            sink.lock().unwrap().push(body);
+            let resp = if holds_retired && !spent {
+                spent = true;
+                tiny_http::Response::from_string(
+                    r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+                )
+                .with_status_code(200)
+            } else {
+                tiny_http::Response::from_string(r#"{"error":"invalid_grant"}"#)
+                    .with_status_code(400)
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port}/v1/oauth/token")
+}
+
+/// Several lapsed Claude slots that all hold the SAME account - two directories
+/// for one login, which `doctor` already reports as a thing people do.
+fn seed_lapsed_twins(root: &std::path::Path, slots: &[(&str, &str, &str)]) {
+    let store = root.join(".local/share/swapdex");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut reg = Vec::new();
+    for (name, id, uuid) in slots {
+        let slot = store.join("slots").join(id);
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(
+            slot.join(".credentials.json"),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
+                   "expiresAt":{},"refreshTokenExpiresAt":{},"subscriptionType":"max",
+                   "scopes":["user:inference"]}}}}"#,
+                now_ms - 3_600_000,
+                now_ms + 30 * 86_400_000
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            slot.join(".claude.json"),
+            format!(
+                r#"{{"oauthAccount":{{"accountUuid":"{uuid}","emailAddress":"shared@x.com"}}}}"#
+            ),
+        )
+        .unwrap();
+        reg.push(serde_json::json!({
+            "name": name, "id": id, "config_dir": slot,
+            "adopted": false, "tool": "claude-code"
+        }));
+    }
+    std::fs::write(store.join("slots.json"), serde_json::to_vec(&reg).unwrap()).unwrap();
+}
+
+/// Two slots holding ONE account must be renewed once, not twice.
+///
+/// swapdex states the rule itself, in the remedy for a slot already being
+/// renewed: "spending its refresh token twice is what logs an account out".
+/// That guard is per DIRECTORY. Two directories holding one login are the same
+/// double-spend and were not guarded, so `swapdex refresh` renewed the first,
+/// the server retired the token both were holding, and the loop then spent the
+/// retired one on behalf of the second - which the server refused, and the
+/// second was reported as having been idle too long with a fresh sign-in as the
+/// cure, seconds after its account had in fact been renewed.
+#[test]
+fn two_slots_on_one_account_are_renewed_once() {
+    let root = tempfile::tempdir().unwrap();
+    seed_lapsed_twins(
+        root.path(),
+        &[
+            ("work", "aaaa1111", "u-shared"),
+            ("work-copy", "bbbb2222", "u-shared"),
+        ],
+    );
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = rotating_oauth(asked.clone());
+
+    let out = Command::new(bin())
+        .args(["refresh"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_OAUTH_URL", &url)
+        .env("HOME", root.path())
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+
+    let bodies = asked.lock().unwrap().clone();
+    let spends = bodies.iter().filter(|b| b.contains("OLD-RT")).count();
+    assert_eq!(
+        spends, 1,
+        "the retired refresh token was spent {spends} times:\n{said}\nrequests: {bodies:?}"
+    );
+    assert!(
+        !said.contains("idle too long"),
+        "the twin was blamed for being idle when its account had just been renewed:\n{said}"
+    );
+}
+
+/// Distinct accounts are each renewed; the guard is about one login, not two.
+///
+/// Skipping the second slot whenever anything was renewed would turn a fleet
+/// refresh into a single refresh, which is the ordinary case this command
+/// exists for. The check has to compare accounts, not count renewals.
+#[test]
+fn slots_on_different_accounts_are_each_renewed() {
+    let root = tempfile::tempdir().unwrap();
+    seed_lapsed_twins(
+        root.path(),
+        &[("one", "aaaa1111", "u-one"), ("two", "bbbb2222", "u-two")],
+    );
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = fake_oauth(
+        asked.clone(),
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+    );
+
+    let out = Command::new(bin())
+        .args(["refresh"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_OAUTH_URL", &url)
+        .env("HOME", root.path())
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        said.contains("one renewed"),
+        "'one' was not renewed:\n{said}"
+    );
+    assert!(
+        said.contains("two renewed"),
+        "'two' was not renewed:\n{said}"
+    );
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        2,
+        "two accounts, two renewals:\n{said}"
+    );
+}

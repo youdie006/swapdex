@@ -2922,6 +2922,59 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
 /// Nothing is deleted. The slot's old directory is renamed aside, not removed,
 /// because it holds real conversations and a rename is undoable while a delete
 /// is not.
+/// The files Codex keeps its conversation LIST in, beside the rollout files.
+///
+/// Sharing `sessions/` shares the transcripts. It does not share the store the
+/// picker reads: Codex moved its conversation list into a paginated thread
+/// history, so `share-history` reported success while a switched account still
+/// opened an empty picker, and a slot that had never run Codex had no store at
+/// all. Same defect the Claude side fixed for `projects/` - not lost, but
+/// invisible, which for a resume list is the same thing.
+const CODEX_THREAD_STORE: &[&str] = &["thread_history_1.sqlite", "session_index.jsonl"];
+
+/// Link one slot's thread store to the shared one, and never over it.
+///
+/// A slot that already has its own store holds conversations the shared one may
+/// not, and replacing it with a link would put them out of reach - the exact
+/// harm this command exists to undo. Those are reported and left alone; merging
+/// two sqlite stores is not something to do behind someone's back.
+fn share_codex_thread_store(
+    tool: &str,
+    bare: &std::path::Path,
+    slot: &std::path::Path,
+    name: &str,
+    dry_run: bool,
+) -> usize {
+    if tool != "codex" {
+        return 0;
+    }
+    let mut touched = 0;
+    for file in CODEX_THREAD_STORE {
+        let src = bare.join(file);
+        let own = slot.join(file);
+        if !src.exists() {
+            continue;
+        }
+        if std::fs::symlink_metadata(&own).is_ok_and(|m| m.file_type().is_symlink()) {
+            continue;
+        }
+        if own.exists() {
+            println!(
+                "  {name} - keeps its own {file}; linking would hide the conversations \
+                 only it has, so it was left alone"
+            );
+            continue;
+        }
+        if !dry_run {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&src, &own).ok();
+        }
+        println!("  {name} - {file} linked to the shared history");
+        touched += 1;
+    }
+    touched
+}
+
 pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
     let bare = match tool {
         "codex" => paths.codex_dir().to_path_buf(),
@@ -2939,6 +2992,10 @@ pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
         .unwrap_or_default();
     let mut touched = 0;
     for r in slots {
+        // Before the transcript directory, because a slot whose `sessions` is
+        // already a link exits below - and that is exactly the slot whose
+        // thread store was never linked, on every machine already repaired.
+        touched += share_codex_thread_store(tool, &bare, &r.config_dir, &r.name, dry_run);
         let own = r.config_dir.join(dir_name);
         if own == shared {
             continue;
@@ -7203,20 +7260,30 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
     if list.is_empty() && codex_list.is_empty() {
         println!("No accounts to renew.");
     }
+    // One renewal per ACCOUNT, not per directory - see `already_renewed`.
+    let mut done: Vec<String> = Vec::new();
     for r in &list {
         if !crate::proxy::creds::slot_token_expired(&r.config_dir, now) {
             println!("  {} is already current", r.name);
             continue;
         }
+        let account = slot_account_of(&r.config_dir);
+        if let Some(note) = already_renewed(&account, &done, &r.name) {
+            println!("  {note}");
+            continue;
+        }
         match crate::refresh::refresh_slot(&r.config_dir, now) {
             Ok(()) => {
                 println!("  {} renewed", r.name);
+                if let Some(a) = account {
+                    done.push(a);
+                }
                 renewed += 1;
             }
             Err(why) => println!("  {}", why.remedy(&r.name)),
         }
     }
-    renewed += refresh_codex(&codex_list, now);
+    renewed += refresh_codex(&codex_list, now, &mut done);
     if renewed > 0 {
         println!("\n{renewed} account(s) renewed - no sign-in needed.");
     }
@@ -7230,22 +7297,61 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
 /// Codex RUNS, which is fine for a slot in daily use and useless for one that
 /// is not: measured across two machines, a slot dies exactly ten days after its
 /// last run, and four of eight were already dead when this was written.
-fn refresh_codex(list: &[crate::slots::SlotRecord], now: i64) -> usize {
+fn refresh_codex(list: &[crate::slots::SlotRecord], now: i64, done: &mut Vec<String>) -> usize {
     let mut renewed = 0;
     for r in list {
         if !crate::proxy::codex::slot_token_expired(&r.config_dir, now / 1000) {
             println!("  {} is already current", r.name);
             continue;
         }
+        let account = slot_account_of(&r.config_dir);
+        if let Some(note) = already_renewed(&account, done, &r.name) {
+            println!("  {note}");
+            continue;
+        }
         match crate::refresh::refresh_codex_slot(&r.config_dir, now) {
             Ok(()) => {
                 println!("  {} renewed", r.name);
+                if let Some(a) = account {
+                    done.push(a);
+                }
                 renewed += 1;
             }
             Err(why) => println!("  {}", why.remedy(&r.name)),
         }
     }
     renewed
+}
+
+/// The account a slot holds, however its tool records it.
+fn slot_account_of(dir: &std::path::Path) -> Option<String> {
+    if let Some(u) = crate::proxy::creds::slot_account_uuid(dir) {
+        return Some(u);
+    }
+    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    v["tokens"]["account_id"].as_str().map(str::to_string)
+}
+
+/// Why this slot must be left alone, when its account was already renewed.
+///
+/// These refresh tokens are single-use: renewing one holder retires the copy
+/// every other holder carries. Two directories for one login are a thing people
+/// keep, and `doctor` reports them, so a renewal loop walks straight into
+/// spending the retired copy - the double-spend this command's own remedy for
+/// a concurrent renewal calls "what logs an account out". Same rule, and it was
+/// enforced per directory instead of per account.
+///
+/// An unreadable identity is never grouped: two unknowns are not one account.
+fn already_renewed(account: &Option<String>, done: &[String], name: &str) -> Option<String> {
+    let a = account.as_ref()?;
+    done.contains(a).then(|| {
+        format!(
+            "{name} holds the login just renewed - left alone rather than spending \
+             the token that renewal retired; `swapdex run {name}` signs this \
+             directory in again if you want its own copy current"
+        )
+    })
 }
 
 /// List the permanent slots (name + the config dir each launches into).
