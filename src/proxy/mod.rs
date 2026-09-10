@@ -547,23 +547,11 @@ const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30 
 /// depend on somebody sending a turn, and that is exactly the account it needs to
 /// reach - the one nobody is using.
 fn spawn_keep_alive(paths: &Paths, tool: &str) {
-    if tool == "codex" {
-        // Codex renews inside its own home and exposes no expiry swapdex can read.
-        return;
-    }
     let paths = paths.clone();
+    let tool = tool.to_string();
     std::thread::spawn(move || loop {
         std::thread::sleep(KEEP_ALIVE_EVERY);
-        let slots: Vec<(String, std::path::PathBuf)> =
-            match crate::slots::Slots::open_for(&paths, "claude-code") {
-                Ok(s) => s
-                    .list()
-                    .into_iter()
-                    .map(|r| (r.name, r.config_dir))
-                    .collect(),
-                Err(_) => continue,
-            };
-        let (renewed, failed) = crate::refresh::keep_alive_sweep(&slots, now_ms());
+        let (renewed, failed) = keep_alive_once(&paths, &tool);
         for name in &renewed {
             println!("keep-alive: renewed {name}");
         }
@@ -574,6 +562,34 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
             std::io::stdout().flush().ok();
         }
     });
+}
+
+/// One sweep, for one tool. Split out of the timer so it can be run directly.
+///
+/// Codex was skipped here on the grounds that it "exposes no expiry swapdex can
+/// read". That was true when written and is not now - `wants_keep_alive_codex`
+/// reads the deadline out of the slot's own `auth.json`, and `refresh
+/// --keep-alive` has swept Codex by that route since. So the machinery existed,
+/// the manual command used it, and the automatic sweep went on returning early
+/// on a stale comment - for the one tool whose slots die on a schedule, ten days
+/// after their last run.
+pub(crate) fn keep_alive_once(
+    paths: &Paths,
+    tool: &str,
+) -> (Vec<String>, Vec<(String, crate::refresh::RefreshError)>) {
+    let slots: Vec<(String, std::path::PathBuf)> = match crate::slots::Slots::open_for(paths, tool)
+    {
+        Ok(s) => s
+            .list()
+            .into_iter()
+            .map(|r| (r.name, r.config_dir))
+            .collect(),
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    match tool {
+        "codex" => crate::refresh::keep_alive_sweep_codex(&slots, now_ms()),
+        _ => crate::refresh::keep_alive_sweep(&slots, now_ms()),
+    }
 }
 
 /// How long a pre-emptive move stands before another can happen. Long enough that
@@ -2848,6 +2864,73 @@ mod has_login_per_tool_tests {
         assert!(
             has_login(&base, "antigravity", &slot),
             "an antigravity slot with its own token is signed in"
+        );
+    }
+}
+
+#[cfg(test)]
+mod keep_alive_wiring_tests {
+    use super::*;
+
+    fn jwt(exp: i64) -> String {
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        format!(
+            "{}.{}.sig",
+            b64(br#"{"alg":"none"}"#),
+            b64(format!(r#"{{"exp":{exp}}}"#).as_bytes())
+        )
+    }
+
+    /// The automatic sweep must cover Codex, the tool whose slots die on a
+    /// schedule.
+    ///
+    /// It returned early for Codex on the grounds that Codex "exposes no expiry
+    /// swapdex can read". `wants_keep_alive_codex` reads exactly that expiry out
+    /// of the slot's own `auth.json`, and `refresh --keep-alive` has swept Codex
+    /// by that route for releases - so the machinery was there, the manual
+    /// command used it, and the timer went on skipping the one tool that needed
+    /// it. A Codex slot is only reached by the Codex sweep: it keeps its
+    /// credential in `auth.json`, which the Claude sweep does not read.
+    #[test]
+    fn the_sweep_reaches_a_codex_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join(".local/share/swapdex");
+        let slot = store.join("slots/cx");
+        std::fs::create_dir_all(&slot).unwrap();
+        let soon = now_ms() / 1000 + 60; // inside the keep-alive window
+        std::fs::write(
+            slot.join("auth.json"),
+            format!(
+                r#"{{"auth_mode":"chatgpt","last_refresh":"2026-09-01T00:00:00Z",
+                   "tokens":{{"id_token":"i","access_token":"{}","refresh_token":"R",
+                   "account_id":"acct"}}}}"#,
+                jwt(soon)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            store.join("slots.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "name": "cx", "id": "cx", "config_dir": slot,
+                "adopted": false, "tool": "codex"}]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // A port nothing answers on: the sweep must still have REACHED the slot,
+        // which it reports as a failure naming it. The Claude sweep would find
+        // no `.credentials.json` here and report nothing at all.
+        std::env::set_var("SWAPDEX_ROOT", root.path());
+        std::env::set_var("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/v1/token");
+        let paths = Paths::rooted(root.path());
+        let (renewed, failed) = keep_alive_once(&paths, "codex");
+        std::env::remove_var("SWAPDEX_CODEX_OAUTH_URL");
+        std::env::remove_var("SWAPDEX_ROOT");
+
+        assert!(
+            renewed.iter().any(|n| n == "cx") || failed.iter().any(|(n, _)| n == "cx"),
+            "the sweep never reached the codex slot: renewed={renewed:?} failed={failed:?}"
         );
     }
 }

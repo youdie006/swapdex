@@ -142,7 +142,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// Bare profile names, one per line (for scripts/completion)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         names: bool,
     },
     /// Show the active account per tool
@@ -150,7 +150,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
         /// One compact line (for shell prompts / statuslines)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         short: bool,
     },
     /// Remove a saved profile (never touches a live login)

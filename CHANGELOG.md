@@ -43,6 +43,31 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   'work'` in the same screen, whose entire job is to say whether a setup is
   sound. The per-tool row follows the pointer, and names a login abandoned in
   the tool's own dir when there is one.
+- **A renewed login no longer inherits the retired token's deadline.** A
+  rotation mints a new refresh token and retires the old one, and the recorded
+  `refreshTokenExpiresAt` described the old one. It was never rewritten, so
+  every renewal left the account one day nearer a sign-in swapdex would demand
+  while it held a token the server had just issued -- and `refresh_slot` and
+  the keep-alive sweep both read that moment to decide whether renewing was
+  worth trying. The new lifetime is recorded when the server states it; when it
+  does not, the stale one is dropped rather than applied to a different token,
+  so the server is the party that says no.
+- **The automatic sweep covers Codex.** It returned early for Codex on the
+  grounds that Codex "exposes no expiry swapdex can read". That stopped being
+  true when `wants_keep_alive_codex` was written to read exactly that expiry
+  out of the slot's own `auth.json`, and `refresh --keep-alive` has swept Codex
+  by that route since. So the machinery was there, the manual command used it,
+  and the timer went on skipping the one tool whose slots die on a schedule ten
+  days after their last run.
+- **`--json` is never silently answered in another format.** `ls --json
+  --names` printed bare names and exited 0; `status --json --short` printed the
+  compact line and exited 0. A script that asked for JSON and got a word per
+  line had no way to tell it had been overruled. The flags conflict now.
+- **A slot's account is identified with its provider.** A Claude `accountUuid`
+  and a ChatGPT `account_id` come from different namespaces and one person's
+  email can hold both, so the renewal claim keys on `claude:` / `codex:` rather
+  than the bare id -- the correction KarpelesLab/teamclaude made in its own
+  pool (#349).
 - **The one-renewal-per-account rule lives where the token is spent.** It was
   added to the `refresh` command's own loop, and four other paths reach
   `refresh_slot` by another road -- the keep-alive sweep, two proxy sweeps and

@@ -114,6 +114,28 @@ pub fn merge_response(old: &[u8], response: &str, now_ms: i64) -> Option<Vec<u8>
     o.insert("accessToken".into(), access.into());
     if let Some(rt) = r["refresh_token"].as_str().filter(|s| !s.is_empty()) {
         o.insert("refreshToken".into(), rt.into());
+        // The deadline on disk belonged to the token this one replaces. The
+        // server retired that one, so the recorded moment now describes
+        // something that does not exist - and it is exactly what decides
+        // whether renewing is worth trying. Left in place it made every
+        // renewal leave the account one day nearer a sign-in swapdex would
+        // demand while holding a refresh token the server had just issued.
+        //
+        // Record the new lifetime when the server states it. When it does not,
+        // drop the stale one rather than apply it to a different token: the
+        // server is then the one that says no, which is the only party that
+        // knows.
+        match r["refresh_token_expires_in"].as_i64() {
+            Some(secs) => {
+                o.insert(
+                    "refreshTokenExpiresAt".into(),
+                    (now_ms + secs * 1000).into(),
+                );
+            }
+            None => {
+                o.remove("refreshTokenExpiresAt");
+            }
+        }
     }
     // `expires_in` is seconds from now; the file records an absolute moment.
     if let Some(secs) = r["expires_in"].as_i64() {
@@ -181,16 +203,22 @@ fn gate() -> &'static RefreshGate {
 }
 
 /// The account a slot holds, however its tool records it.
+/// The provider is part of the identity, not just the id under it.
+///
+/// A Claude `accountUuid` and a ChatGPT `account_id` are drawn from different
+/// namespaces, and one person's email can hold a subscription to both. Keying
+/// on the bare id would let two unrelated accounts share one claim - the same
+/// correction KarpelesLab/teamclaude made in its own pool (#349).
 fn account_of(dir: &Path) -> Option<String> {
     if let Some(u) = crate::proxy::creds::slot_account_uuid(dir) {
-        return Some(u);
+        return Some(format!("claude:{u}"));
     }
     let bytes = std::fs::read(dir.join("auth.json")).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     v["tokens"]["account_id"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+        .map(|id| format!("codex:{id}"))
 }
 
 /// The key a claim is held under: the ACCOUNT, not the directory.
@@ -948,6 +976,89 @@ mod codex_in_use_tests {
         assert!(
             matches!(verdict, Err(RefreshError::InUse)),
             "renewed a slot a live session holds: {verdict:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod refresh_deadline_tests {
+    use super::*;
+
+    fn blob(refresh_exp: i64) -> String {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
+               "expiresAt":1000,"refreshTokenExpiresAt":{refresh_exp},
+               "subscriptionType":"max"}}}}"#
+        )
+    }
+
+    /// A renewal that mints a NEW refresh token must not keep the old one's
+    /// deadline.
+    ///
+    /// The deadline describes the token it was issued with. Rotation retires
+    /// that token, so the recorded moment now describes something that no
+    /// longer exists - and `refresh_token_expired` reads it to decide whether
+    /// renewing is even worth trying. Kept, it made every renewal leave the
+    /// account one day closer to a sign-in swapdex would demand while holding
+    /// a refresh token the server had just issued.
+    #[test]
+    fn a_rotated_refresh_token_does_not_inherit_the_old_deadline() {
+        let now = 1_800_000_000_000i64;
+        let dead_soon = now + 86_400_000; // tomorrow
+        let out = merge_response(
+            blob(dead_soon).as_bytes(),
+            r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+            now,
+        )
+        .expect("merged");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let o = &v["claudeAiOauth"];
+        assert_eq!(o["refreshToken"], "NEW-RT", "the token rotated");
+        assert!(
+            !refresh_token_expired(&out, now + 2 * 86_400_000),
+            "the new token inherited the retired one's deadline: {o}"
+        );
+    }
+
+    /// When the server states the new token's lifetime, record it.
+    #[test]
+    fn a_stated_refresh_lifetime_is_recorded() {
+        let now = 1_800_000_000_000i64;
+        let out = merge_response(
+            blob(now + 1000).as_bytes(),
+            r#"{"access_token":"A","refresh_token":"R","expires_in":3600,
+                "refresh_token_expires_in":604800}"#,
+            now,
+        )
+        .expect("merged");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["claudeAiOauth"]["refreshTokenExpiresAt"].as_i64(),
+            Some(now + 604_800 * 1000),
+            "the stated lifetime was not written"
+        );
+    }
+
+    /// A renewal that does NOT rotate keeps the deadline it had.
+    ///
+    /// The old token is still the live one, so its deadline still describes
+    /// something real. Dropping it there would throw away the one signal that
+    /// says a sign-in is genuinely needed.
+    #[test]
+    fn a_renewal_without_rotation_keeps_the_deadline() {
+        let now = 1_800_000_000_000i64;
+        let deadline = now + 86_400_000;
+        let out = merge_response(
+            blob(deadline).as_bytes(),
+            r#"{"access_token":"NEW-AT","expires_in":3600}"#,
+            now,
+        )
+        .expect("merged");
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["claudeAiOauth"]["refreshTokenExpiresAt"].as_i64(),
+            Some(deadline),
+            "the live token's deadline was discarded"
         );
     }
 }

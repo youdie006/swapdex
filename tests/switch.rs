@@ -4559,3 +4559,35 @@ fn share_history_never_replaces_a_slots_own_thread_store() {
         "nothing said why it was skipped:\n{o}{e}"
     );
 }
+
+/// `--json` means the output is machine-readable. A flag that silently
+/// replaces it with something else breaks the contract without saying so.
+///
+/// `ls --json --names` printed bare names and exited 0; `status --json --short`
+/// printed the compact line and exited 0. A script that asks for JSON and gets
+/// a word per line has no way to tell that it was overruled - the parse just
+/// fails somewhere downstream, on output that looks deliberate.
+#[test]
+fn a_json_request_is_never_silently_answered_in_another_format() {
+    let root = tempfile::tempdir().unwrap();
+    seed_claude(root.path(), "uuid-A", "a@x.com");
+    run(root.path(), &["add", "main", "--tool", "claude"]);
+
+    for args in [
+        vec!["ls", "--json", "--names"],
+        vec!["status", "--json", "--short"],
+    ] {
+        let (out, err, code) = run(root.path(), &args);
+        assert_ne!(
+            code,
+            0,
+            "`{}` answered in another format and called it success:\n{out}",
+            args.join(" ")
+        );
+        assert!(
+            err.contains("cannot be used with") || err.contains("conflict"),
+            "`{}` did not say the flags conflict:\n{err}",
+            args.join(" ")
+        );
+    }
+}
