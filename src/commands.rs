@@ -4542,10 +4542,13 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         .unwrap_or("(unknown)");
                     report("default", true, format!("plain `claude` -> '{name}'"));
                 }
+                // Name the tool the way the arm above does. Unqualified, this
+                // read as "this machine has no default" on a machine whose
+                // Codex default was reported two rows higher.
                 None => report(
                     "default",
                     true,
-                    "no default account set - `swapdex use <name>`".into(),
+                    "no default for a plain `claude` - `swapdex use <name>` sets it".into(),
                 ),
             }
             // Conversations live inside the store they were started in, so

@@ -3027,3 +3027,37 @@ fn doctor_agrees_with_the_default_it_reports() {
         "doctor's claude-code row does not name the active account: {row:?}"
     );
 }
+
+/// Both branches of doctor's default row must name the tool they are about.
+///
+/// The positive branch says ``plain `claude` -> 'work'`` and the negative one
+/// said "no default account set" with no tool in it, so on a machine with a
+/// Codex default and no Claude one `doctor` denied having a default two rows
+/// below reporting one. One `match`, one scoped arm and one unscoped: the
+/// unscoped arm reads as a statement about the machine.
+#[test]
+fn doctor_scopes_the_missing_default_to_its_tool() {
+    let t = fixture();
+    let root = t.path();
+    // A Claude slot with no default pointer, so the row is reached and takes
+    // its negative arm.
+    seed_slot(root, "work", "work@example.com");
+    // ... while Codex demonstrably has one.
+    seed_codex_slot(root, "cx-one", "one@example.com");
+    let (_, err, code) = run(root, &["use", "cx-one", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, _, _) = run(root, &["doctor"]);
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("default "))
+        .unwrap_or_else(|| panic!("doctor has no default row:\n{out}"));
+    assert!(
+        row.contains("no default"),
+        "this machine should have no CLAUDE default: {row:?}"
+    );
+    assert!(
+        row.contains("claude"),
+        "the missing-default row does not say which tool it is about: {row:?}"
+    );
+}

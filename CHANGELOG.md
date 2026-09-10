@@ -43,6 +43,11 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   'work'` in the same screen, whose entire job is to say whether a setup is
   sound. The per-tool row follows the pointer, and names a login abandoned in
   the tool's own dir when there is one.
+- **`doctor`'s default row says which tool it is about.** One `match`: the arm
+  that finds a default says ``plain `claude` -> 'work'``, the arm that does not
+  said "no default account set" with no tool in it. On a machine with a Codex
+  default and no Claude one, `doctor` therefore denied having a default two
+  rows below reporting one.
 - **`quota` marks the account that is actually paying.** Whether a row was
   active came from comparing each slot against the login in the tool's own
   config dir, so on a slots-only machine every row was inactive -- including
