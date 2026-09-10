@@ -2894,3 +2894,102 @@ fn status_names_the_abandoned_login_too() {
         "status hides the login the tool's own dir still holds:\n{st}"
     );
 }
+
+/// One `tools/call` against the MCP server, with its text payload parsed.
+fn mcp_call(root: &Path, tool: &str) -> serde_json::Value {
+    let input = format!(
+        "{}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"{tool}\"}}}}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#
+    );
+    let (out, err, code) = run_stdin(root, &["mcp"], &input);
+    assert_eq!(code, 0, "mcp exited {code}:\n{out}{err}");
+    let reply = out
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no reply to {tool}:\n{out}{err}"));
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{tool} returned no text: {reply}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("{tool} text is not JSON: {text}: {e}"))
+}
+
+fn mcp_whoami(root: &Path) -> Vec<serde_json::Value> {
+    mcp_call(root, "whoami")
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("whoami did not return an array"))
+}
+
+/// One MCP server must not give two answers to "is anyone signed in".
+///
+/// `list_accounts` reports `active_tools` from the pointer, while `whoami` read
+/// the tool's own config dir - which a slot switch never writes. So an agent
+/// that asked swapdex what accounts it had, and then asked who was signed in,
+/// got a list of accounts and a flat denial that any of them was: the two calls
+/// are answered by the same process, from the same store, one line apart.
+#[test]
+fn mcp_whoami_agrees_with_mcp_list_accounts() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let rows = mcp_list_accounts(root);
+    let listed = rows
+        .iter()
+        .find(|r| r["name"] == "work")
+        .unwrap_or_else(|| panic!("no row for work: {rows:?}"));
+    assert_eq!(
+        listed["active_tools"],
+        serde_json::json!(["claude-code"]),
+        "list_accounts does not call it active: {listed}"
+    );
+
+    let who = mcp_whoami(root);
+    let claude = who
+        .iter()
+        .find(|r| r["tool"] == "claude-code")
+        .unwrap_or_else(|| panic!("whoami has no claude-code row: {who:?}"));
+    assert_ne!(
+        claude["display"],
+        serde_json::json!("not logged in"),
+        "whoami denies the account list_accounts calls active: {claude}"
+    );
+    assert!(
+        claude.to_string().contains("work"),
+        "whoami does not name the active account: {claude}"
+    );
+}
+
+/// Preferring the pointer must not cost a copy-model machine its answer.
+///
+/// `whoami` is the call an agent makes to find out whose login it is talking
+/// to. Reading the pointer first is right where there is one; a machine with no
+/// slots still has a live login, and answering "not logged in" there would be
+/// the same defect pointing the other way.
+#[test]
+fn mcp_whoami_still_reports_a_live_login_when_no_slot_points_anywhere() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-live", "live@example.com");
+    let (o, e, c) = run(root, &["add", "live"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+
+    let who = mcp_whoami(root);
+    let claude = who
+        .iter()
+        .find(|r| r["tool"] == "claude-code")
+        .unwrap_or_else(|| panic!("whoami has no claude-code row: {who:?}"));
+    assert_ne!(
+        claude["display"],
+        serde_json::json!("not logged in"),
+        "whoami lost the live login on a machine with no slots: {claude}"
+    );
+    assert_eq!(
+        claude["email"],
+        serde_json::json!("live@example.com"),
+        "whoami does not name the live login: {claude}"
+    );
+}

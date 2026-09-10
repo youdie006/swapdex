@@ -2031,7 +2031,7 @@ pub(crate) fn slot_default_name(paths: &Paths, tool: &str) -> Option<String> {
 /// own config dir. Reading that dir answers a different question - what an
 /// unshimmed launch would use, which on a slots-only machine is nothing at all
 /// and on an older one is whatever a copy-model switch abandoned there.
-fn slot_active_identity(paths: &Paths, tool: &str) -> Option<(String, Option<String>)> {
+pub(crate) fn slot_active_identity(paths: &Paths, tool: &str) -> Option<(String, Option<String>)> {
     let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
     let dir = slots.default_dir()?;
     let rec = slots.list().into_iter().find(|r| r.config_dir == dir)?;

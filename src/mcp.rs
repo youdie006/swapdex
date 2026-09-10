@@ -137,6 +137,20 @@ fn tool_call(params: &Value) -> Result<Value, (i64, String)> {
 fn whoami(paths: &Paths) -> Value {
     let mut out = Vec::new();
     for adapter in crate::adapters::all() {
+        // The pointer answers this wherever there is one. Reading the tool's own
+        // config dir - which a slot switch never writes - denied the very
+        // accounts `list_accounts` reports as active, one call away in this same
+        // server. Name and email only: the A13 allowlist still rules out uuid,
+        // path and token.
+        if let Some((name, email)) = crate::commands::slot_active_identity(paths, adapter.name()) {
+            out.push(json!({
+                "tool": adapter.name(),
+                "display": name,
+                "email": email,
+                "tier": null,
+            }));
+            continue;
+        }
         // whoami MAY show email (opt-in); never a token, uuid, or path.
         if let Ok(Some(id)) = adapter.identity(paths) {
             out.push(json!({

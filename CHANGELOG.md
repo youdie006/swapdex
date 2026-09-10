@@ -32,6 +32,12 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   and `--json` -- now follow the pointer, and the screen names the login left in
   the tool's own dir when that is somebody else, since it is what an unshimmed
   launch still uses.
+- **The MCP server stops contradicting itself.** `list_accounts` reported which
+  tools an account was active for while `whoami`, one call away in the same
+  process and the same store, answered `not logged in` for every tool on a
+  slots-only machine. An agent that asked what accounts existed and then who
+  was signed in got a list and a denial. `whoami` reads the pointer now, and
+  still reports the live login where no pointer exists.
 - **A saved login whose refresh token was retired elsewhere is refused, not
   restored.** These tokens are single-use: the server retires the outgoing one
   the moment a holder renews. Two holders of one account that differ in the
