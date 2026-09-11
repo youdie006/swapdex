@@ -2135,11 +2135,43 @@ pub(crate) fn slot_default_name(paths: &Paths, tool: &str) -> Option<String> {
 /// unshimmed launch would use, which on a slots-only machine is nothing at all
 /// and on an older one is whatever a copy-model switch abandoned there.
 pub(crate) fn slot_active_identity(paths: &Paths, tool: &str) -> Option<(String, Option<String>)> {
+    slot_active_login(paths, tool).map(|(name, email, _)| (name, email))
+}
+
+/// The same, plus whether that slot holds a login at all.
+///
+/// The pointer naming an account and the account being signed in are different
+/// facts, and reading the first as the second reported an EMPTY slot directory
+/// as logged in - while `serve`, asking `proxy::has_login` about the very same
+/// account, refused it for having no login. A missing credential is not an
+/// unreadable one: the remedies differ.
+pub(crate) fn slot_active_login(
+    paths: &Paths,
+    tool: &str,
+) -> Option<(String, Option<String>, bool)> {
     let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
     let dir = slots.default_dir()?;
     let rec = slots.list().into_iter().find(|r| r.config_dir == dir)?;
     let email = crate::proxy::creds::any_slot_email(&rec.config_dir);
-    Some((rec.name, email))
+    let signed_in = crate::proxy::has_login(paths, tool, &rec.config_dir);
+    Some((rec.name, email, signed_in))
+}
+
+/// How a screen should describe the account a pointer names.
+///
+/// Three states, not two: signed in with a readable email, signed in but the
+/// email cannot be read, and not signed in at all. Collapsing the last two into
+/// "login unreadable in the slot" told somebody with an empty slot directory to
+/// go looking for a damaged file.
+fn slot_who(name: &str, email: Option<String>, signed_in: bool, tool: &str) -> String {
+    match (signed_in, email) {
+        (true, Some(e)) => e,
+        (true, None) => "signed in, email unreadable in the slot".into(),
+        (false, _) => format!(
+            "selected but not signed in - `swapdex run {name}{}` signs it in",
+            tool_flag(tool)
+        ),
+    }
 }
 
 /// The profile whose login sits in the tool's OWN config dir, when that is not
@@ -2621,12 +2653,13 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
                 let tool = adapter.name();
                 // Stable shape: every key present on every row, null when
                 // unknown, so `jq .[].email` never needs guards.
-                if let Some((name, email)) = slot_active_identity(paths, tool) {
+                if let Some((name, email, signed_in)) = slot_active_login(paths, tool) {
                     // The slot carries the login; its tier is not recorded
                     // anywhere the pointer can reach, and null already means
-                    // unknown here.
+                    // unknown here. `logged_in` follows the credential, not the
+                    // pointer - an empty slot is selected, not signed in.
                     return serde_json::json!({
-                        "tool": tool, "logged_in": true, "unreadable": false,
+                        "tool": tool, "logged_in": signed_in, "unreadable": false,
                         "email": email, "tier": null, "profile": name, "expired": null,
                     });
                 }
@@ -2656,8 +2689,8 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     }
     for adapter in adapters::all() {
         let tool = adapter.name();
-        if let Some((name, email)) = slot_active_identity(paths, tool) {
-            let who = email.unwrap_or_else(|| "login unreadable in the slot".into());
+        if let Some((name, email, signed_in)) = slot_active_login(paths, tool) {
+            let who = slot_who(&name, email, signed_in, tool);
             println!("{tool}: {who} (profile '{name}')");
             // The abandoned login is the one an unshimmed launch still uses, so
             // it belongs on the screen that claims to say who is active.
@@ -4618,8 +4651,8 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         // The pointer first: this screen exists to tell somebody whether their
         // setup is sound, and reading the tool's own config dir made it print
         // "not logged in" four rows above its own "default -> 'work'".
-        if let Some((name, email)) = slot_active_identity(paths, tool) {
-            let who = email.unwrap_or_else(|| "login unreadable in the slot".into());
+        if let Some((name, email, signed_in)) = slot_active_login(paths, tool) {
+            let who = slot_who(&name, email, signed_in, tool);
             report(tool, true, format!("{who} (profile '{name}')"));
             if let Some(live) = tool_dir_disagrees(&store, paths, tool, &name) {
                 report(
@@ -5014,7 +5047,11 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 SlotLogin::Absent => report(
                     &key,
                     true,
-                    format!("no login yet - `swapdex run {}` once signs it in", r.name),
+                    format!(
+                        "no login yet - `swapdex run {}{}` once signs it in",
+                        r.name,
+                        tool_flag(tool)
+                    ),
                 ),
                 SlotLogin::Present(Some(ts)) if now_ms() - ts > STALE_DAYS * 86_400_000 => {
                     let days = (now_ms() - ts) / 86_400_000;
@@ -5022,9 +5059,10 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         &key,
                         true,
                         format!(
-                            "login idle ~{days}d - `swapdex run {}` once refreshes \
+                            "login idle ~{days}d - `swapdex run {}{}` once refreshes \
                              it (re-login if it asks)",
-                            r.name
+                            r.name,
+                            tool_flag(tool)
                         ),
                     );
                 }

@@ -3357,6 +3357,140 @@ fn doctor_does_not_call_an_unparseable_codex_credential_a_missing_login() {
     );
 }
 
+/// Register a slot for `tool` whose directory holds no credential at all.
+fn seed_empty_codex_slot(root: &Path, name: &str) {
+    seed_codex_slot(root, name, "unused@example.com");
+    let dir = root.join(".local/share/swapdex/slots").join(name);
+    std::fs::remove_file(dir.join("auth.json")).unwrap();
+}
+
+/// The other direction: a slot that IS signed in shows its identity.
+///
+/// Without this, wording the not-signed-in case could swallow the signed-in one
+/// and every existing check would stay green - `doctor_agrees_with_the_default_
+/// it_reports` only asks that the row contain the account name, which the
+/// remedy text "`swapdex run work` signs it in" also does.
+#[test]
+fn status_shows_the_identity_of_a_slot_that_is_signed_in() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err2, _) = run(root, &["status"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        said.contains("work@example.com"),
+        "status hides the email of a slot that is signed in:\n{said}"
+    );
+    assert!(
+        !said.contains("not signed in"),
+        "status calls a signed-in slot unsigned:\n{said}"
+    );
+}
+
+/// The pointer naming an account is not the account being signed in.
+///
+/// `slot_active_identity` answers "who does the pointer name, and what identity
+/// does that slot carry". Three screens read it as "who is logged in", and none
+/// of them asked whether the slot holds a credential - so a registered Codex
+/// slot with an EMPTY directory was reported as logged in. `serve` gets this
+/// right about the same account ("has no codex login"), and `proxy::has_login`
+/// is the helper that knows.
+#[test]
+fn status_does_not_call_an_empty_slot_signed_in() {
+    let t = fixture();
+    let root = t.path();
+    seed_empty_codex_slot(root, "cxwork");
+    let (_, err, code) = run(root, &["use", "cxwork", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    // The surface that already answers correctly. Without it this measures
+    // nothing: it is the disagreement that makes the others wrong.
+    let (so, se, _) = run(root, &["serve", "cxwork", "--tool", "codex"]);
+    assert!(
+        format!("{so}{se}").contains("no codex login"),
+        "serve no longer reports the missing login, so there is nothing to disagree with"
+    );
+
+    let (out, err2, _) = run(root, &["status"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        !said.contains("login unreadable in the slot"),
+        "status calls an empty slot's login unreadable rather than absent:\n{said}"
+    );
+
+    let (jout, jerr, _) = run(root, &["status", "--json"]);
+    let rows: serde_json::Value =
+        serde_json::from_str(&jout).unwrap_or_else(|e| panic!("status --json: {e}\n{jout}{jerr}"));
+    let codex = rows
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["tool"] == "codex"))
+        .unwrap_or_else(|| panic!("no codex row:\n{jout}"));
+    assert_eq!(
+        codex["logged_in"], false,
+        "status --json reports an empty slot as logged in:\n{codex}"
+    );
+}
+
+/// doctor said both things at once about the same account:
+///
+///   codex         ok - login unreadable in the slot (profile 'cxwork')
+///   slot:cxwork   ok - no login yet - ...
+///
+/// which is the contradiction the comment above doctor's own pointer branch was
+/// written about, in the other direction.
+#[test]
+fn doctor_does_not_contradict_itself_about_an_empty_slot() {
+    let t = fixture();
+    let root = t.path();
+    seed_empty_codex_slot(root, "cxwork");
+    let (_, err, code) = run(root, &["use", "cxwork", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err2, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        said.contains("slot:cxwork"),
+        "the per-slot row is gone, so this measures nothing:\n{said}"
+    );
+    // The agreement itself, not one wording of the disagreement: the tool row
+    // must say the same thing the slot row does. Asserting only the absence of
+    // the old phrase let a mutant through that swapped it for "signed in,
+    // email unreadable" - still the contradiction this test is named for.
+    let codex_row = said
+        .lines()
+        .find(|l| l.starts_with("codex"))
+        .unwrap_or_else(|| panic!("doctor has no codex row:\n{said}"));
+    assert!(
+        codex_row.contains("not signed in"),
+        "doctor's codex row claims a login one row above reporting none:\n{said}"
+    );
+}
+
+/// The per-slot row names `run`, and `run` defaults to Claude.
+///
+/// That walk was Claude-only until it was generalised across tools; the message
+/// came along unchanged, so a Codex slot was told `swapdex run <name>`.
+#[test]
+fn the_slot_login_row_names_the_tool() {
+    let t = fixture();
+    let root = t.path();
+    seed_empty_codex_slot(root, "cxwork");
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("swapdex run cxwork"),
+        "the row no longer names `run`, so this measures nothing:\n{said}"
+    );
+    assert!(
+        !said.contains("swapdex run cxwork`"),
+        "the Codex slot's remedy names a command that runs Claude:\n{said}"
+    );
+}
+
 /// `import` tells the reader each imported account still needs a sign-in, and
 /// named `swapdex run <name>` as a placeholder - with no tool in it.
 ///
