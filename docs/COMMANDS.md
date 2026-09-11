@@ -76,6 +76,9 @@ output are `claude-code`, `codex`, `gemini`, and `antigravity`.
 | `CLAUDE_CONFIG_DIR` | Relocates Claude Code's config dir (honored, same as the CLI). |
 | `CODEX_HOME` | Relocates Codex's home dir (honored, same as the CLI). |
 | `SWAPDEX_ROOT` | Dev/test override: resolves every path (Claude, Codex, and the store) under one directory. Used by the test suite so tests never touch a real login. |
+| `CLAUDE_SECURESTORAGE_CONFIG_DIR` | Read, not set. It decides which Keychain item a Claude session uses, so it is half of "which login slot is this running session on" - the question the switch guard answers before it refuses to swap a login out from under a live session. An environment that cannot be read makes that slot UNKNOWN and the guard fails closed. |
+| `NO_COLOR` | Set it to anything and swapdex prints no ANSI colour, on a terminal or off one. The usual convention. |
+| `SWAPDEX_TIMING` | Dev diagnostic: `swapdex ui` prints milestone timings while it starts. Nothing else reads it. |
 | `HOME` | The base for `~/.claude.json`, `~/.claude/`, `~/.codex/`, `~/.gemini/`, and the store when the above are unset. |
 
 ## Tab-completing profile names
