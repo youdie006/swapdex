@@ -927,7 +927,11 @@ mod point_of_effect_tests {
     }
 }
 
-#[cfg(test)]
+// The one test inside is Linux-only, so on every other platform the module is
+// empty and its `use super::*` is an unused import that `-D warnings` rejects.
+// Gate the MODULE, not the test: a body that can vanish takes its imports with
+// it. Only a macOS runner ever saw this, and the local gate runs on Linux.
+#[cfg(all(test, target_os = "linux"))]
 mod codex_in_use_tests {
     use super::*;
 
@@ -939,7 +943,6 @@ mod codex_in_use_tests {
     /// would fail. The slot deliberately has no `auth.json`, so a renewal that
     /// gets past the guard stops at `NoCredential` - what this asserts against -
     /// without reaching the network.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_running_session_refuses_the_renewal() {
         let root = std::env::temp_dir().join(format!("swapdex_cx_ref_{}", std::process::id()));
