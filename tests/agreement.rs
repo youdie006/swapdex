@@ -3357,6 +3357,48 @@ fn doctor_does_not_call_an_unparseable_codex_credential_a_missing_login() {
     );
 }
 
+/// `import` tells the reader each imported account still needs a sign-in, and
+/// named `swapdex run <name>` as a placeholder - with no tool in it.
+///
+/// The manifest carries a tool per account and `import` creates slots for all
+/// of them, so for a Codex account the substituted command launches Claude and
+/// leaves a second account of that name behind. The plan already knows the
+/// tool; printing the real commands says it without the reader guessing.
+#[test]
+fn the_import_sign_in_line_names_each_accounts_tool() {
+    let t = fixture();
+    let root = t.path();
+    let manifest = root.join("setup.json");
+    std::fs::write(
+        &manifest,
+        br#"{"version":1,"accounts":[{"name":"cxwork","tool":"codex"},{"name":"clwork","tool":"claude-code"}]}"#,
+    )
+    .unwrap();
+
+    let (out, err, code) = run(root, &["import", manifest.to_str().unwrap()]);
+    assert_eq!(code, 0, "import failed:\n{out}{err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("still needs its own sign-in"),
+        "import no longer mentions signing in, so this measures nothing:\n{said}"
+    );
+    assert!(
+        said.contains("swapdex run cxwork --tool codex"),
+        "the sign-in named for an imported Codex account runs Claude:\n{said}"
+    );
+    assert!(
+        said.contains("swapdex run clwork"),
+        "the Claude account was not named at all:\n{said}"
+    );
+    // Not `contains("swapdex run clwork ")`: a trailing space matches
+    // "... clwork --tool claude-code" too, so that form passes while the flag
+    // is being printed. Assert the flag's absence directly.
+    assert!(
+        !said.contains("swapdex run clwork --tool"),
+        "Claude is run's default; spelling it out is noise:\n{said}"
+    );
+}
+
 /// `pause` names two commands as still working. One of them did not.
 ///
 /// `use` resolves the tool from the name by itself - `swapdex use cxwork`

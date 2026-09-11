@@ -6710,12 +6710,15 @@ pub fn payer_line(name: &str, email: Option<&str>, has_login: bool) -> String {
     }
 }
 
-/// `--tool codex` where it is needed, nothing where it is not.
-fn tool_flag(tool: &str) -> &'static str {
-    if tool == "codex" {
-        " --tool codex"
-    } else {
-        ""
+/// The `--tool` flag where it is needed, nothing where it is not.
+///
+/// Claude is every command's default, so naming it is noise. Knowing only
+/// Codex was a trap: any caller reached with a third tool got an empty flag
+/// and printed a command aimed at Claude. Same wording as `sign_in_remedy`.
+fn tool_flag(tool: &str) -> String {
+    match tool {
+        "claude-code" | "claude" => String::new(),
+        other => format!(" --tool {other}"),
     }
 }
 
@@ -7240,7 +7243,13 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
         }
     }
     if !todo.is_empty() && !dry_run {
-        println!("  each one still needs its own sign-in: `swapdex run <name>`");
+        // The plan knows each account's tool, and `run` defaults to Claude, so
+        // a bare `<name>` placeholder pointed every imported Codex account at
+        // the wrong one. Print what to actually type.
+        println!("  each one still needs its own sign-in:");
+        for a in &todo {
+            println!("    swapdex run {}{}", a.name, tool_flag(&a.tool));
+        }
     }
     if !unknown_tools.is_empty() {
         // Non-zero so a script does not read a partial import as a clean one.
