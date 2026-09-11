@@ -3357,6 +3357,54 @@ fn doctor_does_not_call_an_unparseable_codex_credential_a_missing_login() {
     );
 }
 
+/// `pause` names two commands as still working. One of them did not.
+///
+/// `use` resolves the tool from the name by itself - `swapdex use cxwork`
+/// answers "default codex account -> cxwork". `serve` does not: it defaults to
+/// Claude and looks the name up in Claude's registry alone, so for a Codex-only
+/// account the command `pause` had just recommended answers "no account named
+/// 'cxwork'". Measured, both of them.
+#[test]
+fn the_pause_note_names_a_serve_that_works_for_this_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cxwork", "cx@example.com");
+
+    let (out, err, code) = run(root, &["pause", "cxwork"]);
+    assert_eq!(code, 0, "pause failed: {err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("swapdex serve cxwork"),
+        "the note no longer names `serve`, so this measures nothing:\n{said}"
+    );
+    assert!(
+        said.contains("swapdex serve cxwork --tool codex"),
+        "pause recommends a `serve` that cannot find this account:\n{said}"
+    );
+}
+
+/// The over-correction: Claude is the default for both commands, so flagging it
+/// would add noise to the common case and teach the flag where it is not
+/// needed. `use` never needs one at all - it resolves the tool itself.
+#[test]
+fn the_pause_note_leaves_claudes_default_unspelled() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+
+    let (out, err, code) = run(root, &["pause", "work"]);
+    assert_eq!(code, 0, "pause failed: {err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("swapdex serve work"),
+        "the note no longer names `serve`:\n{said}"
+    );
+    assert!(
+        !said.contains("--tool"),
+        "Claude is the default for both commands; spelling it out is noise:\n{said}"
+    );
+}
+
 /// `run` defaults to Claude, so advice naming it must carry the tool.
 ///
 /// `sign_in_remedy` exists because of exactly this: "a Codex account that could

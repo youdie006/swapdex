@@ -1882,10 +1882,21 @@ pub fn pause_rotation(paths: &Paths, name: &str, pause: bool) -> Result<i32> {
             cfg.toggle_disabled(name);
         }
     })?;
+    // `use` resolves the tool from the name; `serve` does not, and defaults to
+    // Claude, so naming it bare pointed a Codex-only account at a command that
+    // answers "no account named '<name>'". Claude needs no flag: it is what
+    // both default to.
+    let serve_flag = profiles
+        .iter()
+        .find(|p| p.name == name)
+        .filter(|p| !p.tools.iter().any(|t| t == "claude-code"))
+        .and_then(|p| p.tools.first())
+        .map(|t| format!(" --tool {t}"))
+        .unwrap_or_default();
     if pause {
         println!(
             "{name} paused - the proxy will not pick it (`swapdex use {name}` and \
-             `swapdex serve {name}` still work)"
+             `swapdex serve {name}{serve_flag}` still work)"
         );
     } else {
         println!("{name} back in rotation");
