@@ -2215,6 +2215,93 @@ fn run_ui(root: &Path, keys: &str) -> (String, String, i32) {
     )
 }
 
+/// Drive the real full-screen picker through a pseudo-terminal.
+///
+/// `SWAPDEX_ASSUME_TTY` deliberately selects the plain fallback; a PTY is
+/// required to cover the dashboard row builder that runs on an actual terminal.
+#[cfg(unix)]
+fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+
+    let mut master = -1;
+    let mut slave = -1;
+    let size = libc::winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &size,
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+
+    let mut child = Command::new(bin())
+        .arg("ui")
+        .env("SWAPDEX_ROOT", root)
+        .env("TERM", "xterm")
+        .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stdout(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut input = master.try_clone().unwrap();
+    let keys = keys.to_vec();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        input.write_all(&keys).unwrap();
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("full-screen ui did not exit after the supplied keys");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    writer.join().unwrap();
+    let mut bytes = Vec::new();
+    let _ = master.read_to_end(&mut bytes);
+    (
+        String::from_utf8_lossy(&bytes).into_owned(),
+        status.code().unwrap_or(-1),
+    )
+}
+
+/// The full-screen dashboard must list slots for every supported tool.
+///
+/// Its hand-written join covered Claude and Codex only. A Gemini slot appeared
+/// in `ls` and the plain picker but the terminal dashboard showed the empty
+/// welcome screen, so the command disagreed with itself based on terminal type.
+#[cfg(unix)]
+#[test]
+fn the_fullscreen_menu_lists_a_gemini_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_gemini_slot(root, "kong", "kong@example.com");
+
+    let (out, code) = run_fullscreen_ui(root, b"q");
+    assert_eq!(code, 0, "full-screen menu failed:\n{out}");
+    assert!(
+        out.contains("kong"),
+        "the Gemini account listed by ls is missing from the full-screen menu:\n{out}"
+    );
+}
+
 /// The number the menu printed beside `name`, so a test can pick that row
 /// without assuming what order the menu sorts in.
 fn menu_number(out: &str, name: &str) -> String {
@@ -2297,6 +2384,26 @@ fn the_menu_numbers_every_account_ls_shows() {
     );
 }
 
+/// A slot-only row must keep its tool after the switch.
+///
+/// The picker found the row through the merged account list, then the
+/// post-switch prompt looked the same name up in the snapshot store alone.
+/// That made a working slot lose its "new Claude" action immediately after
+/// the picker had switched to it.
+#[test]
+fn the_menu_offers_the_tool_held_by_a_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+
+    let (out, err, code) = run_ui(root, "1\n\n");
+    assert_eq!(code, 0, "menu switch failed:\n{out}{err}");
+    assert!(
+        out.contains("c new claude"),
+        "the slot's tool disappeared from the post-switch menu:\n{out}{err}"
+    );
+}
+
 /// `add` must not mint a name that means two different accounts.
 ///
 /// `ls` warns on every listing when one name holds a profile and a slot of a
@@ -2366,6 +2473,82 @@ fn add_accepts_a_name_whose_slot_holds_nothing_readable() {
     );
 }
 
+/// `login` must not save a different account over a name held by a slot.
+///
+/// `add` and `setup` already protect this seam. The interactive login flow
+/// repeated the repoint guard against snapshots only, so completing a real
+/// sign-in could leave `ls` showing one account while `use` selected another.
+#[test]
+fn login_rescues_a_new_account_from_a_slot_name_collision() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "personal", "personal@example.com");
+    seed_claude(root, "old-uuid", "old@example.com");
+    let (_, err, code) = run(root, &["add", "old", "--tool", "claude-code"]);
+    assert_eq!(code, 0, "could not save the outgoing account: {err}");
+
+    let dir = root.join("fakebin-login-collision");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("claude");
+    std::fs::write(
+        &fake,
+        r#"#!/bin/sh
+mkdir -p "$SWAPDEX_ROOT/.claude"
+printf '%s' '{"claudeAiOauth":{"accessToken":"AT-NEW","refreshToken":"RT-NEW","expiresAt":9999999999999,"subscriptionType":"max"}}' > "$SWAPDEX_ROOT/.claude/.credentials.json"
+printf '%s' '{"oauthAccount":{"accountUuid":"new-uuid","emailAddress":"new@example.com"}}' > "$SWAPDEX_ROOT/.claude.json"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut child = Command::new(bin())
+        .args(["login", "personal", "--tool", "claude-code"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_ASSUME_TTY", "1")
+        .env("PATH", path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"y\nrescued\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code().unwrap_or(-1),
+        0,
+        "login failed:\n{out}{err}"
+    );
+    assert!(
+        out.contains("saved profile 'rescued'"),
+        "the new login was not rescued under a free name:\n{out}{err}"
+    );
+
+    let (listing, listing_err, _) = run(root, &["ls"]);
+    assert!(
+        !listing_err.contains("DIFFERENT"),
+        "login minted the crossed name that ls warns about:\n{listing}{listing_err}"
+    );
+    assert!(
+        listing.contains("personal") && listing.contains("rescued"),
+        "both accounts should remain reachable under distinct names:\n{listing}{listing_err}"
+    );
+}
+
 /// Drive the interactive wizard over a pipe. `SWAPDEX_ASSUME_TTY` is the escape
 /// hatch `setup` already carries for exactly this.
 fn run_stdin(root: &Path, args: &[&str], input: &str) -> (String, String, i32) {
@@ -2391,6 +2574,83 @@ fn run_stdin(root: &Path, args: &[&str], input: &str) -> (String, String, i32) {
         String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.code().unwrap_or(-1),
     )
+}
+
+/// Attaching a tool to a profile must still respect a same-named slot.
+///
+/// Setup normally sends names through the slot collision guard, but its
+/// automatic multi-tool attach branch returned early. A Codex profile and a
+/// different Claude slot named `work` therefore made setup file the current
+/// Claude login under the slot's name without asking for a safe alternative.
+#[test]
+fn setup_does_not_auto_attach_over_a_different_slots_name() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "personal@example.com");
+    seed_live_codex(root, "codex@example.com");
+    let (_, err, code) = run(root, &["add", "work", "--tool", "codex"]);
+    assert_eq!(code, 0, "could not seed the Codex profile: {err}");
+    seed_claude(root, "work-uuid", "work@example.com");
+
+    let (out, err, code) = run_stdin(root, &["setup"], "safe\n\n");
+    assert_eq!(code, 0, "setup failed:\n{out}{err}");
+    assert!(
+        out.contains("saved as 'safe'"),
+        "setup did not ask for a name clear of the existing slot:\n{out}{err}"
+    );
+
+    let (listing, listing_err, _) = run(root, &["ls"]);
+    assert!(
+        !listing_err.contains("DIFFERENT"),
+        "setup auto-attached over a different slot account:\n{listing}{listing_err}"
+    );
+}
+
+/// Setup's summary must acknowledge accounts already held in slots.
+///
+/// A slot-only account is ready for `use`, `ls`, and `rm`. Summarising the
+/// snapshot store alone called that same machine empty at the end of setup.
+#[test]
+fn setup_recognises_an_existing_slot_only_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+
+    let (out, err, code) = run_stdin(root, &["setup"], "n\n");
+    assert_eq!(code, 0, "setup failed:\n{out}{err}");
+    assert!(
+        !out.contains("No accounts saved yet"),
+        "setup called the slot account nonexistent:\n{out}{err}"
+    );
+    assert!(
+        out.contains("You're set - saved: work."),
+        "setup did not acknowledge the account every other command sees:\n{out}{err}"
+    );
+}
+
+/// Onboarding must not call a saved snapshot "no accounts".
+///
+/// Declining migration leaves the old account usable through `use`, `ls`, and
+/// `rm`. The final summary counted permanent slots alone and contradicted all
+/// three commands about whether that account still existed.
+#[test]
+fn onboard_recognises_a_snapshot_account_that_was_not_migrated() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "work-uuid", "work@example.com");
+    let (_, err, code) = run(root, &["add", "work", "--tool", "claude-code"]);
+    assert_eq!(code, 0, "could not seed the saved account: {err}");
+
+    let (out, err, code) = run(root, &["onboard"]);
+    assert_eq!(code, 0, "onboard failed:\n{out}{err}");
+    assert!(
+        !out.contains("No accounts yet"),
+        "onboard called the snapshot account nonexistent:\n{out}{err}"
+    );
+    assert!(
+        out.contains("swapdex ui` shows your accounts"),
+        "onboard did not acknowledge the account every other command sees:\n{out}{err}"
+    );
 }
 
 /// `setup` must not mint the name `ls` warns about either.
@@ -3341,6 +3601,37 @@ fn export_carries_the_accounts_the_listing_shows() {
             "the export drops an account the listing shows: {name} not in {names:?}"
         );
     }
+}
+
+/// Import must leave an account already present as a snapshot alone.
+///
+/// Export writes both registries, but import compared the manifest with slots
+/// alone. Re-importing a snapshot account therefore created a second, empty
+/// slot under the same name instead of preserving the local login it found.
+#[test]
+fn import_recognises_a_snapshot_account_already_here() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-w", "w@example.com");
+    let (out, err, code) = run(root, &["add", "work", "--tool", "claude-code"]);
+    assert_eq!(code, 0, "add failed:\n{out}{err}");
+
+    let manifest = root.join("setup.json");
+    std::fs::write(
+        &manifest,
+        br#"{"version":1,"accounts":[{"name":"work","tool":"claude-code"}]}"#,
+    )
+    .unwrap();
+    let (out, err, code) = run(root, &["import", manifest.to_str().unwrap()]);
+    assert_eq!(code, 0, "import failed:\n{out}{err}");
+    assert!(
+        out.contains("every account in that file is already here"),
+        "import did not recognise the snapshot account:\n{out}{err}"
+    );
+    assert!(
+        !out.contains("created work"),
+        "import created an empty slot over an account already here:\n{out}{err}"
+    );
 }
 
 /// The rotation check covers Claude, not only Codex.

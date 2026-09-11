@@ -3517,12 +3517,16 @@ fn ui_session_hints(paths: &Paths, name: &str, first_time: bool) -> Result<()> {
     Ok(())
 }
 
-/// The tools a saved profile holds (empty if the profile is unknown).
+/// The tools an account holds, however that account is registered.
 fn profile_tools(paths: &Paths, name: &str) -> Vec<String> {
     Store::open(paths)
         .ok()
         .and_then(|s| {
-            s.list()
+            // The post-switch menu receives names from the merged picker. A
+            // second snapshot-only lookup made every slot-only account lose
+            // its "new conversation" action immediately after selection.
+            merged_accounts(paths, &s)
+                .0
                 .into_iter()
                 .find(|p| p.name == name)
                 .map(|p| p.tools)
@@ -4081,9 +4085,41 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     stale: crate::proxy::creds::slot_token_expired(dir, now_ms()),
                 });
             }
+            // Gemini and Antigravity have permanent homes too, even though the
+            // proxy cannot carry their traffic. Omitting their registries made
+            // a valid account disappear only in the full-screen picker; mark
+            // these rows for `use`, which repoints their home without a relay.
+            for tool in ["gemini", "antigravity"] {
+                let active = active_slot_name(self.paths, tool);
+                let Ok(slots) = crate::slots::Slots::open_for(self.paths, tool) else {
+                    continue;
+                };
+                for rec in slots.list() {
+                    let email = self
+                        .paths
+                        .try_with_tool_dir(tool, &rec.config_dir)
+                        .and_then(|at| {
+                            crate::adapters::by_name(tool)
+                                .and_then(|a| a.identity(&at).ok().flatten())
+                        })
+                        .and_then(|id| id.email);
+                    list.push(crate::tui::Row {
+                        is_slot: false,
+                        disabled: cfg.is_disabled(&rec.name),
+                        needs_login: !crate::proxy::has_login(self.paths, tool, &rec.config_dir),
+                        name: rec.name.clone(),
+                        ident: identity_column(email, None),
+                        tools: tool.to_string(),
+                        active: active.as_deref() == Some(rec.name.as_str()),
+                        warn: None,
+                        also: Vec::new(),
+                        stale: false,
+                    });
+                }
+            }
             // One row per account (a snapshot and a slot for the same login are
-            // one account), then grouped by tool so Claude and Codex read as two
-            // sections rather than one mixed list.
+            // one account), then grouped by tool so the four registries read as
+            // separate sections rather than one mixed list.
             crate::tui::group_sorted(crate::tui::dedupe_by_identity(list))
         }
         fn switch(&mut self, name: &str, is_slot: bool) -> (bool, String) {
@@ -4266,18 +4302,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         ) -> (String, Vec<crate::tui::SessionEntry>, Vec<&'static str>) {
             let first_time = self.pre_switch_first;
             let (sessions, label) = recent_menu_sessions(self.paths, name, first_time, 5);
-            // The profile's saved tools drive which "open a NEW <tool>" entries
-            // the menu offers (a Claude-only account shouldn't offer Codex).
-            let tools: Vec<&'static str> = Store::open(self.paths)
-                .ok()
-                .and_then(|st| st.list().into_iter().find(|p| p.name == name))
-                .map(|p| {
-                    ["claude-code", "codex", "gemini", "antigravity"]
-                        .into_iter()
-                        .filter(|t| p.tools.iter().any(|x| x == t))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Use the same merged tool set as the plain picker. Looking the
+            // selected name up in snapshots alone left slot-only rows with no
+            // way to start a conversation from this screen.
+            let held = profile_tools(self.paths, name);
+            let tools: Vec<&'static str> = ["claude-code", "codex", "gemini", "antigravity"]
+                .into_iter()
+                .filter(|t| held.iter().any(|x| x == t))
+                .collect();
             let entries = sessions
                 .iter()
                 .map(|s| {
@@ -5920,15 +5952,10 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
     // Mark it shown so a bare `swapdex` does not re-run this every launch.
     let _ = crate::atomic::write_managed(&onboarded_marker(paths), b"1");
 
-    // Wrap up.
-    // Counting Claude's registry alone told a Codex-only machine it had no
-    // accounts and pointed it at a tool it does not use - the blind spot `quota`
-    // carries a note about, on the first screen a new user sees.
-    let registered = crate::slots::Slots::open(paths)?.list().len()
-        + crate::slots::Slots::open_for(paths, "codex")
-            .map(|s| s.list().len())
-            .unwrap_or(0);
-    if registered == 0 {
+    // Wrap up from the same union every account-facing command uses. A person
+    // may decline migration and keep a usable snapshot, and slots now exist
+    // for four tools; counting two slot registries called both states empty.
+    if !has_any_account(paths) {
         println!(
             "No accounts yet. Log in to Claude or Codex, then run: swapdex run <name> \
              (add `--tool codex` for a Codex account)."
@@ -7124,18 +7151,14 @@ pub fn import(paths: &Paths, file: &std::path::Path, dry_run: bool) -> Result<i3
         );
         return Ok(2);
     }
-    let here: Vec<(String, String)> = crate::adapters::names()
+    // Imported metadata cannot improve an account that is already local: it
+    // carries no login. Include snapshots here too, or re-importing an export
+    // builds an empty slot over the account whose local copy should win.
+    let store = Store::open(paths)?;
+    let here: Vec<(String, String)> = merged_accounts(paths, &store)
+        .0
         .into_iter()
-        .flat_map(|t| {
-            crate::slots::Slots::open_for(paths, t)
-                .map(|s| {
-                    s.list()
-                        .into_iter()
-                        .map(|r| (r.name, t.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
+        .flat_map(|p| p.tools.into_iter().map(move |tool| (p.name.clone(), tool)))
         .collect();
     let settings = incoming.settings.clone();
     let todo = crate::portable::plan(&here, &incoming);
@@ -7874,6 +7897,41 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
                 // account already saved - the documented no-op case.
                 return Ok(0);
             }
+            // A slot owns its name as surely as a snapshot does, but saving a
+            // snapshot cannot repoint that slot. Letting the fresh sign-in use
+            // a name held by another slot would make `ls` describe one account
+            // while `use` selects the other, so preserve both under distinct
+            // names instead.
+            let slot_id = slot_account_under(paths, tool, name);
+            if name_means_two_accounts(Some(&new.account_id), slot_id.as_deref()) {
+                println!("'{name}' is already a {tool} slot holding a different account.");
+                if let Some(rescue) = ask_name(
+                    &store,
+                    "save the NEW account under a different name instead (Enter discards it): ",
+                    "",
+                    Some(NameHolder {
+                        paths,
+                        tool,
+                        account_id: &new.account_id,
+                    }),
+                ) {
+                    let snap = adapter.capture(paths)?;
+                    store.save(&rescue, &snap)?;
+                    println!(
+                        "saved profile '{rescue}' ({}). '{name}' is untouched.",
+                        identity_line(&new)
+                    );
+                    println!("switch back any time:  swapdex use <name>  (or `swapdex ui`)");
+                    return Ok(0);
+                }
+                adapter.apply(paths, &stash)?;
+                println!(
+                    "the new sign-in was DISCARDED and your previous login restored - \
+                     '{name}' is untouched. Re-run `swapdex login <other-name>` to \
+                     redo it under another name."
+                );
+                return Ok(0);
+            }
             // Same repoint rule as `add --update`: if '{name}' already has a
             // snapshot for this tool, changing what the name means must be
             // explicit. An UNREADABLE snapshot counts as "different" - corrupt
@@ -8356,7 +8414,12 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         // name is the NORMAL multi-tool case (`swapdex add <name>` semantics)
         // - never scare with "replace it?" for it, and never skip it.
         if let Some(p) = store.list().into_iter().find(|p| p.name == default) {
-            if !p.tools.iter().any(|t| t == tool) {
+            // This early attach bypasses `ask_name`, so perform its slot guard
+            // here too. Otherwise a profile holding another tool causes the
+            // current login to be filed over a different slot account's name.
+            let slot_id = slot_account_under(paths, tool, &default);
+            let crosses_slot = name_means_two_accounts(Some(&id.account_id), slot_id.as_deref());
+            if !p.tools.iter().any(|t| t == tool) && !crosses_slot {
                 // One unreadable tool must not abort the whole wizard.
                 match adapter.capture(paths) {
                     Ok(snap) => {
@@ -8426,8 +8489,14 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         println!();
     }
 
-    // 3) Summary.
-    let names: Vec<String> = store.list().into_iter().map(|p| p.name).collect();
+    // 3) Summary. Existing slots are already usable accounts even when this
+    // run captured no snapshot; calling that machine empty contradicts every
+    // account-facing command the summary points at.
+    let names: Vec<String> = merged_accounts(paths, &store)
+        .0
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
     println!();
     if names.is_empty() {
         println!(
