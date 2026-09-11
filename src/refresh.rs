@@ -65,17 +65,25 @@ pub enum RefreshError {
 
 impl RefreshError {
     /// What the user should do about it, in one line.
-    pub fn remedy(&self, name: &str) -> String {
+    ///
+    /// `run` defaults to Claude, so every remedy naming it must name the tool
+    /// too - otherwise a dead Codex account is told to launch Claude.
+    pub fn remedy(&self, name: &str, tool: &str) -> String {
+        let flag = match tool {
+            "claude-code" | "claude" => String::new(),
+            other => format!(" --tool {other}"),
+        };
         match self {
             Self::NoCredential => {
-                format!("'{name}' has no login yet - `swapdex run {name}` signs it in")
+                format!("'{name}' has no login yet - `swapdex run {name}{flag}` signs it in")
             }
             Self::InUse => format!(
                 "'{name}' is in use right now - its own session will renew it; \
                  renewing from here would retire the token that session is holding"
             ),
             Self::Expired => format!(
-                "'{name}' has been idle too long to renew - `swapdex run {name}` signs it in again"
+                "'{name}' has been idle too long to renew - \
+                 `swapdex run {name}{flag}` signs it in again"
             ),
             Self::Busy => format!(
                 "the login server is busy - '{name}' is fine, renewing again shortly will work"
@@ -563,7 +571,7 @@ mod tests {
             now - 1
         );
         assert!(refresh_token_expired(blob.as_bytes(), now));
-        let msg = RefreshError::Expired.remedy("work");
+        let msg = RefreshError::Expired.remedy("work", "claude-code");
         assert!(msg.contains("swapdex run work"), "names the way out: {msg}");
         // Unknown is not expired.
         assert!(!refresh_token_expired(br#"{"claudeAiOauth":{}}"#, now));
@@ -595,10 +603,10 @@ mod tests {
         );
         // Rate limiting is a wait, not a verdict: telling someone to sign in
         // again over it would cost them a login they did not need.
-        let busy = RefreshError::Busy.remedy("work");
+        let busy = RefreshError::Busy.remedy("work", "claude-code");
         assert!(busy.contains("is fine"), "{busy}");
         assert!(!busy.contains("swapdex run"), "not a sign-in: {busy}");
-        let msg = RefreshError::InUse.remedy("work");
+        let msg = RefreshError::InUse.remedy("work", "claude-code");
         assert!(
             msg.contains("its own session will renew it"),
             "an in-use slot is fine, not broken: {msg}"
@@ -698,6 +706,51 @@ pub fn keep_alive_sweep_codex(
         }
     }
     (renewed, failed)
+}
+
+#[cfg(test)]
+mod remedy_tool_tests {
+    use super::*;
+
+    /// A remedy that names `run` must name the tool, because `run` defaults to
+    /// Claude.
+    ///
+    /// `Expired` is what a retired refresh token answers with - Codex returns
+    /// 400/401/403 - which is the silent logout this project exists to prevent.
+    /// The person reading it has a dead Codex account and was told `swapdex run
+    /// <name>`; that launches Claude and registers a second account under the
+    /// same name. `sign_in_remedy` in commands.rs was written for exactly this
+    /// mistake, and these strings never got it.
+    #[test]
+    fn a_codex_remedy_names_codex() {
+        for e in [RefreshError::Expired, RefreshError::NoCredential] {
+            let msg = e.remedy("cxwork", "codex");
+            assert!(
+                msg.contains("swapdex run cxwork"),
+                "the remedy stopped naming `run`, so this test measures nothing: {msg}"
+            );
+            assert!(
+                msg.contains("swapdex run cxwork --tool codex"),
+                "a Codex remedy names a command that runs Claude: {msg}"
+            );
+        }
+    }
+
+    /// The other direction: Claude is `run`'s default, so naming it is noise.
+    #[test]
+    fn a_claude_remedy_carries_no_tool_flag() {
+        for e in [RefreshError::Expired, RefreshError::NoCredential] {
+            let msg = e.remedy("work", "claude-code");
+            assert!(
+                msg.contains("swapdex run work"),
+                "the remedy stopped naming `run`: {msg}"
+            );
+            assert!(
+                !msg.contains("--tool"),
+                "Claude is run's default; spelling it out is noise: {msg}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -918,7 +971,7 @@ mod point_of_effect_tests {
     #[test]
     fn standing_down_is_its_own_answer() {
         let e = RefreshError::AlreadyRefreshing;
-        let r = e.remedy("rnd");
+        let r = e.remedy("rnd", "claude-code");
         assert!(
             !r.to_lowercase().contains("sign in"),
             "nobody needs to sign in: {r}"

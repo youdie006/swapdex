@@ -7449,15 +7449,21 @@ pub fn keep_alive(paths: &Paths) -> Result<i32> {
         return Ok(0);
     }
     let now = now_ms();
-    let (mut renewed, mut failed) = crate::refresh::keep_alive_sweep(&slots, now);
+    let (mut renewed, claude_failed) = crate::refresh::keep_alive_sweep(&slots, now);
     let (codex_renewed, codex_failed) = crate::refresh::keep_alive_sweep_codex(&codex, now);
     renewed.extend(codex_renewed);
-    failed.extend(codex_failed);
+    // Which sweep produced a failure is the last place the tool is known;
+    // merging the two lists first threw it away, and the remedy names `run`.
+    let failed: Vec<(String, &str, crate::refresh::RefreshError)> = claude_failed
+        .into_iter()
+        .map(|(n, e)| (n, "claude-code", e))
+        .chain(codex_failed.into_iter().map(|(n, e)| (n, "codex", e)))
+        .collect();
     for name in &renewed {
         println!("renewed {name}");
     }
-    for (name, why) in &failed {
-        eprintln!("{}", why.remedy(name));
+    for (name, tool, why) in &failed {
+        eprintln!("{}", why.remedy(name, tool));
     }
     if renewed.is_empty() && failed.is_empty() {
         println!("every account has time left - nothing needed renewing");
@@ -7519,7 +7525,7 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
                 }
                 renewed += 1;
             }
-            Err(why) => println!("  {}", why.remedy(&r.name)),
+            Err(why) => println!("  {}", why.remedy(&r.name, "claude-code")),
         }
     }
     renewed += refresh_codex(&codex_list, now, &mut done);
@@ -7556,7 +7562,7 @@ fn refresh_codex(list: &[crate::slots::SlotRecord], now: i64, done: &mut Vec<Str
                 }
                 renewed += 1;
             }
-            Err(why) => println!("  {}", why.remedy(&r.name)),
+            Err(why) => println!("  {}", why.remedy(&r.name, "codex")),
         }
     }
     renewed

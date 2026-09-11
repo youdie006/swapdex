@@ -40,10 +40,19 @@ pub enum TokenUnavailable {
 
 impl TokenUnavailable {
     /// The one next step, for the account named `name`.
-    pub fn remedy(&self, name: &str) -> String {
+    ///
+    /// With the tool, because `run` defaults to Claude: this line is printed
+    /// while the proxy falls back to the client's own login, so the reader is
+    /// already paying for somebody else's turns and needs the right command.
+    pub fn remedy(&self, name: &str, tool: &str) -> String {
+        let flag = match tool {
+            "claude-code" | "claude" => String::new(),
+            other => format!(" --tool {other}"),
+        };
         match self {
             Self::NoLogin => format!(
-                "account '{name}' has no usable login - `swapdex run {name}` once signs it in"
+                "account '{name}' has no usable login - \
+                 `swapdex run {name}{flag}` once signs it in"
             ),
             Self::KeychainLocked => format!(
                 "account '{name}' is signed in, but macOS will not release its login here: \

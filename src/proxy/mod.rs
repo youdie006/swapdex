@@ -556,7 +556,7 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
             println!("keep-alive: renewed {name}");
         }
         for (name, why) in &failed {
-            println!("keep-alive: {}", why.remedy(name));
+            println!("keep-alive: {}", why.remedy(name, &tool));
         }
         if !renewed.is_empty() || !failed.is_empty() {
             std::io::stdout().flush().ok();
@@ -1617,7 +1617,7 @@ fn forward_turn(
                 // Another turn is renewing it; the credential it writes is the
                 // one this turn will use. Not worth a line on the request path.
                 Err(crate::refresh::RefreshError::AlreadyRefreshing) => {}
-                Err(why) => println!("  {}", why.remedy(&slot.name)),
+                Err(why) => println!("  {}", why.remedy(&slot.name, &opts.tool)),
             }
             std::io::stdout().flush().ok();
         }
@@ -1656,7 +1656,7 @@ fn forward_turn(
                     // Another turn is renewing it; the credential it writes is
                     // the one this turn will use.
                     Err(crate::refresh::RefreshError::AlreadyRefreshing) => {}
-                    Err(why) => println!("  {}", why.remedy(&slot.name)),
+                    Err(why) => println!("  {}", why.remedy(&slot.name, &opts.tool)),
                 }
                 std::io::stdout().flush().ok();
             }
@@ -1820,7 +1820,7 @@ fn forward_turn(
                 // all. Being unable to help is not a reason to break the tool.
                 println!(
                     "{} - passing your own login through",
-                    why.remedy(&slot.name)
+                    why.remedy(&slot.name, &opts.tool)
                 );
                 std::io::stdout().flush().ok();
                 note_client_serving(paths, &opts.tool);
