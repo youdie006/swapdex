@@ -612,6 +612,18 @@ fn doctor_flags_slots_without_login_and_stale_logins() {
     .unwrap();
     // 'corrupt': a login artifact EXISTS but is unparseable - not "no login".
     std::fs::write(dir_of("corrupt").join(".credentials.json"), b"not json").unwrap();
+    // 0600, the way swapdex and the tools themselves write a credential. A
+    // fixture at the default mode trips doctor's permission check, which is
+    // doctor being right rather than the check being wrong.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for n in ["old", "recent", "corrupt"] {
+            let f = dir_of(n).join(".credentials.json");
+            if f.exists() {
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+    }
     // PATH holds ONLY the fake tool dir. doctor now reports how many swapdex
     // copies are reachable, and inheriting the developer's PATH would make that
     // answer - and this test - depend on whose machine it runs on.

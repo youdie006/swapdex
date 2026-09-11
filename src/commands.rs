@@ -4913,12 +4913,34 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     // Live credential files hold refresh tokens - flag loose modes on ALL of
     // them, not just .claude.json (the store already self-tightens; the live
     // files are each tool's own, so we can only warn).
-    for f in [
+    // The bare paths, plus every slot: under the slot model each account keeps
+    // its credential in its own directory, and this list checked only the file
+    // a copy-model machine writes. On a machine set up with `run` or `migrate`
+    // - the shape this tool steers people into - it therefore walked nothing
+    // and reported a clean bill.
+    let mut to_check = vec![
         paths.claude_credentials(),
         paths.codex_auth(),
         paths.gemini_oauth(),
         paths.antigravity_token(),
-    ] {
+    ];
+    for tool in crate::adapters::names() {
+        if let Ok(slots) = crate::slots::Slots::open_for(paths, tool) {
+            for r in slots.list() {
+                if let Some(p) = paths.try_with_tool_dir(tool, &r.config_dir) {
+                    to_check.extend([
+                        p.claude_credentials(),
+                        p.codex_auth(),
+                        p.gemini_oauth(),
+                        p.antigravity_token(),
+                    ]);
+                }
+            }
+        }
+    }
+    to_check.sort();
+    to_check.dedup();
+    for f in to_check {
         if let Ok(meta) = std::fs::metadata(&f) {
             use std::os::unix::fs::PermissionsExt;
             if meta.permissions().mode() & 0o077 != 0 {

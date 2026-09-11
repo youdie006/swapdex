@@ -3259,3 +3259,31 @@ fn doctor_reports_a_settings_file_that_will_not_parse() {
         "doctor says nothing about a settings file it cannot read:\n{said}"
     );
 }
+
+/// The permission check must look where the credentials actually live.
+///
+/// It walked the four bare paths - `~/.claude/.credentials.json` and its
+/// siblings - and never a slot. Under the slot model, which is what `run`,
+/// `migrate` and `onboard` all steer people into, every credential lives in a
+/// slot instead, so on such a machine the check ran over nothing at all while
+/// reporting a clean bill. The README's promise that every credential swapdex
+/// writes is 0600 was being verified for the one file it no longer writes.
+#[test]
+fn doctor_checks_the_permissions_of_credentials_in_slots() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let cred = root
+        .join(".local/share/swapdex/slots/work")
+        .join(".credentials.json");
+    assert!(cred.exists(), "the fixture wrote no slot credential");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&cred, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("group/world-readable"),
+        "doctor passed a world-readable slot credential:\n{said}"
+    );
+}
