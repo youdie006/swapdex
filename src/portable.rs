@@ -49,11 +49,18 @@ pub fn export(paths: &Paths) -> Portable {
         if crate::slots::Slots::open_for(paths, tool).is_err() {
             unreadable.push(tool.to_string());
         }
-        if let Ok(s) = crate::slots::Slots::open_for(paths, tool) {
-            for r in s.list() {
+    }
+    // Both registries, the way `ls`, `use` and `rm` read them. Walking the slot
+    // registries alone wrote an empty manifest on a machine whose accounts are
+    // saved profiles - a setup that restored as nothing, reported as success.
+    // The guard above catches a registry that will not parse; this catches the
+    // one that was never asked.
+    if let Ok(store) = crate::store::Store::open(paths) {
+        for p in crate::commands::merged_accounts(paths, &store).0 {
+            for tool in p.tools {
                 accounts.push(PortableAccount {
-                    name: r.name,
-                    tool: tool.to_string(),
+                    name: p.name.clone(),
+                    tool,
                 });
             }
         }

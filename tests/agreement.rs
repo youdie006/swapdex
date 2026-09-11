@@ -3136,3 +3136,42 @@ fn the_command_reference_lists_every_command() {
         missing.join(", ")
     );
 }
+
+/// What `ls` lists, `export` must carry.
+///
+/// `export` walked the slot registries only. On a machine whose accounts are
+/// saved profiles, which `ls`, `use` and `rm` all still serve, it wrote an
+/// empty manifest and reported success, so the setup restored on the next
+/// machine was nothing at all. Its own comment says the one thing an export
+/// must never do is hand back a manifest that looks complete and is not; it
+/// guarded the registry it could not READ and not the one it never ASKED.
+#[test]
+fn export_carries_the_accounts_the_listing_shows() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-w", "w@example.com");
+    let (o, e, c) = run(root, &["add", "work"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    seed_slot(root, "slotted", "s@example.com");
+
+    let (listed, _, _) = run(root, &["ls"]);
+    for name in ["work", "slotted"] {
+        assert!(listed.contains(name), "ls does not show {name}:\n{listed}");
+    }
+
+    let out = root.join("setup.json");
+    let (o, e, c) = run(root, &["export", out.to_str().unwrap()]);
+    assert_eq!(c, 0, "export failed:\n{o}{e}");
+    let text = std::fs::read_to_string(&out).expect("read the export");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("export is json");
+    let names: Vec<&str> = v["accounts"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x["name"].as_str()).collect())
+        .unwrap_or_default();
+    for name in ["work", "slotted"] {
+        assert!(
+            names.contains(&name),
+            "the export drops an account the listing shows: {name} not in {names:?}"
+        );
+    }
+}

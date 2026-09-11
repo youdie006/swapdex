@@ -175,3 +175,81 @@ fn slash_writes_inside_the_sandbox_only() {
         }
     }
 }
+
+/// `export` writes a setup, never a login.
+///
+/// Its own line says so - "names and settings only; every account still signs
+/// in on its own machine" - and the file is the one artefact of this tool meant
+/// to be copied to another machine, mailed, or committed. Nothing checked. The
+/// account sources it reads widened to cover saved profiles as well as slots,
+/// which is exactly the kind of change that can start carrying a credential
+/// without anyone noticing.
+#[test]
+fn an_export_carries_no_credential() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let store = root.join(".local/share/swapdex");
+    std::fs::create_dir_all(store.join("slots/w")).unwrap();
+    std::fs::write(store.join("onboarded"), b"1").unwrap();
+    std::fs::write(
+        store.join("slots/w/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"SLOT-ACCESS","refreshToken":"SLOT-REFRESH"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots/w/.claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"SLOT-UUID","emailAddress":"slot@example.com"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        format!(
+            r#"[{{"name":"work","id":"w","config_dir":"{}","adopted":false,"tool":"claude-code"}}]"#,
+            store.join("slots/w").display()
+        ),
+    )
+    .unwrap();
+    let snap = store.join("accounts/saved/claude-code");
+    std::fs::create_dir_all(&snap).unwrap();
+    std::fs::write(
+        snap.join("credentials"),
+        br#"{"claudeAiOauth":{"accessToken":"SNAP-ACCESS","refreshToken":"SNAP-REFRESH"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        snap.join("oauth_account"),
+        br#"{"accountUuid":"SNAP-UUID","emailAddress":"snap@example.com"}"#,
+    )
+    .unwrap();
+
+    let out = root.join("setup.json");
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .args(["export", out.to_str().unwrap()])
+        .env("SWAPDEX_ROOT", root)
+        .env("HOME", root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "export failed");
+
+    let text = std::fs::read_to_string(&out).expect("read the export");
+    for secret in [
+        "SLOT-ACCESS",
+        "SLOT-REFRESH",
+        "SLOT-UUID",
+        "SNAP-ACCESS",
+        "SNAP-REFRESH",
+        "SNAP-UUID",
+        "slot@example.com",
+        "snap@example.com",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "the export carries {secret}, which is a login or an identity:\n{text}"
+        );
+    }
+    // And it is not empty, or the check above would pass for the wrong reason.
+    assert!(
+        text.contains("work") && text.contains("saved"),
+        "the export named no accounts, so carrying no secret proves nothing:\n{text}"
+    );
+}
