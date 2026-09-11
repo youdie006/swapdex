@@ -424,6 +424,27 @@ fn seed_live_codex(root: &Path, email: &str) {
 }
 
 /// A registered CODEX slot: the shape that can actually pay for Codex turns.
+/// `YYYY-MM-DDTHH:MM:SSZ` from a unix timestamp, the way Codex writes it.
+/// Civil-from-days, so no date crate is pulled in for two tests.
+fn rfc3339_utc(secs: u64) -> String {
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = era * 400 + yoe + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
 fn seed_codex_slot(root: &Path, name: &str, email: &str) {
     let dir = root.join(".local/share/swapdex/slots").join(name);
     std::fs::create_dir_all(dir.join("sessions")).unwrap();
@@ -2996,6 +3017,117 @@ fn mcp_whoami_still_reports_a_live_login_when_no_slot_points_anywhere() {
 
 /// `doctor` must not deny the account its own next line names.
 ///
+/// A Codex login refreshed days ago is current, and doctor must say nothing.
+///
+/// This is the units guard. Claude records a deadline in MILLISECONDS and Codex
+/// records `last_refresh` as RFC 3339 seconds, so the reader scales one and not
+/// the other. Get that wrong and every healthy Codex slot reports roughly fifty
+/// years idle - which an ancient-timestamp test cannot catch, because seconds
+/// and milliseconds both clear the threshold there. Only a fresh login
+/// separates them.
+#[test]
+fn doctor_does_not_call_a_freshly_refreshed_codex_login_idle() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    let cred = root.join(".local/share/swapdex/slots/cx/auth.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cred).unwrap()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    v["last_refresh"] = serde_json::json!(rfc3339_utc(now));
+    std::fs::write(&cred, serde_json::to_vec(&v).unwrap()).unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        !said.contains("idle"),
+        "doctor calls a login refreshed just now idle:\n{said}"
+    );
+}
+
+/// The other direction: a Codex login that has sat unrefreshed past the
+/// threshold must be flagged, because by then the refresh token itself may have
+/// been rotated away and the account is dead without saying so.
+#[test]
+fn doctor_flags_a_codex_login_that_has_sat_unrefreshed() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    let cred = root.join(".local/share/swapdex/slots/cx/auth.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cred).unwrap()).unwrap();
+    let long_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 200 * 86_400;
+    v["last_refresh"] = serde_json::json!(rfc3339_utc(long_ago));
+    std::fs::write(&cred, serde_json::to_vec(&v).unwrap()).unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("slot:cx") && said.contains("idle"),
+        "doctor says nothing about a Codex login unrefreshed for 200 days:\n{said}"
+    );
+}
+
+/// The over-correction of the test below: a credential that is THERE but will
+/// not parse is not a missing login.
+///
+/// Claude's reader documents this - unreadable is "treated as healthy rather
+/// than guessed at" - because the remedy differs. "No login yet, run once to
+/// sign in" sent at an account that is signed in tells the user to redo work
+/// they already did, and buries the real problem (a damaged file) under it.
+#[test]
+fn doctor_does_not_call_an_unparseable_codex_credential_a_missing_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    let cred = root.join(".local/share/swapdex/slots/cx/auth.json");
+    assert!(cred.exists(), "the fixture wrote no credential");
+    std::fs::write(&cred, b"{ this is not json").unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        !said.contains("no login yet"),
+        "doctor calls a present-but-damaged credential a missing login:\n{said}"
+    );
+}
+
+/// Per-slot login health is checked for one tool out of four.
+///
+/// `snapshot_refreshed_at` exists because each reader used to work out a
+/// tool's freshness for itself and they disagreed; snapshots got one helper
+/// covering all four tools. The per-slot walk never did - it calls
+/// `claude::slot_login`, so a Codex slot that has never been signed in gets no
+/// `slot:` row at all. Slots are the shape `run` and `migrate` steer people
+/// into, so this is the common machine, and an absent check reads as a passed
+/// one.
+#[test]
+fn doctor_checks_a_codex_slot_login_the_way_it_checks_a_claude_one() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "cl", "cl@example.com");
+    seed_codex_slot(root, "cx", "cx@example.com");
+    // Neither account has signed in yet.
+    std::fs::remove_file(root.join(".local/share/swapdex/slots/cl/.credentials.json")).unwrap();
+    std::fs::remove_file(root.join(".local/share/swapdex/slots/cx/auth.json")).unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("slot:cl"),
+        "the Claude half of the comparison is gone, so this test measures nothing:\n{said}"
+    );
+    assert!(
+        said.contains("slot:cx"),
+        "doctor reports a Claude slot with no login and says nothing about a Codex one:\n{said}"
+    );
+}
+
 /// The default pointer is the one pointer nothing validates.
 ///
 /// `serving_dir()` refuses to answer with a directory the registry does not

@@ -1567,6 +1567,47 @@ fn snapshot_refreshed_at(snap: &crate::adapters::Snapshot, tool: &str) -> Option
     }
 }
 
+/// The question [`snapshot_refreshed_at`] answers, asked of a LIVE slot.
+///
+/// Snapshots got one helper across every tool because readers working it out
+/// for themselves disagreed. The per-slot walk still called Claude's, so a
+/// Codex slot went unchecked entirely.
+fn slot_login_of(
+    paths: &Paths,
+    tool: &str,
+    dir: &std::path::Path,
+) -> crate::adapters::claude::SlotLogin {
+    use crate::adapters::claude::SlotLogin;
+    // Claude's own reader also consults the Keychain, which no other tool uses.
+    if tool == "claude-code" {
+        return crate::adapters::claude::slot_login(dir);
+    }
+    let Some(p) = paths.try_with_tool_dir(tool, dir) else {
+        return SlotLogin::Present(None);
+    };
+    let file = match tool {
+        "codex" => p.codex_auth(),
+        "gemini" => p.gemini_oauth(),
+        "antigravity" => p.antigravity_token(),
+        _ => return SlotLogin::Present(None),
+    };
+    let Ok(bytes) = std::fs::read(&file) else {
+        return SlotLogin::Absent;
+    };
+    let secs = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| match tool {
+            "codex" => v["last_refresh"]
+                .as_str()
+                .and_then(crate::session_link::rfc3339_to_secs),
+            "gemini" => v["expiry_date"].as_i64().map(|ms| ms / 1000),
+            _ => v["token"]["expiry"]
+                .as_str()
+                .and_then(crate::session_link::rfc3339_to_secs),
+        });
+    SlotLogin::Present(secs.map(|s| s * 1000))
+}
+
 /// Whether a snapshot is old enough that its REFRESH token may itself be dead.
 ///
 /// An access token that merely lapsed is not news for any of these tools - they
@@ -4910,38 +4951,43 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 }
             };
             report("shim", shim_ok, shim_msg);
+        }
+    }
 
-            // Per-slot login health (read-only). Flag only a slot with NO
-            // login yet, or one whose token sat unrefreshed past STALE_DAYS
-            // (by then the refresh token itself may be revoked). Routine
-            // access-token expiry (hours) is NOT flagged - Claude silently
-            // refreshes it on the next run (same no-spam rule as
-            // profile_detail).
-            use crate::adapters::claude::SlotLogin;
-            for r in &list {
-                let key = format!("slot:{}", r.name);
-                match crate::adapters::claude::slot_login(&r.config_dir) {
-                    SlotLogin::Absent => report(
+    // Per-slot login health (read-only), for EVERY tool. Flag only a slot with
+    // NO login yet, or one whose token sat unrefreshed past STALE_DAYS (by then
+    // the refresh token itself may be revoked). Routine access-token expiry
+    // (hours) is NOT flagged - every tool refreshes silently on the next run.
+    // This walked Claude's registry alone, so a Codex slot that had never been
+    // signed in produced no row, and no row reads as a passing one.
+    use crate::adapters::claude::SlotLogin;
+    for tool in crate::adapters::names() {
+        let Ok(slots) = crate::slots::Slots::open_for(paths, tool) else {
+            continue;
+        };
+        for r in slots.list() {
+            let key = format!("slot:{}", r.name);
+            match slot_login_of(paths, tool, &r.config_dir) {
+                SlotLogin::Absent => report(
+                    &key,
+                    true,
+                    format!("no login yet - `swapdex run {}` once signs it in", r.name),
+                ),
+                SlotLogin::Present(Some(ts)) if now_ms() - ts > STALE_DAYS * 86_400_000 => {
+                    let days = (now_ms() - ts) / 86_400_000;
+                    report(
                         &key,
                         true,
-                        format!("no login yet - `swapdex run {}` once signs it in", r.name),
-                    ),
-                    SlotLogin::Present(Some(ts)) if now_ms() - ts > STALE_DAYS * 86_400_000 => {
-                        let days = (now_ms() - ts) / 86_400_000;
-                        report(
-                            &key,
-                            true,
-                            format!(
-                                "login idle ~{days}d - `swapdex run {}` once refreshes \
-                                 it (re-login if it asks)",
-                                r.name
-                            ),
-                        );
-                    }
-                    // Fresh, or present-but-undeterminable: stay quiet - doctor
-                    // flags only what it can determine.
-                    SlotLogin::Present(_) => {}
+                        format!(
+                            "login idle ~{days}d - `swapdex run {}` once refreshes \
+                             it (re-login if it asks)",
+                            r.name
+                        ),
+                    );
                 }
+                // Fresh, or present-but-undeterminable: stay quiet - doctor
+                // flags only what it can determine.
+                SlotLogin::Present(_) => {}
             }
         }
     }
