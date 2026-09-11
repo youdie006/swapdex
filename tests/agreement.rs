@@ -2996,6 +2996,41 @@ fn mcp_whoami_still_reports_a_live_login_when_no_slot_points_anywhere() {
 
 /// `doctor` must not deny the account its own next line names.
 ///
+/// The default pointer is the one pointer nothing validates.
+///
+/// `serving_dir()` refuses to answer with a directory the registry does not
+/// hold - slots.rs tests that. `default_dir()` hands back whatever the file
+/// says, so a pointer left naming a slot the registry no longer lists makes
+/// `doctor` print `default ok - plain `claude` -> '(unknown)'`: the code has
+/// already failed to resolve the name and still records the row as healthy,
+/// while the shim exports that directory to CLAUDE_CONFIG_DIR unchecked. The
+/// remedy doctor itself gives for a damaged registry - restore slots.json from
+/// a backup - is one way to arrive here.
+#[test]
+fn doctor_reports_a_default_pointer_naming_no_account() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let ptr = root.join(".local/share/swapdex/active-claude");
+    assert!(ptr.exists(), "use wrote no default pointer at {ptr:?}");
+    let orphan = root.join(".local/share/swapdex/slots/not-in-the-registry");
+    std::fs::write(&ptr, orphan.to_string_lossy().as_bytes()).unwrap();
+
+    let (out, err2, code2) = run(root, &["doctor"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        !said.contains("(unknown)"),
+        "doctor prints an unresolvable default as if it were an account name:\n{said}"
+    );
+    assert_ne!(
+        code2, 0,
+        "doctor exited 0 with a default naming no account:\n{said}"
+    );
+}
+
 /// The per-tool row was read from the tool's own config dir, so on a machine
 /// whose accounts live only as slots `doctor` printed `claude-code ok - not
 /// logged in` and, four rows down, `default ok - plain claude -> 'work'`. Both
@@ -3286,4 +3321,57 @@ fn doctor_checks_the_permissions_of_credentials_in_slots() {
         said.contains("group/world-readable"),
         "doctor passed a world-readable slot credential:\n{said}"
     );
+}
+
+/// The over-correction of the test above: a registry that parses must not be
+/// announced as damaged. A health check that cries wolf on a healthy machine
+/// teaches the user to skim past the row that will one day be real.
+#[test]
+fn doctor_stays_quiet_about_a_registry_that_parses() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let reg = root.join(".local/share/swapdex/slots.json");
+    assert!(reg.exists(), "the fixture wrote no registry");
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        !said.contains("will not parse"),
+        "doctor called a readable registry damaged:\n{said}"
+    );
+}
+
+/// A registry that will not parse is a finding, not an absence.
+///
+/// `doctor` opened the slot registry with `if let Ok(..)` and skipped every
+/// check inside when it would not parse - the account count, the default
+/// pointer, the per-slot login rows, all of it. The rows did not say "cannot
+/// check"; they simply were not printed, and a shorter clean report reads as a
+/// healthier one. So with a damaged registry `doctor` said "everything looks
+/// healthy" and exited 0, while `ls` printed a paragraph about the same file
+/// being damaged and told the reader how to restore it.
+#[test]
+fn doctor_reports_a_slot_registry_that_will_not_parse() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let reg = root.join(".local/share/swapdex/slots.json");
+    assert!(reg.exists(), "the fixture wrote no registry");
+    std::fs::write(&reg, b"").unwrap();
+
+    // `ls` knows. That is the bar doctor has to meet.
+    let (listed, lerr, _) = run(root, &["ls"]);
+    assert!(
+        format!("{listed}{lerr}").contains("could not be read"),
+        "ls no longer reports a damaged registry, so this test is measuring the wrong thing"
+    );
+
+    let (out, err, code) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("registry") || said.contains("slots.json"),
+        "doctor called a damaged account registry healthy:\n{said}"
+    );
+    assert_ne!(code, 0, "doctor exited 0 with a damaged registry:\n{said}");
 }

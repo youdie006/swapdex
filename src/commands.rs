@@ -4595,6 +4595,32 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
 
     // Permanent slots (the no-copy model): the slots, the default account the
     // claude shim follows, and whether the shim is installed.
+    // Every check below lives inside this open. Skipping them when the registry
+    // will not parse printed a SHORTER clean report, and a shorter clean report
+    // reads as a healthier one - `doctor` said "everything looks healthy" about
+    // a machine whose account registry `ls` was describing as damaged in a
+    // paragraph. An absent check is not a passed one.
+    let unreadable: Vec<&str> = crate::adapters::names()
+        .into_iter()
+        .filter(|t| crate::slots::Slots::open_for(paths, t).is_err())
+        .collect();
+    if !unreadable.is_empty() {
+        // One file backs every tool, so name the tools once rather than
+        // repeating the same path per tool - `ls` already words it this way.
+        report(
+            "registry",
+            false,
+            format!(
+                "the account registry will not parse ({}), so the slot checks below were \
+                 skipped - the slot directories still hold their logins. Restore {} from a \
+                 backup, or re-register each with `swapdex adopt <name> <dir>`.",
+                unreadable.join(", "),
+                crate::util::redact_path(
+                    &paths.store_dir().join("slots.json").display().to_string()
+                )
+            ),
+        );
+    }
     if let Ok(slots) = crate::slots::Slots::open(paths) {
         let list = slots.list();
         // Which swapdex the shims actually call. A shim embeds an ABSOLUTE
@@ -4682,14 +4708,24 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         if !list.is_empty() {
             report("slots", true, format!("{} account(s)", list.len()));
             match slots.default_dir() {
-                Some(dir) => {
-                    let name = list
-                        .iter()
-                        .find(|r| r.config_dir == dir)
-                        .map(|r| r.name.as_str())
-                        .unwrap_or("(unknown)");
-                    report("default", true, format!("plain `claude` -> '{name}'"));
-                }
+                Some(dir) => match list.iter().find(|r| r.config_dir == dir) {
+                    Some(r) => report("default", true, format!("plain `claude` -> '{}'", r.name)),
+                    // The shim exports this directory to CLAUDE_CONFIG_DIR without
+                    // checking it, so an unresolvable pointer is not a cosmetic
+                    // gap: a plain `claude` starts in a directory no account holds
+                    // and asks for a fresh login. This arm used to print the name
+                    // as "(unknown)" and still record the row as healthy.
+                    None => report(
+                        "default",
+                        false,
+                        format!(
+                            "the default pointer names {}, which no account holds - a plain \
+                             `claude` would start there and ask to log in again. Repoint it \
+                             with `swapdex use <name>`.",
+                            crate::util::redact_path(&dir.display().to_string())
+                        ),
+                    ),
+                },
                 // Name the tool the way the arm above does. Unqualified, this
                 // read as "this machine has no default" on a machine whose
                 // Codex default was reported two rows higher.
