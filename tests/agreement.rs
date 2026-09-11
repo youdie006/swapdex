@@ -3084,3 +3084,55 @@ fn the_help_names_the_slash_command_that_gets_installed() {
         "the help still names a command nothing installs:\n{out}"
     );
 }
+
+/// Every command the binary has must appear in the reference that claims to
+/// list them all.
+///
+/// The README sends people to `docs/COMMANDS.md` for the "full command,
+/// exit-code, and environment reference". It listed twenty-five of forty -
+/// missing `serve`, which the README itself features; `refresh` and `service`,
+/// which are how an account is kept from expiring; `export`/`import`; and the
+/// four commands that configure auto-continue. A reference is only a reference
+/// while it is complete, and nothing was checking.
+#[test]
+fn the_command_reference_lists_every_command() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let doc = std::fs::read_to_string(root.join("docs/COMMANDS.md")).expect("read COMMANDS.md");
+
+    let t = fixture();
+    let (help, err, code) = run(t.path(), &["--help"]);
+    assert_eq!(code, 0, "--help failed:\n{help}{err}");
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut in_commands = false;
+    for line in help.lines() {
+        if line.starts_with("Commands:") {
+            in_commands = true;
+            continue;
+        }
+        if !in_commands {
+            continue;
+        }
+        if line.starts_with("Options:") {
+            break;
+        }
+        let Some(name) = line
+            .strip_prefix("  ")
+            .and_then(|l| l.split_whitespace().next())
+        else {
+            continue;
+        };
+        // `help` is clap's own; it is not a swapdex command to document.
+        if name == "help" || !name.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+            continue;
+        }
+        if !doc.contains(&format!("`swapdex {name}")) {
+            missing.push(name.to_string());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "docs/COMMANDS.md is the reference and does not list: {}",
+        missing.join(", ")
+    );
+}
