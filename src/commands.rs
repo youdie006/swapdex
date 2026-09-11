@@ -5636,14 +5636,19 @@ pub fn switch_outcome_line(
     if proxy_running {
         format!("{name} serves this session from the next turn ({bin} proxy is running)")
     } else {
-        let flag = if tool == "codex" { " --tool codex" } else { "" };
         let mut out = format!("default {bin} account -> {name}\n");
         out.push_str(&format!(
             "  this applies to the NEXT {bin} you start; a session already open keeps the account it began with\n"
         ));
-        out.push_str(&format!(
-            "  to move one that is already running: swapdex proxy{flag}\n"
-        ));
+        // Only where a relay exists. Naming `swapdex proxy` for Gemini or
+        // Antigravity pointed at a command that refuses to start, and without a
+        // `--tool` the one it named starts Claude's.
+        if crate::proxy::carries(tool) {
+            out.push_str(&format!(
+                "  to move one that is already running: swapdex proxy{}\n",
+                tool_flag(tool)
+            ));
+        }
         // This used to warn that a switch changed which conversations `-c` and
         // `-r` could see, which was true and cost people time. Slots share their
         // history now, so it is no longer true - and a warning that has stopped
@@ -5713,10 +5718,18 @@ fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Res
         )
     );
     // First-time nudge: without the shim, a plain launch won't follow this.
-    if !crate::shim::shim_path_for(paths, tool).exists() {
+    // Only where both halves are true. `swapdex shim` installs the Claude and
+    // Codex shims alone, and `run` refuses a tool with no per-account home, so
+    // for Gemini and Antigravity this promised a shim that never arrives and a
+    // command that cannot succeed. And `run` defaults to Claude: naming it
+    // without the tool is the mistake `sign_in_remedy` was written to fix, so
+    // following the tip after a Codex switch built a second account of the same
+    // name under Claude.
+    if crate::slots::home_var(tool).is_some() && !crate::shim::shim_path_for(paths, tool).exists() {
         println!(
             "  tip: run `swapdex shim` once so a plain `{bin}` follows your switches\n\
-             \x20      (or launch directly with `swapdex run {name}`)"
+             \x20      (or launch directly with `swapdex run {name}{}`)",
+            tool_flag(tool)
         );
     }
     Ok(0)
@@ -6703,6 +6716,14 @@ pub fn serve(
     quiet: bool,
 ) -> Result<i32> {
     let tool = slot_tool(sel);
+    // Turns are paid through the relay, so where there is none there is no
+    // payer to choose. `proxy` and `service install` already refuse these tools
+    // by name; this one wrote a serving pointer, said "now <name>", and sent the
+    // reader to a `swapdex proxy` that then refuses to start.
+    if !crate::proxy::carries(tool) {
+        eprintln!("{}", crate::proxy::cannot_carry(tool));
+        return Ok(2);
+    }
     let bin = tool_binary(tool);
     let slots = crate::slots::Slots::open_for(paths, tool)?;
     // A pointer naming an account that is gone is inert but not harmless: adopt

@@ -3357,6 +3357,117 @@ fn doctor_does_not_call_an_unparseable_codex_credential_a_missing_login() {
     );
 }
 
+/// `run` defaults to Claude, so advice naming it must carry the tool.
+///
+/// `sign_in_remedy` exists because of exactly this: "a Codex account that could
+/// not serve was told to run `swapdex run codex-test`, and `run` defaults to
+/// Claude - so following the instruction launched Claude for a Codex profile."
+/// The tip printed after a switch never got that fix, and it is on the common
+/// path - every first switch of a tool whose shim is not installed yet.
+/// Following it creates a second account of the same name under Claude.
+#[test]
+fn the_switch_tip_names_the_tool_it_just_switched() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "work", "work@example.com");
+
+    let (out, err, code) = run(root, &["use", "work", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("swapdex run work"),
+        "the tip no longer names `run`, so this test measures nothing:\n{said}"
+    );
+    assert!(
+        said.contains("swapdex run work --tool codex"),
+        "the tip after a Codex switch names a command that runs Claude:\n{said}"
+    );
+}
+
+/// Gemini and Antigravity have no shim and no `run`: `shim` installs only the
+/// Claude and Codex ones, and `run` refuses them outright ("no per-account home
+/// to launch into"). Offering both after a Gemini switch promised a shim that
+/// is never installed and a command that cannot succeed - and the form it
+/// printed, without a `--tool`, quietly built a Claude account of the same
+/// name.
+#[test]
+fn switching_a_tool_with_no_shim_does_not_offer_one() {
+    let t = fixture();
+    let root = t.path();
+    seed_gemini_slot(root, "gwork", "g@example.com");
+
+    let (out, err, code) = run(root, &["use", "gwork", "--tool", "gemini"]);
+    assert_eq!(code, 0, "use failed: {err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("gwork"),
+        "the switch printed nothing, so this measures nothing:\n{said}"
+    );
+    assert!(
+        !said.contains("swapdex shim"),
+        "promises a gemini shim that `swapdex shim` never installs:\n{said}"
+    );
+    assert!(
+        !said.contains("swapdex run gwork"),
+        "names `run`, which refuses gemini and builds a Claude account instead:\n{said}"
+    );
+}
+
+/// `serve` decides who PAYS for turns, and turns are paid through the proxy.
+///
+/// There is no Gemini or Antigravity relay: `proxy` and `service install` both
+/// refuse those tools by name, with a sentence written for it. `serve` did not
+/// ask, so it wrote a serving pointer for a relay that does not exist, reported
+/// "now <name>", and told the reader to run `swapdex proxy` - which then
+/// refuses to start. Three commands, two answers.
+#[test]
+fn serve_refuses_a_tool_the_proxy_cannot_carry() {
+    let t = fixture();
+    let root = t.path();
+    seed_gemini_slot(root, "gwork", "g@example.com");
+
+    // The sibling command refuses; without that this test measures nothing.
+    let (pout, perr, _) = run(root, &["proxy", "--tool", "gemini"]);
+    assert!(
+        format!("{pout}{perr}").contains("no gemini relay"),
+        "`proxy` no longer refuses gemini, so serve has nothing to disagree with"
+    );
+
+    let (out, err2, code2) = run(root, &["serve", "gwork", "--tool", "gemini"]);
+    let said = format!("{out}{err2}");
+    assert_ne!(
+        code2, 0,
+        "serve accepted a tool the proxy cannot carry:\n{said}"
+    );
+    assert!(
+        !root.join(".local/share/swapdex/serving-gemini").exists(),
+        "serve wrote a serving pointer for a relay that does not exist"
+    );
+}
+
+/// The line printed after a switch must not send the reader at a command that
+/// refuses to run. It offered `swapdex proxy` for every tool, so switching a
+/// Gemini account pointed at a relay that does not exist - and without a
+/// `--tool`, the command it named starts Claude's.
+#[test]
+fn switching_a_tool_without_a_relay_does_not_offer_the_proxy() {
+    let t = fixture();
+    let root = t.path();
+    seed_gemini_slot(root, "gwork", "g@example.com");
+
+    let (out, err2, code2) = run(root, &["use", "gwork", "--tool", "gemini"]);
+    assert_eq!(code2, 0, "use failed: {err2}");
+    let said = format!("{out}{err2}");
+    assert!(
+        said.contains("gwork"),
+        "the switch printed nothing about the account, so this measures nothing:\n{said}"
+    );
+    assert!(
+        !said.contains("swapdex proxy"),
+        "switching a gemini account points at a proxy that refuses to start:\n{said}"
+    );
+}
+
 /// Per-slot login health is checked for one tool out of four.
 ///
 /// `snapshot_refreshed_at` exists because each reader used to work out a
