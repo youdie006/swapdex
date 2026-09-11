@@ -127,14 +127,19 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> S
          \tsx_who=$({sx} serve --tool codex --quiet 2>/dev/null)\n\
          fi\n\
          if [ -n \"$port\" ]; then\n\
+         \tsx_id=swapdex\n\
          \tsx_name=swapdex\n\
          \tif [ -n \"$sx_who\" ]; then\n\
+         \t\tsx_acct=$(printf '%s' \"${{sx_who%% *}}\" | tr -c 'A-Za-z0-9_-' '-')\n\
+         \t\tif [ -n \"$sx_acct\" ]; then\n\
+         \t\t\tsx_id=\"swapdex-$sx_acct\"\n\
+         \t\tfi\n\
          \t\tsx_name=\"swapdex: $sx_who\"\n\
          \tfi\n\
-         \tset -- -c model_provider=swapdex \\\n\
-         \t\t-c model_providers.swapdex.name=\"$sx_name\" \\\n\
-         \t\t-c model_providers.swapdex.base_url=\"http://127.0.0.1:$port/v1\" \\\n\
-         \t\t-c model_providers.swapdex.wire_api=responses \"$@\"\n\
+         \tset -- -c model_provider=\"$sx_id\" \\\n\
+         \t\t-c model_providers.\"$sx_id\".name=\"$sx_name\" \\\n\
+         \t\t-c model_providers.\"$sx_id\".base_url=\"http://127.0.0.1:$port/v1\" \\\n\
+         \t\t-c model_providers.\"$sx_id\".wire_api=responses \"$@\"\n\
          fi\n\
          if [ -z \"$CODEX_HOME\" ]; then\n\
          \tdir=$(cat {ptr} 2>/dev/null)\n\
@@ -774,13 +779,20 @@ mod tests {
             s.contains("proxy --ensure --tool codex"),
             "asks swapdex for a live codex proxy: {s}"
         );
-        assert!(s.contains("model_provider=swapdex"), "selects the provider");
+        // The provider ID is built at run time from the paying account, because
+        // Codex renders the ID on `/status` and never the `name` - so the keys
+        // hanging off it are `$sx_id`, not a literal. What matters here is the
+        // address and the protocol, which do not vary with the account.
         assert!(
-            s.contains("model_providers.swapdex.base_url=\"http://127.0.0.1:$port/v1\""),
+            s.contains("model_provider=\"$sx_id\""),
+            "selects the provider"
+        );
+        assert!(
+            s.contains(".base_url=\"http://127.0.0.1:$port/v1\""),
             "points it at the proxy: {s}"
         );
         assert!(
-            s.contains("model_providers.swapdex.wire_api=responses"),
+            s.contains(".wire_api=responses"),
             "the protocol codex speaks"
         );
         assert!(

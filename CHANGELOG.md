@@ -4,6 +4,26 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`/status` names the account Codex is running as.** The shim put the payer
+  in the provider's `name`, and Codex renders the provider's ID -- so
+  `Model provider:` read `swapdex` and the account appeared nowhere Codex
+  shows. Verified against v0.154.0 both ways: a run given the id
+  `swapdex-youdie` and the name `ignored-name` printed
+  `provider: swapdex-youdie`. The payer goes in the id now.
+
+  The test that should have caught this asserted the `name=` argument swapdex
+  WRITES rather than anything Codex SHOWS, so it passed for releases while the
+  feature was dead. It reads the id now.
+- **`swapdex slash --help` names the command it installs.** It said `/sx`; the
+  installer writes `~/.claude/commands/swap.md`, which Claude Code exposes as
+  `/swap`. The installer's own output, its closing hint, the Codex skill path
+  and the tests all said `/swap` -- four places agreed and the one line telling
+  somebody what to type did not. A test pins them together now, and the help
+  also mentions Codex, which it never did although the installer has always
+  written a skill there too.
+
 ## 0.156.0
 
 Two accounts of what is active disagreed on a real machine for six days, and

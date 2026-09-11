@@ -231,7 +231,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Install a `/sx` slash command for Claude Code (switch without leaving the chat)
+    /// Install a `/swap` command for Claude Code and Codex (switch inside the chat)
     Slash,
     /// Step off an account at this much used (e.g. 0.9 or 90%), or `off`
     Threshold {

@@ -3061,3 +3061,26 @@ fn doctor_scopes_the_missing_default_to_its_tool() {
         "the missing-default row does not say which tool it is about: {row:?}"
     );
 }
+
+/// The help must name the slash command the installer actually creates.
+///
+/// It promised `/sx` while `swapdex slash` wrote `~/.claude/commands/swap.md`,
+/// which Claude Code exposes as `/swap` - the filename IS the command name. So
+/// the one line telling somebody what to type named something that has never
+/// existed, and the installer's own output, the closing hint and the Codex
+/// skill all said `/swap`. Four places agreed and the help did not.
+#[test]
+fn the_help_names_the_slash_command_that_gets_installed() {
+    let t = fixture();
+    let root = t.path();
+    let (out, err, code) = run(root, &["slash", "--help"]);
+    assert_eq!(code, 0, "slash --help failed:\n{out}{err}");
+    assert!(
+        out.contains("/swap"),
+        "the help does not name the command the installer writes:\n{out}"
+    );
+    assert!(
+        !out.contains("/sx"),
+        "the help still names a command nothing installs:\n{out}"
+    );
+}

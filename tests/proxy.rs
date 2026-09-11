@@ -1613,10 +1613,15 @@ mod codex_status_names_the_payer {
     #[test]
     fn the_provider_name_carries_the_account_that_pays() {
         let got = args_codex_receives("work", "8788");
+        // The ID, not the name. Codex renders the provider IDENTIFIER on
+        // `/status` and never the `name` field - verified against v0.154.0,
+        // which printed `Model provider: swapdex` while the name it was handed
+        // read "swapdex: work (...)". This assertion used to check the name, so
+        // it passed for releases while the account was visible nowhere: it
+        // tested what swapdex WRITES instead of what Codex SHOWS.
         assert!(
-            got.lines()
-                .any(|l| l == "model_providers.swapdex.name=swapdex: work"),
-            "the /status provider names the payer, got:\n{got}"
+            got.lines().any(|l| l == "model_provider=swapdex-work"),
+            "the /status provider does not name the payer, got:\n{got}"
         );
     }
 
@@ -1645,7 +1650,7 @@ mod codex_status_names_the_payer {
         );
         let guard = s.find("sx_plain=no").unwrap();
         let ask = s.find("serve --tool codex").expect("asks who serves");
-        let name = s.find("model_providers.swapdex.name").unwrap();
+        let name = s.find(".name=").expect("hands codex the provider name");
         assert!(guard < ask && ask < name, "asked inside the talking branch");
     }
 }
@@ -1716,9 +1721,12 @@ mod a_reading_command_keeps_the_real_backend {
     #[test]
     fn a_talking_turn_still_gets_the_override() {
         let got = args_tool_receives("talk", &[("port", "3000")], &["hello"]);
+        // The provider id carries the payer now, so the key it hangs the base
+        // URL on carries it too. What this pins is the ADDRESS: the turn must
+        // go to the port swapdex reported, whatever the provider is called.
         assert!(
             got.lines()
-                .any(|l| l == "model_providers.swapdex.base_url=http://127.0.0.1:8788/v1"),
+                .any(|l| l.ends_with(".base_url=http://127.0.0.1:8788/v1")),
             "a turn routes through the proxy swapdex reported, got:\n{got}"
         );
     }
