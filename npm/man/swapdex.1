@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH swapdex 1  "swapdex 0.155.0" 
+.TH swapdex 1  "swapdex 0.156.0" 
 .SH NAME
 swapdex \- Switch Claude Code / Codex / Gemini / Antigravity login accounts, locally and safely.
 .SH SYNOPSIS
@@ -23,7 +23,7 @@ swapdex\-use(1)
 Switch the active login to a saved profile
 .TP
 swapdex\-run(1)
-Launch Claude in an account\*(Aqs own permanent slot (concurrent\-safe)
+Launch a tool in an account\*(Aqs own permanent slot (concurrent\-safe)
 .TP
 swapdex\-whereis(1)
 Find which account holds a conversation (searches every account\*(Aqs store)
@@ -41,7 +41,7 @@ swapdex\-slots(1)
 List the permanent account slots
 .TP
 swapdex\-shim(1)
-Install the `claude` shim so a plain `claude` follows `swapdex use`
+Install the shims so a plain `claude` or `codex` follows `swapdex use`
 .TP
 swapdex\-adopt(1)
 Register an existing CLAUDE_CONFIG_DIR directory as a slot (in place)
@@ -56,10 +56,16 @@ swapdex\-sync\-mcp(1)
 Share MCP servers (from ~/.claude.json) into every account slot
 .TP
 swapdex\-ls(1)
-List saved profiles (active marked from the live login)
+List accounts, marking the one each tool is pointed at
 .TP
 swapdex\-status(1)
 Show the active account per tool
+.TP
+swapdex\-pause(1)
+Keep an account out of the proxy\*(Aqs AUTOMATIC rotation (`use`/`serve` still work)
+.TP
+swapdex\-resume(1)
+Put a paused account back in rotation
 .TP
 swapdex\-rm(1)
 Remove a saved profile (never touches a live login)
@@ -89,7 +95,7 @@ swapdex\-share\-history(1)
 Make every conversation reachable from every account (one\-time repair)
 .TP
 swapdex\-slash(1)
-Install a `/sx` slash command for Claude Code (switch without leaving the chat)
+Install a `/swap` command for Claude Code and Codex (switch inside the chat)
 .TP
 swapdex\-threshold(1)
 Step off an account at this much used (e.g. 0.9 or 90%), or `off`
@@ -130,4 +136,4 @@ Print the man page (roff) to stdout
 swapdex\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v0.155.0
+v0.156.0

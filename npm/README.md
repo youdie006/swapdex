@@ -148,15 +148,27 @@ so it can't be logged out), `swapdex restore` undoes the last swap, and `swapdex
 ui` is the full-screen picker. `swapdex migrate` matches Claude and Codex
 profiles to slots by account and creates spaces only for accounts without one.
 
-`status` shows the live account per tool, matched back to a saved profile:
+`status` shows the active account per tool, matched back to a saved profile:
 
 ```
 claude-code: you@work.com [max] (profile 'work')
 codex: you@personal.com [chatgpt] (profile 'personal')
 ```
 
-The active account is always read from the **live** login, so if you `/login`
-directly in the CLI, swapdex reports the truth rather than a stale guess.
+The active account is read from the **pointer** a switch sets, and falls back
+to the live login on a machine that has no slots. Where the tool's own config
+dir holds a different account -- you signed in directly without the shim, or an
+old copy-model switch left one behind -- that gets its own line rather than
+being shown as the active account:
+
+```
+codex: you@work.com (profile 'work')
+  (a plain `codex` would launch on 'personal' instead - `swapdex shim`
+   makes it follow your switches)
+```
+
+Both are true and they answer different questions, so swapdex prints both
+instead of picking one. A machine sat in exactly that state for six days.
 
 For your shell prompt or statusline, `status --short` prints one compact line:
 
@@ -228,6 +240,36 @@ setup is one keystroke and a name.
 <img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/ui-demo.gif" alt="swapdex ui on a fresh machine: it finds the Claude Code and Codex logins already present, saves them as a profile named main, and shows the account with its 5h and 7d usage bars" width="760" />
 </div>
 
+## Keeping accounts from expiring
+
+An account nobody opens dies on its own. These refresh tokens go stale when
+they are not exercised -- measured across two machines, an idle Codex slot
+stops working about ten days after its last run -- and once the refresh token
+is gone only a browser sign-in brings the account back.
+
+swapdex renews idle accounts for you, but **only while its proxy is running**,
+because that is the process holding the timer:
+
+```sh
+swapdex service install --tool claude
+swapdex service install --tool codex
+```
+
+That installs a launchd/systemd unit per tool. The proxy then sweeps every
+thirty minutes and renews anything approaching its deadline, including slots
+nobody has opened. A slot the tool is running in is never touched: its own
+session holds the refresh token, and renewing from outside would retire the one
+that session is about to use.
+
+Without the service, nothing is on a timer. You can sweep by hand:
+
+```sh
+swapdex refresh --keep-alive     # renew every account heading for expiry
+swapdex refresh <name>           # renew one that has already lapsed
+```
+
+`swapdex doctor` reports whether the service is installed and running.
+
 ## How it works
 
 **Slots (the model swapdex uses now).** Each account gets its own
@@ -279,6 +321,16 @@ their own slots, retiring the shared homes.
 **The store holds plaintext refresh tokens.** Protect `~/.local/share/swapdex`
 like `~/.ssh`, and do not sync it across machines (it is single-machine,
 single-user by design).
+
+**Do not copy a credential out of the store for something else to use.** These
+refresh tokens are single-use: the server retires the outgoing one whenever a
+holder renews, so two programs holding one account's credential silently
+retire each other's. The copy that missed a renewal keeps working until its
+access token lapses, which is why the failure arrives hours or days after the
+change that caused it -- one such split cost a scheduled job 42 hours. A
+program that needs its own Codex or Claude access should sign in for itself;
+`swapdex` is for accounts a person switches between, not a credential source
+for other software.
 
 ### What it will not do
 
