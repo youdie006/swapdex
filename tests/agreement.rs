@@ -3230,3 +3230,32 @@ fn use_refuses_a_claude_snapshot_whose_refresh_token_was_rotated_away() {
         "nothing said the token was retired elsewhere:\n{said}"
     );
 }
+
+/// A settings file that will not parse must be reported, not absorbed.
+///
+/// `settings::load` falls back to defaults on a parse error, because every
+/// caller wants a value rather than an error. The consequence is that a corrupt
+/// file reads as NO settings: every account the user paused is silently back in
+/// the proxy's rotation, the strategy is back to default, and the listing shows
+/// nothing unusual. The proxy reads the same file, so an account somebody took
+/// out of rotation starts paying for turns again with no signal anywhere.
+/// `doctor` is the one screen whose job is to find exactly this.
+#[test]
+fn doctor_reports_a_settings_file_that_will_not_parse() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (o, e, c) = run(root, &["pause", "work"]);
+    assert_eq!(c, 0, "pause failed:\n{o}{e}");
+
+    let settings = root.join(".local/share/swapdex/settings.json");
+    assert!(settings.exists(), "pause wrote no settings file");
+    std::fs::write(&settings, b"NOT JSON {{{").unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.to_lowercase().contains("settings"),
+        "doctor says nothing about a settings file it cannot read:\n{said}"
+    );
+}

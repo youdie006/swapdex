@@ -4505,6 +4505,29 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         (_, Err(e)) => report("store", false, format!("cannot stat store dir: {e}")),
     }
 
+    // `settings::load` falls back to defaults when the file will not parse,
+    // because every caller of it wants a value rather than an error. That makes
+    // a corrupt file read as NO settings: every paused account is quietly back
+    // in the proxy's rotation - the proxy reads this same file - the strategy
+    // is back to default, and no listing looks any different. Nothing else can
+    // say so, which leaves this screen.
+    {
+        let f = crate::settings::file(paths);
+        match std::fs::read(&f) {
+            Ok(bytes) if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() => report(
+                "settings",
+                false,
+                format!(
+                    "{} will not parse, so it is being read as no settings at all - any \
+                     account you paused is back in rotation. Fix the file, or delete it to \
+                     start from defaults.",
+                    crate::util::redact_path(&f.display().to_string())
+                ),
+            ),
+            _ => {}
+        }
+    }
+
     // Live logins per tool.
     for adapter in adapters::all() {
         let tool = adapter.name();

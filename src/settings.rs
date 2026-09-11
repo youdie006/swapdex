@@ -113,7 +113,7 @@ impl Settings {
     }
 }
 
-fn file(paths: &Paths) -> std::path::PathBuf {
+pub(crate) fn file(paths: &Paths) -> std::path::PathBuf {
     paths.store_dir().join("settings.json")
 }
 
