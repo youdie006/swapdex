@@ -153,6 +153,10 @@ enum Cmd {
         #[arg(long, conflicts_with = "json")]
         short: bool,
     },
+    /// Keep an account out of the proxy's AUTOMATIC rotation (`use`/`serve` still work)
+    Pause { name: String },
+    /// Put a paused account back in rotation
+    Resume { name: String },
     /// Remove a saved profile (never touches a live login)
     Rm {
         name: String,
@@ -428,6 +432,8 @@ fn main() {
         Cmd::SyncMcp => commands::sync_mcp(&paths),
         Cmd::Ls { json, names } => commands::ls(&paths, *json, *names),
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
+        Cmd::Pause { name } => commands::pause_rotation(&paths, name, true),
+        Cmd::Resume { name } => commands::pause_rotation(&paths, name, false),
         Cmd::Rm { name, yes, tool } => commands::rm(&paths, name, *yes, *tool),
         Cmd::Setup => commands::setup(&paths),
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),

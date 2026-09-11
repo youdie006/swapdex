@@ -4591,3 +4591,91 @@ fn a_json_request_is_never_silently_answered_in_another_format() {
         );
     }
 }
+
+/// Keeping an account out of the proxy's rotation must be reachable without
+/// the full-screen picker.
+///
+/// The setting exists, the proxy honours it, and the only way to set it was a
+/// keystroke inside `swapdex ui`. A scripted setup, a headless box, or anyone
+/// who does not open the picker could not say "never rotate into this one" -
+/// and could not see that it had been said either.
+#[test]
+fn an_account_can_be_paused_and_resumed_from_the_cli() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("slot-work");
+    seed_slot(root.path(), "work", &dir, "AT", "work@x.com");
+
+    let (o, e, c) = run(root.path(), &["pause", "work"]);
+    assert_eq!(c, 0, "pause failed:\n{o}{e}");
+    assert!(o.contains("paused"), "pause said nothing useful: {o:?}");
+
+    let (listed, _, _) = run(root.path(), &["ls"]);
+    assert!(
+        listed.contains("paused"),
+        "the listing does not show it is out of rotation:\n{listed}"
+    );
+
+    let (o, e, c) = run(root.path(), &["resume", "work"]);
+    assert_eq!(c, 0, "resume failed:\n{o}{e}");
+    let (listed, _, _) = run(root.path(), &["ls"]);
+    assert!(
+        !listed.contains("paused"),
+        "the listing still calls it paused:\n{listed}"
+    );
+}
+
+/// A name nobody has is refused, not silently recorded.
+#[test]
+fn pausing_an_unknown_account_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("slot-work");
+    seed_slot(root.path(), "work", &dir, "AT", "work@x.com");
+
+    let (o, e, c) = run(root.path(), &["pause", "nobody"]);
+    assert_ne!(c, 0, "an unknown name was accepted:\n{o}{e}");
+    assert!(
+        format!("{o}{e}").contains("nobody"),
+        "the refusal does not name it:\n{o}{e}"
+    );
+}
+
+/// What the CLI can set, the machine-readable listing must report.
+///
+/// `pause` exists so a script or a headless box can say "never rotate into
+/// this one". A script that can set it and cannot read it back has half an
+/// interface, and its only recourse is parsing the human table.
+#[test]
+fn ls_json_reports_whether_an_account_is_paused() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("slot-work");
+    seed_slot(root.path(), "work", &dir, "AT", "work@x.com");
+
+    let paused_flag = |root: &Path| -> serde_json::Value {
+        let (out, err, code) = run(root, &["ls", "--json"]);
+        assert_eq!(code, 0, "ls --json failed:\n{out}{err}");
+        let rows: serde_json::Value =
+            serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("not json ({e}): {out}"));
+        rows.as_array()
+            .and_then(|a| a.iter().find(|r| r["name"] == "work"))
+            .unwrap_or_else(|| panic!("no row for work: {rows}"))["paused"]
+            .clone()
+    };
+
+    assert_eq!(
+        paused_flag(root.path()),
+        serde_json::json!(false),
+        "a fresh account is not paused"
+    );
+    run(root.path(), &["pause", "work"]);
+    assert_eq!(
+        paused_flag(root.path()),
+        serde_json::json!(true),
+        "`pause` is invisible to `ls --json`"
+    );
+    run(root.path(), &["resume", "work"]);
+    assert_eq!(
+        paused_flag(root.path()),
+        serde_json::json!(false),
+        "`resume` is invisible to `ls --json`"
+    );
+}

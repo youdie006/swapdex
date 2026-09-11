@@ -43,6 +43,17 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   'work'` in the same screen, whose entire job is to say whether a setup is
   sound. The per-tool row follows the pointer, and names a login abandoned in
   the tool's own dir when there is one.
+- **Keeping an account out of the proxy's rotation no longer needs the
+  picker.** The setting existed and the proxy has honoured it all along; the
+  only way to SET it was a keystroke inside the full-screen screen. A headless
+  box, a scripted setup, and anyone who does not open that screen could not say
+  "never rotate into this one" -- and could not see that it had been said.
+  `swapdex pause <name>` and `swapdex resume <name>` say it, `ls` marks the row
+  `(rotation paused)`, and `ls --json` carries `"paused"` so the caller that can
+  set it can also read it back. Pausing does not touch `use` or `serve`: it is
+  about what the proxy reaches for on its own, not what a person can ask for by
+  name -- which is why the row names what is paused, since it can also be the
+  account currently paying.
 - **A renewed login no longer inherits the retired token's deadline.** A
   rotation mints a new refresh token and retires the old one, and the recorded
   `refreshTokenExpiresAt` described the old one. It was never rewritten, so

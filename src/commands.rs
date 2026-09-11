@@ -1801,6 +1801,42 @@ pub fn unknown_account_or_unservable(
     unknown_account(asked, servable)
 }
 
+/// `pause` / `resume` - keep an account out of the proxy's rotation, or put it
+/// back.
+///
+/// The setting existed and the proxy has honoured it all along; the only way to
+/// SET it was a keystroke inside the full-screen picker. A headless machine, a
+/// scripted setup, and anyone who does not open that screen could not say "never
+/// rotate into this one" - and could not see that it had been said.
+///
+/// Pausing does not stop `use` or `serve`: this is about what the proxy reaches
+/// for on its own, not about what the person can ask for by name.
+pub fn pause_rotation(paths: &Paths, name: &str, pause: bool) -> Result<i32> {
+    let store = Store::open(paths)?;
+    let (profiles, _, _) = merged_accounts(paths, &store);
+    if !profiles.iter().any(|p| p.name == name) {
+        let known: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+        eprintln!("swapdex: {}", unknown_account(name, &known));
+        return Ok(5);
+    }
+    // Through `update`, so a concurrent edit cannot be lost - the same reason
+    // the picker stopped reading and writing the settings itself.
+    crate::settings::update(paths, |cfg| {
+        if cfg.is_disabled(name) != pause {
+            cfg.toggle_disabled(name);
+        }
+    })?;
+    if pause {
+        println!(
+            "{name} paused - the proxy will not pick it (`swapdex use {name}` and \
+             `swapdex serve {name}` still work)"
+        );
+    } else {
+        println!("{name} back in rotation");
+    }
+    Ok(0)
+}
+
 pub fn unknown_account(asked: &str, known: &[&str]) -> String {
     if known.is_empty() {
         return "no accounts saved yet - `swapdex add <name>` saves the login you are on"
@@ -2223,6 +2259,10 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                     "name": p.name,
                     "tools": p.tools,
                     "active_tools": active_tools_for(&p.name),
+                    // Settable from the CLI, so readable from it: a script that
+                    // can pause an account and not see that it is paused has
+                    // half an interface.
+                    "paused": crate::settings::load(paths).is_disabled(&p.name),
                     "email": email,
                     "tier": tier,
                     "warning": marker,
@@ -2344,6 +2384,8 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // A lone marker reads as "this account is broken" when the others work.
     let mut stale_tools: Vec<String> = Vec::new();
     let mut healthy_tools: Vec<String> = Vec::new();
+    // Who the user has taken out of rotation; the proxy reads the same file.
+    let cfg = crate::settings::load(paths);
     for r in &rows {
         let mark = if r.active { "* " } else { "  " };
         let warn = r
@@ -2379,8 +2421,19 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         // there, and without this the list starred a different name and the
         // switch read as not having taken.
         let pays = if r.pays { "  <- pays" } else { "" };
+        // Being out of rotation is a thing somebody chose, and the screen that
+        // lists accounts is where they would look to check. It was settable and
+        // visible only inside the picker, so a paused account read here as an
+        // ordinary one the proxy simply never reached.
+        // Named, because this row can also say `<- pays` and carry the active
+        // mark: what is paused is the proxy's own picking, not the account.
+        let paused = if cfg.is_disabled(&r.name) {
+            "  (rotation paused)"
+        } else {
+            ""
+        };
         println!(
-            "{mark}{} {} [{}]{warn}{pays}",
+            "{mark}{} {} [{}]{warn}{pays}{paused}",
             fit(&r.name, name_w),
             fit(&r.ident, ident_w),
             r.tools
