@@ -3175,3 +3175,58 @@ fn export_carries_the_accounts_the_listing_shows() {
         );
     }
 }
+
+/// The rotation check covers Claude, not only Codex.
+///
+/// It was written for Codex because Codex keeps the account and the refresh
+/// token in one readable blob, and Claude splits them across two parts of the
+/// same snapshot - a reason to write more code, not a reason to leave the tool
+/// unguarded. Claude's refresh tokens rotate too; the module note that opens
+/// refresh.rs is about exactly that.
+#[test]
+fn use_refuses_a_claude_snapshot_whose_refresh_token_was_rotated_away() {
+    let t = fixture();
+    let root = t.path();
+    // A live slot holding the account with the token the last rotation minted.
+    let slot = root.join(".local/share/swapdex/slots/live");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        slot.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT-NEW","expiresAt":9999999999999,"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        slot.join(".claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"u-shared","emailAddress":"shared@example.com"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".local/share/swapdex/slots.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "name": "live", "id": "live", "config_dir": slot,
+            "adopted": false, "tool": "claude-code"}]))
+        .unwrap(),
+    )
+    .unwrap();
+    // A saved profile for the SAME account carrying the retired token.
+    let snap = root.join(".local/share/swapdex/accounts/stale/claude-code");
+    std::fs::create_dir_all(&snap).unwrap();
+    std::fs::write(
+        snap.join("credentials"),
+        br#"{"claudeAiOauth":{"accessToken":"AT-OLD","refreshToken":"RT-OLD"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        snap.join("oauth_account"),
+        br#"{"accountUuid":"u-shared","emailAddress":"shared@example.com"}"#,
+    )
+    .unwrap();
+
+    let (out, err, code) = run(root, &["use", "stale", "--tool", "claude"]);
+    let said = format!("{out}{err}");
+    assert_ne!(code, 0, "a retired Claude snapshot was applied:\n{said}");
+    assert!(
+        said.contains("retired") || said.contains("rotated"),
+        "nothing said the token was retired elsewhere:\n{said}"
+    );
+}

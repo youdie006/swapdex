@@ -628,3 +628,67 @@ fn slots_with_unreadable_identity_are_each_renewed() {
         "two unidentifiable slots were treated as one account:\n{said}"
     );
 }
+
+/// `restore` must say when the login it is putting back was retired.
+///
+/// It applies a backup without either check `use` performs: no word that the
+/// snapshot is old, and nothing about a refresh token some other holder has
+/// since rotated away. These tokens are single-use, so a backup taken before a
+/// renewal elsewhere is dead - and restoring it replaces a working login with
+/// one that cannot renew, reported as a success. `restore` is the escape hatch,
+/// so it still restores; it must not do it silently.
+#[test]
+fn restore_says_when_the_backup_it_puts_back_was_retired() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::create_dir_all(store.join("slots/live")).unwrap();
+    std::fs::write(store.join("onboarded"), b"1").unwrap();
+
+    // A live slot holding the account, with the token the last rotation minted.
+    let slot = store.join("slots/live");
+    std::fs::write(
+        slot.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT-NEW","expiresAt":9999999999999,"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        slot.join(".claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"u-shared","emailAddress":"shared@example.com"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        format!(
+            r#"[{{"name":"live","id":"live","config_dir":"{}","adopted":false,"tool":"claude-code"}}]"#,
+            slot.display()
+        ),
+    )
+    .unwrap();
+
+    // A backup of the SAME account carrying the token that rotation retired.
+    let backup = store.join("backups/claude-code/1");
+    std::fs::create_dir_all(&backup).unwrap();
+    std::fs::write(
+        backup.join("credentials"),
+        br#"{"claudeAiOauth":{"accessToken":"AT-OLD","refreshToken":"RT-OLD"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        backup.join("oauth_account"),
+        br#"{"accountUuid":"u-shared","emailAddress":"shared@example.com"}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args(["restore", "--tool", "claude"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("retired") || said.contains("rotated") || said.contains("renew"),
+        "restore put back a retired login without a word:\n{said}"
+    );
+}

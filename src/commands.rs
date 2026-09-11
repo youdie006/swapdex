@@ -1225,6 +1225,21 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         } else {
             None
         };
+        // The same two questions `use` asks of a snapshot before applying it.
+        // `use` refuses a retired token; this one restores anyway and says so,
+        // because `restore` is the escape hatch and refusing to undo leaves
+        // somebody with nowhere to go. Putting a dead credential back silently
+        // is the part that is not acceptable: it replaces a working login with
+        // one that cannot renew, and reports success.
+        warn_if_expired(&target, tool);
+        if snapshot_rotated_away(paths, &target, tool) {
+            eprintln!(
+                "swapdex: {tool}: this backup's refresh token was retired when another holder \
+                 of the same account renewed it - these tokens are single-use. The account is \
+                 going back, but it will need a fresh sign-in before it can renew \
+                 (`swapdex run <name>` signs a slot in)."
+            );
+        }
         adapter.apply(paths, &target)?;
         // apply(target) succeeded: NOW it is safe to record the outgoing login as
         // a backup (so `restore` toggles back) and refresh its profile(s) with
@@ -9390,28 +9405,57 @@ fn codex_cred_pair(bytes: &[u8]) -> Option<(String, String)> {
 /// because the access token kept working until it lapsed and only the renewal
 /// it then attempted was refused.
 ///
-/// Codex only: it is the tool that keeps both halves of the pair in one
-/// readable blob. An unreadable file on either side is not a verdict - a switch
-/// must never be blocked by something that could not be parsed.
+/// Claude and Codex both rotate, so both are checked. An unreadable file on
+/// either side is not a verdict - a switch must never be blocked by something
+/// that could not be parsed.
 fn snapshot_rotated_away(paths: &Paths, target: &crate::adapters::Snapshot, tool: &str) -> bool {
-    if tool != "codex" {
-        return false;
-    }
-    let Some((account, refresh)) = target
-        .part("auth")
-        .and_then(|s| codex_cred_pair(s.expose()))
-    else {
+    let Some((account, refresh)) = snapshot_cred_pair(target, tool) else {
         return false;
     };
     let Ok(slots) = crate::slots::Slots::open_for(paths, tool) else {
         return false;
     };
     slots.list().into_iter().any(|r| {
-        std::fs::read(r.config_dir.join("auth.json"))
-            .ok()
-            .and_then(|b| codex_cred_pair(&b))
-            .is_some_and(|(a, rt)| a == account && rt != refresh)
+        slot_cred_pair(&r.config_dir, tool).is_some_and(|(a, rt)| a == account && rt != refresh)
     })
+}
+
+/// The (account, refresh token) a SNAPSHOT carries. Codex keeps both in one
+/// blob; Claude splits them across two parts of the same snapshot.
+fn snapshot_cred_pair(snap: &crate::adapters::Snapshot, tool: &str) -> Option<(String, String)> {
+    match tool {
+        "codex" => snap.part("auth").and_then(|s| codex_cred_pair(s.expose())),
+        "claude-code" => {
+            let id: Value = serde_json::from_slice(snap.part("oauth_account")?.expose()).ok()?;
+            let cred: Value = serde_json::from_slice(snap.part("credentials")?.expose()).ok()?;
+            claude_pair(&id["accountUuid"], &cred["claudeAiOauth"]["refreshToken"])
+        }
+        _ => None,
+    }
+}
+
+/// The same pair, read out of a live slot directory.
+fn slot_cred_pair(dir: &std::path::Path, tool: &str) -> Option<(String, String)> {
+    match tool {
+        "codex" => codex_cred_pair(&std::fs::read(dir.join("auth.json")).ok()?),
+        "claude-code" => {
+            let id: Value =
+                serde_json::from_slice(&std::fs::read(dir.join(".claude.json")).ok()?).ok()?;
+            let cred: Value =
+                serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).ok()?).ok()?;
+            claude_pair(
+                &id["oauthAccount"]["accountUuid"],
+                &cred["claudeAiOauth"]["refreshToken"],
+            )
+        }
+        _ => None,
+    }
+}
+
+fn claude_pair(account: &Value, refresh: &Value) -> Option<(String, String)> {
+    let a = account.as_str().filter(|s| !s.is_empty())?;
+    let r = refresh.as_str().filter(|s| !s.is_empty())?;
+    Some((a.to_string(), r.to_string()))
 }
 
 fn warn_if_expired(target: &crate::adapters::Snapshot, tool: &str) {
