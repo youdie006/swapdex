@@ -3364,6 +3364,51 @@ fn seed_empty_codex_slot(root: &Path, name: &str) {
     std::fs::remove_file(dir.join("auth.json")).unwrap();
 }
 
+/// `short_line` goes in a shell prompt, and its own contract says "None when
+/// nothing is logged in".
+///
+/// It took the pointer without asking whether that slot holds a credential, so
+/// a prompt read `codex:cxwork` on a machine where nothing is signed in at all
+/// and `serve` refuses that account for having no login. The comment right
+/// above the branch states the rule it broke: a prompt naming the account
+/// swapdex is not serving is worse than no line at all.
+#[test]
+fn the_short_line_does_not_name_an_account_with_no_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_empty_codex_slot(root, "cxwork");
+    let (_, err, code) = run(root, &["use", "cxwork", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err2, _) = run(root, &["status", "--short"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        !said.contains("cxwork"),
+        "the prompt line names an account with no login:\n{said}"
+    );
+    assert!(
+        said.contains("not signed in"),
+        "nothing is signed in on this machine; the line should say so:\n{said}"
+    );
+}
+
+/// The over-correction: a slot that IS signed in still belongs in the prompt.
+#[test]
+fn the_short_line_names_a_slot_that_is_signed_in() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let (_, err, code) = run(root, &["use", "work", "--tool", "claude"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err2, _) = run(root, &["status", "--short"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        said.contains("claude:work"),
+        "the prompt line dropped a slot that is signed in:\n{said}"
+    );
+}
+
 /// The other direction: a slot that IS signed in shows its identity.
 ///
 /// Without this, wording the not-signed-in case could swallow the signed-in one

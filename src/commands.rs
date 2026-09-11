@@ -2617,8 +2617,15 @@ pub fn short_line(paths: &Paths) -> Option<String> {
             // The pointer wherever there is one: this line goes in a prompt,
             // and a prompt naming the account swapdex is not serving is worse
             // than no line at all.
-            if let Some((name, _)) = slot_active_identity(paths, a.name()) {
-                return Some(format!("{tool}:{name}"));
+            // Only when that slot holds a login. The pointer governs a shimmed
+            // launch, so an empty slot means swapdex has nothing to serve for
+            // this tool - and naming it anyway is the case the line above warns
+            // about, with the contract ("None when nothing is logged in")
+            // broken on top.
+            match slot_active_login(paths, a.name()) {
+                Some((name, _, true)) => return Some(format!("{tool}:{name}")),
+                Some((_, _, false)) => return None,
+                None => {}
             }
             let id = a.identity(paths).ok().flatten()?;
             let who = matched_profile_name(&store, a.name(), &id.account_id)
