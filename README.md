@@ -240,6 +240,36 @@ setup is one keystroke and a name.
 <img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/ui-demo.gif" alt="swapdex ui on a fresh machine: it finds the Claude Code and Codex logins already present, saves them as a profile named main, and shows the account with its 5h and 7d usage bars" width="760" />
 </div>
 
+## Keeping accounts from expiring
+
+An account nobody opens dies on its own. These refresh tokens go stale when
+they are not exercised -- measured across two machines, an idle Codex slot
+stops working about ten days after its last run -- and once the refresh token
+is gone only a browser sign-in brings the account back.
+
+swapdex renews idle accounts for you, but **only while its proxy is running**,
+because that is the process holding the timer:
+
+```sh
+swapdex service install --tool claude
+swapdex service install --tool codex
+```
+
+That installs a launchd/systemd unit per tool. The proxy then sweeps every
+thirty minutes and renews anything approaching its deadline, including slots
+nobody has opened. A slot the tool is running in is never touched: its own
+session holds the refresh token, and renewing from outside would retire the one
+that session is about to use.
+
+Without the service, nothing is on a timer. You can sweep by hand:
+
+```sh
+swapdex refresh --keep-alive     # renew every account heading for expiry
+swapdex refresh <name>           # renew one that has already lapsed
+```
+
+`swapdex doctor` reports whether the service is installed and running.
+
 ## How it works
 
 **Slots (the model swapdex uses now).** Each account gets its own

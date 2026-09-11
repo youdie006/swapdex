@@ -1039,6 +1039,40 @@ mod refresh_deadline_tests {
         );
     }
 
+    /// The sweep keeps wanting an account it has already renewed past the
+    /// deadline it was signed in with.
+    ///
+    /// This is the whole chain the complaint was about. The sweep asks
+    /// `wants_keep_alive`, which gives up when `refresh_token_expired` says the
+    /// refresh token is gone - and that read the moment recorded at sign-in,
+    /// which no renewal ever moved. So an account renewed every half hour for a
+    /// week stopped being swept on the day its ORIGINAL token would have
+    /// lapsed, while holding one the server had just issued, and the next thing
+    /// the user saw was a browser sign-in.
+    #[test]
+    fn an_account_renewed_past_its_original_deadline_is_still_swept() {
+        let now = 1_800_000_000_000i64;
+        let signed_in_deadline = now + 86_400_000; // a day out, at sign-in
+        let renewed = merge_response(
+            blob(signed_in_deadline).as_bytes(),
+            r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+            now,
+        )
+        .expect("merged");
+
+        // A week later: long past the deadline the sign-in wrote down, with a
+        // token that has been rotated all week.
+        let later = now + 7 * 86_400_000;
+        assert!(
+            !refresh_token_expired(&renewed, later),
+            "the sweep would call a freshly rotated token expired"
+        );
+        assert!(
+            wants_keep_alive(&renewed, later),
+            "the sweep stopped renewing an account that is still renewable"
+        );
+    }
+
     /// A renewal that does NOT rotate keeps the deadline it had.
     ///
     /// The old token is still the live one, so its deadline still describes

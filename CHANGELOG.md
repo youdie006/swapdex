@@ -63,6 +63,12 @@ the disagreement cost a scheduled job 42 hours before anything said a word.
   worth trying. The new lifetime is recorded when the server states it; when it
   does not, the stale one is dropped rather than applied to a different token,
   so the server is the party that says no.
+- **The README says how the renewals get switched on.** Nothing anywhere did.
+  The timer lives in the proxy, so an install without the service has no timer
+  at all -- and the code comment assumed a cron nobody was asked to write. A
+  section now names `swapdex service install --tool <tool>` as the thing that
+  turns this on, with the manual sweep for people who would rather not run a
+  service.
 - **The automatic sweep covers Codex.** It returned early for Codex on the
   grounds that Codex "exposes no expiry swapdex can read". That stopped being
   true when `wants_keep_alive_codex` was written to read exactly that expiry
