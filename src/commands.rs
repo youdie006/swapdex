@@ -2409,6 +2409,19 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         .collect();
     let refs: Vec<(&str, Option<&str>)> = payers.iter().map(|(t, p)| (*t, p.as_deref())).collect();
     let paying = payer_of_any(&refs);
+    // An account with no login cannot pay: the proxy forwards the reader's own
+    // credential instead, which is what `serve` refuses to set up and what
+    // `payer_line` carries on Codex's /status. The mark alone said the opposite
+    // of the truth to a glance and to a script.
+    let payer_has_login = paying.as_deref().is_some_and(|who| {
+        payers.iter().any(|(t, p)| {
+            p.as_deref() == Some(who)
+                && crate::slots::Slots::open_for(paths, t).is_ok_and(|s| {
+                    s.get(who)
+                        .is_some_and(|r| crate::proxy::has_login(paths, t, &r.config_dir))
+                })
+        })
+    });
     let signed_in = active_by_tool(&store, paths)
         .into_iter()
         .find(|(t, _)| *t == "claude-code")
@@ -2519,7 +2532,12 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         // The paying account is named on its own row: `serve` moved the turns
         // there, and without this the list starred a different name and the
         // switch read as not having taken.
-        let pays = if r.pays { "  <- pays" } else { "" };
+        let pays = match (r.pays, payer_has_login) {
+            (true, true) => "  <- pays",
+            // Same words `payer_line` uses, so the two screens cannot drift.
+            (true, false) => "  <- pays (no login)",
+            (false, _) => "",
+        };
         // Being out of rotation is a thing somebody chose, and the screen that
         // lists accounts is where they would look to check. It was settable and
         // visible only inside the picker, so a paused account read here as an

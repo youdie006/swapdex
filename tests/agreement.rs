@@ -3364,6 +3364,56 @@ fn seed_empty_codex_slot(root: &Path, name: &str) {
     std::fs::remove_file(dir.join("auth.json")).unwrap();
 }
 
+/// `ls` marks who pays. An account with no login cannot.
+///
+/// `serve` refuses to put one there and says why: "it cannot pay for turns -
+/// your own account would, while every screen named '<name>'". `payer_line`
+/// exists so the reason travels with the name, and Codex's /status line uses
+/// it. `ls` marked the row `<- pays` with no login check at all, so a glance
+/// (and a script) read an account as footing the bill while the proxy was
+/// quietly forwarding the reader's own credential.
+#[test]
+fn ls_does_not_say_an_account_with_no_login_pays() {
+    let t = fixture();
+    let root = t.path();
+    seed_empty_codex_slot(root, "cxwork");
+    let (_, err, code) = run(root, &["use", "cxwork", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err2, _) = run(root, &["ls"]);
+    let said = format!("{out}{err2}");
+    assert!(
+        said.contains("cxwork"),
+        "ls no longer lists the account, so this measures nothing:\n{said}"
+    );
+    assert!(
+        said.contains("pays"),
+        "ls no longer marks a payer, so this measures nothing:\n{said}"
+    );
+    assert!(
+        said.contains("no login"),
+        "ls says an account with no login pays, without saying it cannot:\n{said}"
+    );
+}
+
+/// The over-correction: a payer that IS signed in must not be slandered.
+#[test]
+fn ls_does_not_claim_a_signed_in_payer_has_no_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cxwork", "cx@example.com");
+    let (_, err, code) = run(root, &["use", "cxwork", "--tool", "codex"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err2, _) = run(root, &["ls"]);
+    let said = format!("{out}{err2}");
+    assert!(said.contains("pays"), "ls no longer marks a payer:\n{said}");
+    assert!(
+        !said.contains("no login"),
+        "ls calls a signed-in payer loginless:\n{said}"
+    );
+}
+
 /// `short_line` goes in a shell prompt, and its own contract says "None when
 /// nothing is logged in".
 ///
