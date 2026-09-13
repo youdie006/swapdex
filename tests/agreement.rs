@@ -3364,6 +3364,102 @@ fn seed_empty_codex_slot(root: &Path, name: &str) {
     std::fs::remove_file(dir.join("auth.json")).unwrap();
 }
 
+/// `status` must read the identity in a Gemini slot, not call it unreadable.
+///
+/// `any_slot_email` promises to read whichever tool wrote the slot, but stopped
+/// after adding Codex. Gemini records the active address in
+/// `google_accounts.json`, so hiding it makes a healthy active login look
+/// damaged on the screen whose job is to say who is active.
+#[test]
+fn status_reads_a_gemini_slots_recorded_email() {
+    let t = fixture();
+    let root = t.path();
+    seed_gemini_slot(root, "gwork", "g@example.com");
+    let (_, err, code) = run(root, &["use", "gwork", "--tool", "gemini"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let (out, err, code) = run(root, &["status"]);
+    assert_eq!(code, 0, "status failed: {err}");
+    assert!(
+        out.contains("gemini: g@example.com (profile 'gwork')"),
+        "status calls a named Gemini login unreadable:\n{out}{err}"
+    );
+}
+
+/// An address in Gemini's `old` list is not the slot's current identity.
+///
+/// Extending the cross-tool reader one field too far would put a previous login
+/// beside the active slot and turn missing information into wrong information.
+#[test]
+fn mcp_whoami_does_not_call_an_old_gemini_account_active() {
+    let t = fixture();
+    let root = t.path();
+    seed_gemini_slot(root, "gwork", "current@example.com");
+    let accounts = root.join(".local/share/swapdex/slots/gwork/google_accounts.json");
+    std::fs::write(accounts, br#"{"old":["old@example.com"]}"#).unwrap();
+    let (_, err, code) = run(root, &["use", "gwork", "--tool", "gemini"]);
+    assert_eq!(code, 0, "use failed: {err}");
+
+    let who = mcp_whoami(root);
+    let gemini = who
+        .iter()
+        .find(|r| r["tool"] == "gemini")
+        .unwrap_or_else(|| panic!("whoami has no Gemini row: {who:?}"));
+    assert_eq!(
+        gemini["email"],
+        serde_json::Value::Null,
+        "whoami called an old Gemini login active: {gemini}"
+    );
+}
+
+/// An old, present login is refreshed by running its own tool, not signed in
+/// from scratch; the remedy must preserve both that verb and Codex's flag.
+#[test]
+fn doctor_names_codex_in_the_remedy_for_an_idle_codex_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    let cred = root.join(".local/share/swapdex/slots/cx/auth.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cred).unwrap()).unwrap();
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 200 * 86_400;
+    v["last_refresh"] = serde_json::json!(rfc3339_utc(old));
+    std::fs::write(&cred, serde_json::to_vec(&v).unwrap()).unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("`swapdex run cx --tool codex` once refreshes it"),
+        "doctor gives the wrong action for an idle Codex login:\n{said}"
+    );
+}
+
+/// Claude remains `run`'s default even on the idle-login branch.
+#[test]
+fn doctor_leaves_claudes_default_out_of_an_idle_login_remedy() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "cl", "cl@example.com");
+    let cred = root.join(".local/share/swapdex/slots/cl/.credentials.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cred).unwrap()).unwrap();
+    v["claudeAiOauth"]["expiresAt"] = serde_json::json!(1_600_000_000_000i64);
+    std::fs::write(&cred, serde_json::to_vec(&v).unwrap()).unwrap();
+
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("`swapdex run cl` once refreshes it"),
+        "doctor no longer names the default Claude refresh:\n{said}"
+    );
+    assert!(
+        !said.contains("`swapdex run cl --tool"),
+        "doctor redundantly spells Claude's default on the idle branch:\n{said}"
+    );
+}
+
 /// `ls` marks who pays. An account with no login cannot.
 ///
 /// `serve` refuses to put one there and says why: "it cannot pay for turns -

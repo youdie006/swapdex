@@ -215,9 +215,24 @@ pub fn any_slot_email(dir: &Path) -> Option<String> {
     if let Some(e) = slot_email(dir) {
         return Some(e);
     }
-    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    crate::adapters::codex::decode_email_from_id_token(v["tokens"]["id_token"].as_str())
+    if let Some(e) = std::fs::read(dir.join("auth.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| {
+            crate::adapters::codex::decode_email_from_id_token(v["tokens"]["id_token"].as_str())
+        })
+    {
+        return Some(e);
+    }
+    let active = std::fs::read(dir.join("google_accounts.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["active"].as_str().map(str::to_string));
+    active.or_else(|| {
+        let oauth = std::fs::read(dir.join("oauth_creds.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&oauth).ok()?;
+        crate::adapters::gemini_jwt_claim(v["id_token"].as_str(), "email")
+    })
 }
 
 /// Does the identity recorded for this slot disagree with the login it holds?
