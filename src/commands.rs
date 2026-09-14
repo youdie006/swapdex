@@ -2146,6 +2146,12 @@ fn account_health(
                 } else if crate::proxy::codex::slot_token_expired(&slot.config_dir, now_ms / 1000) {
                     warnings.push("codex expired - needs refresh".to_string());
                     access_expired = true;
+                } else if crate::refresh::codex_renewal_deferred(
+                    paths,
+                    &slot.config_dir,
+                    now_ms / 1000,
+                ) {
+                    warnings.push("codex renewal deferred - refresh unverified".to_string());
                 }
             }
             "claude-code" if crate::proxy::creds::slot_token_expired(&slot.config_dir, now_ms) => {
@@ -7537,24 +7543,34 @@ pub fn keep_alive(paths: &Paths) -> Result<i32> {
         return Ok(0);
     }
     let now = now_ms();
-    let (mut renewed, claude_failed) = crate::refresh::keep_alive_sweep(paths, &slots, now);
-    let (codex_renewed, codex_failed) = crate::refresh::keep_alive_sweep_codex(paths, &codex, now);
-    renewed.extend(codex_renewed);
+    let mut claude = crate::refresh::keep_alive_sweep_report(paths, &slots, now);
+    let codex = crate::refresh::keep_alive_sweep_codex_report(paths, &codex, now);
+    claude.renewed.extend(codex.renewed);
     // Which sweep produced a failure is the last place the tool is known;
     // merging the two lists first threw it away, and the remedy names `run`.
-    let failed: Vec<(String, &str, crate::refresh::RefreshError)> = claude_failed
+    let deferred: Vec<(String, &str)> = claude
+        .deferred
+        .into_iter()
+        .map(|name| (name, "claude-code"))
+        .chain(codex.deferred.into_iter().map(|name| (name, "codex")))
+        .collect();
+    let failed: Vec<(String, &str, crate::refresh::RefreshError)> = claude
+        .failed
         .into_iter()
         .map(|(n, e)| (n, "claude-code", e))
-        .chain(codex_failed.into_iter().map(|(n, e)| (n, "codex", e)))
+        .chain(codex.failed.into_iter().map(|(n, e)| (n, "codex", e)))
         .collect();
-    for name in &renewed {
+    for name in &claude.renewed {
         println!("renewed {name}");
+    }
+    for (name, tool) in &deferred {
+        println!("{}", crate::refresh::RefreshError::InUse.remedy(name, tool));
     }
     for (name, tool, why) in &failed {
         eprintln!("{}", why.remedy(name, tool));
     }
-    if renewed.is_empty() && failed.is_empty() {
-        println!("every account has time left - nothing needed renewing");
+    if claude.renewed.is_empty() && deferred.is_empty() && failed.is_empty() {
+        println!("no scheduled renewals were needed");
     }
     // A sweep that could not renew something is worth an exit code, so cron can
     // notice; nothing to do is success.

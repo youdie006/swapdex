@@ -332,6 +332,20 @@ program that needs its own Codex or Claude access should sign in for itself;
 `swapdex` is for accounts a person switches between, not a credential source
 for other software.
 
+Codex renewal is checked before access expires: a running Codex proxy checks
+every 30 minutes and attempts renewal for idle slots within 48 hours of expiry.
+`swapdex refresh --keep-alive` runs the same check without a proxy. If a local
+session holds a due account, renewal is deferred to avoid retiring the token
+that session holds. The account list and picker then show that renewal is
+deferred and its refresh validity is unverified; this does not mean the access
+token has expired or the account needs a new login. A confirmed refresh
+rejection is reported separately as requiring re-login.
+
+An external copy can renew without changing any local file. Neither the local
+access token's issue time nor `last_refresh` reveals that remote event. These
+checks therefore cannot certify refresh validity after unseen remote activity;
+external consumers need their own login instead of a copy of a managed slot.
+
 ### What it will not do
 
 These are structural properties, not promises -- the code is built so they

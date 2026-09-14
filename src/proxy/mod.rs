@@ -552,14 +552,20 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
     let tool = tool.to_string();
     std::thread::spawn(move || loop {
         std::thread::sleep(KEEP_ALIVE_EVERY);
-        let (renewed, failed) = keep_alive_once(&paths, &tool);
-        for name in &renewed {
+        let report = keep_alive_once(&paths, &tool);
+        for name in &report.renewed {
             println!("keep-alive: renewed {name}");
         }
-        for (name, why) in &failed {
+        for name in &report.deferred {
+            println!(
+                "keep-alive: {}",
+                crate::refresh::RefreshError::InUse.remedy(name, &tool)
+            );
+        }
+        for (name, why) in &report.failed {
             println!("keep-alive: {}", why.remedy(name, &tool));
         }
-        if !renewed.is_empty() || !failed.is_empty() {
+        if !report.renewed.is_empty() || !report.deferred.is_empty() || !report.failed.is_empty() {
             std::io::stdout().flush().ok();
         }
     });
@@ -574,10 +580,7 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
 /// the manual command used it, and the automatic sweep went on returning early
 /// on a stale comment - for the one tool whose slots die on a schedule, ten days
 /// after their last run.
-pub(crate) fn keep_alive_once(
-    paths: &Paths,
-    tool: &str,
-) -> (Vec<String>, Vec<(String, crate::refresh::RefreshError)>) {
+pub(crate) fn keep_alive_once(paths: &Paths, tool: &str) -> crate::refresh::KeepAliveReport {
     let slots: Vec<(String, std::path::PathBuf)> = match crate::slots::Slots::open_for(paths, tool)
     {
         Ok(s) => s
@@ -585,11 +588,11 @@ pub(crate) fn keep_alive_once(
             .into_iter()
             .map(|r| (r.name, r.config_dir))
             .collect(),
-        Err(_) => return (Vec::new(), Vec::new()),
+        Err(_) => return crate::refresh::KeepAliveReport::default(),
     };
     match tool {
-        "codex" => crate::refresh::keep_alive_sweep_codex(paths, &slots, now_ms()),
-        _ => crate::refresh::keep_alive_sweep(paths, &slots, now_ms()),
+        "codex" => crate::refresh::keep_alive_sweep_codex_report(paths, &slots, now_ms()),
+        _ => crate::refresh::keep_alive_sweep_report(paths, &slots, now_ms()),
     }
 }
 
@@ -2956,13 +2959,14 @@ mod keep_alive_wiring_tests {
         std::env::set_var("SWAPDEX_ROOT", root.path());
         std::env::set_var("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/v1/token");
         let paths = Paths::rooted(root.path());
-        let (renewed, failed) = keep_alive_once(&paths, "codex");
+        let report = keep_alive_once(&paths, "codex");
         std::env::remove_var("SWAPDEX_CODEX_OAUTH_URL");
         std::env::remove_var("SWAPDEX_ROOT");
 
         assert!(
-            renewed.iter().any(|n| n == "cx") || failed.iter().any(|(n, _)| n == "cx"),
-            "the sweep never reached the codex slot: renewed={renewed:?} failed={failed:?}"
+            report.renewed.iter().any(|n| n == "cx")
+                || report.failed.iter().any(|(n, _)| n == "cx"),
+            "the sweep never reached the codex slot: {report:?}"
         );
     }
 }

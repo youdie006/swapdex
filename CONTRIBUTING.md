@@ -76,3 +76,11 @@ crates.io; a successful GitHub release alone does not update those installers.
 
 A failed publication remains an incomplete release. Do not reuse an already
 published version or replace an old tag to repair a missing channel.
+
+Keep an auditable update record: user-visible fixes belong in `CHANGELOG.md`
+with the concrete problem and resulting behavior, and commits and PRs must
+describe their validation. A version bump or a generic "update" is not enough.
+After publishing and installing, append the tag/commit, channel checks, target
+installation version and running-service verification to the release or PR.
+Distinguish a pushed source change from a published release and an installed
+update; do not leave the only deployment record in chat or include credentials.
