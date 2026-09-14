@@ -6,6 +6,35 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.160.0
+
+- **An early curl failure cannot terminate the picker or renewal command.**
+  Writing a request to curl after it had closed stdin could deliver SIGPIPE
+  to swapdex, silently ending the process. Internal config writes now return
+  a transport error and reap the child; normal stdout pipelines still end
+  quietly when their reader closes. Credentials remain on stdin, off argv.
+- Update the proxy's rustls dependency from 0.23.42 to 0.23.45 to address
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), which
+  allowed TLS 1.3 handshake messages across encryption-level boundaries.
+- Update the terminal UI's lru dependency from 0.18.1 to 0.18.2 to address
+  [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253), a
+  potential use-after-free when a stored key's destructor panics during removal.
+
+- **Failed manual renewals return a failing exit status.** `swapdex refresh
+  [name]` previously printed an OAuth rejection, transport error or safety
+  deferral but exited successfully, so scripts could treat an account that had
+  not renewed as ready. It now returns exit code 4 when any requested renewal
+  fails or is deferred, while still attempting the remaining Claude and Codex
+  accounts. Successful renewals, already-current accounts and an empty sweep
+  return 0; `--keep-alive` retains its separate scheduled-deferral behavior.
+- **An empty or unreadable login is not already current.** Manual refresh now
+  checks whether a slot holds a login before checking token expiry. Registered
+  slots with missing or malformed credentials report the sign-in remedy and
+  exit 4 without sending an OAuth request or rewriting credential files.
+- Release guidance now includes publishing the Homebrew formula and checking
+  its downloaded archives, so a successful GitHub/npm release does not leave
+  Homebrew users on an older version.
+
 ## 0.159.0
 
 - **Codex renewal deferrals stay visible before access expires.** When a local

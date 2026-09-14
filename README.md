@@ -334,6 +334,11 @@ for other software.
 
 Codex renewal is checked before access expires: a running Codex proxy checks
 every 30 minutes and attempts renewal for idle slots within 48 hours of expiry.
+`swapdex refresh [name]` exits with status 4 if any requested renewal fails or
+is deferred by the running-session guard, even if another account renews.
+Already-current accounts and successful or empty runs return 0. Missing or
+unreadable logins produce a sign-in remedy without an OAuth request.
+
 `swapdex refresh --keep-alive` runs the same check without a proxy. If a local
 session holds a due account, renewal is deferred to avoid retiring the token
 that session holds. The account list and picker then show that renewal is
