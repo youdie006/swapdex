@@ -13,6 +13,7 @@ pub mod proxy;
 pub mod quota;
 pub mod quota_cache;
 pub mod refresh;
+pub mod refresh_health;
 pub mod secret;
 pub mod service;
 pub mod session_link;

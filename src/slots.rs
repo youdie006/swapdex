@@ -15,6 +15,79 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+const SERVING_OFF: &str = "off";
+
+/// The identity of the pointer file that produced a serving choice.
+///
+/// Pointer values alone are insufficient: an explicit `serve A` after an
+/// automatic rotation to B can write the same path that was already there.
+/// Atomic pointer writes replace the file, so its metadata is the generation
+/// that lets a running proxy recognize that new human decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PointerGeneration {
+    source: PathBuf,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    len: Option<u64>,
+    #[cfg(unix)]
+    device: Option<u64>,
+    #[cfg(unix)]
+    inode: Option<u64>,
+}
+
+impl PointerGeneration {
+    pub(crate) fn at(source: PathBuf) -> Self {
+        let metadata = std::fs::metadata(&source).ok();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            source,
+            modified: metadata.as_ref().and_then(|m| m.modified().ok()),
+            created: metadata.as_ref().and_then(|m| m.created().ok()),
+            len: metadata.as_ref().map(std::fs::Metadata::len),
+            #[cfg(unix)]
+            device: metadata.as_ref().map(|m| m.dev()),
+            #[cfg(unix)]
+            inode: metadata.as_ref().map(|m| m.ino()),
+        }
+    }
+}
+
+fn serving_file_for(paths: &Paths, tool: &str) -> PathBuf {
+    let short = match tool {
+        "claude-code" => "claude",
+        other => other,
+    };
+    paths.store_dir().join(format!("serving-{short}"))
+}
+
+fn read_serving_is_off(path: &std::path::Path, tool: &str) -> Result<bool> {
+    let value = match std::fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {tool} serving state"));
+        }
+    };
+    let value = value.trim();
+    if value == SERVING_OFF {
+        return Ok(true);
+    }
+    if value.is_empty() || !std::path::Path::new(value).is_absolute() {
+        bail!("invalid {tool} serving state");
+    }
+    Ok(false)
+}
+
+/// Read explicit passthrough without opening the slot registry.
+///
+/// Only a genuinely absent marker means the legacy managed/default fallback.
+/// An unreadable or malformed marker is an error so request handling cannot
+/// silently turn uncertain state into managed credential use.
+pub fn serving_is_off_checked(paths: &Paths, tool: &str) -> Result<bool> {
+    read_serving_is_off(&serving_file_for(paths, tool), tool)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SlotRecord {
     pub name: String,
@@ -476,12 +549,32 @@ impl Slots {
         let rec = self
             .get(name)
             .with_context(|| format!("no account named '{name}'"))?;
+        self.write_serving(rec.config_dir.to_string_lossy().as_bytes())
+    }
+
+    fn write_serving(&self, value: &[u8]) -> Result<()> {
         let p = self.serving_file();
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).context("create store dir")?;
         }
-        crate::atomic::write_secret(&p, rec.config_dir.to_string_lossy().as_bytes())
+        crate::atomic::write_secret(&p, value)
             .with_context(|| format!("write {} serving pointer", self.tool))
+    }
+
+    /// Persist explicit passthrough. This is deliberately different from no
+    /// serving pointer: absence is the legacy state that falls back to the
+    /// default account, while `off` promises that no managed account pays.
+    pub fn set_serving_off(&self) -> Result<()> {
+        self.write_serving(SERVING_OFF.as_bytes())
+    }
+
+    /// Whether turns are explicitly set to pass through the client's login.
+    ///
+    /// Compatibility accessor for display callers that cannot return an error.
+    /// Uncertain state is treated as off so they never claim a managed payer.
+    /// Request handling uses [`serving_is_off_checked`] and reports the error.
+    pub fn serving_is_off(&self) -> bool {
+        read_serving_is_off(&self.serving_file(), &self.tool).unwrap_or(true)
     }
 
     /// Delete a serving pointer that names no registered account.
@@ -494,6 +587,9 @@ impl Slots {
         let Ok(s) = std::fs::read_to_string(self.serving_file()) else {
             return;
         };
+        if s.trim() == SERVING_OFF {
+            return;
+        }
         let dir = PathBuf::from(s.trim());
         if dir.as_os_str().is_empty() {
             return;
@@ -503,8 +599,8 @@ impl Slots {
         }
     }
 
-    /// Stop directing turns anywhere in particular: the account a session was
-    /// launched in pays for it, which is what anyone would assume by default.
+    /// Remove an explicit serving choice and re-enable the legacy default
+    /// fallback. `set_serving_off` is the durable passthrough state.
     pub fn clear_serving(&self) -> Result<()> {
         match std::fs::remove_file(self.serving_file()) {
             Ok(()) => Ok(()),
@@ -529,6 +625,9 @@ impl Slots {
 
     pub fn serving_dir(&self) -> Option<PathBuf> {
         let s = std::fs::read_to_string(self.serving_file()).ok()?;
+        if s.trim() == SERVING_OFF {
+            return None;
+        }
         let dir = PathBuf::from(s.trim());
         if dir.as_os_str().is_empty() {
             return None;
@@ -539,11 +638,29 @@ impl Slots {
             .then_some(dir)
     }
 
+    /// The effective serving pointer and the generation of the file that chose
+    /// it. The source file matters too: `use A` and `serve A` can contain the
+    /// same directory while expressing two distinct human decisions.
+    pub(crate) fn serving_choice(&self) -> (Option<PathBuf>, Option<PointerGeneration>) {
+        if let Some(dir) = self.serving_dir() {
+            let generation = PointerGeneration::at(self.serving_file());
+            return (Some(dir), Some(generation));
+        }
+        let dir = self.default_dir();
+        let generation = dir
+            .as_ref()
+            .map(|_| PointerGeneration::at(self.pointer_file()));
+        (dir, generation)
+    }
+
     /// The account that pays the next turn through the proxy: the one directing
     /// turns, or the default it falls back to when none does. This is the same
     /// resolution the proxy performs, kept in one place so what a screen claims
     /// and what the proxy does cannot drift apart.
     pub fn payer(&self) -> Option<String> {
+        if self.serving_is_off() {
+            return None;
+        }
         let dir = self.serving_dir().or_else(|| self.default_dir())?;
         self.list()
             .into_iter()
@@ -909,6 +1026,89 @@ mod tests {
             open().payer().as_deref(),
             Some("main"),
             "and it hands back when that account is gone"
+        );
+    }
+
+    #[test]
+    fn explicit_off_survives_pruning_and_unrelated_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut slots = Slots::open_for_update(&paths, "codex").unwrap();
+            slots.create("main").unwrap();
+            slots.create("other").unwrap();
+            slots.set_default("main").unwrap();
+            slots.set_serving_off().unwrap();
+            slots.remove("other").unwrap();
+        }
+        let slots = Slots::open_for(&paths, "codex").unwrap();
+        slots.prune_serving();
+        assert!(
+            slots.serving_is_off(),
+            "maintenance re-enabled managed auth"
+        );
+        assert_eq!(slots.payer(), None, "off fell through to the default");
+    }
+
+    #[test]
+    fn an_unreadable_serving_marker_never_claims_the_default_as_payer() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        {
+            let mut slots = Slots::open_for_update(&paths, "codex").unwrap();
+            slots.create("main").unwrap();
+            slots.set_default("main").unwrap();
+        }
+        let slots = Slots::open_for(&paths, "codex").unwrap();
+        std::fs::write(slots.serving_file(), [0xff]).unwrap();
+        assert!(
+            slots.serving_is_off(),
+            "the compatibility bool must fail closed when state is unreadable"
+        );
+        assert_eq!(
+            slots.payer(),
+            None,
+            "an unreadable state was presented as managed payment"
+        );
+    }
+
+    #[test]
+    fn checked_serving_state_distinguishes_absent_off_on_and_invalid() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        assert!(
+            !serving_is_off_checked(&paths, "codex").unwrap(),
+            "only marker absence is the legacy fallback"
+        );
+
+        let mut slots = Slots::open_for_update(&paths, "codex").unwrap();
+        slots.create("main").unwrap();
+        slots.set_serving_off().unwrap();
+        assert!(serving_is_off_checked(&paths, "codex").unwrap());
+        slots.set_serving("main").unwrap();
+        assert!(!serving_is_off_checked(&paths, "codex").unwrap());
+
+        std::fs::write(slots.serving_file(), b"relative-marker").unwrap();
+        assert!(serving_is_off_checked(&paths, "codex").is_err());
+        std::fs::write(slots.serving_file(), [0xff]).unwrap();
+        assert!(serving_is_off_checked(&paths, "codex").is_err());
+    }
+
+    #[test]
+    fn repeating_a_pointer_value_has_a_new_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let mut slots = Slots::open_for_update(&paths, "codex").unwrap();
+        slots.create("main").unwrap();
+        slots.set_default("main").unwrap();
+        let (before_dir, before_generation) = slots.serving_choice();
+
+        slots.set_serving("main").unwrap();
+        let (after_dir, after_generation) = slots.serving_choice();
+        assert_eq!(before_dir, after_dir, "the account path really repeated");
+        assert_ne!(
+            before_generation, after_generation,
+            "the explicit serving rewrite must still be observable"
         );
     }
 

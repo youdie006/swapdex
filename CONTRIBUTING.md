@@ -55,3 +55,24 @@ contributions are the most useful right now.
   command.
 
 By contributing you agree your work is licensed under the MIT License.
+
+## Releasing to the installation channels
+
+The tag workflow builds GitHub release assets. It does not publish to npm or
+crates.io; a successful GitHub release alone does not update those installers.
+
+1. Keep the Cargo version, lockfile, npm version, pinned platform versions,
+   changelog section, and generated man page in the release commit.
+2. Run the checks above and the npm tests: `node --test 'npm/**/*.test.mjs'`.
+3. Push the version tag and wait for all four GitHub binary builds to finish.
+4. From `npm/`, run `node publish.mjs <version>`. This publishes the platform
+   packages before the main package and checks that all five resolve on npm.
+5. Publish the crate with `cargo publish` and verify the registry version.
+6. Install the exact npm version on the target machine, then compare
+   `npm ls -g --depth=0 @youdie006/swapdex` with `swapdex --version` and the
+   executable found by `command -v swapdex`. Running proxies keep their old
+   executable until restarted; verify their version markers after applying
+   the update.
+
+A failed publication remains an incomplete release. Do not reuse an already
+published version or replace an old tag to repair a missing channel.

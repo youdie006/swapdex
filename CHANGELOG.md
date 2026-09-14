@@ -6,6 +6,26 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.157.0
+
+- **Refresh protects another running copy of the same account.** Claude and
+  Codex refresh paths compare provider-qualified account identities across
+  running config directories, including explicit refresh and keep-alive sweeps.
+- **`serve --off` persists across proxy restarts.** Explicit passthrough takes
+  precedence over account pins and preserves the client's authentication and
+  account identity. A later `use`, `restore`, or named `serve` selects managed
+  serving again. Usage follows the latest transition and leaves passthrough
+  usage unattributed.
+- **Codex login failures stay visible.** Human and JSON account listings check
+  Codex access-token expiry and remember a definitive refresh rejection until
+  the relevant credential changes. Re-login replaces stale rejection evidence
+  without treating network errors as revoked credentials.
+- **The open account picker follows external changes.** Pause/resume and
+  account selection changes made by another command refresh on the main screen.
+- **Dependency auto-merge validates the tested change.** The privileged gate
+  verifies the current CI attempt, Dependabot author, exact PR head, complete
+  file list, and immutable Cargo manifest/lockfile contents before a pinned merge.
+
 - **`doctor` reports an account registry it cannot read.** Every slot check
   lived inside one `if let Ok(..)`, so a damaged `slots.json` skipped the
   `slots`, `default` and `slot:*` rows entirely and the report came out SHORTER

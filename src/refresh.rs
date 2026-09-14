@@ -22,7 +22,7 @@
 //! No token value is ever logged, and the request carries it on curl's stdin -
 //! the same discipline `quota` uses, so it never reaches `ps`.
 
-use crate::secret::Secret;
+use crate::{paths::Paths, secret::Secret};
 use std::path::Path;
 
 /// Where an OAuth refresh is exchanged. `SWAPDEX_OAUTH_URL` redirects it for
@@ -217,16 +217,33 @@ fn gate() -> &'static RefreshGate {
 /// namespaces, and one person's email can hold a subscription to both. Keying
 /// on the bare id would let two unrelated accounts share one claim - the same
 /// correction KarpelesLab/teamclaude made in its own pool (#349).
-fn account_of(dir: &Path) -> Option<String> {
-    if let Some(u) = crate::proxy::creds::slot_account_uuid(dir) {
-        return Some(format!("claude:{u}"));
+fn identity_file(dir: &Path, name: &str) -> Option<Vec<u8>> {
+    let path = dir.join(name);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
     }
-    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
+    std::fs::read(path).ok()
+}
+
+fn account_of(dir: &Path, tool: &str) -> Option<String> {
+    let (file, field, prefix) = match tool {
+        "claude-code" => (
+            ".claude.json",
+            &["oauthAccount", "accountUuid"][..],
+            "claude",
+        ),
+        "codex" => ("auth.json", &["tokens", "account_id"][..], "codex"),
+        _ => return None,
+    };
+    let bytes = identity_file(dir, file)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    v["tokens"]["account_id"]
+    field
+        .iter()
+        .try_fold(&v, |value, key| value.get(key))?
         .as_str()
         .filter(|s| !s.is_empty())
-        .map(|id| format!("codex:{id}"))
+        .map(|id| format!("{prefix}:{id}"))
 }
 
 /// The key a claim is held under: the ACCOUNT, not the directory.
@@ -239,27 +256,26 @@ fn account_of(dir: &Path) -> Option<String> {
 ///
 /// An identity that cannot be read falls back to the path. Two unknowns are
 /// not one account, and per-path is the stricter answer anyway.
-fn claim_key(dir: &Path) -> std::path::PathBuf {
-    match account_of(dir) {
+fn claim_key(dir: &Path, tool: &str) -> std::path::PathBuf {
+    match account_of(dir, tool) {
         Some(a) => std::path::PathBuf::from(format!("account:{a}")),
-        None => dir.to_path_buf(),
+        None => std::path::PathBuf::from(format!("{tool}:{}", dir.display())),
     }
 }
 
 /// Claim the right to renew this account now. False when another caller has it.
-fn claim_refresh_at(dir: &Path, now_secs: i64) -> bool {
-    gate().claim(&claim_key(dir), now_secs)
+fn claim_refresh_at(dir: &Path, tool: &str, now_secs: i64) -> bool {
+    gate().claim(&claim_key(dir, tool), now_secs)
 }
 
-pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
-    // A slot the tool is using is never touched - see the module note.
-    if slot_in_use(dir, "claude-code") {
-        return Err(RefreshError::InUse);
-    }
+pub fn refresh_slot(paths: &Paths, dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
     // Claimed HERE, not at a caller: every path that spends this token passes
     // through this line, and spending it twice is what logs an account out.
-    if !claim_refresh_at(dir, now_ms / 1000) {
+    if !claim_refresh_at(dir, "claude-code", now_ms / 1000) {
         return Err(RefreshError::AlreadyRefreshing);
+    }
+    if slot_in_use(paths, dir, "claude-code") {
+        return Err(RefreshError::InUse);
     }
     let blob = read_credential(dir).ok_or(RefreshError::NoCredential)?;
     if refresh_token_expired(blob.expose(), now_ms) {
@@ -275,6 +291,16 @@ pub fn refresh_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
         })
         .ok_or(RefreshError::NoCredential)?;
 
+    // Re-read both guards after taking the provider-qualified claim and as
+    // close to the request as possible. A session or login replacement that
+    // appeared while this caller was waiting must keep the old token off the
+    // wire.
+    if slot_in_use(paths, dir, "claude-code") {
+        return Err(RefreshError::InUse);
+    }
+    if read_credential(dir).is_none_or(|current| current.expose() != blob.expose()) {
+        return Err(RefreshError::AlreadyRefreshing);
+    }
     let (body, status) = post(&token)?;
     // 429 is the login server asking for quiet, not a verdict on this account.
     // Reporting it as a refusal reads as "sign in again" - a login nobody needed.
@@ -310,8 +336,33 @@ fn short_reason(body: &str) -> String {
 /// Is a tool currently running with this slot as its home? Checked by the
 /// environment of the running processes, since that is what actually decides
 /// which credential a process holds.
-fn slot_in_use(dir: &Path, tool: &str) -> bool {
-    crate::proc::config_dir_in_use(dir, tool)
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || std::fs::canonicalize(a)
+            .ok()
+            .zip(std::fs::canonicalize(b).ok())
+            .is_some_and(|(a, b)| a == b)
+}
+
+fn inside_paths(paths: &Paths, dir: &Path) -> bool {
+    std::fs::canonicalize(paths.home())
+        .ok()
+        .zip(std::fs::canonicalize(dir).ok())
+        .is_some_and(|(root, dir)| dir.starts_with(root))
+}
+
+fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
+    let running = crate::proc::running_config_dirs(tool);
+    if running.iter().any(|active| same_dir(active, dir)) {
+        return true;
+    }
+    let Some(candidate) = account_of(dir, tool) else {
+        return false;
+    };
+    running.into_iter().any(|active| {
+        (!paths.sandboxed() || inside_paths(paths, &active))
+            && account_of(&active, tool).is_some_and(|id| id == candidate)
+    })
 }
 
 /// The credential blob wherever this slot keeps it.
@@ -460,12 +511,12 @@ pub fn rfc3339_utc(secs: i64) -> String {
 /// running in that slot (its session holds the refresh token, and retiring it
 /// would break the session's own next renewal), and the claim is taken here -
 /// where the token is SPENT - so two callers cannot spend it twice.
-pub fn refresh_codex_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
-    if slot_in_use(dir, "codex") {
-        return Err(RefreshError::InUse);
-    }
-    if !claim_refresh_at(dir, now_ms / 1000) {
+pub fn refresh_codex_slot(paths: &Paths, dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
+    if !claim_refresh_at(dir, "codex", now_ms / 1000) {
         return Err(RefreshError::AlreadyRefreshing);
+    }
+    if slot_in_use(paths, dir, "codex") {
+        return Err(RefreshError::InUse);
     }
     let path = dir.join("auth.json");
     let blob = std::fs::read(&path)
@@ -482,21 +533,37 @@ pub fn refresh_codex_slot(dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
                 .map(str::to_string)
         })
         .ok_or(RefreshError::NoCredential)?;
+    let fingerprint = crate::refresh_health::codex_credential_fingerprint_from_blob(blob.expose())
+        .ok_or(RefreshError::NoCredential)?;
 
+    if slot_in_use(paths, dir, "codex") {
+        return Err(RefreshError::InUse);
+    }
+    if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+        return Err(RefreshError::AlreadyRefreshing);
+    }
     let (body, status) = post_codex(&token)?;
     if status == 429 {
         return Err(RefreshError::Busy);
     }
     if matches!(status, 400 | 401 | 403) {
+        let _ = crate::refresh_health::record_codex_rejection(dir, &fingerprint, now_ms);
         return Err(RefreshError::Expired);
     }
     if !(200..300).contains(&status) {
         return Err(RefreshError::Refused(format!("HTTP {status}")));
     }
+    // A login can replace auth.json while the request is in flight. The
+    // response belongs to the exact blob used for POST and must never be
+    // merged into a newer account or refresh token.
+    if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+        return Err(RefreshError::AlreadyRefreshing);
+    }
     let merged = merge_codex_response(blob.expose(), &body, &rfc3339_utc(now_ms / 1000))
         .ok_or_else(|| RefreshError::Refused("the server's answer had no access token".into()))?;
     crate::atomic::write_secret(&path, &merged)
         .map_err(|e| RefreshError::Refused(e.to_string()))?;
+    let _ = crate::refresh_health::clear_codex_rejection_before(dir, &fingerprint, now_ms);
     Ok(())
 }
 
@@ -686,6 +753,7 @@ pub fn wants_keep_alive_codex(blob: &[u8], now_secs: i64) -> bool {
 /// it looked at Claude alone. A Codex account is idle BY DESIGN between runs -
 /// which is the case the sweep exists for, and the one it did not cover.
 pub fn keep_alive_sweep_codex(
+    paths: &Paths,
     slots: &[(String, std::path::PathBuf)],
     now_ms: i64,
 ) -> (Vec<String>, Vec<(String, RefreshError)>) {
@@ -697,7 +765,7 @@ pub fn keep_alive_sweep_codex(
         if !wants_keep_alive_codex(&blob, now_ms / 1000) {
             continue;
         }
-        match refresh_codex_slot(dir, now_ms) {
+        match refresh_codex_slot(paths, dir, now_ms) {
             Ok(()) => renewed.push(name.clone()),
             // Being in use is the guard doing its job, not a failure worth
             // reporting: that account is alive by definition.
@@ -879,6 +947,7 @@ mod keep_alive_tests {
 /// not stop the sweep reaching the next. `refresh_slot` refuses a slot the tool
 /// is running in, which is the guard that keeps this from logging anyone out.
 pub fn keep_alive_sweep(
+    paths: &Paths,
     slots: &[(String, std::path::PathBuf)],
     now_ms: i64,
 ) -> (Vec<String>, Vec<(String, RefreshError)>) {
@@ -890,7 +959,7 @@ pub fn keep_alive_sweep(
         if !wants_keep_alive(blob.expose(), now_ms) {
             continue;
         }
-        match refresh_slot(dir, now_ms) {
+        match refresh_slot(paths, dir, now_ms) {
             Ok(()) => renewed.push(name.clone()),
             // Being in use is the guard doing its job, not a failure worth
             // reporting: that account is alive by definition.
@@ -936,6 +1005,37 @@ mod one_refresh_per_burst_tests {
 mod point_of_effect_tests {
     use super::*;
 
+    #[test]
+    fn dedupe_uses_provider_qualified_account_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for dir in [&a, &b] {
+            std::fs::write(
+                dir.join(".claude.json"),
+                br#"{"oauthAccount":{"accountUuid":"same-id"}}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("auth.json"),
+                br#"{"tokens":{"account_id":"same-id"}}"#,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            claim_key(&a, "claude-code"),
+            claim_key(&b, "claude-code"),
+            "two directories holding one Claude account share a claim"
+        );
+        assert_ne!(
+            claim_key(&a, "claude-code"),
+            claim_key(&b, "codex"),
+            "equal provider-local ids are not the same account"
+        );
+    }
+
     /// The gate has to sit at the point of effect, not at one caller.
     ///
     /// `RefreshGate`'s own doc names the outcome: N concurrent renewals of one
@@ -948,22 +1048,29 @@ mod point_of_effect_tests {
     fn a_second_refresh_of_the_same_slot_in_a_burst_stands_down() {
         let a = std::path::Path::new("/tmp/swapdex-gate-a");
         let b = std::path::Path::new("/tmp/swapdex-gate-b");
-        assert!(claim_refresh_at(a, 10_000), "the first caller goes ahead");
         assert!(
-            !claim_refresh_at(a, 10_000),
+            claim_refresh_at(a, "claude-code", 10_000),
+            "the first caller goes ahead"
+        );
+        assert!(
+            !claim_refresh_at(a, "claude-code", 10_000),
             "a second in the same burst stands down"
         );
         assert!(
-            !claim_refresh_at(a, 10_000 + BURST_SECS),
+            !claim_refresh_at(a, "claude-code", 10_000 + BURST_SECS),
             "still inside the window"
         );
         assert!(
-            claim_refresh_at(a, 10_001 + BURST_SECS),
+            claim_refresh_at(a, "claude-code", 10_001 + BURST_SECS),
             "a later refresh is a new event, not the same burst"
         );
         assert!(
-            claim_refresh_at(b, 10_000),
+            claim_refresh_at(b, "claude-code", 10_000),
             "another account is never blocked"
+        );
+        assert!(
+            claim_refresh_at(a, "codex", 10_000),
+            "provider namespaces are independent"
         );
     }
 
@@ -1002,13 +1109,14 @@ mod codex_in_use_tests {
         let slot = root.join("slot");
         std::fs::create_dir_all(&slot).unwrap();
         let bin = root.join("codex");
-        std::fs::copy("/bin/sleep", &bin)
-            .or_else(|_| std::fs::copy("/usr/bin/sleep", &bin))
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&bin, perms).unwrap();
+        // Keep the requested comm without executing a freshly written file,
+        // which can produce ETXTBSY while concurrent tests spawn children.
+        let sleep = if std::path::Path::new("/bin/sleep").exists() {
+            "/bin/sleep"
+        } else {
+            "/usr/bin/sleep"
+        };
+        std::os::unix::fs::symlink(sleep, &bin).unwrap();
 
         let mut child = std::process::Command::new(&bin)
             .arg("30")
@@ -1024,7 +1132,8 @@ mod codex_in_use_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let verdict = refresh_codex_slot(&slot, 1_700_000_000_000);
+        let paths = Paths::rooted(&root);
+        let verdict = refresh_codex_slot(&paths, &slot, 1_700_000_000_000);
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&root);

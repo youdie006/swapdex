@@ -318,6 +318,229 @@ fn codex_auth(slot: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(slot.join("auth.json")).unwrap()).unwrap()
 }
 
+#[cfg(target_os = "linux")]
+struct ReapedChild(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Run a harmless process whose name and config environment look exactly like
+/// one tool session. Its config lives under the test root, so refresh safety
+/// can inspect a fake identity without ever following `/proc` into a real auth
+/// file.
+#[cfg(target_os = "linux")]
+fn running_tool(root: &std::path::Path, tool: &str, config_dir: &std::path::Path) -> ReapedChild {
+    let bin = root.join(format!("fake-{tool}")).join(tool);
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    // exec preserves this link's basename as the process name. Reusing the
+    // system executable avoids ETXTBSY from executing a just-copied fixture
+    // while other test threads are spawning children.
+    let sleep = if std::path::Path::new("/bin/sleep").exists() {
+        "/bin/sleep"
+    } else {
+        "/usr/bin/sleep"
+    };
+    std::os::unix::fs::symlink(sleep, &bin).unwrap();
+
+    let config_var = if tool == "claude" {
+        "CLAUDE_CONFIG_DIR"
+    } else {
+        "CODEX_HOME"
+    };
+    let mut child = std::process::Command::new(&bin)
+        .arg("30")
+        .env("HOME", root)
+        .env(config_var, config_dir)
+        .spawn()
+        .unwrap();
+    let environ = format!("/proc/{}/environ", child.id());
+    for _ in 0..300 {
+        if std::fs::read(&environ).is_ok_and(|b| {
+            String::from_utf8_lossy(&b)
+                .contains(&format!("{config_var}={}", config_dir.to_string_lossy()))
+        }) {
+            return ReapedChild(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("the fake {tool} process never exposed its isolated environment");
+}
+
+#[cfg(target_os = "linux")]
+fn seed_external_identity(dir: &std::path::Path, tool: &str, account: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    if tool == "claude" {
+        std::fs::write(
+            dir.join(".claude.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "oauthAccount": {"accountUuid": account}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    } else {
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "tokens": {"account_id": account}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fake_refresh_curl(root: &std::path::Path, answer: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("fake-refresh-curl");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nprintf x >> \"$SWAPDEX_TEST_REFRESH_COUNT\"\nprintf '{answer}\\n200'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_calls(root: &std::path::Path) -> usize {
+    std::fs::read(root.join("refresh-count"))
+        .map(|b| b.len())
+        .unwrap_or(0)
+}
+
+/// A process can hold the same provider account from a second config directory.
+/// Refreshing either copy retires the token held by the other, so the active
+/// twin must protect the candidate even though their paths differ. An unrelated
+/// known account must not block it.
+#[cfg(target_os = "linux")]
+fn check_explicit_active_twin(tool: &str, candidate_account: &str, url_var: &str) {
+    for (running_account, should_refresh) in [(candidate_account, false), ("someone-else", true)] {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = if tool == "claude" {
+            seed_lapsed_account(root.path(), "work", "candidate")
+        } else {
+            seed_lapsed_codex(root.path(), "work", "candidate")
+        };
+        let external = root.path().join(format!(".{tool}-external"));
+        seed_external_identity(&external, tool, running_account);
+        let _running = running_tool(root.path(), tool, &external);
+        let answer = if tool == "claude" {
+            r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#
+        } else {
+            r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","id_token":"NEW-ID"}"#
+        };
+        let curl = fake_refresh_curl(root.path(), answer);
+
+        let out = Command::new(bin())
+            .args(["refresh", "work"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_CURL", curl)
+            .env(
+                "SWAPDEX_TEST_REFRESH_COUNT",
+                root.path().join("refresh-count"),
+            )
+            .env(url_var, "http://127.0.0.1:1/fake-oauth")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            refresh_calls(root.path()),
+            usize::from(should_refresh),
+            "{tool}: active account {running_account:?} gave the wrong refresh verdict:\n{said}"
+        );
+        if should_refresh {
+            assert!(said.contains("work renewed"), "{tool}: {said}");
+        } else {
+            assert!(
+                !said.contains("work renewed"),
+                "{tool}: refreshed a twin held by a live process:\n{said}"
+            );
+            let unchanged = if tool == "claude" {
+                credential(&candidate)["claudeAiOauth"]["accessToken"] == "OLD-AT"
+            } else {
+                codex_auth(&candidate)["tokens"]["access_token"] != "NEW-AT"
+            };
+            assert!(unchanged, "{tool}: the protected credential changed");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_refresh_protects_an_active_claude_twin_but_not_an_unrelated_account() {
+    check_explicit_active_twin("claude", "u-work", "SWAPDEX_OAUTH_URL");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_refresh_protects_an_active_codex_twin_but_not_an_unrelated_account() {
+    check_explicit_active_twin("codex", "acct-1", "SWAPDEX_CODEX_OAUTH_URL");
+}
+
+/// The unattended sweep reaches the same refresh entry point as an explicit
+/// command. It must stand down for an active twin too, for both providers.
+#[cfg(target_os = "linux")]
+fn check_keep_alive_active_twin(tool: &str, account: &str, url_var: &str) {
+    let root = tempfile::tempdir().unwrap();
+    if tool == "claude" {
+        seed_lapsed_account(root.path(), "idle", "candidate");
+    } else {
+        seed_lapsed_codex(root.path(), "idle", "candidate");
+    }
+    let external = root.path().join(format!(".{tool}-external"));
+    seed_external_identity(&external, tool, account);
+    let _running = running_tool(root.path(), tool, &external);
+    let answer = if tool == "claude" {
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#
+    } else {
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","id_token":"NEW-ID"}"#
+    };
+    let curl = fake_refresh_curl(root.path(), answer);
+
+    let out = Command::new(bin())
+        .args(["refresh", "--keep-alive"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_CURL", curl)
+        .env(
+            "SWAPDEX_TEST_REFRESH_COUNT",
+            root.path().join("refresh-count"),
+        )
+        .env(url_var, "http://127.0.0.1:1/fake-oauth")
+        .output()
+        .unwrap();
+    let said =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        refresh_calls(root.path()),
+        0,
+        "{tool}: keep-alive refreshed an account held through a twin:\n{said}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn keep_alive_sweep_protects_an_active_claude_twin() {
+    check_keep_alive_active_twin("claude", "u-idle", "SWAPDEX_OAUTH_URL");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn keep_alive_sweep_protects_an_active_codex_twin() {
+    check_keep_alive_active_twin("codex", "acct-1", "SWAPDEX_CODEX_OAUTH_URL");
+}
+
 #[test]
 fn a_lapsed_codex_account_is_renewed_in_place() {
     let t = tempfile::tempdir().unwrap();

@@ -11,7 +11,7 @@ pub mod ratelimit;
 pub mod upstream;
 
 use crate::paths::Paths;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -365,13 +365,14 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
     // Who serves is its own answer when one was given: `swapdex serve <name>`
     // hands turns to an account without moving where sessions start, so a
     // conversation keeps living where it began while another account pays.
-    let pointer = slots.serving_dir().or_else(|| slots.default_dir());
-    let rotated = sh.rotated.held().clone();
-    let chosen = sh
-        .chooser
-        .held()
-        .choose(pointer.as_deref(), rotated.as_deref(), &list)
+    let (pointer, generation) = slots.serving_choice();
+    let mut chooser = sh.chooser.held();
+    let mut rotated = sh.rotated.held();
+    let chosen = chooser
+        .choose_observed(pointer.as_deref(), generation, &mut rotated, &list)
         .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))?;
+    drop(rotated);
+    drop(chooser);
     // With --auto, an account already known to be out of quota should not serve
     // the next turn: the previous response said a window was spent, so start
     // elsewhere instead of walking into the wall. The turn that OBSERVED this was
@@ -587,8 +588,8 @@ pub(crate) fn keep_alive_once(
         Err(_) => return (Vec::new(), Vec::new()),
     };
     match tool {
-        "codex" => crate::refresh::keep_alive_sweep_codex(&slots, now_ms()),
-        _ => crate::refresh::keep_alive_sweep(&slots, now_ms()),
+        "codex" => crate::refresh::keep_alive_sweep_codex(paths, &slots, now_ms()),
+        _ => crate::refresh::keep_alive_sweep(paths, &slots, now_ms()),
     }
 }
 
@@ -1079,6 +1080,11 @@ fn ctrl_c_cleanup<F: Fn() + Send + Sync + 'static>(f: F) -> Result<()> {
 
 pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     crate::atomic::ensure_not_root()?;
+    // Explicit passthrough is usable without any managed account at all. Read
+    // it independently of slots.json so a missing/corrupt registry cannot turn
+    // "off" into either a startup refusal or managed credential resolution.
+    let serving_off = crate::slots::serving_is_off_checked(paths, &opts.tool)
+        .context("cannot safely read serving state")?;
     // Refuse before binding anything if there is nothing to serve WITH. A proxy
     // that can read no credential still answers, forwarding the client's own
     // login on every turn, and says nothing - it looks like it works while doing
@@ -1086,7 +1092,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // locked Keychain, served for a full day before anyone noticed. Failing here
     // means the shim gets no port and the tool runs with no proxy, which is the
     // login the user already has, and it works.
-    {
+    if !serving_off {
         // Asking the question per tool. It used to be asked with Claude's reader
         // only, which meant it could not be asked about Codex at all - so the
         // refusal this note describes had no Codex half, and a Codex proxy with
@@ -1430,7 +1436,7 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
     // A lapsed Claude token is renewable, so try before ruling the account out:
     // the accounts idle long enough to lapse are the ones with quota left.
     if tool != "codex" && creds::slot_token_expired(dir, now_ms()) {
-        let _ = crate::refresh::refresh_slot(dir, now_ms());
+        let _ = crate::refresh::refresh_slot(paths, dir, now_ms());
     }
     match tool {
         // Codex renews its token when CODEX RUNS, so a slot nobody has opened
@@ -1443,7 +1449,7 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
                 // Same order as the Claude branch above: try to renew before
                 // ruling the account out, because the slots idle long enough to
                 // lapse are exactly the ones with quota left.
-                let _ = crate::refresh::refresh_codex_slot(dir, now_ms());
+                let _ = crate::refresh::refresh_codex_slot(paths, dir, now_ms());
             }
             codex::slot_auth(dir).is_some() && !codex::slot_token_expired(dir, now_secs())
         }
@@ -1548,15 +1554,6 @@ fn forward_turn(
     let mut client_body = Vec::new();
     rq.as_reader().read_to_end(&mut client_body)?;
 
-    let known_uuids: Vec<String> = crate::slots::Slots::open(paths)
-        .map(|s| {
-            s.list()
-                .iter()
-                .filter_map(|r| creds::slot_account_uuid(&r.config_dir))
-                .collect()
-        })
-        .unwrap_or_default();
-
     // Authentication is the user's own business with the vendor. Pass it straight
     // through with the credential the client sent - no account chosen, no token
     // injected, no identity rewritten - and say so, since a silent exemption in
@@ -1573,6 +1570,38 @@ fn forward_turn(
         }
         return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
     }
+
+    // Explicit passthrough outranks every managed choice, including an
+    // `--account` pin. Read it for every request so `serve --off` takes effect
+    // in an already-running proxy and survives its restart. This branch is a
+    // single untouched attempt: it neither rotates nor refreshes managed auth
+    // after an upstream failure.
+    let serving_off = crate::slots::serving_is_off_checked(paths, &opts.tool)
+        .context("cannot safely read serving state; refusing to choose managed credentials")?;
+    if serving_off {
+        // Off ends the previous automatic-choice episode. Without clearing both
+        // halves, re-enabling the same account can lose to the account chosen by
+        // a rotation that happened before passthrough.
+        sh.chooser.held().reset();
+        *sh.rotated.held() = None;
+        note_client_serving(paths, &opts.tool);
+        println!("  [{}] {method} {path} -> passthrough", stamp());
+        std::io::stdout().flush().ok();
+        let mut headers = client_headers.clone();
+        if let Some(auth) = client_auth {
+            headers.push(("authorization".into(), auth));
+        }
+        return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+    }
+
+    let known_uuids: Vec<String> = crate::slots::Slots::open(paths)
+        .map(|s| {
+            s.list()
+                .iter()
+                .filter_map(|r| creds::slot_account_uuid(&r.config_dir))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut slot = pick_slot(paths, opts, sh)?;
     // The mark is NOT written here. Choosing a slot is not the same as paying
@@ -1607,7 +1636,7 @@ fn forward_turn(
         // which is why there is no claim here: claiming twice would make this
         // caller stand down against itself.
         if creds::slot_token_expired(&slot.config_dir, now_ms()) {
-            match crate::refresh::refresh_slot(&slot.config_dir, now_ms()) {
+            match crate::refresh::refresh_slot(paths, &slot.config_dir, now_ms()) {
                 Ok(()) => {
                     // A new credential: any refusal the OLD one earned is not
                     // about this one, so record when it was replaced.
@@ -1646,7 +1675,7 @@ fn forward_turn(
             // That lesson reached the ROTATION candidates and not the account
             // actually serving, which is the one that keeps sending the turn.
             if codex::slot_token_expired(&slot.config_dir, now_secs()) {
-                match crate::refresh::refresh_codex_slot(&slot.config_dir, now_ms()) {
+                match crate::refresh::refresh_codex_slot(paths, &slot.config_dir, now_ms()) {
                     Ok(()) => {
                         // A new credential: any refusal the OLD one earned is
                         // not about this one.
@@ -2194,6 +2223,9 @@ pub fn serving_record_file(paths: &Paths, tool: &str) -> std::path::PathBuf {
 }
 
 pub fn serving_account_for(paths: &Paths, tool: &str) -> Option<String> {
+    if crate::slots::serving_is_off_checked(paths, tool).unwrap_or(true) {
+        return None;
+    }
     running_proxy_for(paths, tool)?;
     std::fs::read_to_string(serving_file_for(paths, tool))
         .ok()

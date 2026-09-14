@@ -35,6 +35,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Test dependency auto-merge gate
+        run: python3 -m unittest discover -s .github/scripts -p 'test_deps_automerge.py'
       - name: Test the npm launcher and the publish checks
         # The launcher decides what a user sees when the binary dies. The
         # publish checks decide whether a half-landed release reports success -
@@ -54,14 +59,14 @@ jobs:
           # full client framework, or a system-TLS binding. Those would change
           # what this binary is (and native-tls would make behaviour differ per
           # platform, which the Linux/WSL/macOS support promise rules out).
-          if cargo tree -e normal | grep -qiE '\b(tokio|async-std|smol|hyper|reqwest|isahc|native-tls|openssl|quinn)\b'; then
+          if cargo tree -e normal | grep -qiE '(^|[^[:alnum:]_])(tokio|async-std|smol|hyper|reqwest|isahc|native-tls|openssl|quinn)([^[:alnum:]_]|$)'; then
             echo "A banned async runtime / heavy HTTP stack is in the dependency graph."
-            cargo tree -e normal | grep -iE '\b(tokio|async-std|smol|hyper|reqwest|isahc|native-tls|openssl|quinn)\b'
+            cargo tree -e normal | grep -iE '(^|[^[:alnum:]_])(tokio|async-std|smol|hyper|reqwest|isahc|native-tls|openssl|quinn)([^[:alnum:]_]|$)'
             exit 1
           fi
       - name: TLS is rustls with bundled roots (identical on Linux, WSL, macOS)
         run: |
-          cargo tree -e normal | grep -qi '\brustls\b' || {
+          cargo tree -e normal | grep -qiE '(^|[^[:alnum:]_])rustls([^[:alnum:]_]|$)' || {
             echo "rustls is expected in the graph (proxy mode's TLS)."; exit 1; }
           cargo tree -e normal | grep -qi 'webpki-roots' || {
             echo "webpki-roots is expected: bundled roots keep behaviour identical across platforms."; exit 1; }

@@ -854,12 +854,17 @@ fn use_account_inner(
             println!("{tool}: '{name}' is already active");
             // Still a sync point: the live login IS this profile's account
             // and its tokens may have rotated since the last save. No backup
-            // and no timeline event - nothing is switching.
+            // is needed. A timeline event is written only when this selection
+            // ends a serving override and therefore changes who pays.
             if !dry_run {
                 if let (Ok(snap), Some(id)) = (adapter.capture(paths), &live_id) {
                     for pname in matching_profile_names(&store, tool, id) {
                         store.save(&pname, &snap)?;
                     }
+                }
+                if clear_serving_choice(paths, tool)? {
+                    store.append_timeline_inv(tool, name, "use", switch_ts, switch_inv)?;
+                    changed += 1;
                 }
             }
             continue;
@@ -1027,6 +1032,7 @@ fn use_account_inner(
             failed.push(tool);
             continue;
         }
+        clear_serving_choice(paths, tool)?;
         store.append_timeline_inv(tool, name, "use", switch_ts, switch_inv)?;
         if let Some(id) = adapter.identity(paths).ok().flatten() {
             println!("switched {tool} -> {}", identity_line(&id));
@@ -1187,6 +1193,14 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         let backup_id = snapshot_account_id(&target, tool).filter(|s| !s.is_empty());
         if live_id.is_some() && live_id == backup_id {
             println!("{tool}: the newest backup is already the active login");
+            if !dry_run && clear_serving_choice(paths, tool)? {
+                let event_name = backup_id
+                    .as_deref()
+                    .and_then(|id| matched_profile_name(&store, tool, id))
+                    .unwrap_or_else(|| "(backup)".into());
+                store.append_timeline_inv(tool, &event_name, "restore", restore_ts, restore_inv)?;
+                changed += 1;
+            }
             continue;
         }
         let age = age_line(stamp);
@@ -1241,6 +1255,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
             );
         }
         adapter.apply(paths, &target)?;
+        clear_serving_choice(paths, tool)?;
         // apply(target) succeeded: NOW it is safe to record the outgoing login as
         // a backup (so `restore` toggles back) and refresh its profile(s) with
         // its freshest tokens - the same rotation invariant as `use`.
@@ -2091,6 +2106,99 @@ fn profile_summary(
     (email, tier, stale_marker(&per_tool))
 }
 
+/// Provider-qualified health for the live slots represented by one account row.
+///
+/// A profile name is only unique within a tool: Claude and Codex can both have
+/// a slot called `work`. Health therefore resolves `(tool, name)` directly from
+/// that tool's registry instead of consulting the listing's legacy name-only
+/// directory map. Snapshot warnings are carried through unchanged.
+#[derive(Default)]
+struct AccountHealth {
+    warning: Option<String>,
+    access_expired: bool,
+    refresh_rejected_at_ms: std::collections::BTreeMap<String, i64>,
+}
+
+fn account_health(
+    paths: &Paths,
+    name: &str,
+    tools: &[String],
+    snapshot_warning: Option<String>,
+    now_ms: i64,
+) -> AccountHealth {
+    let mut warnings: Vec<String> = snapshot_warning.into_iter().collect();
+    let mut access_expired = false;
+    let mut refresh_rejected_at_ms = std::collections::BTreeMap::new();
+
+    for tool in tools {
+        let Some(slot) = crate::slots::Slots::open_for(paths, tool)
+            .ok()
+            .and_then(|slots| slots.get(name))
+        else {
+            continue;
+        };
+        match tool.as_str() {
+            "codex" => {
+                if let Some(rejected_at) = crate::refresh_health::codex_rejection(&slot.config_dir)
+                {
+                    warnings.push("codex refresh rejected - re-login required".to_string());
+                    refresh_rejected_at_ms.insert("codex".to_string(), rejected_at);
+                } else if crate::proxy::codex::slot_token_expired(&slot.config_dir, now_ms / 1000) {
+                    warnings.push("codex expired - needs refresh".to_string());
+                    access_expired = true;
+                }
+            }
+            "claude-code" if crate::proxy::creds::slot_token_expired(&slot.config_dir, now_ms) => {
+                warnings.push("claude-code expired - needs refresh".to_string());
+                access_expired = true;
+            }
+            _ => {}
+        }
+    }
+
+    AccountHealth {
+        warning: (!warnings.is_empty()).then(|| warnings.join(", ")),
+        // A definitive rejection is the stronger diagnosis. The TUI renders
+        // `stale` before `warn`, so leaving this true would hide the re-login
+        // verdict behind the weaker word "expired".
+        access_expired: access_expired && refresh_rejected_at_ms.is_empty(),
+        refresh_rejected_at_ms,
+    }
+}
+
+fn tui_row_names_tool(row: &crate::tui::Row, name: &str, tool: &str) -> bool {
+    row.name == name
+        && row
+            .tools
+            .split(',')
+            .map(|listed| listed.trim().trim_end_matches('*'))
+            .any(|listed| listed == tool)
+}
+
+#[cfg(test)]
+mod account_health_tests {
+    use super::*;
+
+    #[test]
+    fn a_codex_row_does_not_hide_a_claude_slot_with_the_same_name() {
+        let codex = crate::tui::Row {
+            name: "shared".into(),
+            ident: String::new(),
+            tools: "codex".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        };
+
+        assert!(!tui_row_names_tool(&codex, "shared", "claude-code"));
+        assert!(tui_row_names_tool(&codex, "shared", "codex"));
+    }
+}
+
 /// Which profile is the LIVE account for each tool (from live identity, A2).
 /// A mixed state (claude on profile X, codex on profile Y) is representable.
 pub(crate) fn active_by_tool(store: &Store, paths: &Paths) -> Vec<(&'static str, String)> {
@@ -2345,6 +2453,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             .iter()
             .map(|p| {
                 let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+                let health = account_health(paths, &p.name, &p.tools, marker, now_ms());
                 // A slot-only account has no snapshot to name it; its own config
                 // does. Without this the row appeared with an empty name column, so
                 // a switch to it could not be checked against anything.
@@ -2364,7 +2473,8 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                     "paused": crate::settings::load(paths).is_disabled(&p.name),
                     "email": email,
                     "tier": tier,
-                    "warning": marker,
+                    "warning": health.warning,
+                    "refresh_rejected_at_ms": health.refresh_rejected_at_ms,
                 })
             })
             .collect();
@@ -2430,6 +2540,7 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         .iter()
         .map(|p| {
             let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+            let health = account_health(paths, &p.name, &p.tools, marker, now_ms());
             // A slot-only account has no snapshot to name it; its own config
             // does. Without this the row appeared with an empty name column, so
             // a switch to it could not be checked against anything.
@@ -2452,25 +2563,12 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            // An expired slot cannot serve, and the proxy says so at the time
-            // ("its login has expired - passing your own login through"). The
-            // TUI marked it; this listing showed the row with no note at all,
-            // presenting an unusable account as fine - and `ls` is what a
-            // script and a glance both read.
-            let expired = slot_dirs
-                .get(&p.name)
-                .is_some_and(|d| crate::proxy::creds::slot_token_expired(d, now_ms()));
-            let marker = match (marker, expired) {
-                (Some(m), _) => Some(m),
-                (None, true) => Some("expired".to_string()),
-                (None, false) => None,
-            };
             Row {
                 pays: row_suffix(&p.name, signed_in.as_deref(), paying.as_deref()).is_some(),
                 name: p.name.clone(),
                 ident: identity_column(email, tier),
                 tools,
-                warn: marker,
+                warn: health.warning,
                 active: !at.is_empty(),
             }
         })
@@ -2628,6 +2726,11 @@ pub fn short_line(paths: &Paths) -> Option<String> {
     let parts: Vec<String> = adapters::all()
         .iter()
         .filter_map(|a| {
+            if crate::slots::Slots::open_for(paths, a.name())
+                .is_ok_and(|slots| slots.serving_is_off())
+            {
+                return None;
+            }
             let tool = match a.name() {
                 "claude-code" => "claude",
                 t => t,
@@ -4027,6 +4130,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .iter()
                 .map(|p| {
                     let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
+                    let health = account_health(self.paths, &p.name, &p.tools, marker, now_ms());
                     let at: Vec<&str> = active
                         .iter()
                         .filter(|(_, n)| n == &p.name)
@@ -4093,10 +4197,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                             .collect::<Vec<_>>()
                             .join(", "),
                         active: by_pointer.unwrap_or(!at.is_empty()),
-                        warn: marker,
+                        warn: health.warning,
                         also: Vec::new(),
-                        stale: slot_dir_of(&p.name)
-                            .is_some_and(|d| crate::proxy::creds::slot_token_expired(&d, now_ms())),
+                        stale: health.access_expired,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -4111,6 +4214,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // them manages half the accounts while showing the other half's
             // superseded copy-model profiles beside them.
             for (name, dir) in &codex_slots {
+                let tools = vec!["codex".to_string()];
+                let health = account_health(self.paths, name, &tools, None, now_ms());
                 let r = crate::slots::SlotRecord {
                     name: name.clone(),
                     id: String::new(),
@@ -4129,15 +4234,20 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     ident: identity_column(codex_slot_email(&r.config_dir), None),
                     tools: "codex".into(),
                     active: active_codex.as_deref() == Some(r.name.as_str()),
-                    warn: None,
+                    warn: health.warning,
                     also: Vec::new(),
-                    stale: false,
+                    stale: health.access_expired,
                 });
             }
             for (name, dir) in &slot_dirs {
-                if list.iter().any(|r| &r.name == name) {
+                if list
+                    .iter()
+                    .any(|row| tui_row_names_tool(row, name, "claude-code"))
+                {
                     continue;
                 }
+                let tools = vec!["claude-code".to_string()];
+                let health = account_health(self.paths, name, &tools, None, now_ms());
                 list.push(crate::tui::Row {
                     is_slot: true,
                     disabled: cfg.is_disabled(name),
@@ -4149,9 +4259,9 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     ident: identity_column(crate::proxy::creds::slot_email(dir), None),
                     tools: "claude-code".into(),
                     active: active_claude.as_deref() == Some(name.as_str()),
-                    warn: None,
+                    warn: health.warning,
                     also: Vec::new(),
-                    stale: crate::proxy::creds::slot_token_expired(dir, now_ms()),
+                    stale: health.access_expired,
                 });
             }
             // Gemini and Antigravity have permanent homes too, even though the
@@ -5762,6 +5872,17 @@ fn store_lock_or_exit(store: &Store) -> std::result::Result<crate::store::LockGu
     }
 }
 
+/// A direct `use` or `restore` intentionally selects the account again, so it
+/// ends any prior serving override, including durable passthrough. The return
+/// value says whether clearing it changed who pays and therefore needs its own
+/// timeline event on an otherwise no-op credential selection.
+fn clear_serving_choice(paths: &Paths, tool: &str) -> Result<bool> {
+    let slots = crate::slots::Slots::open_for(paths, tool)?;
+    let existed = slots.serving_pointer_file().exists();
+    slots.clear_serving()?;
+    Ok(existed)
+}
+
 fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Result<i32> {
     let bin = tool_binary(tool);
     if dry_run {
@@ -6617,6 +6738,9 @@ pub fn has_any_account(paths: &Paths) -> bool {
 /// read as nothing having happened. One resolution for both tools.
 pub fn active_slot_name(paths: &Paths, tool: &str) -> Option<String> {
     let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+    if slots.serving_is_off() {
+        return None;
+    }
     let name_of = |dir: std::path::PathBuf| {
         slots
             .list()
@@ -6807,6 +6931,25 @@ pub fn serve(
     // its directory back and it would start paying again. This is the command
     // that owns the pointer, so it is the one that clears it.
     slots.prune_serving();
+    if off {
+        let store = Store::open(paths)?;
+        let _lock = match store_lock_or_exit(&store) {
+            Ok(g) => g,
+            Err(code) => return Ok(code),
+        };
+        slots.set_serving_off()?;
+        store.append_timeline(tool, "", crate::session_link::SERVE_OFF)?;
+        // A prior proxy result is no longer authoritative. The durable marker
+        // also suppresses it on reads, while removing it keeps old readers
+        // from claiming that managed account still pays.
+        match std::fs::remove_file(crate::proxy::serving_record_file(paths, tool)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        println!("passthrough is on - each session pays with its own login ({bin})");
+        return Ok(0);
+    }
     // The bare answer, for a caller that puts it somewhere else - the codex shim
     // labels its provider with it. The question there is "who pays", so it takes
     // the default when nobody is directing turns; naming only the explicit case
@@ -6837,12 +6980,11 @@ pub fn serve(
         }
         return Ok(0);
     }
-    if off {
-        slots.clear_serving()?;
-        println!("each session pays for itself again ({bin})");
-        return Ok(0);
-    }
     let Some(name) = name else {
+        if slots.serving_is_off() {
+            println!("passthrough is on ({bin}) - each session pays with its own login");
+            return Ok(0);
+        }
         match slots.serving_dir() {
             Some(dir) => {
                 let who = slots
@@ -7532,8 +7674,8 @@ pub fn keep_alive(paths: &Paths) -> Result<i32> {
         return Ok(0);
     }
     let now = now_ms();
-    let (mut renewed, claude_failed) = crate::refresh::keep_alive_sweep(&slots, now);
-    let (codex_renewed, codex_failed) = crate::refresh::keep_alive_sweep_codex(&codex, now);
+    let (mut renewed, claude_failed) = crate::refresh::keep_alive_sweep(paths, &slots, now);
+    let (codex_renewed, codex_failed) = crate::refresh::keep_alive_sweep_codex(paths, &codex, now);
     renewed.extend(codex_renewed);
     // Which sweep produced a failure is the last place the tool is known;
     // merging the two lists first threw it away, and the remedy names `run`.
@@ -7600,7 +7742,7 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
             println!("  {note}");
             continue;
         }
-        match crate::refresh::refresh_slot(&r.config_dir, now) {
+        match crate::refresh::refresh_slot(paths, &r.config_dir, now) {
             Ok(()) => {
                 println!("  {} renewed", r.name);
                 if let Some(a) = account {
@@ -7611,7 +7753,7 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
             Err(why) => println!("  {}", why.remedy(&r.name, "claude-code")),
         }
     }
-    renewed += refresh_codex(&codex_list, now, &mut done);
+    renewed += refresh_codex(paths, &codex_list, now, &mut done);
     if renewed > 0 {
         println!("\n{renewed} account(s) renewed - no sign-in needed.");
     }
@@ -7625,7 +7767,12 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
 /// Codex RUNS, which is fine for a slot in daily use and useless for one that
 /// is not: measured across two machines, a slot dies exactly ten days after its
 /// last run, and four of eight were already dead when this was written.
-fn refresh_codex(list: &[crate::slots::SlotRecord], now: i64, done: &mut Vec<String>) -> usize {
+fn refresh_codex(
+    paths: &Paths,
+    list: &[crate::slots::SlotRecord],
+    now: i64,
+    done: &mut Vec<String>,
+) -> usize {
     let mut renewed = 0;
     for r in list {
         if !crate::proxy::codex::slot_token_expired(&r.config_dir, now / 1000) {
@@ -7637,7 +7784,7 @@ fn refresh_codex(list: &[crate::slots::SlotRecord], now: i64, done: &mut Vec<Str
             println!("  {note}");
             continue;
         }
-        match crate::refresh::refresh_codex_slot(&r.config_dir, now) {
+        match crate::refresh::refresh_codex_slot(paths, &r.config_dir, now) {
             Ok(()) => {
                 println!("  {} renewed", r.name);
                 if let Some(a) = account {
@@ -8884,7 +9031,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 // problem, and it is usually the one with quota left.
                 expired: {
                     if crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms()) {
-                        let _ = crate::refresh::refresh_slot(&r.config_dir, now_ms());
+                        let _ = crate::refresh::refresh_slot(paths, &r.config_dir, now_ms());
                     }
                     crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms())
                 },

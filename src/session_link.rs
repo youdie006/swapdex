@@ -31,12 +31,33 @@ pub struct Event {
 /// conversation). An entry written before actions were read carries none, and
 /// those were all switches, so a missing action counts as one.
 fn is_switch(action: &str) -> bool {
-    action != SERVE
+    matches!(action, "" | "use" | "restore")
 }
 
 /// The action `serve` writes: turns handed to an account without moving the
 /// conversations.
 pub const SERVE: &str = "serve";
+
+/// Explicit passthrough: no managed account can be named as payer from here.
+pub const SERVE_OFF: &str = "serve-off";
+
+fn changes_payer(action: &str) -> bool {
+    is_switch(action) || matches!(action, SERVE | SERVE_OFF)
+}
+
+fn latest_event<'a>(
+    events: &'a [Event],
+    tool: &str,
+    at_secs: i64,
+    mut include: impl FnMut(&Event) -> bool,
+) -> Option<&'a Event> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.tool == tool && event.ts <= at_secs && include(event))
+        .max_by_key(|(order, event)| (event.ts, *order))
+        .map(|(_, event)| event)
+}
 
 pub fn read_timeline(paths: &Paths) -> Vec<Event> {
     let path = paths.store_dir().join("timeline.jsonl");
@@ -63,11 +84,8 @@ pub fn read_timeline(paths: &Paths) -> Vec<Event> {
 /// The account active when a session of `tool` started: the last switch event
 /// for that tool with `ts <= started`. None (unattributed) if none precedes it.
 pub fn attribute(events: &[Event], tool: &str, started_secs: i64) -> Option<String> {
-    events
-        .iter()
-        .filter(|e| e.tool == tool && is_switch(&e.action) && e.ts <= started_secs)
-        .max_by_key(|e| e.ts)
-        .map(|e| e.account.clone())
+    latest_event(events, tool, started_secs, |event| is_switch(&event.action))
+        .map(|event| event.account.clone())
 }
 
 /// The account `tool` was ON at `at_secs`: the newest event of ANY action at or
@@ -81,27 +99,22 @@ pub fn attribute(events: &[Event], tool: &str, started_secs: i64) -> Option<Stri
 /// in weeks; a tool never `use`d at all was credited to nobody, which was 4457
 /// of 5193 sessions here.
 pub fn active_at(events: &[Event], tool: &str, at_secs: i64) -> Option<String> {
-    events
-        .iter()
-        .filter(|e| e.tool == tool && e.ts <= at_secs)
-        .max_by_key(|e| e.ts)
-        .map(|e| e.account.clone())
+    latest_event(events, tool, at_secs, |event| changes_payer(&event.action)).and_then(|event| {
+        (event.action != SERVE_OFF && !event.account.is_empty()).then(|| event.account.clone())
+    })
 }
 
-/// The account PAYING for `tool` at `at_secs`: the last `serve` event at or
-/// before it, and otherwise the account whose home the session ran in - with
-/// nobody handed the turns, that account pays for itself.
+/// The account PAYING for `tool` at `at_secs`: the newest payer-changing event,
+/// ordered by timestamp and append position. Explicit passthrough has no known
+/// managed payer.
 ///
 /// A Codex transcript's rate limits come from the token that served those turns,
 /// so this is the account they describe. Reading them off the home the file sits
 /// in reports one account's usage under another's name.
 pub fn payer_at(events: &[Event], tool: &str, at_secs: i64) -> Option<String> {
-    events
-        .iter()
-        .filter(|e| e.tool == tool && e.action == SERVE && e.ts <= at_secs)
-        .max_by_key(|e| e.ts)
-        .map(|e| e.account.clone())
-        .or_else(|| attribute(events, tool, at_secs))
+    latest_event(events, tool, at_secs, |event| changes_payer(&event.action)).and_then(|event| {
+        (event.action != SERVE_OFF && !event.account.is_empty()).then(|| event.account.clone())
+    })
 }
 
 /// Session counts per account, best-effort from `sessionwiki list --json`. None
@@ -338,6 +351,85 @@ mod tests {
             payer_at(&events, "codex", 150).as_deref(),
             Some("home"),
             "before anyone was handed the turns, the home account paid"
+        );
+    }
+
+    fn restored(ts: i64, tool: &str, acct: &str) -> Event {
+        Event {
+            action: "restore".into(),
+            ..ev(ts, tool, acct)
+        }
+    }
+
+    fn serving_off(ts: i64, tool: &str) -> Event {
+        Event {
+            ts,
+            tool: tool.into(),
+            account: String::new(),
+            action: "serve-off".into(),
+        }
+    }
+
+    /// Every action that changes who pays competes in one chronological stream.
+    /// An older `serve` must not outrank a newer `use` or `restore`, and explicit
+    /// off means the payer is unknown until another state-changing event.
+    #[test]
+    fn payer_follows_the_latest_state_change_and_off_is_unknown() {
+        let mut events = vec![
+            ev(100, "codex", "home"),
+            served(200, "codex", "payer"),
+            ev(300, "codex", "work"),
+        ];
+        assert_eq!(payer_at(&events, "codex", 250).as_deref(), Some("payer"));
+        assert_eq!(payer_at(&events, "codex", 350).as_deref(), Some("work"));
+
+        events.push(restored(400, "codex", "home"));
+        assert_eq!(payer_at(&events, "codex", 450).as_deref(), Some("home"));
+
+        events.push(serving_off(500, "codex"));
+        assert_eq!(
+            payer_at(&events, "codex", 550),
+            None,
+            "passthrough tokens have no managed payer to fall back to"
+        );
+        assert_eq!(
+            attribute(&events, "codex", 550).as_deref(),
+            Some("home"),
+            "off changes payment, not where sessions launch"
+        );
+
+        events.push(served(600, "codex", "payer"));
+        assert_eq!(payer_at(&events, "codex", 650).as_deref(), Some("payer"));
+    }
+
+    /// Timeline seconds are deliberately coarse. When several commands land in
+    /// one second, append order is the only ordering left and the last appended
+    /// state must win, without leaking across tools.
+    #[test]
+    fn equal_timestamp_payer_events_use_append_order_per_tool() {
+        let mut events = vec![
+            served(100, "codex", "first"),
+            ev(100, "codex", "second"),
+            served(100, "claude-code", "claude-payer"),
+        ];
+        assert_eq!(payer_at(&events, "codex", 100).as_deref(), Some("second"));
+        assert_eq!(
+            payer_at(&events, "claude-code", 100).as_deref(),
+            Some("claude-payer")
+        );
+
+        events.push(serving_off(100, "codex"));
+        assert_eq!(payer_at(&events, "codex", 100), None);
+        assert_eq!(
+            payer_at(&events, "claude-code", 100).as_deref(),
+            Some("claude-payer"),
+            "Codex off does not change Claude"
+        );
+
+        events.push(served(100, "codex", "reenabled"));
+        assert_eq!(
+            payer_at(&events, "codex", 100).as_deref(),
+            Some("reenabled")
         );
     }
 

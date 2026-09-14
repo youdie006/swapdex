@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn bin() -> &'static str {
@@ -13,6 +14,79 @@ struct Seen {
     auth: String,
     /// `metadata.user_id` from the body, when the body carried one.
     user_id: Option<String>,
+}
+
+/// A fake upstream that can be stopped and joined before a test returns.
+///
+/// Most proxy tests predate graceful fake-server cleanup and leave their
+/// listener thread for the test process to reap. Timing tests and state-machine
+/// regressions need a stronger boundary: nothing from one test may keep running
+/// while the next one measures a deadline or observes a pointer.
+struct ControlledUpstream {
+    url: String,
+    server: Arc<tiny_http::Server>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A spawned proxy that is killed and waited even if an assertion unwinds.
+struct ReapedChild(Option<std::process::Child>);
+
+impl ReapedChild {
+    fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn stop(mut self) {
+        if let Some(mut child) = self.0.take() {
+            child.kill().ok();
+            child.wait().unwrap();
+        }
+    }
+}
+
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            child.kill().ok();
+            child.wait().ok();
+        }
+    }
+}
+
+impl ControlledUpstream {
+    fn start(mut respond: impl FnMut(tiny_http::Request) + Send + 'static) -> Self {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let port = server.server_addr().to_ip().unwrap().port();
+        let serving = Arc::clone(&server);
+        let thread = std::thread::spawn(move || {
+            for request in serving.incoming_requests() {
+                respond(request);
+            }
+        });
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            server,
+            thread: Some(thread),
+        }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn close(mut self) {
+        self.server.unblock();
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+impl Drop for ControlledUpstream {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            self.server.unblock();
+            thread.join().unwrap();
+        }
+    }
 }
 
 /// A fake upstream API: records the Authorization header and the body's account
@@ -44,6 +118,35 @@ fn fake_upstream(sink: Arc<Mutex<Vec<Seen>>>) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// A Claude upstream that records the untouched request and refuses it. The
+/// refusal is intentional: passthrough must return that one answer directly,
+/// never retry with a managed credential.
+fn refusing_claude_upstream(sink: Arc<Mutex<Vec<Seen>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut body = Vec::new();
+            rq.as_reader().read_to_end(&mut body).ok();
+            let user_id = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["metadata"]["user_id"].as_str().map(str::to_string));
+            sink.lock().unwrap().push(Seen { auth, user_id });
+            let _ = rq.respond(
+                tiny_http::Response::from_string("{\"error\":\"client refused\"}")
+                    .with_status_code(401),
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
 /// The Authorization values the upstream saw, in order.
 fn auths(sink: &Arc<Mutex<Vec<Seen>>>) -> Vec<String> {
     sink.lock()
@@ -51,6 +154,79 @@ fn auths(sink: &Arc<Mutex<Vec<Seen>>>) -> Vec<String> {
         .iter()
         .map(|s| s.auth.clone())
         .collect()
+}
+
+/// A controllable wall: the next request made with account A is refused as
+/// spent, while B and later A requests succeed. This makes an automatic A -> B
+/// rotation deterministic without involving a real service.
+fn rotating_upstream(
+    sink: Arc<Mutex<Vec<Seen>>>,
+    reject_next_a: Arc<AtomicBool>,
+) -> ControlledUpstream {
+    ControlledUpstream::start(move |mut request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("authorization"))
+            .map(|h| h.value.as_str().to_string())
+            .unwrap_or_default();
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        let user_id = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["metadata"]["user_id"].as_str().map(str::to_string));
+        sink.lock().unwrap().push(Seen {
+            auth: auth.clone(),
+            user_id,
+        });
+        let spent = auth == "Bearer AT-A" && reject_next_a.swap(false, Ordering::SeqCst);
+        let mut response = tiny_http::Response::from_string("{\"ok\":true}");
+        if spent {
+            let reset = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string();
+            response = response
+                .with_status_code(429)
+                .with_header(
+                    tiny_http::Header::from_bytes(
+                        &b"anthropic-ratelimit-unified-status"[..],
+                        &b"rejected"[..],
+                    )
+                    .unwrap(),
+                )
+                // This fake refuses A once, then accepts its next turn. Give the
+                // proxy the matching reset boundary so this fixture exercises a
+                // stale rotation rather than a still-live quota bench.
+                .with_header(
+                    tiny_http::Header::from_bytes(
+                        &b"anthropic-ratelimit-unified-reset"[..],
+                        reset.as_bytes(),
+                    )
+                    .unwrap(),
+                );
+        }
+        let _ = request.respond(response);
+    })
+}
+
+fn serve_as(root: &std::path::Path, name: &str) {
+    let output = Command::new(bin())
+        .args(["serve", name])
+        .env("SWAPDEX_ROOT", root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "serve {name} failed: {output:?}");
+}
+
+fn serve_off(root: &std::path::Path) {
+    let output = Command::new(bin())
+        .args(["serve", "--off"])
+        .env("SWAPDEX_ROOT", root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "serve --off failed: {output:?}");
 }
 
 /// Write a slot with a known token and make it the default account.
@@ -128,7 +304,11 @@ fn start_proxy(
         line.push(b[0]);
     }
     let line = String::from_utf8_lossy(&line).to_string();
-    let port = parse_port(&line).unwrap_or_else(|| panic!("proxy did not announce a port: {line}"));
+    let port = parse_port(&line).unwrap_or_else(|| {
+        child.kill().ok();
+        child.wait().ok();
+        panic!("proxy did not announce a port: {line}")
+    });
     (child, port)
 }
 
@@ -152,6 +332,21 @@ fn post_through(port: u16, body: &str) -> String {
         .read_to_string(&mut out)
         .unwrap();
     out
+}
+
+fn post_through_status(port: u16, body: &str) -> u16 {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    agent
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .header("content-type", "application/json")
+        .send(body.as_bytes())
+        .expect("proxy answered")
+        .status()
+        .as_u16()
 }
 
 /// Repoint the default account, the way `swapdex use <name>` does.
@@ -247,6 +442,201 @@ fn the_forwarded_body_names_the_account_actually_serving_the_turn() {
             && !seen[1].user_id.as_deref().unwrap().contains("uuid-of-rnd"),
         "turn 2 served by bsgong carries bsgong's identity: {:?}",
         seen[1]
+    );
+}
+
+/// `serve --off` is an explicit, durable passthrough mode. It outranks a proxy
+/// pin, survives a proxy restart and pruning, and a failed upstream request is
+/// forwarded once with the client's auth and body identity untouched.
+#[test]
+fn claude_serve_off_is_durable_passthrough_and_beats_a_pin() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    let off = Command::new(bin())
+        .args(["serve", "--off"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(off.status.success(), "serve --off failed: {off:?}");
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = refusing_claude_upstream(sink.clone());
+    let body = r#"{"metadata":{"user_id":"{\"account_uuid\":\"uuid-of-rnd\"}"}}"#;
+    let (mut first, port) = start_proxy(root.path(), &upstream, &["--auto", "--account", "bsgong"]);
+    assert_eq!(post_through_status(port, body), 401);
+    first.kill().ok();
+    first.wait().ok();
+
+    // Pruning invalid account pointers must preserve the explicit off marker.
+    swapdex::slots::Slots::open_for(&swapdex::paths::Paths::rooted(root.path()), "claude-code")
+        .unwrap()
+        .prune_serving();
+    let marker = root.path().join(".local/share/swapdex/serving-claude");
+    assert!(marker.exists(), "off was represented as pointer absence");
+
+    let (mut restarted, port) =
+        start_proxy(root.path(), &upstream, &["--auto", "--account", "bsgong"]);
+    assert_eq!(post_through_status(port, body), 401);
+    restarted.kill().ok();
+    restarted.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "a failed passthrough was retried: {seen:?}");
+    assert!(
+        seen.iter().all(|r| r.auth == "Bearer CLIENT-TOKEN"),
+        "managed auth overrode passthrough: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|r| r
+            .user_id
+            .as_deref()
+            .is_some_and(|id| id.contains("uuid-of-rnd") && !id.contains("uuid-of-bsgong"))),
+        "the client's body identity was substituted: {seen:?}"
+    );
+}
+
+/// Serving state is independent of the account registry. Once passthrough was
+/// explicitly selected, a corrupt registry and a pin naming no account must not
+/// make the proxy look for a managed credential before it honours that choice.
+#[test]
+fn serve_off_works_with_no_readable_slots_and_a_missing_pin() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("serving-claude"), b"off").unwrap();
+    std::fs::write(store.join("slots.json"), b"not json").unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = ControlledUpstream::start({
+        let sink = Arc::clone(&sink);
+        move |mut request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body).unwrap();
+            let user_id = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["metadata"]["user_id"].as_str().map(str::to_string));
+            sink.lock().unwrap().push(Seen { auth, user_id });
+            let _ = request.respond(tiny_http::Response::from_string("{\"ok\":true}"));
+        }
+    });
+
+    let (proxy, port) = start_proxy(root.path(), upstream.url(), &["--account", "missing"]);
+    let proxy = ReapedChild::new(proxy);
+    let body = r#"{"metadata":{"user_id":"client-body"}}"#;
+    assert_eq!(post_through_status(port, body), 200);
+    proxy.stop();
+    upstream.close();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "passthrough was not a single attempt: {seen:?}"
+    );
+    assert_eq!(seen[0].auth, "Bearer CLIENT-TOKEN");
+    assert_eq!(seen[0].user_id.as_deref(), Some("client-body"));
+}
+
+/// An unreadable or malformed state marker is not legacy pointer absence. The
+/// proxy must fail the request locally instead of silently spending a managed
+/// account, and must not retry that state-read failure upstream.
+#[test]
+fn unreadable_or_invalid_serving_state_never_uses_managed_auth() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "a", "aaaa1111", "AT-A", true);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = ControlledUpstream::start({
+        let sink = Arc::clone(&sink);
+        move |mut request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body).ok();
+            sink.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let _ = request.respond(tiny_http::Response::from_string("unexpected"));
+        }
+    });
+    let (proxy, port) = start_proxy(root.path(), upstream.url(), &[]);
+    let proxy = ReapedChild::new(proxy);
+    let marker = root.path().join(".local/share/swapdex/serving-claude");
+
+    std::fs::write(&marker, [0xff]).unwrap();
+    assert_eq!(post_through_status(port, "{}"), 502);
+    std::fs::write(&marker, b"relative-marker").unwrap();
+    assert_eq!(post_through_status(port, "{}"), 502);
+
+    proxy.stop();
+    upstream.close();
+    assert!(
+        sink.lock().unwrap().is_empty(),
+        "a serving-state error reached managed upstream auth"
+    );
+}
+
+/// The proxy may rotate from A to B, but spelling `serve A` again is a new
+/// human decision even though the pointer text is byte-for-byte unchanged.
+#[test]
+fn repeating_the_same_explicit_account_resets_a_stale_rotation() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "a", "aaaa1111", "AT-A", true);
+    seed_slot(root.path(), "b", "bbbb2222", "AT-B", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let reject_next_a = Arc::new(AtomicBool::new(true));
+    let upstream = rotating_upstream(Arc::clone(&sink), reject_next_a);
+    let (proxy, port) = start_proxy(root.path(), upstream.url(), &["--auto"]);
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 200);
+    serve_as(root.path(), "a");
+    assert_eq!(post_through_status(port, "{}"), 200);
+
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        auths(&sink),
+        ["Bearer AT-A", "Bearer AT-B", "Bearer AT-A"],
+        "the repeated explicit choice lost to the old automatic rotation"
+    );
+}
+
+/// The entire off -> on transition can happen between two requests. Observing
+/// only pointer text would miss both writes and leave B in control.
+#[test]
+fn off_then_same_account_on_between_requests_resets_a_stale_rotation() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "a", "aaaa1111", "AT-A", true);
+    seed_slot(root.path(), "b", "bbbb2222", "AT-B", false);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let reject_next_a = Arc::new(AtomicBool::new(true));
+    let upstream = rotating_upstream(Arc::clone(&sink), reject_next_a);
+    let (proxy, port) = start_proxy(root.path(), upstream.url(), &["--auto"]);
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 200);
+    serve_off(root.path());
+    serve_as(root.path(), "a");
+    assert_eq!(post_through_status(port, "{}"), 200);
+
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        auths(&sink),
+        ["Bearer AT-A", "Bearer AT-B", "Bearer AT-A"],
+        "off -> on between requests left the old rotation in control"
     );
 }
 
@@ -1242,6 +1632,96 @@ fn post_codex_turn(port: u16) -> (u16, String) {
     (status, out)
 }
 
+/// Codex carries account identity in a header instead of Claude's body field.
+/// Explicit off must preserve both client headers, beat `--account`, survive a
+/// restart, and return one upstream failure without rotating or retrying.
+#[test]
+fn codex_serve_off_is_durable_passthrough_and_beats_a_pin() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    let off = Command::new(bin())
+        .args(["serve", "--off", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(off.status.success(), "serve --off failed: {off:?}");
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(sink.clone(), "", 403);
+    for _ in 0..2 {
+        let (mut proxy, port) =
+            start_codex_proxy(root.path(), &upstream, &["--auto", "--account", "work"]);
+        let (status, _) = post_codex_turn(port);
+        assert_eq!(status, 403, "the client's upstream failure was replaced");
+        proxy.kill().ok();
+        proxy.wait().ok();
+    }
+
+    let marker = root.path().join(".local/share/swapdex/serving-codex");
+    assert!(marker.exists(), "off did not survive the proxy restart");
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "a failed passthrough was retried: {seen:?}");
+    assert!(
+        seen.iter()
+            .all(|(auth, account)| auth == "Bearer CLIENT-TOKEN" && account == "acct-client"),
+        "managed Codex identity overrode the client: {seen:?}"
+    );
+}
+
+/// Every command surface that labels a payer must distinguish explicit off
+/// from legacy pointer absence. The default is still where sessions launch,
+/// but it must not be presented as paying while passthrough is selected.
+#[test]
+fn cli_payer_labels_do_not_claim_the_default_while_off() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    let run = |args: &[&str]| {
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?} failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    run(&["serve", "--off", "--tool", "codex"]);
+
+    let list = run(&["ls"]);
+    assert!(
+        !list.contains("<- pays"),
+        "ls claimed a managed account pays while off:\n{list}"
+    );
+    let status = run(&["status", "--short"]);
+    assert!(
+        !status.contains("codex:work"),
+        "status claimed the default pays while off:\n{status}"
+    );
+    let serving = run(&["serve", "--tool", "codex"]);
+    assert!(
+        serving.contains("passthrough") || serving.contains("off"),
+        "serve did not report the durable off state:\n{serving}"
+    );
+    let quiet = run(&["serve", "--quiet", "--tool", "codex"]);
+    assert!(
+        !quiet.contains("work"),
+        "the payer label named the default while off:\n{quiet}"
+    );
+}
+
 // The point of --auto for Codex: a turn the current account cannot serve is
 // handed to another one and served THERE, rather than handed back as a failure.
 // Codex has no zero-spend usage endpoint to read ahead of the wall, so this
@@ -1966,6 +2446,59 @@ mod who_was_paying_is_its_own_history {
             .unwrap();
         let events = read_timeline(&paths);
         assert_eq!(payer_at(&events, "codex", LATER).as_deref(), Some("home"));
+    }
+
+    /// Off is a durable state and a timeline event, not deletion of the serving
+    /// pointer. Its event contract is consumed by sessionwiki too, so both the
+    /// action spelling and empty account are pinned here. Naming an account
+    /// afterwards intentionally re-enables managed serving.
+    #[test]
+    fn serve_off_records_unknown_payer_and_serve_name_reenables() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = store_with_two_codex_accounts(root.path());
+        let slots = Slots::open_for(&paths, "codex").unwrap();
+        slots.set_default("home").unwrap();
+
+        commands::serve(&paths, None, true, Some(ToolSel::Codex), false).unwrap();
+        let events = read_timeline(&paths);
+        let off = events.last().expect("serve --off appended an event");
+        assert_eq!(off.action, "serve-off");
+        assert_eq!(off.account, "");
+        assert_eq!(off.tool, "codex");
+        assert_eq!(payer_at(&events, "codex", LATER), None);
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().payer(),
+            None,
+            "explicit off must not fall through to the default"
+        );
+        assert_eq!(commands::payer_label(&paths, "codex"), None);
+        assert_eq!(commands::active_slot_name(&paths, "codex"), None);
+
+        commands::use_account(&paths, "home", Some(ToolSel::Codex), false, false).unwrap();
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().payer().as_deref(),
+            Some("home"),
+            "use intentionally re-enables the selected default"
+        );
+        commands::use_account(&paths, "payer", Some(ToolSel::Codex), false, false).unwrap();
+        commands::serve(&paths, None, true, Some(ToolSel::Codex), false).unwrap();
+        commands::restore(&paths, Some(ToolSel::Codex), false).unwrap();
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().payer().as_deref(),
+            Some("home"),
+            "restore intentionally re-enables the restored default"
+        );
+
+        commands::serve(&paths, None, true, Some(ToolSel::Codex), false).unwrap();
+        commands::serve(&paths, Some("payer"), false, Some(ToolSel::Codex), false).unwrap();
+        assert_eq!(
+            Slots::open_for(&paths, "codex").unwrap().payer().as_deref(),
+            Some("payer")
+        );
+        assert_eq!(
+            payer_at(&read_timeline(&paths), "codex", LATER).as_deref(),
+            Some("payer")
+        );
     }
 }
 
@@ -2722,10 +3255,6 @@ fn hold_seconds_actually_delays_a_spent_turn() {
     std::fs::create_dir_all(root.join(".local/share/swapdex")).unwrap();
     seed_slot(root, "acct", "uuid-a", "AT", true);
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
     let d = root.join(".local/share/swapdex");
     std::fs::write(
         d.join("settings.json"),
@@ -2734,36 +3263,44 @@ fn hold_seconds_actually_delays_a_spent_turn() {
         serde_json::to_vec(&serde_json::json!({"hold_seconds": 5})).unwrap(),
     )
     .unwrap();
-    // Spent, and the soonest window reopens in 3 seconds.
+    // An upstream that is always out of quota.
+    let upstream = ControlledUpstream::start(|request| {
+        let body = br#"{"type":"error","error":{"type":"rate_limit_error"}}"#;
+        let _ =
+            request.respond(tiny_http::Response::from_data(body.to_vec()).with_status_code(429));
+    });
+    let (child, pport) = start_proxy(root, upstream.url(), &[]);
+    let child = ReapedChild::new(child);
+
+    // Set the deadline only after the proxy is listening. Startup time used to
+    // consume most of a reset fixed at setup, so a loaded runner could leave
+    // only milliseconds to wait and fail the elapsed-time assertion without a
+    // product error.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let reset = now + 3;
+    let reset_deadline = std::time::UNIX_EPOCH + std::time::Duration::from_secs(reset as u64);
     std::fs::write(
         d.join("quota-cache.json"),
         serde_json::to_vec(&serde_json::json!({"acct": {
-            "five_h": 100.0, "five_h_reset": now + 3,
+            "five_h": 100.0, "five_h_reset": reset,
             "seven_d": 100.0, "seven_d_reset": now + 900, "at": now}}))
         .unwrap(),
     )
     .unwrap();
 
-    // An upstream that is always out of quota.
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    std::thread::spawn(move || {
-        for rq in server.incoming_requests() {
-            let body = br#"{"type":"error","error":{"type":"rate_limit_error"}}"#;
-            let _ = rq.respond(tiny_http::Response::from_data(body.to_vec()).with_status_code(429));
-        }
-    });
-    let upstream = format!("http://127.0.0.1:{port}");
-    let (mut child, pport) = start_proxy(root, &upstream, &[]);
-
     let started = std::time::Instant::now();
     let _ = post_through(pport, r#"{"model":"claude-sonnet-5","messages":[]}"#);
     let waited = started.elapsed();
-    let _ = child.kill();
+    let returned_at = std::time::SystemTime::now();
+    child.stop();
+    upstream.close();
 
     assert!(
-        waited >= std::time::Duration::from_secs(2),
-        "the turn came back in {waited:?} - it did not wait for the reset"
+        returned_at >= reset_deadline,
+        "the turn came back in {waited:?}, before reset deadline {reset}"
     );
     assert!(
         waited < std::time::Duration::from_secs(60),

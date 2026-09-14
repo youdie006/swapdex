@@ -604,6 +604,27 @@ mod tests {
         );
         assert_eq!(by_serve.get("personal"), Some(&(40, 40)));
 
+        // Explicit passthrough has no managed payer. In particular, do not
+        // fall back to the last `use` and credit the client's own tokens to it.
+        let off = crate::session_link::Event {
+            ts: t10,
+            tool: "claude-code".into(),
+            account: String::new(),
+            action: "serve-off".into(),
+        };
+        let (_b5, _b7, through_client) = claude_usage(
+            dir.path(),
+            now,
+            &[mk(0, "work"), off],
+            &mut UsageCache::default(),
+        );
+        assert_eq!(through_client.get("work"), Some(&(0, 100)));
+        assert_eq!(
+            through_client.len(),
+            1,
+            "the post-off tokens were re-credited through a fallback: {through_client:?}"
+        );
+
         // No events -> no attribution at all (never a guess).
         let (_b5, _b7, none) = claude_usage(dir.path(), now, &[], &mut UsageCache::default());
         assert!(none.is_empty());

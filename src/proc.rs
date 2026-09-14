@@ -425,17 +425,17 @@ fn ps_comm_by_pid() -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-/// Is `tool` running right now with `dir` as its slot?
+/// Every config directory held by a running process for `tool`.
 ///
 /// Renewing a credential retires the refresh token the running process holds in
 /// memory, and its next renewal would then fail - the logout this project exists
 /// to prevent. The environment of the live processes is what decides which
-/// credential each one holds, so that is what is read. Directories are compared
-/// as paths, so the spellings one shell or another produces are one slot.
-pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
+/// credential each one holds, so that is what is returned to refresh safety.
+pub fn running_config_dirs(tool: &str) -> Vec<std::path::PathBuf> {
     let Some(vars) = slot_vars(tool) else {
-        return false;
+        return Vec::new();
     };
+    let mut dirs = Vec::new();
     if let Ok(rd) = std::fs::read_dir("/proc") {
         for e in rd.flatten() {
             // Readable only for our own processes; a foreign session's slot is
@@ -446,11 +446,11 @@ pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
             };
             let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
             let text = String::from_utf8_lossy(&bytes);
-            if slot_dir_in(&text, '\0', comm.trim(), vars).is_some_and(|d| d == dir) {
-                return true;
+            if let Some(dir) = slot_dir_in(&text, '\0', comm.trim(), vars) {
+                dirs.push(dir);
             }
         }
-        return false;
+        return dirs;
     }
     // macOS: `ps -E` prints each process's environment after its command, so the
     // slot a process actually holds is readable there too. An earlier version
@@ -461,16 +461,25 @@ pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
         .args(["-E", "-ww", "-o", "pid=,command="])
         .output()
     else {
-        return false;
+        return dirs;
     };
     let comms = ps_comm_by_pid();
-    String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let l = line;
         let Some((pid, rest)) = l.trim().split_once(char::is_whitespace) else {
-            return false;
+            continue;
         };
         let comm = comms.get(pid).map(String::as_str).unwrap_or_default();
-        slot_dir_in(rest, ' ', comm, vars).is_some_and(|d| d == dir)
-    })
+        if let Some(dir) = slot_dir_in(rest, ' ', comm, vars) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// Whether one exact config directory is held by a running tool process.
+pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
+    running_config_dirs(tool).into_iter().any(|d| d == dir)
 }
 
 #[cfg(test)]
@@ -736,18 +745,19 @@ mod tests {
         assert!(!p2.env_read, "no env visible -> caller must fail closed");
     }
 
-    /// Copy `sleep` under `name` so the spawned process's `comm` is that name.
+    /// Link `sleep` under `name` so the spawned process's `comm` is that name.
     #[cfg(target_os = "linux")]
     fn stub_binary(root: &std::path::Path, name: &str) -> std::path::PathBuf {
         std::fs::create_dir_all(root).unwrap();
         let bin = root.join(name);
-        std::fs::copy("/bin/sleep", &bin)
-            .or_else(|_| std::fs::copy("/usr/bin/sleep", &bin))
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&bin, perms).unwrap();
+        // Keep the requested comm without executing a freshly written file,
+        // which can produce ETXTBSY while concurrent tests spawn children.
+        let sleep = if std::path::Path::new("/bin/sleep").exists() {
+            "/bin/sleep"
+        } else {
+            "/usr/bin/sleep"
+        };
+        std::os::unix::fs::symlink(sleep, &bin).unwrap();
         bin
     }
 

@@ -1,103 +1,41 @@
 name: deps auto-merge
 
-# Dependabot runs CI with a restricted token that cannot merge, so this waits
-# for CI to report and does the merge from the base repo, where the default
-# token can. Patch and compatible-minor bumps go in on their own; anything that
-# crosses a semver-incompatible boundary is labelled and left for a human,
-# because that is where a dependency changes behaviour rather than fixes it.
+# This privileged workflow uses only code from the default branch. Pull request
+# checkouts, artifacts, and caches are intentionally forbidden here.
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
 
 jobs:
   merge:
     if: >-
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.name == 'CI'
+      && github.event.workflow_run.status == 'completed'
+      && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.event == 'pull_request'
-      && startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+      && github.event.workflow_run.repository.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Merge the bump unless it is breaking
+      - name: Check out trusted default branch
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate and merge eligible Dependabot bump
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          set -euo pipefail
-
-          num=$(gh api "repos/$REPO/commits/$SHA/pulls" \
-                  --jq '[.[] | select(.state == "open")] | .[0].number // empty')
-          if [ -z "$num" ]; then
-            echo "no open pull request for $SHA - nothing to merge"
-            exit 0
-          fi
-
-          title=$(gh pr view "$num" -R "$REPO" --json title -q .title)
-          from=$(printf '%s' "$title" | sed -n 's/.* from \([0-9][0-9.]*\) to .*/\1/p')
-          to=$(printf '%s' "$title" | sed -n 's/.* from [0-9][0-9.]* to \([0-9][0-9.]*\).*/\1/p')
-          if [ -z "$from" ] || [ -z "$to" ]; then
-            echo "no version range in: $title - leaving it alone"
-            exit 0
-          fi
-
-          # Cargo treats 0.x as breaking at the MINOR position, so the
-          # compatibility key is "0.23" below 1.0 and "1" at or above it.
-          key() {
-            major=${1%%.*}
-            if [ "$major" = "0" ]; then
-              rest=${1#*.}
-              printf '0.%s' "${rest%%.*}"
-            else
-              printf '%s' "$major"
-            fi
-          }
-
-          if [ "$(key "$from")" != "$(key "$to")" ]; then
-            # Say it once. CI runs again whenever the branch is rebased, and
-            # each of those runs used to add another identical comment.
-            already=$(gh pr view "$num" -R "$REPO" --json labels \
-                        -q '[.labels[].name] | index("needs review") // empty')
-            gh pr edit "$num" -R "$REPO" --add-label "needs review"
-            if [ -z "$already" ]; then
-              gh pr comment "$num" -R "$REPO" --body \
-                "Held for review: $from -> $to crosses a semver-incompatible boundary, which is where a dependency changes behaviour rather than fixes it. CI is green; the merge is the part that wants a person."
-            else
-              echo "#$num is already held - not saying it twice"
-            fi
-            exit 0
-          fi
-
-          # Record what is going in BEFORE it goes in. A compatible bump with
-          # green CI is merged without anyone reading the diff, so the least
-          # this can do is leave the diff readable afterwards - and say plainly
-          # when a dependency PR touched something other than the manifests,
-          # which is the case worth a second look.
-          files=$(gh pr view "$num" -R "$REPO" --json files \
-                    -q '.files[] | "  \(.path)  +\(.additions) -\(.deletions)"')
-          outside=$(gh pr view "$num" -R "$REPO" --json files \
-                    -q '[.files[] | select(.path | test("(^|/)(Cargo|package|package-lock|pnpm-lock|yarn)\\.(toml|lock|json|yaml)$") | not)] | length')
-          if [ "$outside" -eq 0 ]; then
-            verdict="Nothing outside the manifests changed."
-          else
-            verdict="$outside file(s) outside the manifests changed - worth a look."
-          fi
-          checks=$(gh pr view "$num" -R "$REPO" --json statusCheckRollup \
-                    -q '[.statusCheckRollup[]? | select((.conclusion // .state) == "SUCCESS")] | length')
-
-          gh pr comment "$num" -R "$REPO" --body "Auto-merged: $from -> $to, a compatible bump with $checks green check(s).
-
-          \`\`\`
-          $files
-          \`\`\`
-
-          $verdict
-
-          No one read this diff before it merged - that is what auto-merge means here. It is recorded so it can be read now."
-
-          gh pr merge "$num" -R "$REPO" --squash --delete-branch
-          echo "merged #$num ($from -> $to), $outside file(s) outside the manifests"
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/deps-automerge.py

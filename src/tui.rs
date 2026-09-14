@@ -1233,6 +1233,350 @@ impl Timing {
     }
 }
 
+type RowKey = (String, String);
+type QuotaReceiver = std::sync::mpsc::Receiver<Vec<(String, Usage)>>;
+
+fn row_key(row: &Row) -> RowKey {
+    (row.name.clone(), row.tools.replace('*', ""))
+}
+
+/// Refresh local preferences and login health independently of slow quota reads.
+struct RowRefresh {
+    last: std::time::Instant,
+    local_identity: std::collections::HashMap<RowKey, String>,
+    identity_generation: u64,
+}
+
+impl RowRefresh {
+    fn new(now: std::time::Instant, rows: &[Row]) -> Self {
+        Self {
+            last: now,
+            local_identity: rows.iter().map(|r| (row_key(r), r.ident.clone())).collect(),
+            identity_generation: 0,
+        }
+    }
+
+    fn identity_generation(&self) -> u64 {
+        self.identity_generation
+    }
+
+    fn apply_quota_reading(
+        &self,
+        started_generation: u64,
+        rows: &mut [Row],
+        quota: &mut Option<std::collections::HashMap<String, Usage>>,
+        got: Vec<(String, Usage)>,
+    ) -> bool {
+        if started_generation != self.identity_generation {
+            return false;
+        }
+        apply_live_identity(rows, &got);
+        let (next, landed) = merge_reading(quota.take(), got);
+        *quota = next;
+        landed
+    }
+
+    fn poll(
+        &mut self,
+        now: std::time::Instant,
+        rows: &mut Vec<Row>,
+        selected: &mut ListState,
+        confirmation: &mut Option<(usize, std::time::Instant)>,
+        quota: &mut Option<std::collections::HashMap<String, Usage>>,
+        load: impl FnOnce() -> Vec<Row>,
+    ) -> bool {
+        if now.saturating_duration_since(self.last) < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        self.last = now;
+        let selected_key = selected.selected().and_then(|i| rows.get(i)).map(row_key);
+        let mut fresh = load();
+        let local_identity: std::collections::HashMap<RowKey, String> = fresh
+            .iter()
+            .map(|r| (row_key(r), r.ident.clone()))
+            .collect();
+        if local_identity != self.local_identity {
+            self.identity_generation = self.identity_generation.wrapping_add(1);
+        }
+        if let Some(q) = quota.as_mut() {
+            q.retain(|name, _| {
+                fresh
+                    .iter()
+                    .any(|row| row.name == *name || row.also.contains(name))
+            });
+        }
+        for row in &mut fresh {
+            match self.local_identity.get(&row_key(row)) {
+                Some(previous) if previous == &row.ident => {
+                    if let Some(ident) = quota
+                        .as_ref()
+                        .and_then(|q| usage_for(q, row))
+                        .and_then(|u| u.ident.as_ref())
+                        .filter(|s| !s.is_empty())
+                    {
+                        row.ident = ident.clone();
+                    }
+                }
+                Some(_) => {
+                    // A replacement login must not inherit the old login's label
+                    // or numbers, including on the following refresh tick.
+                    if let Some(q) = quota.as_mut() {
+                        q.remove(&row.name);
+                        for alias in &row.also {
+                            q.remove(alias);
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        if !rows
+            .iter()
+            .map(|r| (row_key(r), &r.ident))
+            .eq(fresh.iter().map(|r| (row_key(r), &r.ident)))
+        {
+            *confirmation = None;
+        }
+        let next = selected_key
+            .and_then(|key| fresh.iter().position(|r| row_key(r) == key))
+            .or_else(|| {
+                (!fresh.is_empty()).then(|| selected.selected().unwrap_or(0).min(fresh.len() - 1))
+            });
+        selected.select(next);
+        *rows = fresh;
+        self.local_identity = local_identity;
+        true
+    }
+}
+
+#[cfg(test)]
+mod external_row_refresh_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn row(name: &str) -> Row {
+        Row {
+            name: name.into(),
+            ident: format!("{name}@example.com"),
+            tools: "codex".into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn idle_tick_observes_external_resume_and_selection_without_input() {
+        let now = Instant::now();
+        let mut rows = vec![row("work")];
+        rows[0].disabled = true;
+        let mut refresh = RowRefresh::new(now, &rows);
+        let mut selected = ListState::default().with_selected(Some(0));
+        let mut confirmation = None;
+        assert!(!refresh.poll(
+            now + Duration::from_millis(500),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut None,
+            || panic!("polled too soon")
+        ));
+        assert!(refresh.poll(
+            now + Duration::from_secs(1),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut None,
+            || {
+                let mut fresh = row("work");
+                fresh.active = true;
+                vec![fresh]
+            }
+        ));
+        assert_eq!(account_status(&rows[0], None).0, "active");
+        assert_eq!(selected.selected(), Some(0));
+    }
+
+    #[test]
+    fn reordering_preserves_selection_and_invalidates_delete_confirmation() {
+        let now = Instant::now();
+        let mut rows = vec![row("home"), row("work")];
+        let mut refresh = RowRefresh::new(now, &rows);
+        let mut selected = ListState::default().with_selected(Some(1));
+        let mut confirmation = Some((1, now));
+        refresh.poll(
+            now + Duration::from_secs(1),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut None,
+            || vec![row("work"), row("home"), row("third")],
+        );
+        assert_eq!(selected.selected(), Some(0));
+        assert!(confirmation.is_none());
+        refresh.poll(
+            now + Duration::from_secs(2),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut None,
+            || vec![row("home")],
+        );
+        assert_eq!(selected.selected(), Some(0));
+        refresh.poll(
+            now + Duration::from_secs(3),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut None,
+            Vec::new,
+        );
+        assert_eq!(selected.selected(), None);
+    }
+
+    #[test]
+    fn cached_identity_survives_resume_but_cannot_hide_a_replaced_login() {
+        let now = Instant::now();
+        let mut rows = vec![row("work")];
+        let mut refresh = RowRefresh::new(now, &rows);
+        let mut selected = ListState::default().with_selected(Some(0));
+        let mut confirmation = None;
+        let mut quota = Some(std::collections::HashMap::from([(
+            "work".into(),
+            Usage {
+                ident: Some("server@example.com".into()),
+                ..Default::default()
+            },
+        )]));
+        refresh.poll(
+            now + Duration::from_secs(1),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut quota,
+            || vec![row("work")],
+        );
+        assert_eq!(rows[0].ident, "server@example.com");
+        refresh.poll(
+            now + Duration::from_secs(2),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut quota,
+            || {
+                let mut changed = row("work");
+                changed.ident = "new-login@example.com".into();
+                changed.stale = true;
+                vec![changed]
+            },
+        );
+        assert_eq!(rows[0].ident, "new-login@example.com");
+        assert!(rows[0].stale);
+        assert!(!quota.as_ref().unwrap().contains_key("work"));
+    }
+
+    #[test]
+    fn removing_a_row_purges_its_name_and_aliases_before_name_reuse() {
+        let now = Instant::now();
+        let mut old = row("work");
+        old.also = vec!["work-old".into()];
+        let mut rows = vec![old];
+        let mut refresh = RowRefresh::new(now, &rows);
+        let mut selected = ListState::default().with_selected(Some(0));
+        let mut confirmation = None;
+        let mut quota = Some(std::collections::HashMap::from([
+            (
+                "work".into(),
+                Usage {
+                    ident: Some("old@example.com".into()),
+                    five_h: Some(91.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "work-old".into(),
+                Usage {
+                    ident: Some("old@example.com".into()),
+                    seven_d: Some(84.0),
+                    ..Default::default()
+                },
+            ),
+        ]));
+
+        refresh.poll(
+            now + Duration::from_secs(1),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut quota,
+            || vec![row("work")],
+        );
+        assert!(quota.as_ref().unwrap().contains_key("work"));
+        assert!(!quota.as_ref().unwrap().contains_key("work-old"));
+
+        refresh.poll(
+            now + Duration::from_secs(2),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut quota,
+            Vec::new,
+        );
+        assert!(quota.as_ref().unwrap().is_empty());
+
+        refresh.poll(
+            now + Duration::from_secs(3),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut quota,
+            || vec![row("work")],
+        );
+        assert_eq!(rows[0].ident, "work@example.com");
+        assert!(usage_for(quota.as_ref().unwrap(), &rows[0]).is_none());
+    }
+
+    #[test]
+    fn completed_fetch_is_discarded_after_local_identity_generation_changes() {
+        let now = Instant::now();
+        let mut rows = vec![row("work")];
+        let mut refresh = RowRefresh::new(now, &rows);
+        let started = refresh.identity_generation();
+        let mut selected = ListState::default().with_selected(Some(0));
+        let mut confirmation = None;
+        let mut quota = None;
+
+        refresh.poll(
+            now + Duration::from_secs(1),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut quota,
+            || {
+                let mut changed = row("work");
+                changed.ident = "new-login@example.com".into();
+                vec![changed]
+            },
+        );
+        let stale = vec![(
+            "work".into(),
+            Usage {
+                ident: Some("old-login@example.com".into()),
+                five_h: Some(97.0),
+                ..Default::default()
+            },
+        )];
+        assert!(!refresh.apply_quota_reading(started, &mut rows, &mut quota, stale));
+
+        assert_eq!(rows[0].ident, "new-login@example.com");
+        assert!(quota.is_none());
+    }
+}
+
 pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     let timing = Timing::new();
     timing.mark("start");
@@ -1246,6 +1590,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         ratatui::crossterm::event::EnableMouseCapture
     );
     let mut rows = ctx.rows();
+    let mut row_refresh = RowRefresh::new(std::time::Instant::now(), &rows);
     timing.mark("accounts read");
     let mut state = ListState::default();
     state.select(Some(rows.iter().position(|r| r.active).unwrap_or(0)));
@@ -1278,11 +1623,27 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     let mut fetch_marked = false;
     let mut first_key_marked = false;
     // A reading in flight, if one is.
-    let mut quota_rx: Option<std::sync::mpsc::Receiver<Vec<(String, Usage)>>> = None;
+    let mut quota_rx: Option<(u64, QuotaReceiver)> = None;
     // When the bars were last refreshed, so they can be kept current.
     let mut quota_fetched: Option<std::time::Instant> = None;
 
     let outcome = 'ui: loop {
+        if matches!(screen, Screen::Main)
+            && row_refresh.poll(
+                std::time::Instant::now(),
+                &mut rows,
+                &mut state,
+                &mut confirm_delete,
+                &mut quota_pct,
+                || ctx.rows(),
+            )
+        {
+            onboard_live = if rows.is_empty() {
+                ctx.live_tools()
+            } else {
+                Vec::new()
+            };
+        }
         terminal.draw(|f| {
             // Two hint rows: ten keys on one line were unreadable, and hiding
             // most of them behind '?' was worse - you cannot use a key you cannot
@@ -1980,17 +2341,16 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             fetch_marked = true;
         }
         // Collect a finished reading without waiting for one.
-        if let Some(rx) = quota_rx.as_ref() {
+        if let Some((started_generation, rx)) = quota_rx.as_ref() {
             if let Ok(got) = rx.try_recv() {
-                // A reading can arrive knowing whose account it is, and a row
-                // labelled from a local file cannot know the server disagrees.
-                apply_live_identity(&mut rows, &got);
-                // An empty round is not a reading: keep the numbers already on
-                // screen rather than blanking every gauge, and do not stamp it
-                // as fresh - the next tick should try again soon.
-                let (next, landed) = merge_reading(quota_pct.take(), got);
-                quota_pct = next;
-                if landed {
+                // The guarded apply also discards a response started for an old
+                // local identity generation after a login changed underneath it.
+                if row_refresh.apply_quota_reading(
+                    *started_generation,
+                    &mut rows,
+                    &mut quota_pct,
+                    got,
+                ) {
                     quota_fetched = Some(std::time::Instant::now());
                 }
                 quota_rx = None;
@@ -2004,7 +2364,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             // round trips with backoff, and doing it here froze the dashboard
             // for seconds on open - no keys, no cursor - which reads as the tool
             // being broken. The bars fill in when the answer arrives.
-            quota_rx = Some(ctx.quota_pct_async());
+            quota_rx = Some((row_refresh.identity_generation(), ctx.quota_pct_async()));
         }
         // A left click on a menu item both selects AND activates it; treat
         // that as a synthesized Enter so the key handler below does the work.

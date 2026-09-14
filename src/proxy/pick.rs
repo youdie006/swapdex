@@ -5,13 +5,12 @@
 //! rotation stands, so quota pressure does not fight the user and the user is
 //! never overridden by a stale automatic choice.
 
-use crate::slots::SlotRecord;
+use crate::slots::{PointerGeneration, SlotRecord};
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct Chooser {
-    last_pointer: Option<PathBuf>,
-    seen_once: bool,
+    last_pointer: Option<(Option<PathBuf>, Option<PointerGeneration>)>,
 }
 
 impl Chooser {
@@ -23,6 +22,19 @@ impl Chooser {
         rotated: Option<&str>,
         slots: &[SlotRecord],
     ) -> Option<SlotRecord> {
+        let mut rotated = rotated.map(str::to_string);
+        self.choose_observed(pointer, None, &mut rotated, slots)
+    }
+
+    /// Request-path choice with the pointer generation and mutable rotation
+    /// state that an explicit rewrite is allowed to retire.
+    pub(crate) fn choose_observed(
+        &mut self,
+        pointer: Option<&Path>,
+        generation: Option<PointerGeneration>,
+        rotated: &mut Option<String>,
+        slots: &[SlotRecord],
+    ) -> Option<SlotRecord> {
         let now = pointer.map(Path::to_path_buf);
         // A pointer this chooser has never seen counts as new. It used to
         // require a PREVIOUS sighting, so on the first request after a restart
@@ -30,21 +42,30 @@ impl Chooser {
         // went on losing, because the pointer never "changed" again. On a real
         // machine `serving` named one account for half an hour while every turn
         // went to another.
-        let changed = now != self.last_pointer;
-        self.last_pointer = now;
-        self.seen_once = true;
+        let observed = (now, generation);
+        let changed = self.last_pointer.as_ref() != Some(&observed);
+        self.last_pointer = Some(observed);
         let by_pointer = pointer.and_then(|p| slots.iter().find(|r| r.config_dir == p));
         if changed {
+            // The pointer generation is an explicit `use`/`serve`, even when
+            // its text repeats. It starts a new human choice episode, so an
+            // automatic answer remembered from the previous one is stale.
+            *rotated = None;
             if let Some(r) = by_pointer {
                 return Some(r.clone());
             }
         }
-        if let Some(name) = rotated {
+        if let Some(name) = rotated.as_deref() {
             if let Some(r) = slots.iter().find(|r| r.name == name) {
                 return Some(r.clone());
             }
         }
         by_pointer.or_else(|| slots.first()).cloned()
+    }
+
+    /// Forget the previous human-choice episode after passthrough is observed.
+    pub(crate) fn reset(&mut self) {
+        self.last_pointer = None;
     }
 }
 
@@ -1078,9 +1099,11 @@ mod identity_tests {
     fn a_rotation_naming_an_unknown_account_is_ignored() {
         let slots = vec![slot("rnd", "/s/rnd")];
         let mut c = Chooser::default();
-        c.choose(Some(&PathBuf::from("/s/rnd")), None, &slots);
+        let mut rotated = None;
+        c.choose_observed(Some(&PathBuf::from("/s/rnd")), None, &mut rotated, &slots);
+        rotated = Some("deleted".to_string());
         assert_eq!(
-            c.choose(Some(&PathBuf::from("/s/rnd")), Some("deleted"), &slots)
+            c.choose_observed(Some(&PathBuf::from("/s/rnd")), None, &mut rotated, &slots)
                 .unwrap()
                 .name,
             "rnd",
@@ -1761,6 +1784,15 @@ mod first_sight_tests {
         }
     }
 
+    fn rewritten_generation(root: &std::path::Path) -> (PointerGeneration, PointerGeneration) {
+        let pointer = root.join("serving-claude");
+        crate::atomic::write_secret(&pointer, b"/s/rnd").unwrap();
+        let before = PointerGeneration::at(pointer.clone());
+        crate::atomic::write_secret(&pointer, b"/s/rnd").unwrap();
+        let after = PointerGeneration::at(pointer);
+        (before, after)
+    }
+
     /// A restart must not freeze whatever the proxy last rotated to.
     ///
     /// `changed` was only true once the proxy had ALREADY seen a pointer, so on
@@ -1772,7 +1804,13 @@ mod first_sight_tests {
     fn an_explicit_choice_wins_on_the_very_first_request() {
         let slots = vec![slot("rnd", "/s/rnd"), slot("kong", "/s/kong")];
         let mut c = Chooser::default();
-        let got = c.choose(Some(std::path::Path::new("/s/kong")), Some("rnd"), &slots);
+        let mut rotated = Some("rnd".to_string());
+        let got = c.choose_observed(
+            Some(std::path::Path::new("/s/kong")),
+            None,
+            &mut rotated,
+            &slots,
+        );
         assert_eq!(
             got.map(|r| r.name),
             Some("kong".to_string()),
@@ -1786,19 +1824,83 @@ mod first_sight_tests {
     fn a_rotation_still_wins_when_the_pointer_agrees_with_it() {
         let slots = vec![slot("rnd", "/s/rnd"), slot("kong", "/s/kong")];
         let mut c = Chooser::default();
+        let mut rotated = Some("rnd".to_string());
         // Pointer and rotation name the same account - nothing to arbitrate.
         assert_eq!(
-            c.choose(Some(std::path::Path::new("/s/rnd")), Some("rnd"), &slots)
-                .map(|r| r.name),
+            c.choose_observed(
+                Some(std::path::Path::new("/s/rnd")),
+                None,
+                &mut rotated,
+                &slots
+            )
+            .map(|r| r.name),
             Some("rnd".to_string())
         );
         // Pointer unchanged since, rotation moved on: the rotation is the only
         // thing that knows, so it wins.
+        rotated = Some("kong".to_string());
         assert_eq!(
-            c.choose(Some(std::path::Path::new("/s/rnd")), Some("kong"), &slots)
-                .map(|r| r.name),
+            c.choose_observed(
+                Some(std::path::Path::new("/s/rnd")),
+                None,
+                &mut rotated,
+                &slots
+            )
+            .map(|r| r.name),
             Some("kong".to_string())
         );
+    }
+
+    #[test]
+    fn rewriting_the_same_pointer_resets_the_previous_rotation() {
+        let root = tempfile::tempdir().unwrap();
+        let (before, after) = rewritten_generation(root.path());
+        assert_ne!(before, after, "the atomic rewrite has a new generation");
+        let slots = vec![slot("rnd", "/s/rnd"), slot("kong", "/s/kong")];
+        let mut chooser = Chooser::default();
+        let mut rotated = None;
+        chooser.choose_observed(
+            Some(std::path::Path::new("/s/rnd")),
+            Some(before),
+            &mut rotated,
+            &slots,
+        );
+
+        rotated = Some("kong".to_string());
+        let chosen = chooser.choose_observed(
+            Some(std::path::Path::new("/s/rnd")),
+            Some(after),
+            &mut rotated,
+            &slots,
+        );
+        assert_eq!(chosen.unwrap().name, "rnd");
+        assert_eq!(rotated, None, "the stale automatic choice survived");
+    }
+
+    #[test]
+    fn observing_off_resets_the_previous_rotation_episode() {
+        let root = tempfile::tempdir().unwrap();
+        let (generation, _) = rewritten_generation(root.path());
+        let slots = vec![slot("rnd", "/s/rnd"), slot("kong", "/s/kong")];
+        let mut chooser = Chooser::default();
+        let mut rotated = None;
+        chooser.choose_observed(
+            Some(std::path::Path::new("/s/rnd")),
+            Some(generation.clone()),
+            &mut rotated,
+            &slots,
+        );
+        rotated = Some("kong".to_string());
+
+        chooser.reset();
+        let chosen = chooser.choose_observed(
+            Some(std::path::Path::new("/s/rnd")),
+            Some(generation),
+            &mut rotated,
+            &slots,
+        );
+        assert_eq!(chosen.unwrap().name, "rnd");
+        assert_eq!(rotated, None, "the pre-off rotation survived");
     }
 }
 
