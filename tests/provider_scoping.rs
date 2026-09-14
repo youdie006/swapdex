@@ -282,7 +282,10 @@ fn run_fullscreen_ui_after_screen(
     drain(&mut master, &seen);
     let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
     (
-        String::from_utf8_lossy(&seen).into_owned(),
+        format!(
+            "{}\n[child exit status: {status}]",
+            String::from_utf8_lossy(&seen)
+        ),
         status.code().unwrap_or(-1),
     )
 }

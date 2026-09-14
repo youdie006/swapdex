@@ -135,6 +135,34 @@ fn combined(output: &Output) -> String {
     stdout(output) + &String::from_utf8_lossy(&output.stderr)
 }
 
+#[test]
+fn curl_exiting_before_reading_config_does_not_kill_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    // Exceed the pipe/socket buffer so an immediate-exit curl deterministically
+    // closes stdin before the complete config has been written.
+    let token = "synthetic-refresh-".repeat(65_536);
+    let slot = seed_codex(root.path(), "early-exit", "synthetic-account", &token, 1);
+    let before = std::fs::read(slot.join("auth.json")).unwrap();
+    let curl = root.path().join("early-exit-curl");
+    std::fs::write(&curl, "#!/bin/sh\nexit 22\n").unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = run_with_curl(root.path(), &curl, &["refresh", "early-exit"], &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "transport failure must return exit 4, not a signal: {}\n{}",
+        output.status,
+        combined(&output)
+    );
+    assert!(!combined(&output).contains("synthetic-refresh-"));
+    assert_eq!(std::fs::read(slot.join("auth.json")).unwrap(), before);
+    assert!(
+        !slot.join(STATUS_FILE).exists(),
+        "transport failure is not revocation"
+    );
+}
+
 fn json_row(root: &Path, name: &str) -> serde_json::Value {
     let output = run(root, &["ls", "--json"]);
     assert!(output.status.success(), "{}", combined(&output));

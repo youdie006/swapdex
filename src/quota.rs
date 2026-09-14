@@ -390,7 +390,15 @@ pub fn run_curl_cfg(cfg: &str) -> std::result::Result<(String, u32), String> {
 /// Run `curl --config -`, feeding the config on stdin. Returns (body, status).
 fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
     use std::io::Write;
-    let mut child = std::process::Command::new(curl_bin())
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    // main restores SIGPIPE for normal stdout pipelines. A pipe to curl would
+    // also kill the process if curl exits before reading its config (including
+    // a picker doing a background usage read). UnixStream writes suppress
+    // SIGPIPE on our Unix targets without changing other threads' signal policy.
+    let (mut input, reader) = UnixStream::pair().map_err(|e| e.to_string())?;
+    let child = std::process::Command::new(curl_bin())
         // `-q` MUST be first: it disables ~/.curlrc, which could otherwise turn
         // on `verbose`/`trace-ascii` and log the Authorization: Bearer header
         // (the account token) to a file. curl reads the default config even
@@ -398,18 +406,18 @@ fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
         .arg("-q")
         .arg("--config")
         .arg("-")
-        .stdin(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::from(OwnedFd::from(reader)))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("run curl: {e} (curl is required only for `swapdex quota`)"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "curl stdin unavailable".to_string())?
-        .write_all(cfg.as_bytes())
-        .map_err(|e| e.to_string())?;
+    let written = input.write_all(cfg.as_bytes());
+    // EOF: curl must finish reading the config before proceeding.
+    drop(input);
+    // Reap the child even when it closed stdin early; returning at write_all
+    // used to leave an unreaped curl in long-running picker/proxy processes.
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    written.map_err(|e| format!("write curl config: {e}"))?;
     // curl exits non-zero on transport failure (it exits 0 on HTTP error
     // statuses - no --fail here). A partial body from an aborted transfer
     // must not be parsed as a response.

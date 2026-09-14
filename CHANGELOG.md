@@ -8,6 +8,11 @@ All notable changes to swapdex are documented here. This project follows
 
 ## 0.160.0
 
+- **An early curl failure cannot terminate the picker or renewal command.**
+  Writing a request to curl after it had closed stdin could deliver SIGPIPE
+  to swapdex, silently ending the process. Internal config writes now return
+  a transport error and reap the child; normal stdout pipelines still end
+  quietly when their reader closes. Credentials remain on stdin, off argv.
 - Update the proxy's rustls dependency from 0.23.42 to 0.23.45 to address
   [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), which
   allowed TLS 1.3 handshake messages across encryption-level boundaries.
