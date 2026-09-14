@@ -2219,7 +2219,15 @@ fn run_ui(root: &Path, keys: &str) -> (String, String, i32) {
 ///
 /// `SWAPDEX_ASSUME_TTY` deliberately selects the plain fallback; a PTY is
 /// required to cover the dashboard row builder that runs on an actual terminal.
-#[cfg(unix)]
+///
+/// Linux only, and the reason is the HARNESS rather than the product. On the
+/// macOS runner the child wrote ZERO bytes to the pty and was still alive
+/// thirty seconds later - measured, by dumping what the pty had received. The
+/// child is never made a session leader, so the slave never becomes its
+/// controlling terminal; Linux tolerates that and macOS does not. Making this
+/// portable means `setsid` plus `TIOCSCTTY` in a pre-exec hook, which is a
+/// harness to write deliberately, not to bolt on to keep a job green.
+#[cfg(target_os = "linux")]
 fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
@@ -2307,7 +2315,10 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
 /// Its hand-written join covered Claude and Codex only. A Gemini slot appeared
 /// in `ls` and the plain picker but the terminal dashboard showed the empty
 /// welcome screen, so the command disagreed with itself based on terminal type.
-#[cfg(unix)]
+///
+/// Linux only - see `run_fullscreen_ui`. The row builder this covers is not
+/// platform-specific; the pty harness is.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_fullscreen_menu_lists_a_gemini_slot_only_account() {
     let t = fixture();
