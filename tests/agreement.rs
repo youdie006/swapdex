@@ -2286,6 +2286,34 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
     // the read below blocks forever. The old temporary `Command::new(..)
     // .spawn()` dropped them at the end of its own statement.
     drop(cmd);
+    // Non-blocking for the rest of this function, and drained as the child
+    // runs rather than once at the end. Two reasons, both measured on macOS:
+    // a pty master whose slave has closed reports EIO on Linux and can simply
+    // block on BSD, and a full screen is bigger than the pty buffer, so a
+    // child nobody is reading from stops mid-draw and never reaches its exit.
+    unsafe {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&master);
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        assert_ne!(fl, -1, "F_GETFL on the pty master");
+        assert_ne!(
+            libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK),
+            -1,
+            "F_SETFL O_NONBLOCK on the pty master"
+        );
+    }
+    let mut seen: Vec<u8> = Vec::new();
+    let drain = |m: &mut std::fs::File, out: &mut Vec<u8>| {
+        let mut buf = [0u8; 4096];
+        loop {
+            match m.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                // WouldBlock is "nothing right now"; anything else is the
+                // slave being gone, which is not an error here either.
+                Err(_) => break,
+            }
+        }
+    };
     let mut input = master.try_clone().unwrap();
     let keys = keys.to_vec();
     let writer = std::thread::spawn(move || {
@@ -2297,33 +2325,32 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
     // deadline that merely expires tells you nothing about why.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let status = loop {
+        drain(&mut master, &mut seen);
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            drain(&mut master, &mut seen);
             // Say what the terminal actually received. "Did not exit" alone
             // cannot distinguish a screen that never drew from one that drew
             // and ignored the keys, and a CI-only failure gives no other way
             // to look.
-            let mut seen = Vec::new();
-            let _ = master.read_to_end(&mut seen);
-            let seen = String::from_utf8_lossy(&seen);
+            let text = String::from_utf8_lossy(&seen);
             panic!(
                 "full-screen ui did not exit after the supplied keys; \
                  the pty received {} bytes:\n{}",
-                seen.len(),
-                seen.chars().take(2000).collect::<String>()
+                text.len(),
+                text.chars().take(2000).collect::<String>()
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     writer.join().unwrap();
-    let mut bytes = Vec::new();
-    let _ = master.read_to_end(&mut bytes);
+    drain(&mut master, &mut seen);
     (
-        String::from_utf8_lossy(&bytes).into_owned(),
+        String::from_utf8_lossy(&seen).into_owned(),
         status.code().unwrap_or(-1),
     )
 }
