@@ -395,9 +395,32 @@ fn run_curl(cfg: &str) -> std::result::Result<(String, u32), String> {
 
     // main restores SIGPIPE for normal stdout pipelines. A pipe to curl would
     // also kill the process if curl exits before reading its config (including
-    // a picker doing a background usage read). UnixStream writes suppress
-    // SIGPIPE on our Unix targets without changing other threads' signal policy.
+    // a picker doing a background usage read). Rust's UnixStream writes use
+    // MSG_NOSIGNAL on Linux; Apple socket pairs need SO_NOSIGPIPE explicitly.
+    // Neither changes other threads' signal policy.
     let (mut input, reader) = UnixStream::pair().map_err(|e| e.to_string())?;
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        let enabled: libc::c_int = 1;
+        // SAFETY: input owns a live socket, and enabled is a valid c_int for
+        // the duration and size of this setsockopt call.
+        let result = unsafe {
+            libc::setsockopt(
+                input.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                std::ptr::from_ref(&enabled).cast(),
+                std::mem::size_of_val(&enabled) as libc::socklen_t,
+            )
+        };
+        if result == -1 {
+            return Err(format!(
+                "configure curl stdin: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
     let child = std::process::Command::new(curl_bin())
         // `-q` MUST be first: it disables ~/.curlrc, which could otherwise turn
         // on `verbose`/`trace-ascii` and log the Authorization: Bearer header
