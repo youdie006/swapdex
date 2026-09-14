@@ -186,9 +186,17 @@ fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// The newest `n` sessions across Claude Code and Codex, straight from disk.
 pub fn recent(paths: &Paths, n: usize) -> Vec<NativeSession> {
+    recent_for_tool(paths, n, None)
+}
+
+/// Filter the provider before bounding the files we parse. Newer sessions from
+/// another tool must not push this tool's conversations out of its own menu.
+pub(crate) fn recent_for_tool(paths: &Paths, n: usize, tool: Option<&str>) -> Vec<NativeSession> {
     let mut files: Vec<(i64, &'static str, PathBuf)> = Vec::new();
     let mut claude = Vec::new();
-    walk_jsonl(&paths.claude_projects(), &mut claude);
+    if tool.is_none_or(|t| t == "claude-code") {
+        walk_jsonl(&paths.claude_projects(), &mut claude);
+    }
     for p in claude {
         // Subagent transcripts resume via their parent; skip them in the menu.
         if p.to_string_lossy().contains("/subagents/") {
@@ -197,7 +205,9 @@ pub fn recent(paths: &Paths, n: usize) -> Vec<NativeSession> {
         files.push((mtime_secs(&p), "claude-code", p));
     }
     let mut codex = Vec::new();
-    walk_jsonl(&paths.codex_sessions(), &mut codex);
+    if tool.is_none_or(|t| t == "codex") {
+        walk_jsonl(&paths.codex_sessions(), &mut codex);
+    }
     for p in codex {
         files.push((mtime_secs(&p), "codex", p));
     }
@@ -271,6 +281,42 @@ pub fn exec_resume(s: &NativeSession) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_selection_precedes_the_recent_file_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let claude = paths.claude_projects();
+        let codex = paths.codex_sessions();
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        for i in 0..25 {
+            let file = claude.join(format!("00000000-0000-4000-8000-{i:012}.jsonl"));
+            std::fs::write(
+                &file,
+                br#"{"type":"user","message":{"content":"newer Claude"}}"#,
+            )
+            .unwrap();
+            std::fs::File::open(file)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(200))
+                .unwrap();
+        }
+        let file = codex.join("rollout-00000000-0000-4000-8000-000000000099.jsonl");
+        std::fs::write(
+            &file,
+            br#"{"payload":{"type":"user_message","message":"older Codex"}}"#,
+        )
+        .unwrap();
+        std::fs::File::open(file)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100))
+            .unwrap();
+        let sessions = recent_for_tool(&paths, 1, Some("codex"));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].tool, "codex");
+        assert_eq!(sessions[0].title, "older Codex");
+    }
 
     #[test]
     fn reads_claude_and_codex_sessions_from_disk() {

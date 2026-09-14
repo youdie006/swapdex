@@ -6,6 +6,19 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.158.0
+
+- **The picker keeps each account's tool when acting on it.** Claude and Codex
+  entries with the same name keep separate login state, account selection and
+  usage readings. Selecting or signing into one no longer infers the other tool
+  from a saved profile with that name. Recent conversations remain visible even
+  when another tool has more recent activity, and stale snapshots no longer
+  override a live slot's identity or health.
+- **An open picker explains when an update requires reopening it.** If an
+  installer removes its executable, account switches and diagnostic panels show
+  a restart instruction instead of an unexplained OS error. The failed action
+  leaves the selected account unchanged.
+
 ## 0.157.0
 
 - **Refresh protects another running copy of the same account.** Claude and

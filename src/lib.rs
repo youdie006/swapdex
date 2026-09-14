@@ -15,6 +15,7 @@ pub mod quota_cache;
 pub mod refresh;
 pub mod refresh_health;
 pub mod secret;
+mod self_exe;
 pub mod service;
 pub mod session_link;
 pub mod settings;

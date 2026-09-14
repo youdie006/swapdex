@@ -180,16 +180,32 @@ pub struct RecentSession {
 /// The most recent sessions attributed to `account`, newest first. None when
 /// sessionwiki is absent (the caller simply shows no hint).
 pub fn recent_sessions_for(paths: &Paths, account: &str, n: usize) -> Option<Vec<RecentSession>> {
-    let rows = sessionwiki_rows()?;
+    recent_sessions_for_tool(paths, account, n, None)
+}
+
+pub(crate) fn recent_sessions_for_tool(
+    paths: &Paths,
+    account: &str,
+    n: usize,
+    tool: Option<&str>,
+) -> Option<Vec<RecentSession>> {
+    let rows = sessionwiki_rows_for_tool(tool)?;
     let events = read_timeline(paths);
-    Some(pick_recent(&rows, &events, account, n))
+    Some(pick_recent(&rows, &events, account, n, tool))
 }
 
 /// The most recent sessions regardless of account - the honest fallback for a
 /// store with no switch history yet (nothing can be attributed before the
 /// first switch). None when sessionwiki is absent.
 pub fn recent_sessions_any(n: usize) -> Option<Vec<RecentSession>> {
-    let rows = sessionwiki_rows()?;
+    recent_sessions_any_for_tool(n, None)
+}
+
+pub(crate) fn recent_sessions_any_for_tool(
+    n: usize,
+    tool: Option<&str>,
+) -> Option<Vec<RecentSession>> {
+    let rows = sessionwiki_rows_for_tool(tool)?;
     let mut out: Vec<RecentSession> = rows
         .iter()
         .filter_map(|row| {
@@ -213,11 +229,15 @@ pub(crate) fn pick_recent(
     events: &[Event],
     account: &str,
     n: usize,
+    selected_tool: Option<&str>,
 ) -> Vec<RecentSession> {
     let mut out: Vec<RecentSession> = rows
         .iter()
         .filter_map(|row| {
             let tool = row["tool"].as_str()?;
+            if selected_tool.is_some_and(|selected| selected != tool) {
+                return None;
+            }
             let started = row["started"].as_str().and_then(rfc3339_to_secs)?;
             if active_at(events, tool, started).as_deref() != Some(account) {
                 return None;
@@ -239,8 +259,13 @@ pub(crate) fn pick_recent(
 /// defensively. Any failure (absent binary, non-zero exit, unparseable, slow)
 /// returns None so `status`/`sessions` never hangs or errors.
 fn sessionwiki_rows() -> Option<Vec<Value>> {
+    sessionwiki_rows_for_tool(None)
+}
+
+fn sessionwiki_rows_for_tool(tool: Option<&str>) -> Option<Vec<Value>> {
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
+    let matches_tool = |row: &&Value| tool.is_none_or(|t| row["tool"].as_str() == Some(t));
     // Test hook: a fixture file stands in for the shell-out so the ui flow is
     // E2E-testable inside an isolated root. Only honored WITH SWAPDEX_ROOT so
     // a stray env var can never redirect a production run.
@@ -248,7 +273,7 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
         .filter(|_| std::env::var_os("SWAPDEX_ROOT").is_some())
     {
         let v: Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
-        return v.as_array().cloned();
+        return Some(v.as_array()?.iter().filter(matches_tool).cloned().collect());
     }
     // Under a dev/test root, sessionwiki would still read the HOST's real
     // sessions (it has no notion of SWAPDEX_ROOT), leaking them into an isolated
@@ -257,11 +282,14 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
         return None;
     }
     let (tx, rx) = mpsc::channel();
+    let selected_tool = tool.map(str::to_string);
     std::thread::spawn(move || {
-        let out = Command::new("sessionwiki")
-            .args(["list", "--json", "--no-sync", "-n", "50000"])
-            .stdin(Stdio::null())
-            .output();
+        let mut cmd = Command::new("sessionwiki");
+        cmd.args(["list", "--json", "--no-sync", "-n", "50000"]);
+        if let Some(tool) = selected_tool {
+            cmd.args(["--tool", &tool]);
+        }
+        let out = cmd.stdin(Stdio::null()).output();
         let _ = tx.send(out);
     });
     let out = rx
@@ -272,7 +300,7 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
         return None;
     }
     let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.as_array().cloned()
+    Some(v.as_array()?.iter().filter(matches_tool).cloned().collect())
 }
 
 pub fn rfc3339_to_secs(s: &str) -> Option<i64> {
@@ -511,12 +539,24 @@ mod tests {
             serde_json::json!({"id":"ccc333","tool":"codex","title":"older on personal",
                                "started":"1970-01-01T00:02:00Z"}), // t=120 -> personal
         ];
-        let got = pick_recent(&rows, &events, "personal", 5);
+        let got = pick_recent(&rows, &events, "personal", 5, None);
         let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["bbb222", "ccc333"], "personal only, newest first");
-        let one = pick_recent(&rows, &events, "personal", 1);
+        let one = pick_recent(&rows, &events, "personal", 1, None);
         assert_eq!(one.len(), 1, "truncates to n");
         assert_eq!(one[0].id, "bbb222");
+    }
+
+    #[test]
+    fn provider_selection_precedes_the_recent_session_limit() {
+        let events = vec![ev(0, "codex", "shared"), ev(0, "claude-code", "shared")];
+        let rows = vec![
+            serde_json::json!({"id":"claude-new", "tool":"claude-code", "started":"1970-01-01T00:03:00Z"}),
+            serde_json::json!({"id":"codex-old", "tool":"codex", "started":"1970-01-01T00:02:00Z"}),
+        ];
+        let got = pick_recent(&rows, &events, "shared", 1, Some("codex"));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "codex-old");
     }
 
     #[test]
@@ -556,7 +596,7 @@ mod tests {
             serde_json::json!({"id":"bbb222","tool":"claude-code","title":"on kong",
                                "started":"1970-01-01T00:03:00Z"}), // t=180 -> kong
         ];
-        let ids: Vec<String> = pick_recent(&rows, &events, "kong", 5)
+        let ids: Vec<String> = pick_recent(&rows, &events, "kong", 5, None)
             .iter()
             .map(|s| s.id.clone())
             .collect();
@@ -566,7 +606,7 @@ mod tests {
             "a served session belongs to the account that served it"
         );
         assert_eq!(
-            pick_recent(&rows, &events, "rnd", 5).len(),
+            pick_recent(&rows, &events, "rnd", 5, None).len(),
             1,
             "and the earlier one to the account serving then"
         );

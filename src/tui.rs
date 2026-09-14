@@ -128,8 +128,8 @@ fn key_hints(pairs: &[(&'static str, &'static str)]) -> Line<'static> {
 /// Tools in the order the Main screen groups them.
 const TOOL_ORDER: &[&str] = &["claude-code", "codex", "gemini", "antigravity"];
 
-/// The tool an account is grouped under: its first tool in canonical order, so a
-/// profile holding several appears once, under the first one it has.
+/// The provider represented by a row. Production rows carry exactly one; the
+/// canonical scan also tolerates legacy/test rows that still contain a list.
 fn group_of(tools: &str) -> &'static str {
     TOOL_ORDER
         .iter()
@@ -138,10 +138,11 @@ fn group_of(tools: &str) -> &'static str {
         .unwrap_or("other")
 }
 
-/// One account is one row, even when swapdex holds it two ways. A saved snapshot
-/// and a slot for the same login are two storage details, not two accounts, and
-/// showing both asks the user to know which is which. The row that can actually
-/// serve wins: a slot with a login, else whatever else names that identity.
+/// One provider account is one row, even when swapdex holds it two ways. A saved
+/// snapshot and a slot for the same login are two storage details, not two
+/// accounts, and showing both asks the user to know which is which. The row that
+/// can actually serve wins: a slot with a login, else whatever else names that
+/// identity.
 ///
 /// Rows with no identity to compare (no email yet) are always kept - they cannot
 /// be proven to be duplicates.
@@ -255,12 +256,14 @@ pub fn dedupe_by_identity(rows: Vec<Row>) -> Vec<Row> {
 /// the server disagrees with it - and that disagreement is the whole shape of
 /// the mix-up where signing in as one account leaves another connected. A row
 /// with no live answer keeps the label it had.
-pub fn apply_live_identity(rows: &mut [Row], usage: &[(String, Usage)]) {
+pub fn apply_live_identity(rows: &mut [Row], usage: &[(AccountKey, Usage)]) {
     for r in rows.iter_mut() {
-        let names = |n: &String| *n == r.name || r.also.contains(n);
+        let names = |(tool, name): &AccountKey| {
+            tool == r.tool() && (*name == r.name || r.also.contains(name))
+        };
         if let Some(id) = usage
             .iter()
-            .find(|(n, _)| names(n))
+            .find(|(key, _)| names(key))
             .and_then(|(_, u)| u.ident.as_ref())
             .filter(|id| !id.is_empty())
         {
@@ -304,7 +307,7 @@ mod live_identity_tests {
         apply_live_identity(
             &mut rows,
             &[(
-                "work".into(),
+                account_key("codex", "work"),
                 said(Some("live@example.com [pro] (saved as saved@example.com)")),
             )],
         );
@@ -319,11 +322,11 @@ mod live_identity_tests {
     #[test]
     fn a_reading_that_names_nobody_leaves_the_label_alone() {
         let mut rows = vec![row("work", "saved@example.com")];
-        apply_live_identity(&mut rows, &[("work".into(), said(None))]);
+        apply_live_identity(&mut rows, &[(account_key("codex", "work"), said(None))]);
         assert_eq!(rows[0].ident, "saved@example.com");
         // An empty name is not a name either - blanking the column would trade
         // a stale label for no label.
-        apply_live_identity(&mut rows, &[("work".into(), said(Some("")))]);
+        apply_live_identity(&mut rows, &[(account_key("codex", "work"), said(Some("")))]);
         assert_eq!(rows[0].ident, "saved@example.com");
     }
 
@@ -336,7 +339,10 @@ mod live_identity_tests {
         let mut rows = vec![r];
         apply_live_identity(
             &mut rows,
-            &[("work-old".into(), said(Some("live@example.com")))],
+            &[(
+                account_key("codex", "work-old"),
+                said(Some("live@example.com")),
+            )],
         );
         assert_eq!(rows[0].ident, "live@example.com");
     }
@@ -785,6 +791,24 @@ pub struct Row {
     pub also: Vec<String>,
 }
 
+/// A profile name is only unique within one provider. This is the key used for
+/// selection refresh and quota readings inside the dashboard.
+pub type AccountKey = (String, String);
+
+pub fn account_key(tool: &str, name: &str) -> AccountKey {
+    (tool.to_string(), name.to_string())
+}
+
+impl Row {
+    pub fn tool(&self) -> &'static str {
+        group_of(&self.tools)
+    }
+
+    pub fn key(&self) -> AccountKey {
+        account_key(self.tool(), &self.name)
+    }
+}
+
 /// This row's reading, under its own name or under any name it absorbed.
 ///
 /// An entry that carries NUMBERS is preferred over one that carries only a reason
@@ -802,9 +826,9 @@ pub struct Row {
 ///
 /// Returns the map to show and whether a reading actually landed.
 pub fn merge_reading(
-    current: Option<std::collections::HashMap<String, Usage>>,
-    incoming: Vec<(String, Usage)>,
-) -> (Option<std::collections::HashMap<String, Usage>>, bool) {
+    current: Option<std::collections::HashMap<AccountKey, Usage>>,
+    incoming: Vec<(AccountKey, Usage)>,
+) -> (Option<std::collections::HashMap<AccountKey, Usage>>, bool) {
     if incoming.is_empty() {
         return (current, false);
     }
@@ -812,15 +836,15 @@ pub fn merge_reading(
 }
 
 pub fn usage_for<'a>(
-    map: &'a std::collections::HashMap<String, Usage>,
+    map: &'a std::collections::HashMap<AccountKey, Usage>,
     r: &Row,
 ) -> Option<&'a Usage> {
     let has_numbers = |u: &&Usage| u.five_h.is_some() || u.seven_d.is_some();
     let names = || std::iter::once(&r.name).chain(r.also.iter());
     names()
-        .filter_map(|n| map.get(n))
+        .filter_map(|name| map.get(&(r.tool().to_string(), name.clone())))
         .find(has_numbers)
-        .or_else(|| names().find_map(|n| map.get(n)))
+        .or_else(|| names().find_map(|name| map.get(&(r.tool().to_string(), name.clone()))))
 }
 
 /// One line in the post-switch "open" screen (pre-rendered by the caller).
@@ -833,8 +857,8 @@ pub trait TuiCtx {
     fn rows(&mut self) -> Vec<Row>;
     /// Perform the switch (subprocess); returns (success, condensed message).
     /// `"-"` toggles to the previously-used account (the `r` key).
-    fn switch(&mut self, name: &str, is_slot: bool) -> (bool, String);
-    fn delete(&mut self, name: &str) -> String;
+    fn switch(&mut self, name: &str, tool: &str, is_slot: bool) -> (bool, String);
+    fn delete(&mut self, name: &str, tool: &str) -> String;
     /// Take an account out of automatic rotation, or put it back. Returns the
     /// message to show. Default no-op so test contexts need not implement it.
     fn toggle_rotation(&mut self, _name: &str) -> String {
@@ -843,13 +867,17 @@ pub trait TuiCtx {
     /// (label, session entries) for the just-switched profile.
     /// (label, session entries, the profile's tools) for the just-switched
     /// profile. The tools drive which "open a NEW ..." entries to show.
-    fn sessions(&mut self, name: &str) -> (String, Vec<SessionEntry>, Vec<&'static str>);
+    fn sessions(
+        &mut self,
+        name: &str,
+        tool: &str,
+    ) -> (String, Vec<SessionEntry>, Vec<&'static str>);
     /// Rename a profile (subprocess). Returns (ok, message).
     fn rename(&mut self, old: &str, new: &str) -> (bool, String);
     /// Sign this account in and RETURN. Adding several accounts is what the
     /// dashboard is for, and handing the sign-in back to the shell tore the
     /// dashboard down after each one.
-    fn sign_in(&mut self, name: &str) -> (bool, String);
+    fn sign_in(&mut self, name: &str, tool: &str) -> (bool, String);
     /// Save the accounts you're currently logged into as a new profile
     /// (subprocess `add <name>` - captures live logins, no sign-out). This is
     /// the onboarding action: a fresh machine is usually already logged in.
@@ -864,19 +892,19 @@ pub trait TuiCtx {
     /// Per-account session (5h) and weekly (7d) utilization from the live quota
     /// endpoint, for the inline bars. Network; called lazily. Default empty so
     /// test contexts need not implement it.
-    fn quota_pct(&mut self) -> Vec<(String, Usage)> {
+    fn quota_pct(&mut self) -> Vec<(AccountKey, Usage)> {
         Vec::new()
     }
     /// What was read last time, from disk. Drawn immediately so the bars are
     /// there on the first frame instead of six seconds later; each carries its
     /// own age, so a remembered number is never passed off as current.
-    fn cached_quota(&mut self) -> Vec<(String, Usage)> {
+    fn cached_quota(&mut self) -> Vec<(AccountKey, Usage)> {
         Vec::new()
     }
     /// Start a reading and hand back the channel it will arrive on. The default
     /// answers immediately from `quota_pct`, so a context that has nothing to
     /// fetch needs no threads.
-    fn quota_pct_async(&mut self) -> std::sync::mpsc::Receiver<Vec<(String, Usage)>> {
+    fn quota_pct_async(&mut self) -> std::sync::mpsc::Receiver<Vec<(AccountKey, Usage)>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = tx.send(self.quota_pct());
         rx
@@ -885,7 +913,7 @@ pub trait TuiCtx {
     /// in the session that is ALREADY open, so Enter has no reason to leave the
     /// screen to start a new conversation. Default false so test contexts need
     /// not implement it.
-    fn proxy_running(&mut self) -> bool {
+    fn proxy_running(&mut self, _tool: &str) -> bool {
         false
     }
     /// Who is paying for turns right now, so a switch is confirmed rather than
@@ -1233,11 +1261,11 @@ impl Timing {
     }
 }
 
-type RowKey = (String, String);
-type QuotaReceiver = std::sync::mpsc::Receiver<Vec<(String, Usage)>>;
+type RowKey = AccountKey;
+type QuotaReceiver = std::sync::mpsc::Receiver<Vec<(AccountKey, Usage)>>;
 
 fn row_key(row: &Row) -> RowKey {
-    (row.name.clone(), row.tools.replace('*', ""))
+    row.key()
 }
 
 /// Refresh local preferences and login health independently of slow quota reads.
@@ -1264,8 +1292,8 @@ impl RowRefresh {
         &self,
         started_generation: u64,
         rows: &mut [Row],
-        quota: &mut Option<std::collections::HashMap<String, Usage>>,
-        got: Vec<(String, Usage)>,
+        quota: &mut Option<std::collections::HashMap<AccountKey, Usage>>,
+        got: Vec<(AccountKey, Usage)>,
     ) -> bool {
         if started_generation != self.identity_generation {
             return false;
@@ -1281,8 +1309,8 @@ impl RowRefresh {
         now: std::time::Instant,
         rows: &mut Vec<Row>,
         selected: &mut ListState,
-        confirmation: &mut Option<(usize, std::time::Instant)>,
-        quota: &mut Option<std::collections::HashMap<String, Usage>>,
+        confirmation: &mut Option<(RowKey, std::time::Instant)>,
+        quota: &mut Option<std::collections::HashMap<AccountKey, Usage>>,
         load: impl FnOnce() -> Vec<Row>,
     ) -> bool {
         if now.saturating_duration_since(self.last) < std::time::Duration::from_secs(1) {
@@ -1299,10 +1327,10 @@ impl RowRefresh {
             self.identity_generation = self.identity_generation.wrapping_add(1);
         }
         if let Some(q) = quota.as_mut() {
-            q.retain(|name, _| {
+            q.retain(|(tool, name), _| {
                 fresh
                     .iter()
-                    .any(|row| row.name == *name || row.also.contains(name))
+                    .any(|row| row.tool() == tool && (row.name == *name || row.also.contains(name)))
             });
         }
         for row in &mut fresh {
@@ -1321,19 +1349,22 @@ impl RowRefresh {
                     // A replacement login must not inherit the old login's label
                     // or numbers, including on the following refresh tick.
                     if let Some(q) = quota.as_mut() {
-                        q.remove(&row.name);
+                        q.remove(&(row.tool().to_string(), row.name.clone()));
                         for alias in &row.also {
-                            q.remove(alias);
+                            q.remove(&(row.tool().to_string(), alias.clone()));
                         }
                     }
                 }
                 None => {}
             }
         }
-        if !rows
-            .iter()
-            .map(|r| (row_key(r), &r.ident))
-            .eq(fresh.iter().map(|r| (row_key(r), &r.ident)))
+        // The prompt belongs to the provider-qualified row that opened it. A
+        // refresh may reorder the list, so retaining an index could delete a
+        // different provider. Keep the prompt only while that exact row and
+        // local identity remain present.
+        if confirmation
+            .as_ref()
+            .is_some_and(|(key, _)| self.local_identity.get(key) != local_identity.get(key))
         {
             *confirmation = None;
         }
@@ -1402,12 +1433,12 @@ mod external_row_refresh_tests {
     }
 
     #[test]
-    fn reordering_preserves_selection_and_invalidates_delete_confirmation() {
+    fn reordering_preserves_selection_and_delete_confirmation_target() {
         let now = Instant::now();
         let mut rows = vec![row("home"), row("work")];
         let mut refresh = RowRefresh::new(now, &rows);
         let mut selected = ListState::default().with_selected(Some(1));
-        let mut confirmation = Some((1, now));
+        let mut confirmation = Some((account_key("codex", "work"), now));
         refresh.poll(
             now + Duration::from_secs(1),
             &mut rows,
@@ -1417,7 +1448,10 @@ mod external_row_refresh_tests {
             || vec![row("work"), row("home"), row("third")],
         );
         assert_eq!(selected.selected(), Some(0));
-        assert!(confirmation.is_none());
+        assert_eq!(
+            confirmation.as_ref().map(|(key, _)| key),
+            Some(&account_key("codex", "work"))
+        );
         refresh.poll(
             now + Duration::from_secs(2),
             &mut rows,
@@ -1446,7 +1480,7 @@ mod external_row_refresh_tests {
         let mut selected = ListState::default().with_selected(Some(0));
         let mut confirmation = None;
         let mut quota = Some(std::collections::HashMap::from([(
-            "work".into(),
+            account_key("codex", "work"),
             Usage {
                 ident: Some("server@example.com".into()),
                 ..Default::default()
@@ -1476,7 +1510,10 @@ mod external_row_refresh_tests {
         );
         assert_eq!(rows[0].ident, "new-login@example.com");
         assert!(rows[0].stale);
-        assert!(!quota.as_ref().unwrap().contains_key("work"));
+        assert!(!quota
+            .as_ref()
+            .unwrap()
+            .contains_key(&account_key("codex", "work")));
     }
 
     #[test]
@@ -1490,7 +1527,7 @@ mod external_row_refresh_tests {
         let mut confirmation = None;
         let mut quota = Some(std::collections::HashMap::from([
             (
-                "work".into(),
+                account_key("codex", "work"),
                 Usage {
                     ident: Some("old@example.com".into()),
                     five_h: Some(91.0),
@@ -1498,7 +1535,7 @@ mod external_row_refresh_tests {
                 },
             ),
             (
-                "work-old".into(),
+                account_key("codex", "work-old"),
                 Usage {
                     ident: Some("old@example.com".into()),
                     seven_d: Some(84.0),
@@ -1515,8 +1552,14 @@ mod external_row_refresh_tests {
             &mut quota,
             || vec![row("work")],
         );
-        assert!(quota.as_ref().unwrap().contains_key("work"));
-        assert!(!quota.as_ref().unwrap().contains_key("work-old"));
+        assert!(quota
+            .as_ref()
+            .unwrap()
+            .contains_key(&account_key("codex", "work")));
+        assert!(!quota
+            .as_ref()
+            .unwrap()
+            .contains_key(&account_key("codex", "work-old")));
 
         refresh.poll(
             now + Duration::from_secs(2),
@@ -1563,7 +1606,7 @@ mod external_row_refresh_tests {
             },
         );
         let stale = vec![(
-            "work".into(),
+            account_key("codex", "work"),
             Usage {
                 ident: Some("old-login@example.com".into()),
                 five_h: Some(97.0),
@@ -1596,7 +1639,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     state.select(Some(rows.iter().position(|r| r.active).unwrap_or(0)));
     let mut open_state = ListState::default();
     let mut status = String::new();
-    let mut confirm_delete: Option<(usize, std::time::Instant)> = None;
+    let mut confirm_delete: Option<(RowKey, std::time::Instant)> = None;
     // Checked once: drives the "install sessionwiki for more" hint in the
     // native session menu.
     let wiki_present = ctx.sessionwiki_present();
@@ -1617,7 +1660,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
     // empty gauge for that long says "no quota" when the truth is "not asked yet".
     let cached = ctx.cached_quota();
     timing.mark("remembered usage read");
-    let mut quota_pct: Option<std::collections::HashMap<String, Usage>> =
+    let mut quota_pct: Option<std::collections::HashMap<AccountKey, Usage>> =
         (!cached.is_empty()).then(|| cached.into_iter().collect());
     let mut first_frame = true;
     let mut fetch_marked = false;
@@ -1974,7 +2017,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .highlight_style(Style::default().add_modifier(Modifier::BOLD));
                         f.render_stateful_widget(list, body, &mut state);
                     }
-                    let foot_line = if let Some((i, _)) = confirm_delete {
+                    let foot_line = if let Some((key, _)) = &confirm_delete {
                         // Say what this actually does. "Delete" over an account
                         // whose folder and login both survive invites someone to
                         // decline a harmless action - or to expect a folder gone
@@ -1982,7 +2025,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         Line::from(Span::styled(
                             format!(
                                 "  stop managing '{}'? its login and folder stay.  y / N",
-                                rows[i].name
+                                rows.iter()
+                                    .find(|row| row.key() == *key)
+                                    .map(|row| row.name.as_str())
+                                    .unwrap_or("that account")
                             ),
                             Style::default().fg(Color::Rgb(200, 150, 90)),
                         ))
@@ -2476,7 +2522,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
         }
         match &mut screen {
             Screen::Main => {
-                if let Some((i, opened)) = confirm_delete {
+                if let Some((confirmed_key, opened)) = confirm_delete.take() {
                     if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                         // A `y` that lands in the same instant as the `d` that
                         // opened this prompt was not typed - refuse it and leave
@@ -2487,8 +2533,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             confirm_delete = None;
                             continue;
                         }
-                        if let Some(row) = rows.get(i) {
-                            status = ctx.delete(&row.name);
+                        if let Some(row) = rows.iter().find(|row| row.key() == confirmed_key) {
+                            status = ctx.delete(&row.name, row.tool());
                             rows = ctx.rows();
                         }
                         // The list may now be EMPTY - a dangling Some(0)
@@ -2504,7 +2550,6 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             Vec::new()
                         };
                     }
-                    confirm_delete = None;
                     continue;
                 }
                 match key.code {
@@ -2521,20 +2566,17 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     // switches - the fastest path when you can see the list.
                     KeyCode::Char(c) if c.is_ascii_digit() && c != '0' && !rows.is_empty() => {
                         let idx = (c as usize) - ('1' as usize);
-                        if let Some(name) = rows.get(idx).map(|r| r.name.clone()) {
+                        if let Some((name, tool, is_slot)) = rows
+                            .get(idx)
+                            .map(|row| (row.name.clone(), row.tool(), row.is_slot))
+                        {
                             state.select(Some(idx));
-                            let (ok, msg) = ctx.switch(
-                                &name,
-                                state
-                                    .selected()
-                                    .and_then(|i| rows.get(i))
-                                    .is_some_and(|r| r.is_slot),
-                            );
+                            let (ok, msg) = ctx.switch(&name, tool, is_slot);
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
                             status = if !ok {
                                 msg
-                            } else if ctx.proxy_running() {
+                            } else if ctx.proxy_running(tool) {
                                 format!("{name} now serves the running session")
                             } else {
                                 msg
@@ -2544,18 +2586,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     KeyCode::Enter if !rows.is_empty() => {
                         // rows.get, not rows[i]: the stored selection can point
                         // past the list if a concurrent `swapdex rm` shrank it.
-                        if let Some(name) = state
+                        if let Some((name, tool, is_slot)) = state
                             .selected()
                             .and_then(|i| rows.get(i))
-                            .map(|r| r.name.clone())
+                            .map(|row| (row.name.clone(), row.tool(), row.is_slot))
                         {
-                            let (ok, msg) = ctx.switch(
-                                &name,
-                                state
-                                    .selected()
-                                    .and_then(|i| rows.get(i))
-                                    .is_some_and(|r| r.is_slot),
-                            );
+                            let (ok, msg) = ctx.switch(&name, tool, is_slot);
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
                             // Enter switches and STAYS here. Leaving for a session
@@ -2564,7 +2600,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // the switch has already reached the open session.
                             status = if !ok {
                                 msg
-                            } else if ctx.proxy_running() {
+                            } else if ctx.proxy_running(tool) {
                                 format!("{name} now serves the running session")
                             } else {
                                 msg
@@ -2572,10 +2608,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         }
                     }
                     KeyCode::Char('o') if !rows.is_empty() => {
-                        if let Some(name) = state
+                        if let Some((name, tool, is_slot)) = state
                             .selected()
                             .and_then(|i| rows.get(i))
-                            .map(|r| r.name.clone())
+                            .map(|row| (row.name.clone(), row.tool(), row.is_slot))
                         {
                             // Switch FIRST, like Enter: opening a NEW conversation
                             // (or resuming) launches under whatever account is
@@ -2583,13 +2619,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // profile would open the wrong account. `o` differs
                             // from Enter only in always showing the full menu
                             // (Enter shortcuts a single-tool profile to the folder).
-                            let (ok, msg) = ctx.switch(
-                                &name,
-                                state
-                                    .selected()
-                                    .and_then(|i| rows.get(i))
-                                    .is_some_and(|r| r.is_slot),
-                            );
+                            let (ok, msg) = ctx.switch(&name, tool, is_slot);
                             status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
@@ -2602,10 +2632,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // but it is a note on the screen, not a reason to skip
                             // showing it.
                             if ok {
-                                if ctx.proxy_running() {
+                                if ctx.proxy_running(tool) {
                                     status = format!("{name} also serves the session already open");
                                 }
-                                let (label, entries, tools) = ctx.sessions(&name);
+                                let (label, entries, tools) = ctx.sessions(&name, tool);
                                 let new_conv = new_conv_for(&tools);
                                 open_state.select(Some(0));
                                 screen = Screen::Open {
@@ -2645,7 +2675,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         // not `restore`: restore returns the pre-switch login,
                         // which in hub-and-spoke use is always one fixed base,
                         // never the account you actually used before.
-                        let (_ok, msg) = ctx.switch("-", true);
+                        let (_ok, msg) = ctx.switch("-", "claude-code", true);
                         status = msg;
                         rows = ctx.rows();
                     }
@@ -2656,15 +2686,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     // tool's own login runs there. swapdex never writes a
                     // credential itself, so this is the only way to create one.
                     KeyCode::Char('l') if !rows.is_empty() => {
-                        if let Some(name) = state
+                        if let Some((name, tool)) = state
                             .selected()
                             .and_then(|i| rows.get(i))
-                            .map(|r| r.name.clone())
+                            .map(|row| (row.name.clone(), row.tool()))
                         {
                             // Hand the terminal to the tool's own login, then
                             // come back and redraw - the account list is where
                             // the result belongs.
-                            let (_ok, msg) = suspended(&mut terminal, || ctx.sign_in(&name));
+                            let (_ok, msg) = suspended(&mut terminal, || ctx.sign_in(&name, tool));
                             status = msg;
                             rows = ctx.rows();
                             clamp_selection(&mut state, rows.len());
@@ -2682,7 +2712,10 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         }
                     }
                     KeyCode::Char('d') if !rows.is_empty() => {
-                        confirm_delete = state.selected().map(|i| (i, std::time::Instant::now()));
+                        confirm_delete = state
+                            .selected()
+                            .and_then(|i| rows.get(i))
+                            .map(|row| (row.key(), std::time::Instant::now()));
                     }
                     KeyCode::Char('?') => {
                         screen = Screen::Doctor {
@@ -3244,26 +3277,29 @@ mod tests {
             ..Default::default()
         };
         let mut usage = std::collections::HashMap::new();
-        usage.insert("rnd".to_string(), measured(42.0));
+        usage.insert(account_key("claude-code", "rnd"), measured(42.0));
         assert_eq!(
             usage_for(&usage, &out[0]).and_then(|u| u.five_h),
             Some(42.0),
             "a reading taken for the snapshot belongs to the same account"
         );
         // The row's own name wins when both were actually measured.
-        usage.insert("rnd-slot".to_string(), measured(7.0));
+        usage.insert(account_key("claude-code", "rnd-slot"), measured(7.0));
         assert_eq!(usage_for(&usage, &out[0]).and_then(|u| u.five_h), Some(7.0));
         // But a name that only carries a REASON does not outrank a name that
         // carries numbers: the account has one quota, and 'the snapshot's token
         // expired' says nothing about the slot that answered for the same login.
-        usage.insert("rnd-slot".to_string(), reason("saved token expired"));
+        usage.insert(
+            account_key("claude-code", "rnd-slot"),
+            reason("saved token expired"),
+        );
         assert_eq!(
             usage_for(&usage, &out[0]).and_then(|u| u.five_h),
             Some(42.0),
             "numbers anywhere beat a reason here"
         );
         // With no numbers anywhere, the row's own reason is the one to show.
-        usage.insert("rnd".to_string(), reason("endpoint busy"));
+        usage.insert(account_key("claude-code", "rnd"), reason("endpoint busy"));
         assert_eq!(
             usage_for(&usage, &out[0]).and_then(|u| u.note.clone()),
             Some("saved token expired".into())
@@ -3271,6 +3307,45 @@ mod tests {
         // And an account with no reading anywhere stays absent, not zero.
         let lonely = row("other", true);
         assert!(usage_for(&usage, &lonely).is_none());
+    }
+
+    #[test]
+    fn same_named_providers_keep_independent_usage() {
+        let row = |tool: &str| Row {
+            name: "shared".into(),
+            ident: String::new(),
+            tools: tool.into(),
+            active: false,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        };
+        let claude = row("claude-code");
+        let codex = row("codex");
+        let usage = std::collections::HashMap::from([
+            (
+                account_key("claude-code", "shared"),
+                Usage {
+                    five_h: Some(17.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                account_key("codex", "shared"),
+                Usage {
+                    five_h: Some(83.0),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(
+            usage_for(&usage, &claude).and_then(|u| u.five_h),
+            Some(17.0)
+        );
+        assert_eq!(usage_for(&usage, &codex).and_then(|u| u.five_h), Some(83.0));
     }
 
     #[test]
@@ -3706,7 +3781,7 @@ mod tests {
         // The trait's method returns a result rather than an Outcome, which is
         // what makes staying possible: an Outcome ends the loop by construction.
         fn asserts_it_returns<C: TuiCtx>(ctx: &mut C, name: &str) -> (bool, String) {
-            ctx.sign_in(name)
+            ctx.sign_in(name, "codex")
         }
         struct Fake {
             called: Vec<String>,
@@ -3715,20 +3790,24 @@ mod tests {
             fn rows(&mut self) -> Vec<Row> {
                 Vec::new()
             }
-            fn switch(&mut self, _: &str, _: bool) -> (bool, String) {
+            fn switch(&mut self, _: &str, _: &str, _: bool) -> (bool, String) {
                 (true, String::new())
             }
-            fn delete(&mut self, _: &str) -> String {
+            fn delete(&mut self, _: &str, _: &str) -> String {
                 String::new()
             }
-            fn sessions(&mut self, _: &str) -> (String, Vec<SessionEntry>, Vec<&'static str>) {
+            fn sessions(
+                &mut self,
+                _: &str,
+                _: &str,
+            ) -> (String, Vec<SessionEntry>, Vec<&'static str>) {
                 (String::new(), Vec::new(), Vec::new())
             }
             fn rename(&mut self, _: &str, _: &str) -> (bool, String) {
                 (true, String::new())
             }
-            fn sign_in(&mut self, name: &str) -> (bool, String) {
-                self.called.push(name.to_string());
+            fn sign_in(&mut self, name: &str, tool: &str) -> (bool, String) {
+                self.called.push(format!("{tool}:{name}"));
                 (true, format!("'{name}' is signed in"))
             }
             fn save_current(&mut self, _: &str) -> (bool, String) {
@@ -3753,7 +3832,7 @@ mod tests {
         let mut f = Fake { called: Vec::new() };
         let (ok, msg) = asserts_it_returns(&mut f, "work");
         assert!(ok);
-        assert_eq!(f.called, vec!["work".to_string()], "it reached the account");
+        assert_eq!(f.called, vec!["codex:work"], "it reached the account");
         assert!(msg.contains("signed in"), "and reports back: {msg}");
         // A second one needs no relaunch - that is the whole point.
         asserts_it_returns(&mut f, "home");
@@ -4037,8 +4116,8 @@ mod empty_reading_tests {
     /// wipes it: that is the "the usage disappears after a while" report.
     #[test]
     fn an_empty_reading_leaves_the_numbers_that_are_already_there() {
-        let have: std::collections::HashMap<String, Usage> = [(
-            "rnd".to_string(),
+        let have: std::collections::HashMap<AccountKey, Usage> = [(
+            account_key("claude-code", "rnd"),
             Usage {
                 five_h: Some(4.0),
                 ..Default::default()
@@ -4052,7 +4131,7 @@ mod empty_reading_tests {
         assert!(!landed, "an empty round is not a reading");
         assert_eq!(
             map.as_ref()
-                .and_then(|m| m.get("rnd"))
+                .and_then(|m| m.get(&account_key("claude-code", "rnd")))
                 .and_then(|u| u.five_h),
             Some(4.0),
             "the numbers survived"
@@ -4060,7 +4139,7 @@ mod empty_reading_tests {
 
         // A real reading replaces it.
         let fresh = vec![(
-            "rnd".to_string(),
+            account_key("claude-code", "rnd"),
             Usage {
                 five_h: Some(9.0),
                 ..Default::default()
@@ -4069,7 +4148,10 @@ mod empty_reading_tests {
         let (map, landed) = merge_reading(Some(have), fresh);
         assert!(landed, "a reading with rows in it landed");
         assert_eq!(
-            map.and_then(|m| m.get("rnd").and_then(|u| u.five_h)),
+            map.and_then(|m| {
+                m.get(&account_key("claude-code", "rnd"))
+                    .and_then(|u| u.five_h)
+            }),
             Some(9.0)
         );
     }

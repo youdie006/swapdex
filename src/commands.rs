@@ -3539,8 +3539,20 @@ pub(crate) fn recent_menu_sessions(
     first_time: bool,
     n: usize,
 ) -> (Vec<MenuSession>, String) {
+    recent_menu_sessions_for_tool(paths, name, first_time, n, None)
+}
+
+/// The picker has already selected a provider. Apply that filter before any
+/// recent-session limit, including the any-account and native fallbacks.
+pub(crate) fn recent_menu_sessions_for_tool(
+    paths: &Paths,
+    name: &str,
+    first_time: bool,
+    n: usize,
+    tool: Option<&str>,
+) -> (Vec<MenuSession>, String) {
     // sessionwiki path (attributed, then honest any-account fallback).
-    if let Some(r) = crate::session_link::recent_sessions_for(paths, name, n) {
+    if let Some(r) = crate::session_link::recent_sessions_for_tool(paths, name, n, tool) {
         if !r.is_empty() {
             return (
                 r.into_iter().map(MenuSession::Wiki).collect(),
@@ -3550,7 +3562,7 @@ pub(crate) fn recent_menu_sessions(
         // No sessions attributed to this account: still show recent ones so
         // the menu is useful (you can resume any). Attribution is best-effort;
         // an empty menu is worse than a broad one.
-        if let Some(any) = crate::session_link::recent_sessions_any(n) {
+        if let Some(any) = crate::session_link::recent_sessions_any_for_tool(n, tool) {
             if !any.is_empty() {
                 let label = if first_time {
                     "recent sessions (any account - attribution starts with your first switch):"
@@ -3570,7 +3582,7 @@ pub(crate) fn recent_menu_sessions(
     }
     // Native path: straight from ~/.claude and ~/.codex.
     let events = crate::session_link::read_timeline(paths);
-    let all = crate::native_sessions::recent(paths, n * 4);
+    let all = crate::native_sessions::recent_for_tool(paths, n * 4, tool);
     let mine: Vec<crate::native_sessions::NativeSession> = all
         .iter()
         .filter(|s| {
@@ -3757,15 +3769,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         pre_switch_first: bool,
     }
     fn run_self(args: &[&str]) -> (bool, String) {
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(e) => return (false, format!("cannot find own binary: {e}")),
-        };
-        match Command::new(exe)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-        {
+        match crate::self_exe::output(args) {
             Ok(out) => {
                 let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
                 text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -3784,16 +3788,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
     }
     /// Read every account's usage. A free function so the dashboard can run it
     /// on a thread: doing it on the loop froze the screen for seconds.
-    fn read_quota_usage(paths: &Paths) -> Vec<(String, crate::tui::Usage)> {
-        let Ok(exe) = std::env::current_exe() else {
-            return Vec::new();
-        };
-        let Ok(out) = Command::new(exe)
-            .arg("quota")
-            .arg("--json")
-            .stdin(std::process::Stdio::null())
-            .output()
-        else {
+    fn read_quota_usage(paths: &Paths) -> Vec<(crate::tui::AccountKey, crate::tui::Usage)> {
+        let Ok(out) = crate::self_exe::output(&["quota", "--json"]) else {
             return Vec::new();
         };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
@@ -3920,6 +3916,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         //
         // This runs on a thread, off the render loop, which is what makes it
         // safe to put a network call here at all.
+        let mut codex: Vec<(String, crate::tui::Usage)> = Vec::new();
         let codex_homes: Vec<(String, std::path::PathBuf)> =
             crate::slots::Slots::open_for(paths, "codex")
                 .map(|s| {
@@ -3988,7 +3985,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 if !refused_names.contains(name) {
                     remember_codex_reading(paths, &row.0, &row.1);
                 }
-                claude.push(row);
+                codex.push(row);
             }
         }
         // Codex accounts that live only as a saved snapshot. The loop above
@@ -4009,7 +4006,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 .unwrap_or_default();
             let extra: Vec<String> = codex_names_without_a_slot(&stored, &slot_names)
                 .into_iter()
-                .filter(|n| !claude.iter().any(|(have, _)| have == n))
+                .filter(|n| !codex.iter().any(|(have, _)| have == n))
                 .collect();
             // Same treatment as the slot reads: concurrent, staggered.
             let extra_live: std::collections::HashMap<String, crate::codex_usage::Account> = extra
@@ -4034,12 +4031,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 })
                 .collect();
             for name in extra {
-                // A name is unique only WITHIN a tool. `kong` holds both a
-                // Claude and a Codex login, and pushing a second row under that
-                // name put the Codex windows where the Claude ones belong -
-                // exactly the collision `quota_cache` warns about. The row that
-                // is already here was built from this account's own tool.
-                if claude.iter().any(|(n, _)| *n == name) {
+                if codex.iter().any(|(n, _)| *n == name) {
                     continue;
                 }
                 let live = extra_live.get(&name).cloned();
@@ -4053,7 +4045,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                     now_secs() as i64,
                 ) {
                     remember_codex_reading(paths, &row.0, &row.1);
-                    claude.push(row);
+                    codex.push(row);
                 }
             }
         }
@@ -4076,7 +4068,18 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 u.note = Some(why);
             }
         }
+        // Disk caches and CLI schemas stay unchanged. Provider qualification is
+        // attached only at the dashboard boundary, where same-named Claude and
+        // Codex rows must never share a number or status.
         claude
+            .into_iter()
+            .map(|(name, usage)| (("claude-code".to_string(), name), usage))
+            .chain(
+                codex
+                    .into_iter()
+                    .map(|(name, usage)| (("codex".to_string(), name), usage)),
+            )
+            .collect()
     }
     impl crate::tui::TuiCtx for Ctx<'_> {
         fn rows(&mut self) -> Vec<crate::tui::Row> {
@@ -4085,214 +4088,134 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             };
             let active = active_by_tool(&store, self.paths);
             let cfg = crate::settings::load(self.paths);
-            // A Vec, not a HashMap: the rows are rendered in this order, and a
-            // HashMap iterates differently every run - the list visibly reshuffled
-            // itself on each refresh, so a row could move out from under the
-            // cursor between pressing a key and reading the result.
-            let slot_dirs: Vec<(String, std::path::PathBuf)> =
-                crate::slots::Slots::open(self.paths)
-                    .map(|s| {
-                        s.list()
-                            .into_iter()
-                            .map(|r| (r.name, r.config_dir))
-                            .collect()
+            // Keep every registry provider-qualified. A name is reusable across
+            // tools, so a flat name -> directory map lets a Claude slot lend its
+            // health, active state, and switching semantics to a Codex snapshot.
+            let slots_by_tool: Vec<(&'static str, Vec<crate::slots::SlotRecord>)> =
+                crate::adapters::names()
+                    .into_iter()
+                    .map(|tool| {
+                        let rows = crate::slots::Slots::open_for(self.paths, tool)
+                            .map(|slots| slots.list())
+                            .unwrap_or_default();
+                        (tool, rows)
                     })
-                    .unwrap_or_default();
-            // Which account is actually taking turns. With a proxy running that is
-            // the account SERVING them, not the one the pointer names: after a
-            // rotation those differ, and marking a spent account "active" next to
-            // the word "spent" is a contradiction the user has to decode.
-
-            let active_claude = active_slot_name(self.paths, "claude-code");
-            let active_codex = active_slot_name(self.paths, "codex");
-            let slot_dir_of = |name: &str| {
-                slot_dirs
+                    .collect();
+            let active_by_provider: Vec<(&'static str, Option<String>)> = crate::adapters::names()
+                .into_iter()
+                .map(|tool| (tool, active_slot_name(self.paths, tool)))
+                .collect();
+            let slot_dir_of = |tool: &str, name: &str| {
+                slots_by_tool
                     .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, d)| d.clone())
+                    .find(|(held, _)| *held == tool)
+                    .and_then(|(_, rows)| rows.iter().find(|row| row.name == name))
+                    .map(|row| row.config_dir.clone())
             };
-            // Codex switches by pointer now too, so the same authority applies:
-            // once a pointer exists it decides which Codex account is active. The
-            // live login does not move when a pointer does, and consulting it
-            // anyway marked two Codex accounts active at once.
-            let codex_slots: Vec<(String, std::path::PathBuf)> =
-                crate::slots::Slots::open_for(self.paths, "codex")
-                    .map(|s| {
-                        s.list()
-                            .into_iter()
-                            .map(|r| (r.name, r.config_dir))
-                            .collect()
+            let pointer_active = |tool: &str, name: &str| {
+                active_by_provider
+                    .iter()
+                    .find(|(held, _)| *held == tool)
+                    .and_then(|(_, active)| active.as_ref())
+                    .map(|active| active == name)
+            };
+            let slot_email = |tool: &str, dir: &std::path::Path| match tool {
+                "claude-code" => crate::proxy::creds::slot_email(dir),
+                "codex" => codex_slot_email(dir),
+                _ => self
+                    .paths
+                    .try_with_tool_dir(tool, dir)
+                    .and_then(|at| {
+                        crate::adapters::by_name(tool)
+                            .and_then(|adapter| adapter.identity(&at).ok().flatten())
                     })
-                    .unwrap_or_default();
+                    .and_then(|identity| identity.email),
+            };
 
-            let list: Vec<crate::tui::Row> = store
+            // A profile that holds several providers is several independent TUI
+            // rows. The legacy `ls --json` aggregation remains unchanged; the
+            // picker needs the provider as part of its selection and action key.
+            let mut list: Vec<crate::tui::Row> = store
                 .list()
                 .iter()
-                .map(|p| {
-                    let (email, tier, marker) = profile_summary(&store, &p.name, &p.tools);
-                    let health = account_health(self.paths, &p.name, &p.tools, marker, now_ms());
-                    let at: Vec<&str> = active
-                        .iter()
-                        .filter(|(_, n)| n == &p.name)
-                        .map(|(t, _)| *t)
-                        .collect();
-                    // A profile that ALSO has a slot switches by pointer, so its
-                    // active marker has to follow the pointer too - the live login
-                    // does not move, and the marker would sit still after a switch.
-                    // Exactly one Claude account is active, and there is an order
-                    // of authority for which: the proxy actually serving turns,
-                    // else the default pointer (the slot model's answer), else the
-                    // live login. Consulting the live login WHILE a pointer exists
-                    // marked two accounts active at once - the pointed-at one, and
-                    // whatever happened to be signed into the bare config.
-                    // Codex is a different tool and keeps its own answer.
-                    let is_claude = p.tools.iter().any(|t| t == "claude-code");
-                    let is_codex = p.tools.iter().any(|t| t == "codex");
-                    // One resolver for every kind of row. This branch used to ask
-                    // its own question - "is this the DEFAULT account?" - and so
-                    // ignored the serving pointer entirely. An account that is
-                    // both a saved profile and a slot draws as ONE row, and when
-                    // the profile half won that merge, pressing Enter moved who
-                    // pays and left the row reading "ready".
-                    //
-                    // `None` still means "nothing points anywhere", which is when
-                    // the live login is the only answer there is.
-                    let by_pointer = if is_claude {
-                        active_claude.as_ref().map(|a| a == &p.name)
-                    } else if is_codex {
-                        active_codex.as_ref().map(|a| a == &p.name)
-                    } else {
-                        None
-                    };
-                    crate::tui::Row {
-                        is_slot: slot_dir_of(&p.name).is_some(),
-                        disabled: cfg.is_disabled(&p.name),
-                        // A slot with no readable token cannot serve a turn; say so
-                        // rather than letting it look ready and fail later.
-                        //
-                        // Asked the same way the slot rows below ask it. This one
-                        // used `slot_token`, the wrapper that throws away WHY, so
-                        // a Keychain that would not open read as an account never
-                        // signed into - and a row said "no login" beside its own
-                        // live usage figures. A profile and a slot sharing a name
-                        // leaves only this row, so the lossy answer was the only
-                        // one shown.
-                        needs_login: row_needs_login(
+                .flat_map(|profile| {
+                    profile.tools.iter().filter_map(|tool| {
+                        if !crate::adapters::names().contains(&tool.as_str()) {
+                            return None;
+                        }
+                        let tools = vec![tool.clone()];
+                        let (snapshot_email, snapshot_tier, marker) =
+                            profile_summary(&store, &profile.name, &tools);
+                        let slot_dir = slot_dir_of(tool, &profile.name);
+                        // The snapshot is only a saved copy once a slot exists.
+                        // Its stale/unreadable marker says nothing about the live
+                        // slot that serves this row; slot health is still checked
+                        // below by `account_health` through (tool, name).
+                        let snapshot_warning = if slot_dir.is_some() { None } else { marker };
+                        let health = account_health(
                             self.paths,
-                            "claude-code",
-                            slot_dir_of(&p.name).as_deref(),
-                        ),
-                        name: p.name.clone(),
-                        ident: identity_column(email, tier),
-                        tools: p
-                            .tools
+                            &profile.name,
+                            &tools,
+                            snapshot_warning,
+                            now_ms(),
+                        );
+                        // A slot is the live account the row can serve. Once one
+                        // exists, its identity wins even when it is empty and
+                        // waiting for sign-in; showing a saved copy's old email
+                        // would label the live home as a different account.
+                        let ident = match slot_dir.as_deref() {
+                            Some(dir) => identity_column(slot_email(tool, dir), None),
+                            None => identity_column(snapshot_email, snapshot_tier),
+                        };
+                        let live = active
                             .iter()
-                            .map(|t| {
-                                if at.contains(&t.as_str()) {
-                                    format!("{t}*")
-                                } else {
-                                    t.clone()
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        active: by_pointer.unwrap_or(!at.is_empty()),
+                            .any(|(held, name)| *held == tool && name == &profile.name);
+                        let can_serve = matches!(tool.as_str(), "claude-code" | "codex");
+                        Some(crate::tui::Row {
+                            is_slot: can_serve && slot_dir.is_some(),
+                            disabled: cfg.is_disabled(&profile.name),
+                            needs_login: row_needs_login(self.paths, tool, slot_dir.as_deref()),
+                            name: profile.name.clone(),
+                            ident,
+                            tools: if live {
+                                format!("{tool}*")
+                            } else {
+                                tool.clone()
+                            },
+                            active: pointer_active(tool, &profile.name).unwrap_or(live),
+                            warn: health.warning,
+                            also: Vec::new(),
+                            stale: health.access_expired,
+                        })
+                    })
+                })
+                .collect();
+
+            // Slot-only accounts use the same provider-qualified resolution. A
+            // slot already represented by that provider's snapshot stays one row.
+            for (tool, records) in &slots_by_tool {
+                let can_serve = matches!(*tool, "claude-code" | "codex");
+                for record in records {
+                    if list
+                        .iter()
+                        .any(|row| tui_row_names_tool(row, &record.name, tool))
+                    {
+                        continue;
+                    }
+                    let tools = vec![(*tool).to_string()];
+                    let health = account_health(self.paths, &record.name, &tools, None, now_ms());
+                    let email = slot_email(tool, &record.config_dir);
+                    list.push(crate::tui::Row {
+                        is_slot: can_serve,
+                        disabled: cfg.is_disabled(&record.name),
+                        needs_login: row_needs_login(self.paths, tool, Some(&record.config_dir)),
+                        name: record.name.clone(),
+                        ident: identity_column(email, None),
+                        tools: (*tool).to_string(),
+                        active: pointer_active(tool, &record.name).unwrap_or(false),
                         warn: health.warning,
                         also: Vec::new(),
                         stale: health.access_expired,
-                    }
-                })
-                .collect::<Vec<_>>();
-            // Slot accounts too. They are what proxy mode rotates between, so a
-            // list without them manages everything except what actually serves the
-            // turns. A slot counts as ACTIVE when the default pointer names it:
-            // switching a slot moves that pointer and never touches a live login,
-            // so judging it by the live login would leave the marker stuck where
-            // it was.
-            let mut list = list;
-            // Codex accounts live in slots too now, and a dashboard that omits
-            // them manages half the accounts while showing the other half's
-            // superseded copy-model profiles beside them.
-            for (name, dir) in &codex_slots {
-                let tools = vec!["codex".to_string()];
-                let health = account_health(self.paths, name, &tools, None, now_ms());
-                let r = crate::slots::SlotRecord {
-                    name: name.clone(),
-                    id: String::new(),
-                    config_dir: dir.clone(),
-                    adopted: false,
-                    tool: "codex".into(),
-                };
-                list.push(crate::tui::Row {
-                    is_slot: true,
-                    disabled: cfg.is_disabled(&r.name),
-                    needs_login: crate::proxy::codex::slot_auth(&r.config_dir).is_none(),
-                    name: r.name.clone(),
-                    // Codex records the signed-in address inside its id_token; the
-                    // account id is what it authenticates with, and it is what
-                    // distinguishes two rows when both are signed in.
-                    ident: identity_column(codex_slot_email(&r.config_dir), None),
-                    tools: "codex".into(),
-                    active: active_codex.as_deref() == Some(r.name.as_str()),
-                    warn: health.warning,
-                    also: Vec::new(),
-                    stale: health.access_expired,
-                });
-            }
-            for (name, dir) in &slot_dirs {
-                if list
-                    .iter()
-                    .any(|row| tui_row_names_tool(row, name, "claude-code"))
-                {
-                    continue;
-                }
-                let tools = vec!["claude-code".to_string()];
-                let health = account_health(self.paths, name, &tools, None, now_ms());
-                list.push(crate::tui::Row {
-                    is_slot: true,
-                    disabled: cfg.is_disabled(name),
-                    // A Keychain that will not open is not an account that was
-                    // never signed in; telling the user to log in again would
-                    // send them to fix something that is not broken.
-                    needs_login: row_needs_login(self.paths, "claude-code", Some(dir)),
-                    name: name.clone(),
-                    ident: identity_column(crate::proxy::creds::slot_email(dir), None),
-                    tools: "claude-code".into(),
-                    active: active_claude.as_deref() == Some(name.as_str()),
-                    warn: health.warning,
-                    also: Vec::new(),
-                    stale: health.access_expired,
-                });
-            }
-            // Gemini and Antigravity have permanent homes too, even though the
-            // proxy cannot carry their traffic. Omitting their registries made
-            // a valid account disappear only in the full-screen picker; mark
-            // these rows for `use`, which repoints their home without a relay.
-            for tool in ["gemini", "antigravity"] {
-                let active = active_slot_name(self.paths, tool);
-                let Ok(slots) = crate::slots::Slots::open_for(self.paths, tool) else {
-                    continue;
-                };
-                for rec in slots.list() {
-                    let email = self
-                        .paths
-                        .try_with_tool_dir(tool, &rec.config_dir)
-                        .and_then(|at| {
-                            crate::adapters::by_name(tool)
-                                .and_then(|a| a.identity(&at).ok().flatten())
-                        })
-                        .and_then(|id| id.email);
-                    list.push(crate::tui::Row {
-                        is_slot: false,
-                        disabled: cfg.is_disabled(&rec.name),
-                        needs_login: !crate::proxy::has_login(self.paths, tool, &rec.config_dir),
-                        name: rec.name.clone(),
-                        ident: identity_column(email, None),
-                        tools: tool.to_string(),
-                        active: active.as_deref() == Some(rec.name.as_str()),
-                        warn: None,
-                        also: Vec::new(),
-                        stale: false,
                     });
                 }
             }
@@ -4301,13 +4224,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // separate sections rather than one mixed list.
             crate::tui::group_sorted(crate::tui::dedupe_by_identity(list))
         }
-        fn switch(&mut self, name: &str, is_slot: bool) -> (bool, String) {
+        fn switch(&mut self, name: &str, tool: &str, is_slot: bool) -> (bool, String) {
             self.pre_switch_first = crate::session_link::read_timeline(self.paths).is_empty();
             // Enter means "let this account serve me" - not "move where my
             // conversations live". Moving the store is what `use` does, and having
             // the most natural key do it split a history in two every time
             // somebody changed accounts, which is the opposite of the point.
-            let tool = tool_of_account(self.paths, name);
             // A snapshot cannot pay for turns - serving reads a slot's own
             // credential directory - so `serve` on one only ever answered that
             // it had never been signed in here. Switching a snapshot means
@@ -4327,13 +4249,13 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => format!("could not save that: {e}"),
             }
         }
-        fn delete(&mut self, name: &str) -> String {
+        fn delete(&mut self, name: &str, tool: &str) -> String {
             // Delegate to the command every other caller uses. Deleting here only
             // ever touched the STORE, and every account in this list is a slot -
             // so it answered "no profile named X" for exactly the accounts the
             // dashboard is made of. Renaming had the same fault and was fixed
             // without me looking at its neighbour.
-            run_self(&["rm", name, "--yes"]).1
+            run_self(&["rm", name, "--yes", "--tool", pretty_tool_flag(tool)]).1
         }
         fn rename(&mut self, old: &str, new: &str) -> (bool, String) {
             // Delegate to the command every other caller uses. Renaming here only
@@ -4342,8 +4264,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             // exactly the accounts the dashboard is made of.
             run_self(&["rename", old, new])
         }
-        fn sign_in(&mut self, name: &str) -> (bool, String) {
-            sign_in_child(self.paths, name, tool_of_account(self.paths, name))
+        fn sign_in(&mut self, name: &str, tool: &str) -> (bool, String) {
+            sign_in_child(self.paths, name, tool)
         }
         fn save_current(&mut self, name: &str) -> (bool, String) {
             // `add <name>` captures the CURRENT live logins (all tools) - no
@@ -4351,15 +4273,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             run_self(&["add", name])
         }
         fn doctor(&mut self) -> Vec<String> {
-            let exe = match std::env::current_exe() {
-                Ok(e) => e,
-                Err(e) => return vec![format!("cannot find own binary: {e}")],
-            };
-            match Command::new(exe)
-                .arg("doctor")
-                .stdin(std::process::Stdio::null())
-                .output()
-            {
+            match crate::self_exe::output(&["doctor"]) {
                 Ok(out) => {
                     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
                     text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -4369,15 +4283,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn usage(&mut self) -> Vec<String> {
-            let exe = match std::env::current_exe() {
-                Ok(e) => e,
-                Err(e) => return vec![format!("cannot find own binary: {e}")],
-            };
-            match Command::new(exe)
-                .arg("usage")
-                .stdin(std::process::Stdio::null())
-                .output()
-            {
+            match crate::self_exe::output(&["usage"]) {
                 Ok(out) => {
                     let text = String::from_utf8_lossy(&out.stdout);
                     let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
@@ -4392,15 +4298,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             }
         }
         fn quota(&mut self) -> Vec<String> {
-            let exe = match std::env::current_exe() {
-                Ok(e) => e,
-                Err(e) => return vec![format!("cannot find own binary: {e}")],
-            };
-            match Command::new(exe)
-                .arg("quota")
-                .stdin(std::process::Stdio::null())
-                .output()
-            {
+            match crate::self_exe::output(&["quota"]) {
                 Ok(out) => {
                     // stderr too (like doctor): a failed quota must show its
                     // error in the panel, not render blank.
@@ -4411,17 +4309,21 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("quota failed: {e}")],
             }
         }
-        fn cached_quota(&mut self) -> Vec<(String, crate::tui::Usage)> {
+        fn cached_quota(&mut self) -> Vec<(crate::tui::AccountKey, crate::tui::Usage)> {
             // Every tool's cache, not just Claude's: a remembered reading that
             // nobody reads back leaves the row empty until the network answers.
             cached_quota_tools()
                 .into_iter()
-                .flat_map(|t| crate::quota_cache::load_for(self.paths, t))
+                .flat_map(|tool| {
+                    crate::quota_cache::load_for(self.paths, tool)
+                        .into_iter()
+                        .map(move |(name, entry)| (tool, name, entry))
+                })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|(name, e)| {
+                .map(|(tool, name, e)| {
                     (
-                        name,
+                        crate::tui::account_key(tool, &name),
                         crate::tui::Usage {
                             five_h: e.five_h,
                             five_h_reset: e.five_h_reset,
@@ -4438,7 +4340,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 })
                 .collect()
         }
-        fn quota_pct(&mut self) -> Vec<(String, crate::tui::Usage)> {
+        fn quota_pct(&mut self) -> Vec<(crate::tui::AccountKey, crate::tui::Usage)> {
             read_quota_usage(self.paths)
         }
         /// Start a reading and hand back the channel it arrives on. The read is
@@ -4446,7 +4348,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         /// dashboard with no keys and no cursor, which reads as a broken tool.
         fn quota_pct_async(
             &mut self,
-        ) -> std::sync::mpsc::Receiver<Vec<(String, crate::tui::Usage)>> {
+        ) -> std::sync::mpsc::Receiver<Vec<(crate::tui::AccountKey, crate::tui::Usage)>> {
             let (tx, rx) = std::sync::mpsc::channel();
             let paths = self.paths.clone();
             std::thread::spawn(move || {
@@ -4454,8 +4356,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
             });
             rx
         }
-        fn proxy_running(&mut self) -> bool {
-            crate::proxy::running_port(self.paths).is_some()
+        fn proxy_running(&mut self, tool: &str) -> bool {
+            crate::proxy::running_proxy_for(self.paths, tool).is_some()
         }
         fn paying_account(&mut self) -> Option<String> {
             crate::adapters::names()
@@ -4478,16 +4380,14 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         fn sessions(
             &mut self,
             name: &str,
+            tool: &str,
         ) -> (String, Vec<crate::tui::SessionEntry>, Vec<&'static str>) {
             let first_time = self.pre_switch_first;
-            let (sessions, label) = recent_menu_sessions(self.paths, name, first_time, 5);
-            // Use the same merged tool set as the plain picker. Looking the
-            // selected name up in snapshots alone left slot-only rows with no
-            // way to start a conversation from this screen.
-            let held = profile_tools(self.paths, name);
+            let (sessions, label) =
+                recent_menu_sessions_for_tool(self.paths, name, first_time, 5, Some(tool));
             let tools: Vec<&'static str> = ["claude-code", "codex", "gemini", "antigravity"]
                 .into_iter()
-                .filter(|t| held.iter().any(|x| x == t))
+                .filter(|held| *held == tool)
                 .collect();
             let entries = sessions
                 .iter()
@@ -6560,43 +6460,6 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
         }
         Err(e) => (false, format!("could not start {bin}: {e}")),
     }
-}
-
-/// Which tool an account belongs to.
-///
-/// This was worked out separately at every place that needed it - signing in,
-/// switching, renaming, removing - and the versions disagreed. One of them fell
-/// back to Claude whenever the slot registry did not know the name, so opening
-/// the login for a Codex account launched Claude's.
-///
-/// A saved profile states its tool outright, so it is asked first; a slot is
-/// registered under the tool it was made for; and only with neither is Claude
-/// assumed, because that is what an unqualified account was before Codex had
-/// accounts at all.
-pub(crate) fn tool_of_account(paths: &Paths, name: &str) -> &'static str {
-    let tools = crate::adapters::names();
-    if let Some(t) = Store::open(paths).ok().and_then(|st| {
-        st.list()
-            .into_iter()
-            .find(|p| p.name == name)
-            .and_then(|p| {
-                tools
-                    .iter()
-                    .copied()
-                    .find(|t| p.tools.iter().any(|x| x == t))
-            })
-    }) {
-        return t;
-    }
-    tools
-        .iter()
-        .copied()
-        .find(|t| {
-            crate::slots::Slots::open_for(paths, t)
-                .map(|s| s.get(name).is_some())
-                .unwrap_or(false)
-        })
-        .unwrap_or("claude-code")
 }
 
 /// The tool a slot command means. Slots exist for the two tools that can be
