@@ -2220,17 +2220,16 @@ fn run_ui(root: &Path, keys: &str) -> (String, String, i32) {
 /// `SWAPDEX_ASSUME_TTY` deliberately selects the plain fallback; a PTY is
 /// required to cover the dashboard row builder that runs on an actual terminal.
 ///
-/// Linux only, and the reason is the HARNESS rather than the product. On the
-/// macOS runner the child wrote ZERO bytes to the pty and was still alive
-/// thirty seconds later - measured, by dumping what the pty had received. The
-/// child is never made a session leader, so the slave never becomes its
-/// controlling terminal; Linux tolerates that and macOS does not. Making this
-/// portable means `setsid` plus `TIOCSCTTY` in a pre-exec hook, which is a
-/// harness to write deliberately, not to bolt on to keep a job green.
-#[cfg(target_os = "linux")]
+/// The child is put in its own session and given the slave as its CONTROLLING
+/// terminal. Without that the macOS runner ran it to a thirty-second timeout
+/// having written zero bytes - measured, by dumping what the pty received -
+/// while Linux tolerated the same setup. A pty a process cannot claim is not a
+/// terminal to it, so the screen this covers never drew.
+#[cfg(unix)]
 fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
 
     let mut master = -1;
     let mut slave = -1;
@@ -2259,15 +2258,34 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
     let mut master = unsafe { std::fs::File::from_raw_fd(master) };
     let slave = unsafe { std::fs::File::from_raw_fd(slave) };
 
-    let mut child = Command::new(bin())
-        .arg("ui")
+    let mut cmd = Command::new(bin());
+    cmd.arg("ui")
         .env("SWAPDEX_ROOT", root)
         .env("TERM", "xterm")
         .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
         .stdout(std::process::Stdio::from(slave.try_clone().unwrap()))
-        .stderr(std::process::Stdio::from(slave))
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::from(slave));
+    // Runs in the child after the stdio dup2s and before exec, so fd 0 is
+    // already the pty slave. `setsid` first - TIOCSCTTY is refused unless the
+    // caller is a session leader with no controlling terminal yet. Both calls
+    // are async-signal-safe, which is the rule for anything in here.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    // The parent's copies of the slave close with `cmd`. Held open - as they
+    // are while a `Command` binding lives - the master never reaches EOF and
+    // the read below blocks forever. The old temporary `Command::new(..)
+    // .spawn()` dropped them at the end of its own statement.
+    drop(cmd);
     let mut input = master.try_clone().unwrap();
     let keys = keys.to_vec();
     let writer = std::thread::spawn(move || {
@@ -2315,10 +2333,7 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
 /// Its hand-written join covered Claude and Codex only. A Gemini slot appeared
 /// in `ls` and the plain picker but the terminal dashboard showed the empty
 /// welcome screen, so the command disagreed with itself based on terminal type.
-///
-/// Linux only - see `run_fullscreen_ui`. The row builder this covers is not
-/// platform-specific; the pty harness is.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn the_fullscreen_menu_lists_a_gemini_slot_only_account() {
     let t = fixture();
