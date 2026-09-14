@@ -8,6 +8,13 @@ All notable changes to swapdex are documented here. This project follows
 
 ## 0.160.0
 
+- Update the proxy's rustls dependency from 0.23.42 to 0.23.45 to address
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), which
+  allowed TLS 1.3 handshake messages across encryption-level boundaries.
+- Update the terminal UI's lru dependency from 0.18.1 to 0.18.2 to address
+  [RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253), a
+  potential use-after-free when a stored key's destructor panics during removal.
+
 - **Failed manual renewals return a failing exit status.** `swapdex refresh
   [name]` previously printed an OAuth rejection, transport error or safety
   deferral but exited successfully, so scripts could treat an account that had
