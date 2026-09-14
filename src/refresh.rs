@@ -78,8 +78,8 @@ impl RefreshError {
                 format!("'{name}' has no login yet - `swapdex run {name}{flag}` signs it in")
             }
             Self::InUse => format!(
-                "'{name}' is in use right now - its own session will renew it; \
-                 renewing from here would retire the token that session is holding"
+                "'{name}' {tool} renewal deferred - refresh unverified while a {tool} session \
+                 is using this account; retry after the session exits"
             ),
             Self::Expired => format!(
                 "'{name}' has been idle too long to renew - \
@@ -674,10 +674,12 @@ mod tests {
         assert!(busy.contains("is fine"), "{busy}");
         assert!(!busy.contains("swapdex run"), "not a sign-in: {busy}");
         let msg = RefreshError::InUse.remedy("work", "claude-code");
+        assert!(msg.contains("renewal deferred"), "name the outcome: {msg}");
         assert!(
-            msg.contains("its own session will renew it"),
-            "an in-use slot is fine, not broken: {msg}"
+            msg.contains("refresh unverified"),
+            "name uncertainty: {msg}"
         );
+        assert!(!msg.contains("re-login"), "not a rejection verdict: {msg}");
     }
 }
 
@@ -747,6 +749,25 @@ pub fn wants_keep_alive_codex(blob: &[u8], now_secs: i64) -> bool {
         .is_some_and(|exp| exp - now_secs <= KEEP_ALIVE_CODEX_WINDOW_SECS)
 }
 
+/// A keep-alive pass has three distinct outcomes. A deferred account is due,
+/// but the safety guard found a live session holding the same account; it is
+/// neither renewed nor known to have failed.
+#[derive(Debug, Default)]
+pub(crate) struct KeepAliveReport {
+    pub(crate) renewed: Vec<String>,
+    pub(crate) deferred: Vec<String>,
+    pub(crate) failed: Vec<(String, RefreshError)>,
+}
+
+/// Whether current local evidence says this Codex slot is due for renewal but
+/// held by a live session. This deliberately uses the same deadline predicate
+/// and account-aware process guard as the refresh path itself.
+pub(crate) fn codex_renewal_deferred(paths: &Paths, dir: &Path, now_secs: i64) -> bool {
+    std::fs::read(dir.join("auth.json")).is_ok_and(|blob| {
+        wants_keep_alive_codex(&blob, now_secs) && slot_in_use(paths, dir, "codex")
+    })
+}
+
 /// The Codex half of the keep-alive sweep.
 ///
 /// The sweep was written because an idle account's refresh token goes stale, and
@@ -757,7 +778,16 @@ pub fn keep_alive_sweep_codex(
     slots: &[(String, std::path::PathBuf)],
     now_ms: i64,
 ) -> (Vec<String>, Vec<(String, RefreshError)>) {
-    let (mut renewed, mut failed) = (Vec::new(), Vec::new());
+    let report = keep_alive_sweep_codex_report(paths, slots, now_ms);
+    (report.renewed, report.failed)
+}
+
+pub(crate) fn keep_alive_sweep_codex_report(
+    paths: &Paths,
+    slots: &[(String, std::path::PathBuf)],
+    now_ms: i64,
+) -> KeepAliveReport {
+    let mut report = KeepAliveReport::default();
     for (name, dir) in slots {
         let Ok(blob) = std::fs::read(dir.join("auth.json")) else {
             continue;
@@ -765,15 +795,21 @@ pub fn keep_alive_sweep_codex(
         if !wants_keep_alive_codex(&blob, now_ms / 1000) {
             continue;
         }
+        // Derive a known safety hold before claiming the account-wide refresh
+        // gate. Otherwise the first held copy consumes the claim on its way to
+        // `InUse`, and a second due copy of the same account is misreported as
+        // `AlreadyRefreshing` even though neither attempted an exchange.
+        if codex_renewal_deferred(paths, dir, now_ms / 1000) {
+            report.deferred.push(name.clone());
+            continue;
+        }
         match refresh_codex_slot(paths, dir, now_ms) {
-            Ok(()) => renewed.push(name.clone()),
-            // Being in use is the guard doing its job, not a failure worth
-            // reporting: that account is alive by definition.
-            Err(RefreshError::InUse) => {}
-            Err(e) => failed.push((name.clone(), e)),
+            Ok(()) => report.renewed.push(name.clone()),
+            Err(RefreshError::InUse) => report.deferred.push(name.clone()),
+            Err(e) => report.failed.push((name.clone(), e)),
         }
     }
-    (renewed, failed)
+    report
 }
 
 #[cfg(test)]
@@ -951,7 +987,16 @@ pub fn keep_alive_sweep(
     slots: &[(String, std::path::PathBuf)],
     now_ms: i64,
 ) -> (Vec<String>, Vec<(String, RefreshError)>) {
-    let (mut renewed, mut failed) = (Vec::new(), Vec::new());
+    let report = keep_alive_sweep_report(paths, slots, now_ms);
+    (report.renewed, report.failed)
+}
+
+pub(crate) fn keep_alive_sweep_report(
+    paths: &Paths,
+    slots: &[(String, std::path::PathBuf)],
+    now_ms: i64,
+) -> KeepAliveReport {
+    let mut report = KeepAliveReport::default();
     for (name, dir) in slots {
         let Some(blob) = read_credential(dir) else {
             continue;
@@ -960,14 +1005,12 @@ pub fn keep_alive_sweep(
             continue;
         }
         match refresh_slot(paths, dir, now_ms) {
-            Ok(()) => renewed.push(name.clone()),
-            // Being in use is the guard doing its job, not a failure worth
-            // reporting: that account is alive by definition.
-            Err(RefreshError::InUse) => {}
-            Err(e) => failed.push((name.clone(), e)),
+            Ok(()) => report.renewed.push(name.clone()),
+            Err(RefreshError::InUse) => report.deferred.push(name.clone()),
+            Err(e) => report.failed.push((name.clone(), e)),
         }
     }
-    (renewed, failed)
+    report
 }
 
 #[cfg(test)]

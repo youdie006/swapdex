@@ -145,6 +145,17 @@ fn seed_empty_claude_slot(root: &Path, name: &str) {
 /// Drive the real alternate-screen UI. Each tuple waits, then writes its keys;
 /// the delay lets destructive confirmation distinguish typed input from paste.
 fn run_fullscreen_ui(root: &Path, input: &[(u64, &[u8])]) -> (String, i32) {
+    run_fullscreen_ui_after_screen(root, input, None)
+}
+
+/// Drive the UI, optionally waiting for rendered text before sending a final
+/// key sequence. The rendered prompt is the readiness signal for interactions
+/// whose preceding key runs a blocking child command.
+fn run_fullscreen_ui_after_screen(
+    root: &Path,
+    input: &[(u64, &[u8])],
+    followup: Option<(&str, u64, &[u8])>,
+) -> (String, i32) {
     let mut master = -1;
     let mut slave = -1;
     let mut size = libc::winsize {
@@ -205,15 +216,43 @@ fn run_fullscreen_ui(root: &Path, input: &[(u64, &[u8])]) -> (String, i32) {
         .iter()
         .map(|(delay, keys)| (*delay, keys.to_vec()))
         .collect();
+    let followup =
+        followup.map(|(text, delay, keys)| (text.as_bytes().to_vec(), delay, keys.to_vec()));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&seen);
     let writer = std::thread::spawn(move || {
+        let wait_for_text = |text: &[u8]| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !observed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .windows(text.len())
+                .any(|window| window == text)
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for UI text: {}",
+                    String::from_utf8_lossy(text)
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        // A fixed startup sleep raced the picker under parallel test load. Its
+        // key-hint footer means the first frame is complete and input is live.
+        wait_for_text(b"switch by number");
         for (delay, keys) in input {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            writer.write_all(&keys).unwrap();
+        }
+        if let Some((text, delay, keys)) = followup {
+            wait_for_text(&text);
             std::thread::sleep(std::time::Duration::from_millis(delay));
             writer.write_all(&keys).unwrap();
         }
     });
 
-    let mut seen = Vec::new();
-    let drain = |master: &mut std::fs::File, seen: &mut Vec<u8>| {
+    let drain = |master: &mut std::fs::File, seen: &std::sync::Mutex<Vec<u8>>| {
+        let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
         let mut buf = [0u8; 4096];
         while let Ok(n) = master.read(&mut buf) {
             if n == 0 {
@@ -224,13 +263,14 @@ fn run_fullscreen_ui(root: &Path, input: &[(u64, &[u8])]) -> (String, i32) {
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let status = loop {
-        drain(&mut master, &mut seen);
+        drain(&mut master, &seen);
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
             panic!(
                 "full-screen UI timed out:\n{}",
                 String::from_utf8_lossy(&seen)
@@ -239,7 +279,8 @@ fn run_fullscreen_ui(root: &Path, input: &[(u64, &[u8])]) -> (String, i32) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     writer.join().unwrap();
-    drain(&mut master, &mut seen);
+    drain(&mut master, &seen);
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
     (
         String::from_utf8_lossy(&seen).into_owned(),
         status.code().unwrap_or(-1),
@@ -339,7 +380,15 @@ fn deleting_same_named_codex_row_keeps_claude_snapshot() {
     seed_claude_snapshot(t.path(), "shared", "claude@example.com");
     seed_codex_snapshot(t.path(), "shared", "codex@example.com");
 
-    let (screen, code) = run_fullscreen_ui(t.path(), &[(300, b"2d"), (400, b"yq")]);
+    let (screen, code) = run_fullscreen_ui_after_screen(
+        t.path(),
+        &[(300, b"2d")],
+        // The destructive-input guard requires 250 ms after the prompt opens.
+        // Start that interval only after the real prompt has rendered: `2`
+        // performs a blocking switch, so wall time since sending `2d` says
+        // nothing about when `d` was processed.
+        Some(("stop managing 'shared'?", 300, b"yq")),
+    );
     assert_eq!(code, 0, "UI failed:\n{screen}");
     let account = t.path().join(".local/share/swapdex/accounts/shared");
     assert!(
@@ -348,6 +397,6 @@ fn deleting_same_named_codex_row_keeps_claude_snapshot() {
     );
     assert!(
         !account.join("codex").exists(),
-        "the selected Codex row was not deleted"
+        "the selected Codex row was not deleted:\n{screen}"
     );
 }

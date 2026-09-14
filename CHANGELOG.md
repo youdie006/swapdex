@@ -6,6 +6,16 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.159.0
+
+- **Codex renewal deferrals stay visible before access expires.** When a local
+  session holds an account within the keep-alive window, the list and picker
+  report that renewal is deferred and refresh validity is unverified. The
+  keep-alive command and proxy report deferred accounts separately from failures
+  instead of claiming every account has time left. Multiple due slots holding
+  the same live account are all deferred without consuming a refresh claim.
+  The existing refresh guard and renewal schedule are unchanged.
+
 ## 0.158.0
 
 - **The picker keeps each account's tool when acting on it.** Claude and Codex

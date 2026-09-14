@@ -83,6 +83,9 @@ cat >/dev/null
 if [ -n "$FAKE_REPLACE_FROM" ]; then
     cp "$FAKE_REPLACE_FROM" "$FAKE_AUTH_PATH" || exit 91
 fi
+if [ -n "$FAKE_COUNT_PATH" ]; then
+    printf x >> "$FAKE_COUNT_PATH"
+fi
 if [ "${FAKE_EXIT:-0}" -ne 0 ]; then
     printf '%s\n' 'synthetic transport failure' >&2
     exit "$FAKE_EXIT"
@@ -143,6 +146,327 @@ fn json_row(root: &Path, name: &str) -> serde_json::Value {
         .find(|row| row["name"] == name)
         .unwrap_or_else(|| panic!("missing {name}: {}", stdout(&output)))
         .clone()
+}
+
+#[cfg(target_os = "linux")]
+struct ReapedChild(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ReapedChild {
+    fn stop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn running_codex(root: &Path, config_dir: &Path) -> ReapedChild {
+    let bin = root.join("fake-codex/codex");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    let sleep = if Path::new("/bin/sleep").exists() {
+        "/bin/sleep"
+    } else {
+        "/usr/bin/sleep"
+    };
+    if !bin.exists() {
+        std::os::unix::fs::symlink(sleep, &bin).unwrap();
+    }
+    let mut child = Command::new(&bin)
+        .arg("30")
+        .env("HOME", root)
+        .env("CODEX_HOME", config_dir)
+        .spawn()
+        .unwrap();
+    let environ = format!("/proc/{}/environ", child.id());
+    for _ in 0..300 {
+        if std::fs::read(&environ).is_ok_and(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .contains(&format!("CODEX_HOME={}", config_dir.to_string_lossy()))
+        }) {
+            return ReapedChild(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("the fake Codex process never exposed its isolated environment");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn due_codex_renewal_held_by_live_account_is_reported_as_deferred() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_codex(
+        root.path(),
+        "due",
+        "account-due",
+        "refresh-due",
+        now_secs() + 47 * 60 * 60,
+    );
+    let before = std::fs::read(slot.join("auth.json")).unwrap();
+    let holder = root.path().join("running-codex");
+    std::fs::create_dir_all(&holder).unwrap();
+    std::fs::write(
+        holder.join("auth.json"),
+        codex_auth(
+            "account-due",
+            "holder-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let mut running = running_codex(root.path(), &holder);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+
+    let keep_alive = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "--keep-alive"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    let said = combined(&keep_alive);
+    assert!(keep_alive.status.success(), "{said}");
+    assert!(said.contains("codex renewal deferred"), "{said}");
+    assert!(said.contains("refresh unverified"), "{said}");
+    assert!(
+        !said.contains("every account has time left"),
+        "a skipped renewal was reported as current: {said}"
+    );
+    assert_eq!(
+        std::fs::read(&count).unwrap_or_default().len(),
+        0,
+        "the guarded renewal reached curl"
+    );
+    assert_eq!(
+        std::fs::read(slot.join("auth.json")).unwrap(),
+        before,
+        "the guarded renewal changed auth.json"
+    );
+
+    let row = json_row(root.path(), "due");
+    let warning = row["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("codex renewal deferred"), "{row}");
+    assert!(warning.contains("refresh unverified"), "{row}");
+
+    running.stop();
+    let row = json_row(root.path(), "due");
+    assert_eq!(row["warning"], serde_json::Value::Null, "{row}");
+
+    let mut running = running_codex(root.path(), &holder);
+    std::fs::write(
+        slot.join("auth.json"),
+        codex_auth(
+            "account-due",
+            "replacement-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let row = json_row(root.path(), "due");
+    assert_eq!(row["warning"], serde_json::Value::Null, "{row}");
+    running.stop();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn duplicate_due_codex_slots_held_by_one_live_account_are_all_deferred() {
+    let root = tempfile::tempdir().unwrap();
+    let slots = seed_slots(
+        root.path(),
+        &[
+            ("due-a", "codex-slot-a", "codex"),
+            ("due-b", "codex-slot-b", "codex"),
+        ],
+    );
+    for (index, slot) in slots.iter().enumerate() {
+        std::fs::write(
+            slot.join("auth.json"),
+            codex_auth(
+                "account-shared",
+                &format!("refresh-{index}"),
+                &jwt(now_secs() + 47 * 60 * 60),
+            ),
+        )
+        .unwrap();
+    }
+    let before: Vec<Vec<u8>> = slots
+        .iter()
+        .map(|slot| std::fs::read(slot.join("auth.json")).unwrap())
+        .collect();
+    let holder = root.path().join("running-codex");
+    std::fs::create_dir_all(&holder).unwrap();
+    std::fs::write(
+        holder.join("auth.json"),
+        codex_auth(
+            "account-shared",
+            "holder-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let _running = running_codex(root.path(), &holder);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+
+    let keep_alive = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "--keep-alive"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    let said = combined(&keep_alive);
+    assert_eq!(keep_alive.status.code(), Some(0), "{said}");
+    for name in ["due-a", "due-b"] {
+        assert!(
+            said.contains(&format!("'{name}' codex renewal deferred")),
+            "{said}"
+        );
+    }
+    assert_eq!(said.matches("codex renewal deferred").count(), 2, "{said}");
+    assert!(!said.contains("already being renewed"), "{said}");
+    assert_eq!(
+        std::fs::read(&count).unwrap_or_default().len(),
+        0,
+        "a held credential reached curl"
+    );
+    for (slot, expected) in slots.iter().zip(before) {
+        assert_eq!(
+            std::fs::read(slot.join("auth.json")).unwrap(),
+            expected,
+            "the guarded credential changed: {}",
+            slot.display()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn definitive_codex_health_verdicts_take_precedence_over_deferred_renewal() {
+    let rejected_root = tempfile::tempdir().unwrap();
+    let rejected_slot = seed_codex(
+        rejected_root.path(),
+        "rejected",
+        "account-rejected",
+        "refresh-rejected",
+        now_secs() - 60,
+    );
+    let curl = fake_curl(rejected_root.path());
+    let refresh = run_with_curl(rejected_root.path(), &curl, &["refresh", "rejected"], &[]);
+    assert!(refresh.status.success(), "{}", combined(&refresh));
+    std::fs::write(
+        rejected_slot.join("auth.json"),
+        codex_auth(
+            "account-rejected",
+            "refresh-rejected",
+            &jwt(now_secs() + 47 * 60 * 60),
+        ),
+    )
+    .unwrap();
+    let rejected_holder = rejected_root.path().join("running-codex");
+    std::fs::create_dir_all(&rejected_holder).unwrap();
+    std::fs::write(
+        rejected_holder.join("auth.json"),
+        codex_auth(
+            "account-rejected",
+            "holder-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let _running = running_codex(rejected_root.path(), &rejected_holder);
+    let row = json_row(rejected_root.path(), "rejected");
+    let warning = row["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("codex refresh rejected"), "{row}");
+    assert!(!warning.contains("renewal deferred"), "{row}");
+
+    let expired_root = tempfile::tempdir().unwrap();
+    let expired_slot = seed_codex(
+        expired_root.path(),
+        "expired",
+        "account-expired",
+        "refresh-expired",
+        now_secs() - 60,
+    );
+    let expired_holder = expired_root.path().join("running-codex");
+    std::fs::create_dir_all(&expired_holder).unwrap();
+    std::fs::write(
+        expired_holder.join("auth.json"),
+        codex_auth(
+            "account-expired",
+            "holder-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let _running = running_codex(expired_root.path(), &expired_holder);
+    let row = json_row(expired_root.path(), "expired");
+    let warning = row["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("codex expired"), "{row}");
+    assert!(!warning.contains("renewal deferred"), "{row}");
+    assert!(expired_slot.join("auth.json").is_file());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn codex_deferred_renewal_does_not_warn_for_an_unrelated_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let dirs = seed_slots(
+        root.path(),
+        &[
+            ("due", "codex-slot", "codex"),
+            ("claude-only", "claude-slot", "claude-code"),
+        ],
+    );
+    std::fs::write(
+        dirs[0].join("auth.json"),
+        codex_auth(
+            "shared-account-text",
+            "codex-refresh",
+            &jwt(now_secs() + 47 * 60 * 60),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dirs[1].join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"claude-access","refreshToken":"claude-refresh","expiresAt":32503680000000}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dirs[1].join(".claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"shared-account-text"}}"#,
+    )
+    .unwrap();
+    let holder = root.path().join("running-codex");
+    std::fs::create_dir_all(&holder).unwrap();
+    std::fs::write(
+        holder.join("auth.json"),
+        codex_auth(
+            "shared-account-text",
+            "holder-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let _running = running_codex(root.path(), &holder);
+
+    let codex = json_row(root.path(), "due");
+    assert!(
+        codex["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("codex renewal deferred")),
+        "{codex}"
+    );
+    let claude = json_row(root.path(), "claude-only");
+    assert_eq!(claude["warning"], serde_json::Value::Null, "{claude}");
 }
 
 #[test]
