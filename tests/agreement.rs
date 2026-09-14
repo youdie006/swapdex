@@ -2226,19 +2226,25 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
 
     let mut master = -1;
     let mut slave = -1;
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: 40,
         ws_col: 120,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // `*mut` for the termios and winsize arguments on BOTH platforms: macOS
+    // declares them `*mut` and Linux `*const`, and a `*mut` coerces to a
+    // `*const` while the reverse does not. Written the other way round this
+    // compiled here and broke the macOS job only. Raw pointers rather than
+    // `&mut`, because on Linux clippy rejects a mutable reference the callee
+    // does not need.
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(size),
         )
     };
     assert_eq!(rc, 0, "openpty failed");

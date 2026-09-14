@@ -6,6 +6,83 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **`doctor` reports an account registry it cannot read.** Every slot check
+  lived inside one `if let Ok(..)`, so a damaged `slots.json` skipped the
+  `slots`, `default` and `slot:*` rows entirely and the report came out SHORTER
+  and clean -- "everything looks healthy", exit 0 -- while `ls` printed a
+  paragraph saying the registry was damaged and accounts were missing from its
+  listing. An absent check is not a passed one.
+- **`doctor` reports a default pointer that names no account.** `serving_dir()`
+  refuses to answer with a directory the registry does not hold; `default_dir()`
+  returns whatever the file says. Doctor failed to resolve the name, printed
+  `(unknown)`, and still recorded the row as ok -- while the shim exports that
+  directory to `CLAUDE_CONFIG_DIR` unchecked, so a plain `claude` starts where
+  no account lives and asks to log in again.
+- **Per-slot login health is checked for every tool.** That walk called Claude's
+  reader, so a Codex slot that had never been signed in produced no row at all,
+  and no row reads as a passing one. Slots are the shape `run` and `migrate`
+  steer people into, so this was the common machine.
+- **Seven surfaces read one of the two account registries.** An account can be
+  a slot, a saved snapshot, or both. The post-switch menu lost a slot-only
+  account's "new conversation" action; the full-screen picker omitted Gemini and
+  Antigravity entirely; `import` built an empty slot over a local copy that
+  should have won; `login` and `setup` let a fresh sign-in take a name another
+  slot holds; `onboard` and `setup` called a machine with accounts empty.
+- **`serve` refuses a tool the proxy cannot carry.** There is no Gemini or
+  Antigravity relay -- `proxy` and `service install` both say so by name. `serve`
+  did not ask: it wrote a serving pointer for a relay that does not exist, said
+  "now <name>", and sent the reader to a `swapdex proxy` that then refuses to
+  start. The line printed after a switch offered that same proxy, and without a
+  `--tool` the command it named starts Claude's.
+- **Advice that names `run` names the tool.** `run` defaults to Claude, so
+  `swapdex run <name>` aimed at a Codex account launches Claude. The first-switch
+  tip, both renewal-failure remedies, `pause`'s closing note and `import`'s
+  sign-in line all said it bare. `RefreshError::remedy` and
+  `TokenUnavailable::remedy` could not even express the tool -- it was not in
+  their signatures -- and the path that reaches them is the one this project
+  exists for: Codex answers a retired refresh token with 400/401/403, so
+  somebody whose account was silently logged out was told to launch the wrong
+  tool. `swapdex shim` installs the Claude and Codex shims only, so promising a
+  Gemini one was a promise nothing keeps.
+- **A pointer naming an account is not that account being signed in.** Three
+  screens read "who does the pointer name" as "who is logged in" and none asked
+  whether the slot holds a credential, so a registered Codex slot with an EMPTY
+  directory was reported as signed in: `status` called its login unreadable,
+  `status --json` said `logged_in: true`, and `doctor` said both that and "no
+  login yet" two rows apart -- while `serve` refused the same account for having
+  no login. The states are three, not two: signed in with a readable email,
+  signed in but the email cannot be read, and not signed in at all.
+- **`status --short` stops naming an account that has no login.** Its own
+  contract says "None when nothing is logged in", and a prompt naming the
+  account swapdex is not serving is worse than no line at all. On a machine
+  where nothing was signed in anywhere it read `codex:cxwork`.
+- **`ls` stops saying an account with no login pays.** `serve` refuses to put one
+  in the payer's seat and says what follows: "it cannot pay for turns -- your own
+  account would, while every screen named '<name>'". `ls` was one of those
+  screens, marking the row from the pointer alone, so a glance and a script both
+  read an account as footing the bill while the proxy forwarded the reader's own
+  credential.
+- **A Gemini slot's recorded email is read instead of called unreadable.**
+  `google_accounts.json` in that directory records the current address; only its
+  `active` field is used, because naming an address from its `old` list is a
+  worse answer than none.
+- **`doctor` reports a settings file that will not parse.** A damaged
+  `settings.json` silently un-paused every paused account, and the proxy reads
+  the same file -- so billing went back to an account the user had excluded,
+  with nothing on screen about it.
+- **Credential permissions are checked where the credentials live.** The walk
+  looked at the bare paths only, so on a machine set up with `run` or `migrate`
+  -- the shape this tool steers people into -- it checked nothing and reported a
+  clean bill.
+- **`restore` is guarded the way `use` is, for Claude as well as Codex.** A
+  snapshot whose refresh token a live slot has already rotated away is a logout
+  waiting to happen, and the check ran for one tool.
+- **`export` writes the accounts the listing shows.** It read the slot registry
+  alone, so a snapshot-only account was missing from its own backup.
+- **Reference docs match the binary.** Fourteen commands, three environment
+  variables and two picker keys were missing from `docs/COMMANDS.md`, which
+  claims to list them all, and three stale claims were corrected.
+
 - **`/status` names the account Codex is running as.** The shim put the payer
   in the provider's `name`, and Codex renders the provider's ID -- so
   `Model provider:` read `swapdex` and the account appeared nowhere Codex
