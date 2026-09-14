@@ -2267,7 +2267,9 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
         input.write_all(&keys).unwrap();
     });
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Generous, because the macOS runner is far slower than this box and a
+    // deadline that merely expires tells you nothing about why.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -2275,7 +2277,19 @@ fn run_fullscreen_ui(root: &Path, keys: &[u8]) -> (String, i32) {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("full-screen ui did not exit after the supplied keys");
+            // Say what the terminal actually received. "Did not exit" alone
+            // cannot distinguish a screen that never drew from one that drew
+            // and ignored the keys, and a CI-only failure gives no other way
+            // to look.
+            let mut seen = Vec::new();
+            let _ = master.read_to_end(&mut seen);
+            let seen = String::from_utf8_lossy(&seen);
+            panic!(
+                "full-screen ui did not exit after the supplied keys; \
+                 the pty received {} bytes:\n{}",
+                seen.len(),
+                seen.chars().take(2000).collect::<String>()
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
