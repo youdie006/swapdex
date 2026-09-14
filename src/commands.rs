@@ -7606,12 +7606,21 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
     }
     let now = now_ms();
     let mut renewed = 0;
+    let mut failed = 0;
     if list.is_empty() && codex_list.is_empty() {
         println!("No accounts to renew.");
     }
     // One renewal per ACCOUNT, not per directory - see `already_renewed`.
     let mut done: Vec<String> = Vec::new();
     for r in &list {
+        if !crate::proxy::has_login(paths, "claude-code", &r.config_dir) {
+            println!(
+                "  {}",
+                crate::refresh::RefreshError::NoCredential.remedy(&r.name, "claude-code")
+            );
+            failed += 1;
+            continue;
+        }
         if !crate::proxy::creds::slot_token_expired(&r.config_dir, now) {
             println!("  {} is already current", r.name);
             continue;
@@ -7629,14 +7638,22 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
                 }
                 renewed += 1;
             }
-            Err(why) => println!("  {}", why.remedy(&r.name, "claude-code")),
+            Err(why) => {
+                println!("  {}", why.remedy(&r.name, "claude-code"));
+                failed += 1;
+            }
         }
     }
-    renewed += refresh_codex(paths, &codex_list, now, &mut done);
+    let (codex_renewed, codex_failed) = refresh_codex(paths, &codex_list, now, &mut done);
+    renewed += codex_renewed;
+    failed += codex_failed;
     if renewed > 0 {
         println!("\n{renewed} account(s) renewed - no sign-in needed.");
     }
-    Ok(0)
+    // Explicit renewal must expose incomplete work to callers even when another
+    // account succeeded. A safety deferral also leaves the requested renewal
+    // incomplete; the scheduled keep-alive command has its own deferral policy.
+    Ok(if failed == 0 { 0 } else { 4 })
 }
 
 /// The Codex half of `swapdex refresh`.
@@ -7651,9 +7668,18 @@ fn refresh_codex(
     list: &[crate::slots::SlotRecord],
     now: i64,
     done: &mut Vec<String>,
-) -> usize {
+) -> (usize, usize) {
     let mut renewed = 0;
+    let mut failed = 0;
     for r in list {
+        if !crate::proxy::has_login(paths, "codex", &r.config_dir) {
+            println!(
+                "  {}",
+                crate::refresh::RefreshError::NoCredential.remedy(&r.name, "codex")
+            );
+            failed += 1;
+            continue;
+        }
         if !crate::proxy::codex::slot_token_expired(&r.config_dir, now / 1000) {
             println!("  {} is already current", r.name);
             continue;
@@ -7671,10 +7697,13 @@ fn refresh_codex(
                 }
                 renewed += 1;
             }
-            Err(why) => println!("  {}", why.remedy(&r.name, "codex")),
+            Err(why) => {
+                println!("  {}", why.remedy(&r.name, "codex"));
+                failed += 1;
+            }
         }
     }
-    renewed
+    (renewed, failed)
 }
 
 /// The account a slot holds, however its tool records it.

@@ -187,6 +187,11 @@ fn a_refused_renewal_changes_nothing() {
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "failed renewal must fail the command: {said}"
+    );
     assert!(
         said.contains("could not be renewed"),
         "the refusal is reported: {said}"
@@ -460,6 +465,11 @@ fn check_explicit_active_twin(tool: &str, candidate_account: &str, url_var: &str
             usize::from(should_refresh),
             "{tool}: active account {running_account:?} gave the wrong refresh verdict:\n{said}"
         );
+        assert_eq!(
+            out.status.code(),
+            Some(if should_refresh { 0 } else { 4 }),
+            "{tool}: {said}"
+        );
         if should_refresh {
             assert!(said.contains("work renewed"), "{tool}: {said}");
         } else {
@@ -605,7 +615,7 @@ fn a_codex_renewal_the_server_refuses_changes_nothing() {
         .env("SWAPDEX_CODEX_OAUTH_URL", &url)
         .output()
         .unwrap();
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(4));
     assert_eq!(
         codex_auth(&slot),
         before,

@@ -6,6 +6,23 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.160.0
+
+- **Failed manual renewals return a failing exit status.** `swapdex refresh
+  [name]` previously printed an OAuth rejection, transport error or safety
+  deferral but exited successfully, so scripts could treat an account that had
+  not renewed as ready. It now returns exit code 4 when any requested renewal
+  fails or is deferred, while still attempting the remaining Claude and Codex
+  accounts. Successful renewals, already-current accounts and an empty sweep
+  return 0; `--keep-alive` retains its separate scheduled-deferral behavior.
+- **An empty or unreadable login is not already current.** Manual refresh now
+  checks whether a slot holds a login before checking token expiry. Registered
+  slots with missing or malformed credentials report the sign-in remedy and
+  exit 4 without sending an OAuth request or rewriting credential files.
+- Release guidance now includes publishing the Homebrew formula and checking
+  its downloaded archives, so a successful GitHub/npm release does not leave
+  Homebrew users on an older version.
+
 ## 0.159.0
 
 - **Codex renewal deferrals stay visible before access expires.** When a local

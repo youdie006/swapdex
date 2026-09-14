@@ -68,7 +68,11 @@ crates.io; a successful GitHub release alone does not update those installers.
 4. From `npm/`, run `node publish.mjs <version>`. This publishes the platform
    packages before the main package and checks that all five resolve on npm.
 5. Publish the crate with `cargo publish` and verify the registry version.
-6. Install the exact npm version on the target machine, then compare
+6. Update the `youdie006/homebrew-tap` formula's version, all platform URLs,
+   archive SHA-256 values and version assertion. Verify actual release downloads
+   against the formula, check Ruby syntax, and record the merged tap PR. The tag
+   workflow does not update Homebrew; do not leave that channel on an old release.
+7. Install the exact npm version on the target machine, then compare
    `npm ls -g --depth=0 @youdie006/swapdex` with `swapdex --version` and the
    executable found by `command -v swapdex`. Running proxies keep their old
    executable until restarted; verify their version markers after applying

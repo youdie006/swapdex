@@ -361,7 +361,7 @@ fn definitive_codex_health_verdicts_take_precedence_over_deferred_renewal() {
     );
     let curl = fake_curl(rejected_root.path());
     let refresh = run_with_curl(rejected_root.path(), &curl, &["refresh", "rejected"], &[]);
-    assert!(refresh.status.success(), "{}", combined(&refresh));
+    assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
     std::fs::write(
         rejected_slot.join("auth.json"),
         codex_auth(
@@ -507,7 +507,7 @@ fn definitive_refresh_rejection_persists_into_later_listings() {
 
     let refresh = run_with_curl(root.path(), &curl, &["refresh", "rejected"], &[]);
     let refresh_text = combined(&refresh);
-    assert!(refresh.status.success(), "{refresh_text}");
+    assert_eq!(refresh.status.code(), Some(4), "{refresh_text}");
     assert!(refresh_text.contains("idle too long"), "{refresh_text}");
     assert!(
         !refresh_text.contains("server-body-sentinel"),
@@ -555,7 +555,7 @@ fn every_definitive_oauth_status_persists_rejection() {
             &["refresh", "rejected"],
             &[("FAKE_STATUS", status)],
         );
-        assert!(refresh.status.success(), "{}", combined(&refresh));
+        assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
         assert!(slot.join(STATUS_FILE).is_file(), "HTTP {status}");
         let row = json_row(root.path(), "rejected");
         assert!(
@@ -579,7 +579,7 @@ fn successful_refresh_clears_matching_old_rejection() {
     );
     let curl = fake_curl(root.path());
     let rejected = run_with_curl(root.path(), &curl, &["refresh", "recovers"], &[]);
-    assert!(rejected.status.success(), "{}", combined(&rejected));
+    assert_eq!(rejected.status.code(), Some(4), "{}", combined(&rejected));
     assert!(slot.join(STATUS_FILE).is_file());
 
     let response = serde_json::json!({
@@ -619,7 +619,7 @@ fn transient_and_malformed_failures_do_not_become_permanent_rejections() {
 
     for vars in cases {
         let refresh = run_with_curl(root.path(), &curl, &["refresh", "transient"], &vars);
-        assert!(refresh.status.success(), "{}", combined(&refresh));
+        assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
         assert!(
             !slot.join(STATUS_FILE).exists(),
             "{vars:?} left permanent rejection evidence"
@@ -653,7 +653,7 @@ fn rejection_follows_account_and_refresh_token_but_not_access_token() {
     );
     let curl = fake_curl(root.path());
     let refresh = run_with_curl(root.path(), &curl, &["refresh", "binding"], &[]);
-    assert!(refresh.status.success(), "{}", combined(&refresh));
+    assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
 
     std::fs::write(
         slot.join("auth.json"),
@@ -686,7 +686,7 @@ fn rejection_follows_account_and_refresh_token_but_not_access_token() {
     )
     .unwrap();
     let second = run_with_curl(root.path(), &curl, &["refresh", "binding"], &[]);
-    assert!(second.status.success(), "{}", combined(&second));
+    assert_eq!(second.status.code(), Some(4), "{}", combined(&second));
     std::fs::write(
         slot.join("auth.json"),
         codex_auth("account-new", "refresh-old", &jwt(now_secs() + 86_400)),
@@ -728,7 +728,7 @@ fn same_name_claude_and_codex_slots_report_the_correct_tool() {
     let curl = fake_curl(root.path());
 
     let refresh = run_with_curl(root.path(), &curl, &["refresh", "shared"], &[]);
-    assert!(refresh.status.success(), "{}", combined(&refresh));
+    assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
     let row = json_row(root.path(), "shared");
     let warning = row["warning"].as_str().unwrap_or_default();
     assert!(warning.contains("codex refresh rejected"), "{row}");
@@ -763,7 +763,7 @@ fn request_failure_cannot_mark_credentials_replaced_during_the_request() {
             ("FAKE_REPLACE_FROM", replacement.to_str().unwrap()),
         ],
     );
-    assert!(refresh.status.success(), "{}", combined(&refresh));
+    assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
     assert!(!slot.join(STATUS_FILE).exists());
     let row = json_row(root.path(), "race");
     assert_eq!(row["warning"], serde_json::Value::Null, "{row}");
@@ -800,11 +800,145 @@ fn successful_old_request_cannot_overwrite_credentials_replaced_in_flight() {
             ("FAKE_REPLACE_FROM", replacement.to_str().unwrap()),
         ],
     );
-    assert!(refresh.status.success(), "{}", combined(&refresh));
+    assert_eq!(refresh.status.code(), Some(4), "{}", combined(&refresh));
     assert_eq!(
         std::fs::read(slot.join("auth.json")).unwrap(),
         replacement_bytes,
         "a response for the old login overwrote its replacement"
     );
     assert!(!slot.join(STATUS_FILE).exists());
+}
+
+#[test]
+fn manual_refresh_reports_partial_failure_across_both_tools() {
+    for claude_fails in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = seed_slots(
+            root.path(),
+            &[
+                ("shared", "claude-slot", "claude-code"),
+                ("shared", "codex-slot", "codex"),
+            ],
+        );
+        let claude = serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "synthetic-claude-access",
+                "refreshToken": "synthetic-claude-refresh",
+                "expiresAt": 1,
+                "refreshTokenExpiresAt": if claude_fails { 1 } else { 32503680000000_i64 }
+            }
+        }))
+        .unwrap();
+        std::fs::write(dirs[0].join(".credentials.json"), &claude).unwrap();
+        let codex = codex_auth(
+            "codex-account",
+            if claude_fails { "refresh-codex" } else { "" },
+            &jwt(1),
+        );
+        std::fs::write(dirs[1].join("auth.json"), &codex).unwrap();
+        let curl = fake_curl(root.path());
+        let count = root.path().join("exchange-count");
+        let answer = serde_json::json!({
+            "access_token": jwt(now_secs() + 86_400),
+            "refresh_token": "synthetic-renewed-refresh",
+            "expires_in": 3600
+        })
+        .to_string();
+        let output = run_with_curl(
+            root.path(),
+            &curl,
+            &["refresh", "shared"],
+            &[
+                ("FAKE_STATUS", "200"),
+                ("FAKE_BODY", &answer),
+                ("FAKE_COUNT_PATH", count.to_str().unwrap()),
+            ],
+        );
+        let said = combined(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "partial renewal was reported as success: {said}"
+        );
+        assert!(
+            said.contains("1 account(s) renewed"),
+            "remaining account was not attempted: {said}"
+        );
+        assert_eq!(std::fs::read(count).unwrap().len(), 1);
+        let (failed_dir, file, before) = if claude_fails {
+            (&dirs[0], ".credentials.json", claude)
+        } else {
+            (&dirs[1], "auth.json", codex)
+        };
+        assert_eq!(std::fs::read(failed_dir.join(file)).unwrap(), before);
+    }
+}
+
+#[test]
+fn current_and_empty_manual_refresh_remain_successful() {
+    let root = tempfile::tempdir().unwrap();
+    let empty = run(root.path(), &["refresh"]);
+    assert_eq!(empty.status.code(), Some(0), "{}", combined(&empty));
+    let slot = seed_codex(
+        root.path(),
+        "current",
+        "current-account",
+        "current-refresh",
+        now_secs() + 86_400,
+    );
+    let before = std::fs::read(slot.join("auth.json")).unwrap();
+    let curl = fake_curl(root.path());
+    let count = root.path().join("exchange-count");
+    let current = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "current"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    assert_eq!(current.status.code(), Some(0), "{}", combined(&current));
+    assert!(combined(&current).contains("already current"));
+    assert!(!count.exists());
+    assert_eq!(std::fs::read(slot.join("auth.json")).unwrap(), before);
+}
+
+#[test]
+fn manual_refresh_does_not_call_unsigned_slots_current() {
+    for tool in ["claude-code", "codex"] {
+        for malformed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = seed_slots(root.path(), &[("empty", "empty-slot", tool)]);
+            let file = if tool == "codex" {
+                "auth.json"
+            } else {
+                ".credentials.json"
+            };
+            if malformed {
+                std::fs::write(dirs[0].join(file), "{malformed").unwrap();
+            }
+            let curl = fake_curl(root.path());
+            let count = root.path().join("exchange-count");
+            let output = run_with_curl(
+                root.path(),
+                &curl,
+                &["refresh", "empty"],
+                &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+            );
+            let said = combined(&output);
+            assert_eq!(
+                output.status.code(),
+                Some(4),
+                "{tool} missing/unreadable login: {said}"
+            );
+            assert!(!said.contains("already current"), "{said}");
+            assert!(!count.exists(), "missing/unreadable login reached OAuth");
+            if malformed {
+                assert_eq!(
+                    std::fs::read_to_string(dirs[0].join(file)).unwrap(),
+                    "{malformed"
+                );
+            } else {
+                assert!(!dirs[0].join(file).exists());
+            }
+        }
+    }
 }
