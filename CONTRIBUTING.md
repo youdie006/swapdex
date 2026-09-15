@@ -83,6 +83,7 @@ crates.io; a successful GitHub release alone does not update those installers.
    launcher behavior and next-request account switching over one connection.
    It also accepts a POST at a fake provider and resets the connection before
    responding, verifying that neither tool submits that accepted turn again.
+   Bodyless GET requests must still recover from the same connection failure.
    Also run `scripts/verify-codex-session-resume.py` with the installed native
    Swapdex and stock Codex paths to check native session listing/resume and
    WebSocket-to-HTTP recovery. Both scripts clean up their test processes.
