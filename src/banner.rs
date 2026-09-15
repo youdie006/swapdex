@@ -43,19 +43,23 @@ pub fn print_banner() {
         "\n  {m}Switch Claude Code / Codex / Gemini / Antigravity accounts - locally, one command.{r}\n\n"
     ));
     s.push_str(&format!(
-        "  {v}${r} swapdex setup          guided first-time setup\n"
+        "  {v}${r} swapdex onboard        configure account slots and launchers\n"
     ));
     s.push_str(&format!(
-        "  {v}${r} swapdex login <name>   log in + save an account\n"
+        "  {v}${r} swapdex setup          save existing logins as profiles\n"
     ));
     s.push_str(&format!(
         "  {v}${r} swapdex use <name>     switch to a saved account\n"
     ));
     s.push_str(&format!(
-        "  {v}${r} swapdex ls | status    see your accounts\n\n"
+        "  {v}${r} swapdex ls             list your accounts\n"
     ));
     s.push_str(&format!(
-        "  {m}New here? Run `swapdex setup`.  Switch: `swapdex ui`.  All commands: `swapdex --help`.{r}\n"
+        "  {v}${r} swapdex status         show launch defaults\n\n"
+    ));
+    s.push_str(&format!(
+        "  {m}Quick start: https://github.com/youdie006/swapdex#quick-start\n\
+         \x20 Switch: `swapdex ui`.  All commands: `swapdex --help`.{r}\n"
     ));
     print!("{s}");
 }

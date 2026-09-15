@@ -6,19 +6,15 @@
 [![crates.io](https://img.shields.io/crates/v/swapdex?logo=rust&color=7a3be0)](https://crates.io/crates/swapdex)
 [![npm](https://img.shields.io/npm/v/%40youdie006%2Fswapdex?logo=npm&color=7a3be0)](https://www.npmjs.com/package/@youdie006/swapdex)
 [![license](https://img.shields.io/badge/license-MIT-1e1d1a.svg)](LICENSE)
-[![switcher: no network](https://img.shields.io/badge/switcher-no%20network-7a3be0.svg)](#what-it-will-not-do)
+[![selection: local](https://img.shields.io/badge/selection-local-7a3be0.svg)](#network-and-credential-behavior)
 
 </div>
 
-One command to flip your Claude Code, Codex, Gemini CLI, or Antigravity from
-your work account to your personal one, and back. No re-login, no browser, no copying
-tokens around -- and the switch itself never touches the network. (One opt-in
-command, `swapdex quota`, reads your remaining balance from Anthropic; nothing
-else does.)
-
-<div align="center">
-<img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/demo.gif" alt="swapdex demo: ls lists two saved accounts, use personal switches Claude Code and Codex together, status confirms both, restore puts the previous login back" width="760" />
-</div>
+Keep your Claude Code and Codex accounts in separate login directories, then
+choose which account handles the next request in a managed conversation.
+Sign each account in once; subsequent account selections do not require a new
+login while its credentials remain usable. Gemini CLI and Antigravity use the
+supported snapshot-switching workflow.
 
 ```sh
 brew install youdie006/tap/swapdex     # macOS / Linux
@@ -26,8 +22,9 @@ npm  i -g @youdie006/swapdex           # or, if you have node
 cargo install swapdex                  # or, if you have rust
 ```
 
-Then `swapdex add work`, `swapdex add personal`, and `swapdex use personal`.
-[Full install notes](#install) &middot; [what it will not do](#what-it-will-not-do).
+Start with the [Claude/Codex quickstart](#quick-start).
+[Install notes](#install) &middot; [existing logins](#existing-logins-and-folders)
+&middot; [network behavior](#network-and-credential-behavior).
 
 ---
 
@@ -37,13 +34,11 @@ If you run Claude Code, Codex, Gemini CLI, or Antigravity under more than one
 account -- a work seat and a personal subscription, a client's org and your own
 -- switching means logging out and back in every time.
 
-swapdex gives each account its **own permanent space** -- its own
-`CLAUDE_CONFIG_DIR` or `CODEX_HOME` slot -- and switches the default pointer.
-`swapdex use work` points your default account there and a plain `claude`
-follows it; `swapdex run work` launches straight into that account (each terminal
-can be a different one). Existing native sessions keep their own slot when the
-default changes.
-`swapdex onboard` sets this up in a few prompts.
+swapdex gives each Claude or Codex account its **own permanent space** -- its
+own `CLAUDE_CONFIG_DIR` or `CODEX_HOME` slot. A small launcher called a **shim**
+makes plain `claude` or `codex` commands use the selected space and local proxy.
+The proxy chooses an account for each managed request, so changing the serving
+account keeps the conversation and its working directory in place.
 
 It manages accounts you already own, with separate launch defaults, proxy
 selection and configurable failover. See [How it works](#how-it-works) for the
@@ -59,12 +54,15 @@ that application and uses a verified, read-only access snapshot when available.
 - **Account** -- one login you own (a work seat, a personal subscription). Its
   redacted identity (email, tier) is shown by `slots`, `status`, and `doctor`;
   never a token.
-- **Slot** -- an account's own permanent `CLAUDE_CONFIG_DIR`, where its login
-  lives and refreshes in place. swapdex creates one per account (or adopts a
-  `~/.claude-*` dir you already use) and never copies tokens between them.
-- **Default account** -- the one a plain `claude` uses, via a tiny shim on your
-  PATH. `swapdex use <name>` repoints it; `swapdex run <name>` ignores it and
-  launches a specific account directly.
+- **Slot** -- an account's permanent Claude or Codex directory, where its login
+  lives and refreshes in place. Swapdex creates it, or registers a separate
+  directory you already use. Each new slot needs its own native sign-in.
+- **Launch default** -- the slot a plain `claude` or `codex` starts in through
+  the shim. `swapdex use <name> --tool codex` selects a Codex default.
+- **Serving account** -- the account the proxy uses for subsequent managed
+  requests. `swapdex serve <name> --tool codex` changes it without moving the
+  conversation's home. `swapdex run` launches the named slot directly, so it
+  is useful for login and for sessions that should use their own account.
 
 <sub>swapdex still keeps the classic snapshot commands (`add` copies a live login
 into a profile, `use` on that profile swaps it back, guarded against the
@@ -75,7 +73,7 @@ slots.</sub>
 ## Install
 
 ```sh
-# npm - you already have it, since Claude Code and Codex ship this way
+# npm (requires Node.js and npm)
 npm install -g @youdie006/swapdex
 
 # Homebrew (macOS / Linux)
@@ -93,60 +91,120 @@ with two of them the shims keep calling whichever copy wrote them - so updating
 the other one changes nothing, silently. `swapdex doctor` reports this, along
 with whether the version you are running is the one that is published.
 
-Linux, WSL, and macOS (Claude's macOS login lives in the Keychain; swapdex
-swaps it there, via `/usr/bin/security`). Requires at least one supported CLI
-(Claude Code, Codex, Gemini, Antigravity) already installed and logged in. Full command, exit-code, and environment
-reference: [docs/COMMANDS.md](docs/COMMANDS.md).
+Linux, WSL, and macOS are supported. Install the native CLI you want to use
+first; Swapdex does not install it. Codex-only and Claude-only machines are both
+supported. Claude's macOS login uses the Keychain through `/usr/bin/security`.
+For WSL, install and run Swapdex and the native CLI inside the same WSL
+distribution. [Full command reference](docs/COMMANDS.md).
 
-## Use
+## Quick start
+
+Choose the tool you have. `work` and `personal` are example names; sign into
+the intended account in each login flow. The second account is optional.
+
+### Codex
 
 ```sh
-# First run: guided setup -- registers ~/.claude-* dirs you already use,
-# moves old profiles onto slots, offers the shim. A bare `swapdex` runs this
-# automatically the first time there is something to set up.
-swapdex onboard
-
-# Launch an account in its own slot (first time = sign in; concurrent-safe,
-# so each terminal can be a different account)
-swapdex run work
-swapdex run personal
-
-# Make a plain `claude` follow a default account
-swapdex shim                # installs the claude shim once (prints a PATH line)
-swapdex use personal        # a plain `claude` now runs as personal
-swapdex use work            # switch the default -- no re-login, never logs out
-
-# See your accounts and who's active
-swapdex slots
-swapdex status
-
-# Register a config dir you already run by hand; move old profiles to slots
-swapdex adopt company ~/.claude-company
-swapdex migrate
-
-# Sessions grouped by the account active when they ran (needs sessionwiki)
-swapdex sessions
-
-# Recent local token usage per tool (5h/7d) -- tells you when to switch
-swapdex usage
-
-# Remaining quota per Claude account -- the one opt-in network read
-swapdex quota
-
-# Set up a second machine with the same accounts (never carries a login)
-swapdex export setup.json    # on the machine you already use
-swapdex import setup.json    # on the new one, then sign each account in
-
-# Anything off? Every finding comes with its fix
-swapdex doctor
+swapdex run work --tool codex -- login --device-auth
+swapdex run personal --tool codex -- login --device-auth
+swapdex shim
 ```
 
-The classic snapshot commands still work for the shared-slot workflow: `swapdex
-add <name>` snapshots the current login, `swapdex use <name>` swaps it back
-(backed up first, and refused while a `claude` session is running on that login
-so it can't be logged out), `swapdex restore` undoes the last swap, and `swapdex
-ui` is the full-screen picker. `swapdex migrate` matches Claude and Codex
-profiles to slots by account and creates spaces only for accounts without one.
+Activate the PATH change printed by `swapdex shim`: open a new terminal, source
+the shell file it names, or apply its printed `export PATH=...` command. Then:
+
+```sh
+swapdex use work --tool codex
+codex
+```
+
+While that conversation stays open, use another terminal to select the account
+for its next request:
+
+```sh
+swapdex serve personal --tool codex
+swapdex serve --tool codex --quiet
+```
+
+The last command shows the selected serving account. It is a routing status,
+not an independent billing statement. A request already in progress finishes
+with the account it started with.
+
+### Claude Code
+
+```sh
+swapdex run work --tool claude -- auth login
+swapdex run personal --tool claude -- auth login
+swapdex shim
+```
+
+Activate the printed PATH change, then start a managed conversation:
+
+```sh
+swapdex use work --tool claude
+claude
+```
+
+In another terminal, `swapdex serve personal --tool claude` selects the account
+for the next managed request. `swapdex serve --tool claude --quiet` shows it.
+
+**Existing conversations:** a native process started before the shim was
+installed, or started directly with `swapdex run`, keeps its direct routing.
+Resume it once through plain `codex resume` or `claude --resume` after activating
+the shim. Subsequent serving-account changes apply without restarting that
+managed session. Explicit custom-provider options can also bypass managed
+routing. If proxy startup fails, the managed launcher stops with an error.
+
+`swapdex slash` installs an in-chat `/swap` command. `swapdex ui` offers the
+account picker and conversation menu. Run `swapdex doctor` if the plain CLI
+still uses a different executable or account than expected.
+
+## Existing logins and folders
+
+Already signed in through a default native directory? The quickstart creates
+separate slots and leaves that login in place. It requires one sign-in in each
+new slot; it does not import the existing credential into those slots.
+
+If you already keep accounts in separate directories, register them in place:
+
+```sh
+swapdex adopt work ~/.codex-work --tool codex
+swapdex adopt work ~/.claude-work --tool claude
+swapdex onboard
+```
+
+Run only the `adopt` command for a directory you actually have. `onboard` can
+discover `~/.claude-*` directories, offer migration of saved Claude/Codex
+profiles, and install available shims. Migration creates missing slots; each
+new slot still needs its native sign-in.
+
+### Saved snapshots and other tools
+
+`swapdex setup` guides saving current logins as profiles and adding more.
+`swapdex add work --tool codex` saves the Codex login that is already present;
+calling `add` again under another name does not sign into a different account.
+`swapdex login personal --tool codex` runs the legacy add-another-login flow,
+preserving the old login and restoring it if sign-in fails.
+
+`swapdex use <name>` applies a saved snapshot when no matching slot exists,
+with backups and running-session guards. `swapdex restore` restores the last
+snapshot switch. Gemini and Antigravity use this workflow; the live proxy and
+slot quickstart above support Claude and Codex. Snapshot switching does not
+reconfigure an already running native process.
+
+## Everyday commands
+
+| Task | Command |
+| --- | --- |
+| List accounts and their state | `swapdex ls` |
+| Show launch defaults | `swapdex status` |
+| Show the Codex serving account | `swapdex serve --tool codex --quiet` |
+| Find a conversation by project | `swapdex whereis <project>` |
+| Group indexed sessions by account | `swapdex sessions` (needs sessionwiki) |
+| Read local session activity | `swapdex usage` |
+| Fetch Claude/Codex account quota | `swapdex quota` |
+| Check paths, accounts and services | `swapdex doctor` |
+| Transfer setup without credentials | `swapdex export setup.json`, then `swapdex import setup.json` on the other machine and sign in there |
 
 `status` shows the active account per tool, matched back to a saved profile:
 
@@ -206,8 +264,8 @@ each event's timestamp (the same honest join `sessions` uses); anything before
 your first switch stays untagged. Still deliberately a hint, not a
 quota-dodging auto-rotator.
 
-Where `usage` is your local activity, `quota` is the vendor's actual remaining
-balance -- the one command that reaches the network, and only when you run it:
+Where `usage` is local activity, `quota` fetches the provider's reported usage
+windows for Claude and Codex accounts:
 
 ```
 $ swapdex quota
@@ -219,14 +277,14 @@ work (active)   you@work.com
   7d        ▓▓▓▓▓▓░░░░   57% left   resets in 3d 4h
 
 personal   you@personal.com
-  snapshot token expired - `swapdex use personal` to refresh, then `swapdex quota`
+  usage endpoint rejected this credential - check `swapdex doctor`
 ```
 
-It reads each account's remaining quota from Anthropic's official OAuth usage
-endpoint using that account's **own** token -- read-only, and it spends zero
-message quota. It uses the slot or a verified current native login for that
-account. An unavailable or expired credential reports its state rather than
-inventing current quota. It is also in `swapdex ui` under the `%` key.
+It reads usage endpoints using each account's **own** token and does not submit
+a model request. It uses the slot or a verified current native login for that
+account. An unavailable credential or failed lookup reports its state rather
+than inventing current quota. The dashboard also fetches quota for its account
+rows; `%` opens the detailed panel.
 
 ### The dashboard
 
@@ -244,8 +302,8 @@ setup is one keystroke and a name.
 Use `codex resume` normally, or `codex resume --all` to include other working
 directories. Swapdex keeps one stable OpenAI provider across account changes.
 The paying account is shown by `swapdex serve --tool codex --quiet`.
-If the proxy cannot start, the launcher warns that Codex will use its own login
-directly.
+If the proxy cannot start, the managed launcher exits with an error before
+starting Codex. It does not send the request through a different native login.
 
 After updating from a version that created `swapdex` provider IDs, run
 `swapdex shim` to refresh the launcher. It automatically repairs those legacy
@@ -267,7 +325,7 @@ remains valid, but provider expiry, revocation or renewal by another credential
 holder can make a new browser sign-in necessary. Keep-alive reduces avoidable
 idle expiry; it cannot guarantee that a login never expires.
 
-swapdex renews idle accounts for you, but **only while its proxy is running**,
+Swapdex can renew idle accounts **while its proxy is running**,
 because that is the process holding the timer:
 
 ```sh
@@ -281,7 +339,9 @@ nobody has opened. A slot the tool is running in is never touched: its own
 session holds the refresh token, and renewing from outside would retire the one
 that session is about to use.
 
-Without the service, nothing is on a timer. You can sweep by hand:
+The service keeps that timer available after the launching terminal closes.
+A foreground or automatically started proxy also sweeps while it remains
+running. You can run a sweep by hand:
 
 ```sh
 swapdex refresh --keep-alive     # renew every account heading for expiry
@@ -292,17 +352,16 @@ swapdex refresh <name>           # renew one that has already lapsed
 
 ## How it works
 
-**Slots (the model swapdex uses now).** Each account gets its own
-`CLAUDE_CONFIG_DIR` -- a directory under `~/.local/share/swapdex/slots/`, or a
-`~/.claude-*` dir you adopt. Claude keys its login to that dir (a file on Linux,
-a Keychain item on macOS), so each account's token lives and refreshes *in its
-own slot*. swapdex never copies a token between slots: `swapdex run <name>`
-`exec`s `claude` with that slot's `CLAUDE_CONFIG_DIR`, and `swapdex use <name>`
-writes a one-line pointer that a small `claude` shim on your PATH reads. Shared
-config (`settings.json`, global `CLAUDE.md`) is symlinked into each new slot;
-the token and history stay per-slot. Independently signed-in slots avoid sharing
-a rotating refresh chain. Copies of one login remain coupled even if they live
-in different directories; the warning below applies to those copies.
+**Slots.** Each Claude or Codex account gets its own `CLAUDE_CONFIG_DIR` or
+`CODEX_HOME`, under Swapdex's data directory or in a directory you adopt.
+Claude keys its login to that directory (a file on Linux, a Keychain item on
+macOS); Codex stores its own auth file there. Each token refreshes in its own
+slot. `swapdex run` invokes the native CLI directly with the named slot's home.
+`swapdex use` selects the home for plain shimmed launches. Shared configuration
+and conversation stores are linked where supported, so selecting a different
+serving account does not require copying conversations. Independently signed-in
+slots avoid sharing a rotating refresh chain. Copies of one login remain
+coupled even when stored in different directories.
 
 **Classic snapshots (still supported).** Each CLI also keeps its login in a
 small on-disk file:
@@ -320,8 +379,8 @@ your projects, MCP servers, and settings are untouched. That switch is refused
 while a `claude` session is running on the same login slot, since the session's
 next token refresh would otherwise revoke the saved copy. On macOS the Claude
 token lives in the login Keychain, one item per `CLAUDE_CONFIG_DIR`. `swapdex
-migrate [--tool claude|codex]` moves unslotted Claude and Codex profiles onto
-their own slots, retiring the shared homes.
+migrate [--tool claude|codex]` creates missing slots for saved Claude and Codex
+accounts. It does not copy their credentials; sign in to each new slot once.
 
 ## Safety
 
@@ -336,7 +395,8 @@ their own slots, retiring the shared homes.
   command if the switch was a mistake. The store keeps the last 2 backups per
   tool, and `use` warns when the outgoing login is not saved as a profile --
   so save accounts you care about with `add`.
-- No token, refresh token, or home path is ever printed.
+- Diagnostics do not print tokens or refresh tokens. Setup commands may show
+  the local paths that need to be configured.
 
 **The store holds plaintext refresh tokens.** Protect `~/.local/share/swapdex`
 like `~/.ssh`, and do not sync it across machines (it is single-machine,
@@ -388,11 +448,14 @@ external consumers need their own login instead of a copy of a managed slot.
 
 ### Network and credential behavior
 
-Account selection and listing read local state. Opt-in quota lookups contact
-provider usage endpoints. The optional proxy relays API requests with the
-selected credential, and its scheduled renewal work contacts OAuth endpoints
-for idle logins. It uses `ureq` with rustls and bundled roots; CI excludes heavy
-async runtimes and system-TLS dependencies.
+Account selection and listing use local state. Managed launches and `serve`
+can start a local proxy; its scheduled renewal work contacts OAuth endpoints
+for idle logins. `quota` and the dashboard contact provider usage endpoints,
+and `doctor` checks the published version online. Login commands invoke the
+native tool's sign-in flow. The proxy relays model requests with the selected
+credential using `ureq`, rustls and bundled roots; CI excludes heavy async
+runtimes and system-TLS dependencies. An ordinary account selection does not
+submit a model request.
 
 Explicit account selection, launch defaults and configured proxy failover are
 separate controls. A local file lock coordinates participating Swapdex callers;

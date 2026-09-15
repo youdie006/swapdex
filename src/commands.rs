@@ -5880,43 +5880,70 @@ fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Res
     Ok(0)
 }
 
-/// Install the `claude` shim so a plain `claude` launches in the default
-/// account's slot. Prints the one PATH line the user needs.
+/// Install shims for the supported clients that are present on this machine.
+/// Each client is optional; finding one must not depend on finding the other.
 pub fn install_shim(paths: &Paths) -> Result<i32> {
-    let (shim, shim_dir) = crate::shim::install(paths)?;
-    println!("installed the claude shim at {}", shim.display());
-    // Codex switches by pointer too, so a plain `codex` needs the same wrapper.
-    // Not having Codex installed is not a failure - there is simply nothing to
-    // wrap - so it is reported either way and never aborts the claude shim.
+    install_requested_shims(paths, &["claude-code", "codex"])
+}
+
+fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
+    let shim_dir = crate::shim::shim_bin_dir(paths);
+    let mut installed = Vec::new();
+
+    if requested.contains(&"claude-code") {
+        match crate::shim::install_claude(paths)? {
+            Some((shim, _)) => {
+                println!("installed the claude shim at {}", shim.display());
+                installed.push("claude");
+            }
+            None => println!("  (no `claude` on PATH - skipped its shim)"),
+        }
+    }
+    if requested.contains(&"codex") {
+        match crate::shim::install_codex(paths)? {
+            Some(shim) => {
+                println!("installed the codex shim at {}", shim.display());
+                installed.push("codex");
+            }
+            None => println!("  (no `codex` on PATH - skipped its shim)"),
+        }
+    }
+    if installed.is_empty() {
+        eprintln!(
+            "swapdex: no `claude` or `codex` executable found on PATH - install Claude Code or \
+             Codex, then rerun `swapdex shim`"
+        );
+        return Ok(1);
+    }
+
     // Reaching the proxy must not depend on winning the PATH. The shim only
     // fires when it does, and on a real machine another `claude` sat ahead of
     // it - so the proxy went unused and `serve` silently changed nothing for a
     // day, on two machines. Pinning the address in the tool's own settings is
     // what every competing proxy switcher does, and no PATH ordering undoes it.
-    let svc = {
-        let h = paths.home();
-        if cfg!(target_os = "macos") {
-            crate::service::launchd_path(h, "claude-code").exists()
-        } else {
-            crate::service::systemd_path(h, "claude-code").exists()
+    if installed.contains(&"claude") {
+        let svc = {
+            let h = paths.home();
+            if cfg!(target_os = "macos") {
+                crate::service::launchd_path(h, "claude-code").exists()
+            } else {
+                crate::service::systemd_path(h, "claude-code").exists()
+            }
+        };
+        match crate::shim::pin_base_url(paths, 8787, svc)? {
+            Some(f) => println!(
+                "  pinned the proxy address in {} - a plain `claude` reaches it \
+                 however it is started",
+                crate::util::redact_path(&f.display().to_string())
+            ),
+            None => println!(
+                "  not pinning the proxy address: no service keeps the proxy alive, and a \
+                 pinned address with nothing behind it would stop `claude` from starting.\n\
+                 \x20     run `swapdex service install --tool claude` first"
+            ),
         }
-    };
-    match crate::shim::pin_base_url(paths, 8787, svc)? {
-        Some(f) => println!(
-            "  pinned the proxy address in {} - a plain `claude` reaches it \
-             however it is started",
-            crate::util::redact_path(&f.display().to_string())
-        ),
-        None => println!(
-            "  not pinning the proxy address: no service keeps the proxy alive, and a \
-             pinned address with nothing behind it would stop `claude` from starting.\n\
-             \x20     run `swapdex service install --tool claude` first"
-        ),
     }
-    match crate::shim::install_codex(paths)? {
-        Some(p) => println!("installed the codex shim at {}", p.display()),
-        None => println!("  (no `codex` on PATH - skipped its shim)"),
-    }
+
     // Put it on PATH ourselves. Leaving that to the user is how the shim ends up
     // installed but never reached: `swapdex use` then flips a pointer nothing
     // reads, and the switch appears to work while changing nothing.
@@ -5932,38 +5959,41 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
                 .map(str::to_string)
                 .collect();
             let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
-            match crate::shim::path_verdict(&shim_dir, &refs) {
-                crate::shim::PathVerdict::Wins => {
-                    println!("  it is already on your PATH - a plain `claude` goes through it");
-                }
-                crate::shim::PathVerdict::Shadowed(winner) => {
-                    println!(
-                        "  it is on your PATH but {} comes first and holds `claude`, so the \
-                         shim never runs - `swapdex serve` would change nothing.\n\
+            for binary in &installed {
+                match crate::shim::path_verdict_for(&shim_dir, &refs, binary) {
+                    crate::shim::PathVerdict::Wins => println!(
+                        "  it is already on your PATH - a plain `{binary}` goes through its shim"
+                    ),
+                    crate::shim::PathVerdict::Shadowed(winner) => println!(
+                        "  it is on your PATH but {} comes first and holds `{binary}`, so the \
+                         {binary} shim never runs - `swapdex serve` would change nothing.\n\
                          \x20     put the shim ahead of it:  export PATH=\"{}:$PATH\"",
                         crate::util::redact_path(&winner),
                         shim_dir.display()
-                    );
-                }
-                crate::shim::PathVerdict::Absent => {
-                    println!(
-                        "  add this to your shell profile so it wins over the real claude:\n\
+                    ),
+                    crate::shim::PathVerdict::Absent => println!(
+                        "  add this to your shell profile so it wins over the real {binary}:\n\
                          \x20     export PATH=\"{}:$PATH\"",
                         shim_dir.display()
-                    );
+                    ),
                 }
             }
         }
         crate::shim::PathSetup::Added(profile) => {
             println!(
                 "  added it to {} - open a new terminal (or `source` that file) and a plain \
-                 `claude` goes through it",
-                crate::util::redact_path(&profile.display().to_string())
+                 {} goes through the installed shim",
+                crate::util::redact_path(&profile.display().to_string()),
+                installed
+                    .iter()
+                    .map(|binary| format!("`{binary}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
             );
         }
         crate::shim::PathSetup::Manual => {
             println!(
-                "  add this to your shell profile so it wins over the real claude:\n\
+                "  add this to your shell profile so the installed shims win:\n\
                  \x20     export PATH=\"{}:$PATH\"",
                 shim_dir.display()
             );
@@ -5992,10 +6022,25 @@ fn onboarded_marker(paths: &Paths) -> std::path::PathBuf {
     paths.store_dir().join("onboarded")
 }
 
-/// True when a bare `swapdex` has an unregistered Claude dir or an unslotted profile account.
+/// Installed native clients whose plain launch still bypasses Swapdex.
+fn available_missing_shims(paths: &Paths) -> Vec<&'static str> {
+    ["claude-code", "codex"]
+        .into_iter()
+        .filter(|tool| {
+            !crate::shim::shim_path_for(paths, tool).exists()
+                && crate::shim::real_tool(paths, tool).is_some()
+        })
+        .collect()
+}
+
+/// True when a bare `swapdex` has an available client to wrap, an unregistered
+/// Claude dir, or an unslotted profile account.
 pub fn needs_onboarding(paths: &Paths) -> bool {
     if onboarded_marker(paths).exists() {
         return false;
+    }
+    if !available_missing_shims(paths).is_empty() {
+        return true;
     }
     let Ok(slots) = crate::slots::Slots::open(paths) else {
         return false;
@@ -6100,12 +6145,27 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
         }
     }
 
-    // Casual convenience: make a plain `claude` follow `swapdex use`.
-    if !crate::shim::shim_path(paths).exists()
-        && ask_yes("Make a plain `claude` follow `swapdex use`? (installs a small shim)")
-    {
-        install_shim(paths)?;
-        println!();
+    // Casual convenience: offer only shims that can wrap a client this machine
+    // actually has. Each tool can arrive later, so explicit `onboard` checks
+    // again even when an older shim is already present.
+    let missing_shims = available_missing_shims(paths);
+    let question = match missing_shims.as_slice() {
+        ["claude-code"] => Some(
+            "Make a plain `claude` follow `swapdex use`? (installs a small shim)",
+        ),
+        ["codex"] => Some(
+            "Make a plain `codex` follow `swapdex use --tool codex`? (installs a small shim)",
+        ),
+        ["claude-code", "codex"] => Some(
+            "Make plain `claude` and `codex` follow their `swapdex use` selections? (installs small shims)",
+        ),
+        _ => None,
+    };
+    if let Some(question) = question {
+        if ask_yes(question) {
+            install_requested_shims(paths, &missing_shims)?;
+            println!();
+        }
     }
 
     // Mark it shown so a bare `swapdex` does not re-run this every launch.
@@ -6116,8 +6176,12 @@ pub fn onboard(paths: &Paths) -> Result<i32> {
     // for four tools; counting two slot registries called both states empty.
     if !has_any_account(paths) {
         println!(
-            "No accounts yet. Log in to Claude or Codex, then run: swapdex run <name> \
-             (add `--tool codex` for a Codex account)."
+            "No accounts yet. Install your native client if needed, then sign in inside a new slot:\n\
+             \x20 Codex:  swapdex run work --tool codex -- login --device-auth\n\
+             \x20 Claude: swapdex run work --tool claude -- auth login\n\
+             Use the command for your client; `work` is an example account name.\n\
+             Continue with shim activation and launch selection:\n\
+             \x20 https://github.com/youdie006/swapdex#quick-start"
         );
     } else {
         println!("You're set. `swapdex ui` shows your accounts and switches between them.");
@@ -6921,7 +6985,8 @@ pub fn serve(
                 println!("turns are served by '{who}' ({bin})");
             }
             None => println!(
-                "no account is directing turns ({bin}) - each session pays for itself\n                   `swapdex serve <name>` hands them to one without moving your conversations"
+                "no account is directing turns ({bin}) - each session pays for itself\n                   `swapdex serve <name>{}` hands them to one without moving your conversations",
+                tool_flag(tool)
             ),
         }
         return Ok(0);
@@ -8815,11 +8880,8 @@ pub fn setup(paths: &Paths) -> Result<i32> {
     // 3) Summary. Existing slots are already usable accounts even when this
     // run captured no snapshot; calling that machine empty contradicts every
     // account-facing command the summary points at.
-    let names: Vec<String> = merged_accounts(paths, &store)
-        .0
-        .into_iter()
-        .map(|p| p.name)
-        .collect();
+    let accounts = merged_accounts(paths, &store).0;
+    let names: Vec<String> = accounts.iter().map(|p| p.name.clone()).collect();
     println!();
     if names.is_empty() {
         println!(
@@ -8830,7 +8892,47 @@ pub fn setup(paths: &Paths) -> Result<i32> {
         println!("  switch:   swapdex use <name>");
         println!("  see all:  swapdex ls");
         if names.len() > 1 {
-            println!("Switching takes effect on your next message - no restart needed.");
+            let mut described_managed_session = false;
+            for tool in ["claude-code", "codex"] {
+                let has_slots = crate::slots::Slots::open_for(paths, tool)
+                    .map(|slots| !slots.list().is_empty())
+                    .unwrap_or(false);
+                if !has_slots {
+                    continue;
+                }
+                described_managed_session = true;
+                let bin = tool_binary(tool);
+                if crate::shim::shim_path_for(paths, tool).exists() {
+                    println!(
+                        "  {bin}: launch or relaunch a plain `{bin}` through its installed shim; \
+                         that is a managed session."
+                    );
+                } else if crate::shim::real_tool(paths, tool).is_some() {
+                    println!(
+                        "  {bin}: run `swapdex shim`, then launch or relaunch a plain `{bin}`; \
+                         a launch through the shim is a managed session."
+                    );
+                } else {
+                    println!(
+                        "  {bin}: install the client, run `swapdex shim`, then launch it through \
+                         the shim to start a managed session."
+                    );
+                }
+                println!(
+                    "    choose the payer for managed sessions: `swapdex serve <name>{}`",
+                    tool_flag(tool)
+                );
+                println!(
+                    "    a `{bin}` session opened directly outside Swapdex keeps its own login; \
+                     relaunch it through the shim once before `serve` can manage it."
+                );
+            }
+            if !described_managed_session {
+                println!(
+                    "  saved profiles apply when you launch the client again; an already-running \
+                     direct session keeps its current login."
+                );
+            }
         }
     }
     Ok(0)
@@ -9282,7 +9384,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     if let Some(msg) = offline {
         println!("swapdex quota: could not reach api.anthropic.com - {msg}");
         println!(
-            "(quota is the only swapdex command that uses the network; everything else is local)"
+            "(this live quota lookup needs the network; `swapdex usage` reads local activity)"
         );
         return Ok(0);
     }
@@ -9317,14 +9419,10 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 }
             }
             Fetch::Unauthorized => {
-                if r.active {
-                    println!("  active token rejected - run `claude` once to refresh, then retry");
-                } else {
-                    println!(
-                        "  snapshot token expired - `swapdex use {}` to refresh, then `swapdex quota`",
-                        r.name
-                    );
-                }
+                println!(
+                    "  usage endpoint rejected this credential - check `swapdex doctor`; \
+                     renew or sign in to this account before retrying"
+                );
             }
             Fetch::Unexpected(code, _) => {
                 println!(
@@ -9337,7 +9435,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         println!();
     }
     print_codex_quota(paths, now);
-    println!("this is the only swapdex command that touches the network.");
+    println!("quota reads provider usage; `swapdex usage` shows local session activity.");
     Ok(0)
 }
 
