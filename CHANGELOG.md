@@ -33,6 +33,8 @@ All notable changes to swapdex are documented here. This project follows
   verifier exercises fresh and already signed-in homes with Claude only,
   Codex only and both clients, including proxy autostart, the first request,
   next-turn payer changes, cross-tool isolation and unchanged native logins.
+  Home aliases such as macOS `/var` and `/private/var` are compared by their
+  resolved location, and every platform exercises an aliased home.
   It uses fake native sign-ins and a loopback provider; real login UI and
   billing-ledger verification remain outside these fixtures.
 

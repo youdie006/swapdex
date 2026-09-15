@@ -89,3 +89,20 @@ GitHub release and its PR after deployment.
 - PASS POSIX shell syntax under `sh`, `dash` and `bash --posix`; ShellCheck was
   unavailable on the local host. The installer integration suite passed 12 cases.
 - Independent final code/spec review found no blocking regression.
+
+## macOS CI path-alias correction
+
+The first PR CI run passed on Linux but failed the new verifier on macOS:
+https://github.com/youdie006/swapdex/actions/runs/34962007383
+
+The verifier compared a native home path literally with a canonicalized slot
+path. macOS can expose the same temporary directory through `/var` and
+`/private/var`; this was a verifier assertion error, not lost slot isolation.
+A Linux home symlink reproduced the exact failure before repair. Both native
+home comparisons now resolve aliases before comparing. Every journey now uses
+an aliased home, so Linux also exercises the condition. Native PID and home
+stability within a conversation still use the original unmodified values.
+
+After this correction, all six aliased-home autostart and foreground journeys,
+Python lint and all six release-metadata checks passed locally. Fresh PR CI
+is required before integration.

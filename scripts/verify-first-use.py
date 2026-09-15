@@ -131,7 +131,7 @@ def prepare_accounts(swapdex, root, native_bin, env, tool, existing):
         )
         event = json.loads(stdout)
         routing.require(event["event"] == "login", "native login was not invoked")
-        routing.require(Path(event["home"]) == routing.slot_dir(root, name, tool),
+        routing.require(Path(event["home"]).resolve() == routing.slot_dir(root, name, tool),
                         "login was not isolated in the requested account slot")
     routing.require(digest_existing(root) == original, "slot login changed the existing native login")
 
@@ -211,7 +211,7 @@ def verify(swapdex, root, tools, existing, proxy_mode):
             )
             ready = state["ready"] = receive(client)
             routing.require(ready["event"] == "ready", "plain native command did not start")
-            routing.require(Path(ready["home"]) == routing.slot_dir(root, "work", tool),
+            routing.require(Path(ready["home"]).resolve() == routing.slot_dir(root, "work", tool),
                             "plain native launch ignored the selected default")
             state["marker_before"] = routing.marker_for(root, tool).read_bytes()
         for changed in (None, *tools):
@@ -296,7 +296,13 @@ def main():
         for existing in (False, True):
             label = "+".join(tools)
             with tempfile.TemporaryDirectory(prefix=f"swapdex-first-use-{label}-") as directory:
-                verify(str(binary), Path(directory), tools, existing, args.proxy_mode)
+                # macOS commonly presents /private/var through /var. Exercise
+                # equivalent path spellings on every platform, including Linux.
+                real_home = Path(directory) / "actual-home"
+                real_home.mkdir()
+                alias_home = Path(directory) / "home"
+                alias_home.symlink_to(real_home, target_is_directory=True)
+                verify(str(binary), alias_home, tools, existing, args.proxy_mode)
             state = "existing native login preserved" if existing else "fresh home"
             print(f"PASS {label} {state} ({args.proxy_mode}): native slot login, shim, "
                   "first turn, next-turn switch", flush=True)
