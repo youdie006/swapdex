@@ -130,8 +130,16 @@ fn exercise_picker(unlink: bool) {
     std::fs::write(&curl, "#!/bin/sh\ncat >/dev/null\nprintf '{}\\n503'\n").unwrap();
     std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
     let binary = root.path().join("swapdex");
-    std::fs::copy(env!("CARGO_BIN_EXE_swapdex"), &binary).unwrap();
-    let mut picker = Picker::start(&binary, root.path(), &curl);
+    // `pre_exec` makes spawn fork. A parallel test can inherit the writable
+    // descriptor from this copy until it execs, making our exec fail with
+    // ETXTBSY even after fs::copy has returned. Protect only copy + spawn;
+    // both picker scenarios can still exercise their terminals concurrently.
+    static COPY_AND_START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let mut picker = {
+        let _launch = COPY_AND_START.lock().unwrap();
+        std::fs::copy(env!("CARGO_BIN_EXE_swapdex"), &binary).unwrap();
+        Picker::start(&binary, root.path(), &curl)
+    };
     picker.wait_until(|s| s.contains("rnd@example.com"));
     if unlink {
         std::fs::remove_file(&binary).unwrap();

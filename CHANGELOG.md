@@ -6,6 +6,15 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.165.4
+
+- **Keep a disconnected client from terminating every proxy session.** The
+  command-line SIGPIPE policy also applied to proxy processes, so a broken
+  connection could kill the shared Claude/Codex proxy and trigger repeated
+  service restarts. Proxy startup now ignores SIGPIPE before starting its
+  workers, allowing the failed write to follow normal connection error handling.
+  Ordinary command output piped to a short reader still ends quietly.
+
 ## 0.165.3
 
 - **Keep a started response streaming past five minutes.** The locked ureq

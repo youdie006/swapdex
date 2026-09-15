@@ -1,4 +1,5 @@
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2281,6 +2282,264 @@ fn post_codex_turn(port: u16) -> (u16, String) {
         .read_to_string(&mut out)
         .unwrap();
     (status, out)
+}
+
+fn seed_signal_test_account(root: &std::path::Path, tool: &str) {
+    if tool == "codex" {
+        seed_codex_slot(root, "work", "codex-work", "AT-WORK", "acct-work", true);
+    } else {
+        seed_slot(root, "work", "claude-work", "AT-WORK", true);
+    }
+}
+
+fn start_signal_test_proxy(
+    root: &std::path::Path,
+    tool: &str,
+    upstream: &str,
+) -> (ReapedChild, u16) {
+    let mut command = Command::new(bin());
+    command
+        .args(["proxy", "--port", "0"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
+        // Keep stdout open without relying on a blocking read for readiness.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if tool == "codex" {
+        command
+            .args(["--tool", "codex"])
+            .env("SWAPDEX_UPSTREAM_CODEX", upstream);
+    } else {
+        command.env("SWAPDEX_UPSTREAM", upstream);
+    }
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    let mut proxy = ReapedChild::new(child);
+    let paths = swapdex::paths::Paths::rooted(root);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if let Some(status) = proxy.0.as_mut().unwrap().try_wait().unwrap() {
+            panic!("{tool} proxy exited during startup: {status}");
+        }
+        if let Some((marker_pid, port, build)) = swapdex::proxy::running_proxy_for(&paths, tool) {
+            assert_eq!(marker_pid, pid as i32, "proxy marker named another process");
+            assert!(!build.is_empty(), "proxy marker omitted its build identity");
+            return (proxy, port);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{tool} proxy did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn post_signal_test_turn(tool: &str, port: u16) -> u16 {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .build()
+        .into();
+    let (path, body) = if tool == "codex" {
+        ("/v1/responses", r#"{"input":[]}"#)
+    } else {
+        ("/v1/messages", r#"{"turn":1}"#)
+    };
+    let mut request = agent
+        .post(format!("http://127.0.0.1:{port}{path}"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .header("content-type", "application/json");
+    if tool == "codex" {
+        request = request.header("chatgpt-account-id", "acct-client");
+    }
+    let mut response = request
+        .send(body.as_bytes())
+        .expect("proxy answered within the test deadline");
+    let status = response.status().as_u16();
+    let mut response_body = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut response_body)
+        .expect("proxy response completed within the test deadline");
+    status
+}
+
+fn assert_proxy_stays_running(
+    proxy: &mut ReapedChild,
+    duration: std::time::Duration,
+    context: &str,
+) {
+    let deadline = std::time::Instant::now() + duration;
+    loop {
+        let status = proxy.0.as_mut().unwrap().try_wait().unwrap();
+        assert!(
+            status.is_none(),
+            "proxy exited {context}: {}",
+            status.unwrap()
+        );
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn executable_proxy_ignores_sigpipe_and_keeps_serving(tool: &str) {
+    let root = tempfile::tempdir().unwrap();
+    seed_signal_test_account(root.path(), tool);
+    let upstream = ControlledUpstream::start(|mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        request
+            .respond(tiny_http::Response::from_string(r#"{"ok":true}"#))
+            .ok();
+    });
+    let (mut proxy, port) = start_signal_test_proxy(root.path(), tool, upstream.url());
+    let pid = proxy.0.as_ref().unwrap().id();
+
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGPIPE) };
+    assert_eq!(sent, 0, "could not send SIGPIPE to the {tool} proxy");
+    assert_proxy_stays_running(
+        &mut proxy,
+        std::time::Duration::from_millis(500),
+        "after SIGPIPE",
+    );
+    assert_eq!(
+        post_signal_test_turn(tool, port),
+        200,
+        "the same {tool} proxy did not answer after SIGPIPE"
+    );
+    assert_eq!(proxy.0.as_ref().unwrap().id(), pid);
+
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn executable_claude_proxy_ignores_sigpipe_and_keeps_serving() {
+    executable_proxy_ignores_sigpipe_and_keeps_serving("claude-code");
+}
+
+#[test]
+fn executable_codex_proxy_ignores_sigpipe_and_keeps_serving() {
+    executable_proxy_ignores_sigpipe_and_keeps_serving("codex");
+}
+
+fn open_turn_for_disconnect(port: u16, tool: &str) -> std::net::TcpStream {
+    let (path, body, identity) = if tool == "codex" {
+        (
+            "/v1/responses",
+            r#"{"input":[]}"#,
+            "Authorization: Bearer CLIENT-TOKEN\r\nChatGPT-Account-ID: acct-client\r\n",
+        )
+    } else {
+        (
+            "/v1/messages",
+            r#"{"turn":1}"#,
+            "Authorization: Bearer CLIENT-TOKEN\r\n",
+        )
+    };
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{identity}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut client =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3)).unwrap();
+    client
+        .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client
+}
+
+fn reset_client_connection(client: std::net::TcpStream) {
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    let set = unsafe {
+        libc::setsockopt(
+            client.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&linger as *const libc::linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "could not configure a reset-on-close client");
+    drop(client);
+}
+
+fn executable_proxy_survives_a_disconnected_client(tool: &str) {
+    let root = tempfile::tempdir().unwrap();
+    seed_signal_test_account(root.path(), tool);
+    let (received_tx, received_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (responded_tx, responded_rx) = std::sync::mpsc::channel();
+    let mut first = true;
+    let upstream = ControlledUpstream::start(move |mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        let was_first = std::mem::replace(&mut first, false);
+        let released = if was_first {
+            received_tx.send(()).is_ok()
+                && release_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .is_ok()
+        } else {
+            true
+        };
+        let answered = released
+            && request
+                .respond(tiny_http::Response::from_string(r#"{"ok":true}"#))
+                .is_ok();
+        if was_first {
+            responded_tx.send(answered).ok();
+        }
+    });
+    let (mut proxy, port) = start_signal_test_proxy(root.path(), tool, upstream.url());
+    let pid = proxy.0.as_ref().unwrap().id();
+
+    let client = open_turn_for_disconnect(port, tool);
+    received_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("the upstream did not receive the abandoned turn");
+    reset_client_connection(client);
+    release_tx.send(()).unwrap();
+    assert!(
+        responded_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("the upstream did not finish the abandoned turn"),
+        "the upstream could not answer the abandoned turn"
+    );
+    assert_proxy_stays_running(
+        &mut proxy,
+        std::time::Duration::from_millis(500),
+        "after a client disconnected before its response",
+    );
+    assert_eq!(
+        post_signal_test_turn(tool, port),
+        200,
+        "the same {tool} proxy did not answer after a client disconnected"
+    );
+    assert_eq!(proxy.0.as_ref().unwrap().id(), pid);
+
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn executable_claude_proxy_survives_a_disconnected_client() {
+    executable_proxy_survives_a_disconnected_client("claude-code");
+}
+
+#[test]
+fn executable_codex_proxy_survives_a_disconnected_client() {
+    executable_proxy_survives_a_disconnected_client("codex");
 }
 
 fn select_serving(root: &std::path::Path, tool: &str, name: &str) {
