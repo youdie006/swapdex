@@ -239,6 +239,27 @@ setup is one keystroke and a name.
 <img src="https://raw.githubusercontent.com/youdie006/swapdex/main/docs/ui-demo.gif" alt="swapdex ui on a fresh machine: it finds the Claude Code and Codex logins already present, saves them as a profile named main, and shows the account with its 5h and 7d usage bars" width="760" />
 </div>
 
+## Resuming Codex conversations
+
+Use `codex resume` normally, or `codex resume --all` to include other working
+directories. Swapdex keeps one stable OpenAI provider across account changes.
+The paying account is shown by `swapdex serve --tool codex --quiet`.
+If the proxy cannot start, the launcher warns that Codex will use its own login
+directly.
+
+After updating from a version that created `swapdex` provider IDs, run
+`swapdex shim` to refresh the launcher. It automatically repairs those legacy
+session labels before launching Codex. To inspect or retry the repair directly:
+
+```sh
+swapdex repair-codex-sessions --dry-run
+swapdex repair-codex-sessions
+```
+
+The repair preserves conversation contents and keeps a private recovery journal.
+Open sessions are deferred until they close. Unsupported compressed rollouts
+and unsuccessful repairs are reported rather than silently hidden.
+
 ## Keeping accounts from expiring
 
 Access tokens expire by design. An idle slot can renew while its refresh token

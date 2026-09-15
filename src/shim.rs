@@ -90,65 +90,78 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
 /// Codex's own variable and pointer. It never mentions Claude's: one tool's shim
 /// moving the other tool's account is exactly what the per-tool split prevents.
 pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> String {
-    // The provider name is the one identity Codex prints on /status, and with the
-    // proxy rewriting the bearer, the login inside CODEX_HOME is not the account
-    // being charged. Naming the payer there is the difference between a screen
-    // that says who pays and a screen that says nothing.
-    //
-    // The provider block deliberately carries no `env_key`: that omission is what
-    // makes Codex attach its OWN ChatGPT OAuth bearer and account-id, which is
-    // the pair the proxy rewrites. Naming a key instead would have it send an API
-    // key and there would be nothing to switch.
+    // Provider identity is persisted in Codex rollouts and filters its native
+    // picker. Route the built-in provider by URL instead of creating an
+    // ephemeral provider for each paying account.
     format!(
-        "#!/bin/sh\n\
-         # swapdex codex shim - launch codex in the default account's slot.\n\
-         # Managed by swapdex; re-created by `swapdex shim`.\n\
-         # The provider overrides belong on a run that TALKS to the model. On\n\
-         # `resume` they emptied the session picker: Codex lists the sessions that\n\
-         # match the configured provider, and a conversation held long before\n\
-         # swapdex existed matches none. A sign-in is excluded for its own reason -\n\
-         # the OAuth exchange is between the browser and the real backend, and a\n\
-         # proxy in the middle answers with whichever account it already holds.\n\
-         # Start these empty. The branch below only ever SETS them, so a caller\n\
-         # who exported a variable of the same name would answer for it - and the\n\
-         # override this guard exists to withhold would go on anyway.\n\
-         sx_plain=no\n\
-         port=\n\
-         sx_who=\n\
-         for a in \"$@\"; do\n\
-         \tcase \"$a\" in login|/login|logout|/logout|resume|/resume|history|sessions) sx_plain=yes ;; esac\n\
-         done\n\
-         # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
-         # port); silence means \"run without one\", exactly as before.\n\
-         if [ \"$sx_plain\" = no ]; then\n\
-         \tport=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
-         \t# Who pays. Codex prints the provider name on /status and nothing\n\
-         \t# else about identity, so the account goes in the one field it shows.\n\
-         \tsx_who=$({sx} serve --tool codex --quiet 2>/dev/null)\n\
-         fi\n\
-         if [ -n \"$port\" ]; then\n\
-         \tsx_id=swapdex\n\
-         \tsx_name=swapdex\n\
-         \tif [ -n \"$sx_who\" ]; then\n\
-         \t\tsx_acct=$(printf '%s' \"${{sx_who%% *}}\" | tr -c 'A-Za-z0-9_-' '-')\n\
-         \t\tif [ -n \"$sx_acct\" ]; then\n\
-         \t\t\tsx_id=\"swapdex-$sx_acct\"\n\
-         \t\tfi\n\
-         \t\tsx_name=\"swapdex: $sx_who\"\n\
-         \tfi\n\
-         \tset -- -c model_provider=\"$sx_id\" \\\n\
-         \t\t-c model_providers.\"$sx_id\".name=\"$sx_name\" \\\n\
-         \t\t-c model_providers.\"$sx_id\".base_url=\"http://127.0.0.1:$port/v1\" \\\n\
-         \t\t-c model_providers.\"$sx_id\".wire_api=responses \"$@\"\n\
-         fi\n\
-         if [ -z \"$CODEX_HOME\" ]; then\n\
-         \tdir=$(cat {ptr} 2>/dev/null)\n\
-         \tif [ -n \"$dir\" ]; then\n\
-         \t\tCODEX_HOME=\"$dir\"\n\
-         \t\texport CODEX_HOME\n\
-         \tfi\n\
-         fi\n\
-         exec {real} \"$@\"\n",
+        r#"#!/bin/sh
+# swapdex codex shim - launch codex in the default account's slot.
+# Managed by swapdex; re-created by `swapdex shim`.
+if [ -z "$CODEX_HOME" ]; then
+    dir=$(cat {ptr} 2>/dev/null)
+    if [ -n "$dir" ]; then
+        CODEX_HOME="$dir"
+        export CODEX_HOME
+    fi
+fi
+# Parse the command separately from option values and prompt text. In
+# particular, `exec login` is a model prompt, not an OAuth operation.
+sx_plain=no
+sx_skip=
+sx_command=
+sx_options=yes
+port=
+sx_explicit_config() {{
+    sx_key=$(printf '%s' "${{1%%=*}}" | tr -d '[:space:]')
+    case "$sx_key" in model_provider|openai_base_url|model_providers.*) return 0 ;; esac
+    return 1
+}}
+for a in "$@"; do
+    if [ "$sx_skip" = config ]; then
+        if sx_explicit_config "$a"; then sx_plain=yes; fi
+        sx_skip=
+        continue
+    fi
+    if [ "$sx_skip" = value ]; then
+        sx_skip=
+        continue
+    fi
+    if [ "$sx_skip" = images ]; then
+        case "$a" in -*) sx_skip= ;; *) continue ;; esac
+    fi
+    [ "$sx_options" = yes ] || continue
+    case "$a" in
+        --) sx_options=no ;;
+        -c|--config) sx_skip=config ;;
+        --config=*) if sx_explicit_config "${{a#--config=}}"; then sx_plain=yes; fi ;;
+        -c?*) if sx_explicit_config "${{a#-c}}"; then sx_plain=yes; fi ;;
+        -p|--profile|--remote|--remote-auth-token-env|--local-provider) sx_plain=yes; sx_skip=value ;;
+        -p?*|--profile=*|--remote=*|--remote-auth-token-env=*|--local-provider=*|--oss) sx_plain=yes ;;
+        -i|--image) sx_skip=images ;;
+        -C|--cd|-m|--model|-s|--sandbox|-a|--ask-for-approval|--add-dir|--enable|--disable) sx_skip=value ;;
+        -h|--help|-V|--version) sx_plain=yes ;;
+        -*) ;;
+        *)
+            if [ -z "$sx_command" ]; then
+                sx_command="$a"
+                case "$a" in login|logout|completion|mcp|mcp-server|debug|features|apply|help) sx_plain=yes ;; esac
+            fi
+            ;;
+    esac
+done
+if [ "$sx_plain" = no ]; then
+    if ! {sx} repair-codex-sessions --quiet; then
+        printf '%s\n' 'swapdex: session repair was incomplete; run swapdex repair-codex-sessions for details.' >&2
+    fi
+    port=$({sx} proxy --ensure --tool codex 2>/dev/null)
+    if [ -n "$port" ]; then
+        set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+    else
+        printf '%s\n' "swapdex: Codex proxy unavailable; using this Codex home's login directly." >&2
+    fi
+fi
+exec {real} "$@"
+"#,
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_codex),
@@ -779,26 +792,11 @@ mod tests {
             s.contains("proxy --ensure --tool codex"),
             "asks swapdex for a live codex proxy: {s}"
         );
-        // The provider ID is built at run time from the paying account, because
-        // Codex renders the ID on `/status` and never the `name` - so the keys
-        // hanging off it are `$sx_id`, not a literal. What matters here is the
-        // address and the protocol, which do not vary with the account.
         assert!(
-            s.contains("model_provider=\"$sx_id\""),
-            "selects the provider"
+            s.contains("openai_base_url=\"http://127.0.0.1:$port/v1\""),
+            "routes the built-in provider without changing session identity: {s}"
         );
-        assert!(
-            s.contains(".base_url=\"http://127.0.0.1:$port/v1\""),
-            "points it at the proxy: {s}"
-        );
-        assert!(
-            s.contains(".wire_api=responses"),
-            "the protocol codex speaks"
-        );
-        assert!(
-            !s.contains("env_key"),
-            "declaring an api key would stop codex attaching its own OAuth"
-        );
+        assert!(!s.contains("set -- -c model_provider="));
         // Without a proxy, codex runs exactly as it would have.
         assert!(
             s.contains("if [ -n \"$port\" ]"),
@@ -806,28 +804,17 @@ mod tests {
         );
     }
 
-    // Codex lists the sessions matching its configured provider, so the provider
-    // overrides emptied the resume picker - a machine with 158 conversations for
-    // the current directory showed "No sessions yet", which reads as the history
-    // being gone.
     #[test]
-    fn the_codex_shim_leaves_reading_commands_alone() {
+    fn the_codex_shim_repairs_the_resolved_home_before_routing() {
         let s = codex_shim_script(
             Path::new("/store/active-codex"),
             Path::new("/usr/bin/codex"),
             Path::new("/bin/swapdex"),
         );
-        for verb in ["resume", "history", "sessions"] {
-            assert!(s.contains(verb), "recognised as a plain run: {verb}");
-        }
-        // Those runs ask for no proxy, so no provider is set on them.
-        let guard = s.find("if [ \"$sx_plain\" = no ]").expect("the guard");
-        let ask = s.find("proxy --ensure").expect("the ask");
-        assert!(guard < ask, "the proxy is only asked for on a talking run");
-        // The home still comes from the pointer, whatever the command is: that is
-        // what decides which conversations exist at all.
-        let home = s.find("CODEX_HOME=").expect("home");
-        assert!(home > guard, "the home is set outside the guard: {s}");
+        let home = s.find("CODEX_HOME=").unwrap();
+        let repair = s.find("repair-codex-sessions --quiet").unwrap();
+        let proxy = s.find("proxy --ensure").unwrap();
+        assert!(home < repair && repair < proxy);
     }
 
     #[test]

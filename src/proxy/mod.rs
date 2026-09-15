@@ -1185,13 +1185,9 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     if announced && crate::shim::shim_path_for(paths, &opts.tool).exists() {
         println!("  a plain `{bin}` now goes through it (the shim picks it up)");
     } else if is_codex {
-        // Codex reaches a proxy through a model provider, not an env var, and
-        // the block must declare no api key or Codex sends one instead of the
-        // ChatGPT login this proxy switches between.
-        println!("  point Codex at it:  codex -c model_provider=swapdex \\");
-        println!("    -c model_providers.swapdex.name=swapdex \\");
-        println!("    -c model_providers.swapdex.base_url=http://127.0.0.1:{port}/v1 \\");
-        println!("    -c model_providers.swapdex.wire_api=responses");
+        // Keep Codex's built-in OpenAI provider so its native session picker and
+        // resume metadata remain stable; only direct that provider at the proxy.
+        println!("  point Codex at it:  codex -c openai_base_url=http://127.0.0.1:{port}/v1");
     } else {
         println!("  point Claude at it:  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}");
     }
@@ -1760,6 +1756,10 @@ fn recover_rejected_bearer(
 }
 
 fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<()> {
+    if is_codex_responses_websocket(&rq, opts) {
+        rq.respond(tiny_http::Response::empty(tiny_http::StatusCode(426)))?;
+        return Ok(());
+    }
     // The request stays owned here so a failure can still be ANSWERED. Dropping it
     // gives the client a bare "500 (no body)" and the reason - a login that could
     // not be read, usually - stays in a log the user cannot reach.
@@ -1799,6 +1799,20 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Share
     );
     rq.respond(resp)?;
     Ok(())
+}
+
+/// Codex probes Responses over WebSocket before using the HTTP transport. This
+/// proxy is HTTP-only, so reject that probe locally and let Codex fall back
+/// without selecting an account or contacting upstream.
+fn is_codex_responses_websocket(rq: &tiny_http::Request, opts: &Opts) -> bool {
+    if opts.tool != "codex" || !rq.method().as_str().eq_ignore_ascii_case("GET") {
+        return false;
+    }
+    let path = rq.url().split('?').next().unwrap_or(rq.url());
+    matches!(path, "/v1/responses" | "/responses")
+        && rq.headers().iter().any(|header| {
+            header.field.equiv("upgrade") && header.value.as_str().eq_ignore_ascii_case("websocket")
+        })
 }
 
 /// Choose the account, serve the turn (retrying and rotating as needed), and hand
