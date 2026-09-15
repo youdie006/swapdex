@@ -4,7 +4,53 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.161.0
+
+- **Use the selected account's current native login when its saved slot is
+  stale.** Health, quota and proxy requests now resolve a usable access token
+  from an actual running Claude or Codex process after verifying its stable
+  account identity. A valid native login no longer appears expired merely
+  because a saved copy is older. Native refresh tokens are never copied or
+  exchanged by this resolver; ambiguous or mismatched sources remain excluded.
+- **Distinguish native renewal ownership from a blocked renewal.** Verified
+  usable native logins no longer display `renewal deferred`. JSON listings expose
+  their renewal owner, and manual/background output does not claim an OAuth
+  exchange when the native app manages renewal. Actual expiry and recorded
+  rejection remain visible. An inaccessible Claude Keychain is reported as
+  unavailable instead of being inferred to be an expired login.
+- **Concurrent renewals share a result.** Participating Swapdex callers now
+  serialize through an OS file lock held across credential reads, exchange and
+  persistence. Followers wait for the result, and generation checks prevent a
+  late success or rejection from overwriting a replacement login. Cached success
+  is bound to the operation's input and persisted output generations.
+  Cross-process freshness uses the coordinator's clock, so an older timestamp
+  captured by a waiting request or scheduled sweep cannot hide a completed renewal.
+- **An unavailable selected login does not silently use the client's other
+  account.** Managed proxy requests now return an actionable error when no
+  selected credential can serve them. Explicit passthrough and configured
+  account failover retain their existing controls.
+- **Recover the same selected account before failover on HTTP 401.** The proxy
+  rereads a native-owned access snapshot or waits for coordinated managed renewal,
+  and retries only with a changed usable bearer. Recovery is bounded per account
+  and request, before any response body is streamed.
+- **Manual renewal keeps provider identities separate.** A Claude account ID
+  can no longer suppress a Codex renewal with the same text, and unrelated
+  Claude metadata in a Codex directory does not determine its renewal identity.
+- **Read macOS native login paths containing spaces correctly.** Native process
+  discovery uses NUL-delimited kernel data and distinguishes Claude's default
+  identity/Keychain locations from custom config directories.
+- **Use one authoritative Claude credential source on macOS.** The slot's exact
+  Keychain item now supplies its bearer, expiry, plan and renewal writeback.
+  A leftover file cannot override it or substitute for a locked/missing item.
+  Linux and isolated test roots retain file-backed credentials.
+- **Account labels describe the slot whose health is displayed.** A same-name
+  saved profile could supply another account's email while `ls` displayed the
+  slot's health. Listings now prefer the slot identity and include conflicting
+  profile/slot identities in JSON warnings, without changing account selection.
+- Expand the [source comparison](docs/research/2026-09-15-codex-switcher-survey.md)
+  with a reproducible index of 227 discovered Codex switching/proxy candidates,
+  pinned implementation references, operational reports, and the limits of
+  file-based switching for existing sessions.
 
 ## 0.160.0
 

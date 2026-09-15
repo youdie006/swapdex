@@ -23,7 +23,13 @@
 //! the same discipline `quota` uses, so it never reaches `ps`.
 
 use crate::{paths::Paths, secret::Secret};
-use std::path::Path;
+use fs2::FileExt;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Where an OAuth refresh is exchanged. `SWAPDEX_OAUTH_URL` redirects it for
 /// tests, honored ONLY under `SWAPDEX_ROOT` so a production run can never be
@@ -42,7 +48,7 @@ pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 /// Why a refresh did not happen. Each is a different thing to tell the user, and
 /// none of them should read as "your account is gone".
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RefreshError {
     /// The slot has no readable credential to renew.
     NoCredential,
@@ -53,15 +59,27 @@ pub enum RefreshError {
     Expired,
     /// The login server is rate-limiting; the account itself is fine.
     Busy,
-    /// Another caller in this process is already renewing this slot. Spending
-    /// the same refresh token twice is what logs an account out, so the second
-    /// caller stands down and uses the credential the first is about to write.
+    /// Another caller may have renewed this account, but its exact result could
+    /// not be established safely. Spending the same refresh token twice is what
+    /// logs an account out, so ambiguity remains a conservative stand-down.
     AlreadyRefreshing,
     /// The server refused the exchange.
     Refused(String),
     /// The request could not be made at all.
     Offline(String),
 }
+
+/// A successful refresh request either rotated the saved credential or proved
+/// that the native client already owns a usable access token for this account.
+/// Keeping those outcomes separate prevents a no-op from being reported as an
+/// OAuth exchange and credential write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefreshOutcome {
+    Renewed,
+    NativeManaged,
+}
+
+type RefreshResult = Result<RefreshOutcome, RefreshError>;
 
 impl RefreshError {
     /// What the user should do about it, in one line.
@@ -163,12 +181,10 @@ pub fn request_body(refresh_token: &str) -> String {
     .to_string()
 }
 
-/// Renew this slot's credential in place. `Ok` carries nothing: the point is the
-/// side effect, and returning the token would invite logging it.
 /// How close together two refreshes count as the same burst.
 pub const BURST_SECS: i64 = 30;
 
-/// Lets ONE refresh through per slot per burst.
+/// Lets one leader refresh an account while followers wait for its result.
 ///
 /// Refresh tokens rotate: each use mints a new one and retires the old. So N
 /// concurrent turns each refreshing the same slot spend the same token N times,
@@ -176,25 +192,150 @@ pub const BURST_SECS: i64 = 30;
 /// up logged out by its own renewal. teamclaude hit this as "don't rotate the
 /// token family once per 401 in a burst".
 ///
-/// Per-slot, so one account's burst never blocks another's genuine refresh, and
-/// time-bounded, so a refresh minutes later is a new event rather than the same
-/// burst still being suppressed.
+/// Per-account, so one account's burst never blocks another's genuine refresh,
+/// and time-bounded, so a refresh minutes later is a new event rather than the
+/// same burst still being suppressed.
+const WAIT_FOR_REFRESH: Duration = Duration::from_secs(20);
+
+#[derive(Clone)]
+struct CompletedRefresh {
+    generation: String,
+    result_generation: Option<String>,
+    source: String,
+    completed_at: Instant,
+    result: RefreshResult,
+}
+
+enum GateEntry {
+    Running {
+        generation: String,
+        source: String,
+        started: Instant,
+    },
+    Complete(CompletedRefresh),
+}
+
+enum GateDecision {
+    Leader,
+    Shared(RefreshResult),
+}
+
 #[derive(Default)]
-pub struct RefreshGate {
-    last: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, i64>>,
+struct RefreshGate {
+    entries: Mutex<HashMap<PathBuf, GateEntry>>,
+    changed: Condvar,
 }
 
 impl RefreshGate {
-    /// True when this caller should go ahead; false when another already is.
-    pub fn claim(&self, dir: &Path, now_secs: i64) -> bool {
-        let mut m = self.last.lock().unwrap_or_else(|e| e.into_inner());
-        match m.get(dir) {
-            Some(&t) if now_secs - t <= BURST_SECS => false,
-            _ => {
-                m.insert(dir.to_path_buf(), now_secs);
-                true
+    fn begin(&self, key: &Path, generation: &str, source: &str) -> GateDecision {
+        let wait_started = Instant::now();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            match entries.get(key) {
+                None => {
+                    entries.insert(
+                        key.to_path_buf(),
+                        GateEntry::Running {
+                            generation: generation.to_string(),
+                            source: source.to_string(),
+                            started: Instant::now(),
+                        },
+                    );
+                    return GateDecision::Leader;
+                }
+                Some(GateEntry::Running { started, .. }) => {
+                    let elapsed = wait_started.elapsed();
+                    if elapsed >= WAIT_FOR_REFRESH || started.elapsed() >= WAIT_FOR_REFRESH {
+                        // The filesystem lock remains the final exclusion layer.
+                        // Removing an abandoned local claim cannot overlap a live
+                        // exchange in this or another process.
+                        entries.remove(key);
+                        self.changed.notify_all();
+                        return GateDecision::Shared(Err(RefreshError::AlreadyRefreshing));
+                    }
+                    let remaining = WAIT_FOR_REFRESH.saturating_sub(elapsed);
+                    let waited = self
+                        .changed
+                        .wait_timeout(entries, remaining)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    entries = waited.0;
+                }
+                Some(GateEntry::Complete(completed)) => {
+                    let recent =
+                        completed.completed_at.elapsed() <= Duration::from_secs(BURST_SECS as u64);
+                    if !recent {
+                        entries.remove(key);
+                        continue;
+                    }
+                    if completed.source != source {
+                        // Two directories carrying one provider identity may be
+                        // stale copies. They share exclusion, but never inherit a
+                        // success that was persisted somewhere else.
+                        return GateDecision::Shared(Err(RefreshError::AlreadyRefreshing));
+                    }
+                    if completed.generation == generation
+                        || completed.result_generation.as_deref() == Some(generation)
+                    {
+                        return GateDecision::Shared(completed.result.clone());
+                    }
+                    // A replacement generation after a failure is a new login,
+                    // so an old refusal must not poison it.
+                    entries.insert(
+                        key.to_path_buf(),
+                        GateEntry::Running {
+                            generation: generation.to_string(),
+                            source: source.to_string(),
+                            started: Instant::now(),
+                        },
+                    );
+                    return GateDecision::Leader;
+                }
             }
         }
+    }
+
+    fn finish(
+        &self,
+        key: &Path,
+        generation: &str,
+        source: &str,
+        result: Option<(RefreshResult, Option<String>)>,
+    ) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owns_entry = matches!(
+            entries.get(key),
+            Some(GateEntry::Running {
+                generation: current_generation,
+                source: current_source,
+                ..
+            }) if current_generation == generation && current_source == source
+        );
+        if owns_entry {
+            match result {
+                Some((result, result_generation)) => {
+                    entries.insert(
+                        key.to_path_buf(),
+                        GateEntry::Complete(CompletedRefresh {
+                            generation: generation.to_string(),
+                            result_generation,
+                            source: source.to_string(),
+                            completed_at: Instant::now(),
+                            result,
+                        }),
+                    );
+                }
+                None => {
+                    entries.remove(key);
+                }
+            }
+        }
+        self.changed.notify_all();
     }
 }
 
@@ -206,7 +347,7 @@ impl RefreshGate {
 /// caller does not know exists, so it lives here now, where the token is
 /// actually spent.
 fn gate() -> &'static RefreshGate {
-    static GATE: std::sync::OnceLock<RefreshGate> = std::sync::OnceLock::new();
+    static GATE: OnceLock<RefreshGate> = OnceLock::new();
     GATE.get_or_init(RefreshGate::default)
 }
 
@@ -226,17 +367,15 @@ fn identity_file(dir: &Path, name: &str) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-fn account_of(dir: &Path, tool: &str) -> Option<String> {
-    let (file, field, prefix) = match tool {
-        "claude-code" => (
-            ".claude.json",
-            &["oauthAccount", "accountUuid"][..],
-            "claude",
-        ),
-        "codex" => ("auth.json", &["tokens", "account_id"][..], "codex"),
+fn account_from_identity(path: &Path, tool: &str) -> Option<String> {
+    let (field, prefix) = match tool {
+        "claude-code" => (&["oauthAccount", "accountUuid"][..], "claude"),
+        "codex" => (&["tokens", "account_id"][..], "codex"),
         _ => return None,
     };
-    let bytes = identity_file(dir, file)?;
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    let bytes = identity_file(parent, name)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     field
         .iter()
@@ -244,6 +383,15 @@ fn account_of(dir: &Path, tool: &str) -> Option<String> {
         .as_str()
         .filter(|s| !s.is_empty())
         .map(|id| format!("{prefix}:{id}"))
+}
+
+fn account_of(dir: &Path, tool: &str) -> Option<String> {
+    let name = match tool {
+        "claude-code" => ".claude.json",
+        "codex" => "auth.json",
+        _ => return None,
+    };
+    account_from_identity(&dir.join(name), tool)
 }
 
 /// The key a claim is held under: the ACCOUNT, not the directory.
@@ -263,59 +411,491 @@ fn claim_key(dir: &Path, tool: &str) -> std::path::PathBuf {
     }
 }
 
-/// Claim the right to renew this account now. False when another caller has it.
-fn claim_refresh_at(dir: &Path, tool: &str, now_secs: i64) -> bool {
-    gate().claim(&claim_key(dir, tool), now_secs)
+fn fingerprint(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
-pub fn refresh_slot(paths: &Paths, dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
-    // Claimed HERE, not at a caller: every path that spends this token passes
-    // through this line, and spending it twice is what logs an account out.
-    if !claim_refresh_at(dir, "claude-code", now_ms / 1000) {
+/// A non-secret identifier for one exact Claude credential generation.
+/// Callers that already hold the blob use this instead of racing another read
+/// of the selected file or Keychain item.
+pub(crate) fn claude_credential_fingerprint_from_blob(bytes: &[u8]) -> String {
+    fingerprint(bytes)
+}
+
+fn source_fingerprint(dir: &Path) -> String {
+    let source = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    fingerprint(source.as_os_str().as_encoded_bytes())
+}
+
+fn coordination_now_ms() -> i64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct DiskCompletion {
+    version: u8,
+    generation: String,
+    #[serde(default)]
+    result_generation: Option<String>,
+    source: String,
+    completed_at_ms: i64,
+    result: DiskResult,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiskResult {
+    Renewed,
+    Busy,
+    Expired,
+    Refused,
+    Offline,
+    Superseded,
+    NoAttempt,
+}
+
+impl DiskResult {
+    fn from_result(result: &RefreshResult) -> Option<Self> {
+        match result {
+            Ok(RefreshOutcome::Renewed) => Some(Self::Renewed),
+            Ok(RefreshOutcome::NativeManaged) => None,
+            Err(RefreshError::Busy) => Some(Self::Busy),
+            Err(RefreshError::Expired) => Some(Self::Expired),
+            Err(RefreshError::Refused(_)) => Some(Self::Refused),
+            Err(RefreshError::Offline(_)) => Some(Self::Offline),
+            Err(RefreshError::AlreadyRefreshing) => Some(Self::Superseded),
+            Err(RefreshError::NoCredential | RefreshError::InUse) => None,
+        }
+    }
+
+    fn into_result(self) -> RefreshResult {
+        match self {
+            Self::Renewed => Ok(RefreshOutcome::Renewed),
+            Self::Busy => Err(RefreshError::Busy),
+            Self::Expired => Err(RefreshError::Expired),
+            Self::Refused => Err(RefreshError::Refused("the login server refused it".into())),
+            Self::Offline => Err(RefreshError::Offline(
+                "the refresh request did not complete".into(),
+            )),
+            Self::Superseded | Self::NoAttempt => Err(RefreshError::AlreadyRefreshing),
+        }
+    }
+}
+
+struct Attempt {
+    result: RefreshResult,
+    result_generation: Option<String>,
+    cache: bool,
+}
+
+impl Attempt {
+    fn before_exchange(result: RefreshResult) -> Self {
+        Self {
+            result,
+            result_generation: None,
+            cache: false,
+        }
+    }
+
+    fn after_exchange(result: RefreshResult) -> Self {
+        Self {
+            result,
+            result_generation: None,
+            cache: true,
+        }
+    }
+
+    fn after_exchange_with_generation(result: RefreshResult, generation: Option<String>) -> Self {
+        Self {
+            result,
+            result_generation: generation,
+            cache: true,
+        }
+    }
+}
+
+fn open_refresh_lock(paths: &Paths, key: &Path) -> std::io::Result<std::fs::File> {
+    let lock_dir = paths.store_dir().join(".refresh-locks");
+    std::fs::create_dir_all(&lock_dir)?;
+    let lock_name = format!("{}.lock", fingerprint(key.as_os_str().as_encoded_bytes()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(lock_dir.join(lock_name))
+}
+
+fn read_disk_completion(file: &mut std::fs::File) -> Option<DiskCompletion> {
+    file.rewind().ok()?;
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 4096 {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_disk_completion(file: &mut std::fs::File, completion: &DiskCompletion) {
+    let Ok(bytes) = serde_json::to_vec(completion) else {
+        return;
+    };
+    if file.set_len(0).is_err() || file.rewind().is_err() {
+        return;
+    }
+    if file.write_all(&bytes).is_ok() {
+        let _ = file.sync_data();
+    }
+}
+
+enum DiskDecision {
+    Shared(RefreshResult),
+    RetryAllowed,
+}
+
+fn disk_decision_for(
+    completion: DiskCompletion,
+    generation: &str,
+    source: &str,
+) -> Option<DiskDecision> {
+    if completion.version != 1 {
+        return None;
+    }
+    let age = coordination_now_ms().checked_sub(completion.completed_at_ms)?;
+    if !(0..=BURST_SECS.saturating_mul(1000)).contains(&age) {
+        return None;
+    }
+    if matches!(completion.result, DiskResult::NoAttempt) {
+        return Some(DiskDecision::RetryAllowed);
+    }
+    if completion.source != source {
+        return Some(DiskDecision::Shared(Err(RefreshError::AlreadyRefreshing)));
+    }
+    if completion.generation == generation
+        || completion.result_generation.as_deref() == Some(generation)
+    {
+        return Some(DiskDecision::Shared(completion.result.into_result()));
+    }
+    None
+}
+
+#[cfg(test)]
+mod disk_clock_tests {
+    use super::*;
+
+    /// Keep-alive and request recovery pass the token-observation time into the
+    /// refresh API. That timestamp may be fixed or captured long before a
+    /// follower acquires the disk lock, so it cannot date coordination records.
+    #[test]
+    fn completion_freshness_ignores_the_callers_token_clock() {
+        let fixed_token_clock = 1_i64;
+        let completed_at_ms = coordination_now_ms();
+        assert!(completed_at_ms > fixed_token_clock);
+        let decision = disk_decision_for(
+            DiskCompletion {
+                version: 1,
+                generation: "old".into(),
+                result_generation: Some("new".into()),
+                source: "slot".into(),
+                completed_at_ms,
+                result: DiskResult::Renewed,
+            },
+            "old",
+            "slot",
+        );
+        assert!(matches!(
+            decision,
+            Some(DiskDecision::Shared(Ok(RefreshOutcome::Renewed)))
+        ));
+    }
+}
+
+fn coordinate_across_processes<F>(
+    paths: &Paths,
+    key: &Path,
+    generation: &str,
+    source: &str,
+    action: F,
+) -> Attempt
+where
+    F: FnOnce() -> Attempt,
+{
+    let mut file = match open_refresh_lock(paths, key) {
+        Ok(file) => file,
+        Err(_) => {
+            return Attempt::before_exchange(Err(RefreshError::Offline(
+                "could not coordinate the refresh safely".into(),
+            )))
+        }
+    };
+    let started = Instant::now();
+    let mut contended = false;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                contended = true;
+                if started.elapsed() >= WAIT_FOR_REFRESH {
+                    return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                return Attempt::before_exchange(Err(RefreshError::Offline(
+                    "could not coordinate the refresh safely".into(),
+                )))
+            }
+        }
+    }
+
+    let disk_decision = read_disk_completion(&mut file).and_then(|completion| {
+        // A follower that actually waited receives the leader's full outcome.
+        // A later independent command may retry a refusal, while a recorded
+        // success still protects stale duplicate copies from spending the token
+        // the successful exchange retired.
+        let reusable_without_contention = matches!(
+            completion.result,
+            DiskResult::Renewed | DiskResult::Superseded
+        );
+        (contended
+            || reusable_without_contention
+            || matches!(completion.result, DiskResult::NoAttempt))
+        .then(|| disk_decision_for(completion, generation, source))
+        .flatten()
+    });
+    if let Some(DiskDecision::Shared(result)) = disk_decision {
+        return Attempt::after_exchange(result);
+    }
+    if contended && !matches!(disk_decision, Some(DiskDecision::RetryAllowed)) {
+        // The previous holder may have exited after sending the request but
+        // before recording its answer. Retrying here could spend the same
+        // rotating token twice, so ambiguity is a conservative stand-down.
+        return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+    }
+
+    let _ = file.set_len(0);
+    let attempt = action();
+    if attempt.cache {
+        if let Some(result) = DiskResult::from_result(&attempt.result) {
+            write_disk_completion(
+                &mut file,
+                &DiskCompletion {
+                    version: 1,
+                    generation: generation.to_string(),
+                    result_generation: attempt.result_generation.clone(),
+                    source: source.to_string(),
+                    completed_at_ms: coordination_now_ms(),
+                    result,
+                },
+            );
+        }
+    } else {
+        // A waiting process can distinguish a clean guard refusal from a holder
+        // that may have disappeared after sending OAuth. It re-runs every guard
+        // rather than turning a preflight InUse into AlreadyRefreshing.
+        write_disk_completion(
+            &mut file,
+            &DiskCompletion {
+                version: 1,
+                generation: generation.to_string(),
+                result_generation: None,
+                source: source.to_string(),
+                completed_at_ms: coordination_now_ms(),
+                result: DiskResult::NoAttempt,
+            },
+        );
+    }
+    attempt
+}
+
+fn coordinate_refresh<F>(
+    paths: &Paths,
+    dir: &Path,
+    tool: &str,
+    generation: &str,
+    action: F,
+) -> RefreshResult
+where
+    F: FnOnce() -> Attempt,
+{
+    let key = claim_key(dir, tool);
+    let source = source_fingerprint(dir);
+    match gate().begin(&key, generation, &source) {
+        GateDecision::Shared(result) => result,
+        GateDecision::Leader => {
+            let attempt = coordinate_across_processes(paths, &key, generation, &source, action);
+            let cached = attempt
+                .cache
+                .then(|| (attempt.result.clone(), attempt.result_generation.clone()));
+            gate().finish(&key, generation, &source, cached);
+            attempt.result
+        }
+    }
+}
+
+fn native_managed(paths: &Paths, dir: &Path, tool: &str, now_ms: i64) -> Option<RefreshResult> {
+    let login = crate::live_login::resolve(paths, dir, tool, now_ms)?;
+    if login.refresh_rejected_at_ms.is_some() {
+        return Some(Err(RefreshError::Expired));
+    }
+    Some(Ok(RefreshOutcome::NativeManaged))
+}
+
+pub fn refresh_slot(paths: &Paths, dir: &Path, now_ms: i64) -> RefreshResult {
+    refresh_slot_inner(paths, dir, now_ms, None, None, None)
+}
+
+/// Renew only when both the credential source generation and every available
+/// selected-account identity field still name the rejected request's owner.
+pub(crate) fn refresh_slot_if_current(
+    paths: &Paths,
+    dir: &Path,
+    now_ms: i64,
+    expected_fingerprint: &str,
+    expected_account_uuid: Option<&str>,
+    expected_identity: Option<&crate::live_login::LoginIdentity>,
+) -> RefreshResult {
+    refresh_slot_inner(
+        paths,
+        dir,
+        now_ms,
+        Some(expected_fingerprint),
+        expected_account_uuid,
+        expected_identity,
+    )
+}
+
+fn claude_identity_matches(
+    dir: &Path,
+    expected_account_uuid: Option<&str>,
+    expected_identity: Option<&crate::live_login::LoginIdentity>,
+) -> bool {
+    if expected_account_uuid.is_none() && expected_identity.is_none() {
+        return true;
+    }
+    let Some(blob) = identity_file(dir, ".claude.json") else {
+        return false;
+    };
+    let account_uuid = serde_json::from_slice::<serde_json::Value>(&blob)
+        .ok()
+        .and_then(|value| {
+            value["oauthAccount"]["accountUuid"]
+                .as_str()
+                .map(str::to_string)
+        });
+    if expected_account_uuid.is_some_and(|expected| account_uuid.as_deref() != Some(expected)) {
+        return false;
+    }
+    !expected_identity.is_some_and(|expected| {
+        crate::live_login::identity_from_credential(&blob, "claude-code").as_ref() != Some(expected)
+    })
+}
+
+fn refresh_slot_inner(
+    paths: &Paths,
+    dir: &Path,
+    now_ms: i64,
+    expected_fingerprint: Option<&str>,
+    expected_account_uuid: Option<&str>,
+    expected_identity: Option<&crate::live_login::LoginIdentity>,
+) -> RefreshResult {
+    if !claude_identity_matches(dir, expected_account_uuid, expected_identity) {
         return Err(RefreshError::AlreadyRefreshing);
     }
+    if expected_fingerprint.is_none() {
+        if let Some(result) = native_managed(paths, dir, "claude-code", now_ms) {
+            return result;
+        }
+    }
+    // Preflight before joining the gate: an attempt that never reaches OAuth
+    // must not suppress the next caller after the native process exits.
     if slot_in_use(paths, dir, "claude-code") {
         return Err(RefreshError::InUse);
     }
-    let blob = read_credential(dir).ok_or(RefreshError::NoCredential)?;
-    if refresh_token_expired(blob.expose(), now_ms) {
+    let credential = read_credential(dir).map_err(|_| RefreshError::NoCredential)?;
+    if expected_fingerprint.is_some_and(|expected| fingerprint(credential.bytes()) != expected) {
+        return Err(RefreshError::AlreadyRefreshing);
+    }
+    if !claude_identity_matches(dir, expected_account_uuid, expected_identity) {
+        return Err(RefreshError::AlreadyRefreshing);
+    }
+    if let Some(result) = native_managed(paths, dir, "claude-code", now_ms) {
+        if !credential_unchanged(dir, &credential)
+            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+        {
+            return Err(RefreshError::AlreadyRefreshing);
+        }
+        return result;
+    }
+    if refresh_token_expired(credential.bytes(), now_ms) {
         return Err(RefreshError::Expired);
     }
-    let token = serde_json::from_slice::<serde_json::Value>(blob.expose())
-        .ok()
-        .and_then(|v| {
-            v["claudeAiOauth"]["refreshToken"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .ok_or(RefreshError::NoCredential)?;
+    let token = refresh_token(credential.bytes()).ok_or(RefreshError::NoCredential)?;
+    let generation = fingerprint(credential.bytes());
 
-    // Re-read both guards after taking the provider-qualified claim and as
-    // close to the request as possible. A session or login replacement that
-    // appeared while this caller was waiting must keep the old token off the
-    // wire.
-    if slot_in_use(paths, dir, "claude-code") {
-        return Err(RefreshError::InUse);
-    }
-    if read_credential(dir).is_none_or(|current| current.expose() != blob.expose()) {
-        return Err(RefreshError::AlreadyRefreshing);
-    }
-    let (body, status) = post(&token)?;
-    // 429 is the login server asking for quiet, not a verdict on this account.
-    // Reporting it as a refusal reads as "sign in again" - a login nobody needed.
-    if status == 429 {
-        return Err(RefreshError::Busy);
-    }
-    if status == 401 || status == 400 {
-        return Err(RefreshError::Refused(short_reason(&body)));
-    }
-    if !(200..300).contains(&status) {
-        return Err(RefreshError::Refused(format!("HTTP {status}")));
-    }
-    let merged = merge_response(blob.expose(), &body, now_ms)
-        .ok_or_else(|| RefreshError::Refused("the server's answer had no access token".into()))?;
-    write_credential(dir, &merged).map_err(|e| RefreshError::Refused(e.to_string()))
+    coordinate_refresh(paths, dir, "claude-code", &generation, || {
+        if !credential_unchanged(dir, &credential)
+            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+        {
+            return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+        }
+        if let Some(result) = native_managed(paths, dir, "claude-code", now_ms) {
+            return Attempt::before_exchange(result);
+        }
+        if slot_in_use(paths, dir, "claude-code") {
+            return Attempt::before_exchange(Err(RefreshError::InUse));
+        }
+
+        let response = post(&token);
+        // A login may replace the blob while the request is in flight. Its
+        // generation owns every later verdict, so neither a success nor a
+        // refusal for the old token may overwrite or poison it.
+        if !credential_unchanged(dir, &credential)
+            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+        {
+            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+        }
+        let (body, status) = match response {
+            Ok(response) => response,
+            Err(error) => return Attempt::after_exchange(Err(error)),
+        };
+        if status == 429 {
+            return Attempt::after_exchange(Err(RefreshError::Busy));
+        }
+        if status == 401 || status == 400 {
+            return Attempt::after_exchange(Err(RefreshError::Refused(short_reason(&body))));
+        }
+        if !(200..300).contains(&status) {
+            return Attempt::after_exchange(Err(RefreshError::Refused(format!("HTTP {status}"))));
+        }
+        let Some(merged) = merge_response(credential.bytes(), &body, now_ms) else {
+            return Attempt::after_exchange(Err(RefreshError::Refused(
+                "the server's answer had no access token".into(),
+            )));
+        };
+        if !credential_unchanged(dir, &credential)
+            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+        {
+            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+        }
+        let result = write_credential(dir, credential.source(), &merged)
+            .map(|()| RefreshOutcome::Renewed)
+            .map_err(|error| RefreshError::Refused(error.to_string()));
+        let result_generation = result.is_ok().then(|| fingerprint(&merged));
+        Attempt::after_exchange_with_generation(result, result_generation)
+    })
 }
 
 /// One short clause from an error body, for a message a person reads. Never the
@@ -359,32 +939,166 @@ fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
     let Some(candidate) = account_of(dir, tool) else {
         return false;
     };
+    // A default Claude process reads identity from HOME/.claude.json, not from
+    // ~/.claude/.claude.json. The usable-login resolver intentionally returns
+    // None for expired or unverified access, but that must never erase the
+    // holder guard: the process can still have the selected refresh token in
+    // memory. Use the native accessor's exact identity path for this check.
+    if crate::proc::running_native_login_processes(paths, tool)
+        .into_iter()
+        .any(|process| {
+            account_from_identity(&process.identity_path, tool).is_some_and(|id| id == candidate)
+        })
+    {
+        return true;
+    }
     running.into_iter().any(|active| {
         (!paths.sandboxed() || inside_paths(paths, &active))
             && account_of(&active, tool).is_some_and(|id| id == candidate)
     })
 }
 
-/// The credential blob wherever this slot keeps it.
-fn read_credential(dir: &Path) -> Option<Secret> {
-    if let Ok(bytes) = std::fs::read(dir.join(".credentials.json")) {
-        if !bytes.is_empty() {
-            return Some(Secret::new(bytes));
-        }
-    }
-    crate::adapters::claude::slot_keychain_read_detail(dir)
+fn refresh_token(blob: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(blob)
         .ok()
-        .map(Secret::new)
+        .and_then(|value| {
+            value["claudeAiOauth"]["refreshToken"]
+                .as_str()
+                .filter(|token| !token.is_empty())
+                .map(str::to_string)
+        })
+}
+
+/// The one credential generation Claude Code uses for this slot.
+fn read_credential(
+    dir: &Path,
+) -> std::result::Result<
+    crate::adapters::claude::SlotCredential,
+    crate::adapters::claude::KeychainReadError,
+> {
+    crate::adapters::claude::slot_credential(dir)
+}
+
+fn credential_unchanged(dir: &Path, expected: &crate::adapters::claude::SlotCredential) -> bool {
+    read_credential(dir).is_ok_and(|current| current == *expected)
 }
 
 /// Put the renewed blob back where the old one was, so the tool's next run reads
 /// what was written rather than a second, competing copy.
-fn write_credential(dir: &Path, blob: &[u8]) -> anyhow::Result<()> {
-    let file = dir.join(".credentials.json");
-    if file.exists() {
-        return crate::atomic::write_secret(&file, blob);
+fn write_credential(
+    dir: &Path,
+    source: crate::adapters::claude::SlotCredentialSource,
+    blob: &[u8],
+) -> anyhow::Result<()> {
+    write_credential_with(
+        source,
+        blob,
+        |value| crate::atomic::write_secret(&dir.join(".credentials.json"), value),
+        |value| crate::adapters::claude::slot_keychain_write(dir, value),
+    )
+}
+
+fn write_credential_with<F, K>(
+    source: crate::adapters::claude::SlotCredentialSource,
+    blob: &[u8],
+    write_file: F,
+    write_keychain: K,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(&[u8]) -> anyhow::Result<()>,
+    K: FnOnce(&[u8]) -> anyhow::Result<()>,
+{
+    match source {
+        crate::adapters::claude::SlotCredentialSource::File => write_file(blob),
+        crate::adapters::claude::SlotCredentialSource::Keychain => write_keychain(blob),
     }
-    crate::adapters::claude::slot_keychain_write(dir, blob)
+}
+
+#[cfg(test)]
+mod claude_credential_source_tests {
+    use super::*;
+    use crate::adapters::claude::{
+        choose_slot_credential, KeychainReadError, SlotCredentialSource,
+    };
+    use std::cell::Cell;
+
+    fn blob(access: &str, refresh: &str, expires_at: i64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": refresh,
+                "expiresAt": expires_at,
+                "refreshTokenExpiresAt": 9_999_999_999_999i64
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn renewal_uses_and_writes_the_selected_keychain_generation() {
+        let selected = choose_slot_credential(
+            Some(blob("OLD-AT", "OLD-RT", 9_999_999_999_999)),
+            Ok(blob("NEW-AT", "NEW-RT", 1_000)),
+        )
+        .expect("Keychain credential");
+        assert_eq!(refresh_token(selected.bytes()).as_deref(), Some("NEW-RT"));
+
+        let file_writes = Cell::new(0);
+        let keychain_writes = Cell::new(0);
+        write_credential_with(
+            selected.source(),
+            b"renewed",
+            |_| {
+                file_writes.set(file_writes.get() + 1);
+                Ok(())
+            },
+            |_| {
+                keychain_writes.set(keychain_writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(file_writes.get(), 0);
+        assert_eq!(keychain_writes.get(), 1);
+    }
+
+    #[test]
+    fn a_file_generation_writes_back_to_the_file() {
+        let selected = choose_slot_credential(
+            Some(blob("FILE-AT", "FILE-RT", 1_000)),
+            Err(KeychainReadError::NotApplicable),
+        )
+        .expect("file credential");
+        let file_writes = Cell::new(0);
+        let keychain_writes = Cell::new(0);
+        write_credential_with(
+            selected.source(),
+            b"renewed",
+            |_| {
+                file_writes.set(file_writes.get() + 1);
+                Ok(())
+            },
+            |_| {
+                keychain_writes.set(keychain_writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(file_writes.get(), 1);
+        assert_eq!(keychain_writes.get(), 0);
+    }
+
+    #[test]
+    fn keep_alive_uses_the_selected_keychain_expiry() {
+        let now = 1_800_000_000_000;
+        let selected = choose_slot_credential(
+            Some(blob("OLD-AT", "OLD-RT", now + KEEP_ALIVE_WINDOW_MS * 2)),
+            Ok(blob("NEW-AT", "NEW-RT", now + 1_000)),
+        )
+        .expect("Keychain credential");
+        assert_eq!(selected.source(), SlotCredentialSource::Keychain);
+        assert!(wants_keep_alive(selected.bytes(), now));
+    }
 }
 
 /// POST the exchange with the token on stdin, never in argv.
@@ -511,19 +1225,74 @@ pub fn rfc3339_utc(secs: i64) -> String {
 /// running in that slot (its session holds the refresh token, and retiring it
 /// would break the session's own next renewal), and the claim is taken here -
 /// where the token is SPENT - so two callers cannot spend it twice.
-pub fn refresh_codex_slot(paths: &Paths, dir: &Path, now_ms: i64) -> Result<(), RefreshError> {
-    if !claim_refresh_at(dir, "codex", now_ms / 1000) {
+pub fn refresh_codex_slot(paths: &Paths, dir: &Path, now_ms: i64) -> RefreshResult {
+    refresh_codex_slot_inner(paths, dir, now_ms, None)
+}
+
+/// Renew only when the slot still contains the credential generation and
+/// provider identity that supplied the rejected request.
+pub fn refresh_codex_slot_if_current(
+    paths: &Paths,
+    dir: &Path,
+    now_ms: i64,
+    expected_fingerprint: &str,
+    expected_identity: Option<&crate::live_login::LoginIdentity>,
+) -> RefreshResult {
+    let blob = read_codex_credential(dir)?;
+    let fingerprint = crate::refresh_health::codex_credential_fingerprint_from_blob(blob.expose())
+        .ok_or(RefreshError::NoCredential)?;
+    if fingerprint != expected_fingerprint
+        || expected_identity.is_some_and(|expected| {
+            crate::live_login::identity_from_credential(blob.expose(), "codex").as_ref()
+                != Some(expected)
+        })
+    {
         return Err(RefreshError::AlreadyRefreshing);
     }
-    if slot_in_use(paths, dir, "codex") {
-        return Err(RefreshError::InUse);
-    }
-    let path = dir.join("auth.json");
-    let blob = std::fs::read(&path)
+    refresh_codex_slot_inner(paths, dir, now_ms, Some(blob))
+}
+
+fn read_codex_credential(dir: &Path) -> Result<Secret, RefreshError> {
+    std::fs::read(dir.join("auth.json"))
         .ok()
-        .filter(|b| !b.is_empty())
+        .filter(|blob| !blob.is_empty())
         .map(Secret::new)
-        .ok_or(RefreshError::NoCredential)?;
+        .ok_or(RefreshError::NoCredential)
+}
+
+fn refresh_codex_slot_inner(
+    paths: &Paths,
+    dir: &Path,
+    now_ms: i64,
+    prechecked_blob: Option<Secret>,
+) -> RefreshResult {
+    let path = dir.join("auth.json");
+    let blob = match prechecked_blob {
+        Some(blob) => {
+            if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+                return Err(RefreshError::AlreadyRefreshing);
+            }
+            if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
+                if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+                    return Err(RefreshError::AlreadyRefreshing);
+                }
+                return result;
+            }
+            if slot_in_use(paths, dir, "codex") {
+                return Err(RefreshError::InUse);
+            }
+            blob
+        }
+        None => {
+            if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
+                return result;
+            }
+            if slot_in_use(paths, dir, "codex") {
+                return Err(RefreshError::InUse);
+            }
+            read_codex_credential(dir)?
+        }
+    };
     let token = serde_json::from_slice::<serde_json::Value>(blob.expose())
         .ok()
         .and_then(|v| {
@@ -535,36 +1304,57 @@ pub fn refresh_codex_slot(paths: &Paths, dir: &Path, now_ms: i64) -> Result<(), 
         .ok_or(RefreshError::NoCredential)?;
     let fingerprint = crate::refresh_health::codex_credential_fingerprint_from_blob(blob.expose())
         .ok_or(RefreshError::NoCredential)?;
+    let generation = fingerprint.clone();
 
-    if slot_in_use(paths, dir, "codex") {
-        return Err(RefreshError::InUse);
-    }
-    if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
-        return Err(RefreshError::AlreadyRefreshing);
-    }
-    let (body, status) = post_codex(&token)?;
-    if status == 429 {
-        return Err(RefreshError::Busy);
-    }
-    if matches!(status, 400 | 401 | 403) {
-        let _ = crate::refresh_health::record_codex_rejection(dir, &fingerprint, now_ms);
-        return Err(RefreshError::Expired);
-    }
-    if !(200..300).contains(&status) {
-        return Err(RefreshError::Refused(format!("HTTP {status}")));
-    }
-    // A login can replace auth.json while the request is in flight. The
-    // response belongs to the exact blob used for POST and must never be
-    // merged into a newer account or refresh token.
-    if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
-        return Err(RefreshError::AlreadyRefreshing);
-    }
-    let merged = merge_codex_response(blob.expose(), &body, &rfc3339_utc(now_ms / 1000))
-        .ok_or_else(|| RefreshError::Refused("the server's answer had no access token".into()))?;
-    crate::atomic::write_secret(&path, &merged)
-        .map_err(|e| RefreshError::Refused(e.to_string()))?;
-    let _ = crate::refresh_health::clear_codex_rejection_before(dir, &fingerprint, now_ms);
-    Ok(())
+    coordinate_refresh(paths, dir, "codex", &generation, || {
+        if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+            return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+        }
+        if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
+            return Attempt::before_exchange(result);
+        }
+        if slot_in_use(paths, dir, "codex") {
+            return Attempt::before_exchange(Err(RefreshError::InUse));
+        }
+
+        let response = post_codex(&token);
+        if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+        }
+        let (body, status) = match response {
+            Ok(response) => response,
+            Err(error) => return Attempt::after_exchange(Err(error)),
+        };
+        if status == 429 {
+            return Attempt::after_exchange(Err(RefreshError::Busy));
+        }
+        if matches!(status, 400 | 401 | 403) {
+            let _ = crate::refresh_health::record_codex_rejection(dir, &fingerprint, now_ms);
+            return Attempt::after_exchange(Err(RefreshError::Expired));
+        }
+        if !(200..300).contains(&status) {
+            return Attempt::after_exchange(Err(RefreshError::Refused(format!("HTTP {status}"))));
+        }
+        let Some(merged) = merge_codex_response(blob.expose(), &body, &rfc3339_utc(now_ms / 1000))
+        else {
+            return Attempt::after_exchange(Err(RefreshError::Refused(
+                "the server's answer had no access token".into(),
+            )));
+        };
+        if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+        }
+        let result = crate::atomic::write_secret(&path, &merged)
+            .map(|()| RefreshOutcome::Renewed)
+            .map_err(|error| RefreshError::Refused(error.to_string()));
+        if result.is_ok() {
+            let _ = crate::refresh_health::clear_codex_rejection_before(dir, &fingerprint, now_ms);
+        }
+        let result_generation = result
+            .is_ok()
+            .then(|| crate::refresh_health::codex_credential_fingerprint_from_blob(&merged));
+        Attempt::after_exchange_with_generation(result, result_generation.flatten())
+    })
 }
 
 fn post_codex(refresh_token: &str) -> Result<(String, u32), RefreshError> {
@@ -749,12 +1539,13 @@ pub fn wants_keep_alive_codex(blob: &[u8], now_secs: i64) -> bool {
         .is_some_and(|exp| exp - now_secs <= KEEP_ALIVE_CODEX_WINDOW_SECS)
 }
 
-/// A keep-alive pass has three distinct outcomes. A deferred account is due,
-/// but the safety guard found a live session holding the same account; it is
-/// neither renewed nor known to have failed.
+/// A keep-alive pass distinguishes an OAuth renewal from a native client that
+/// already owns usable access. A deferred account is due, but the safety guard
+/// could not prove that the live holder can serve it.
 #[derive(Debug, Default)]
 pub(crate) struct KeepAliveReport {
     pub(crate) renewed: Vec<String>,
+    pub(crate) native_managed: Vec<String>,
     pub(crate) deferred: Vec<String>,
     pub(crate) failed: Vec<(String, RefreshError)>,
 }
@@ -795,16 +1586,9 @@ pub(crate) fn keep_alive_sweep_codex_report(
         if !wants_keep_alive_codex(&blob, now_ms / 1000) {
             continue;
         }
-        // Derive a known safety hold before claiming the account-wide refresh
-        // gate. Otherwise the first held copy consumes the claim on its way to
-        // `InUse`, and a second due copy of the same account is misreported as
-        // `AlreadyRefreshing` even though neither attempted an exchange.
-        if codex_renewal_deferred(paths, dir, now_ms / 1000) {
-            report.deferred.push(name.clone());
-            continue;
-        }
         match refresh_codex_slot(paths, dir, now_ms) {
-            Ok(()) => report.renewed.push(name.clone()),
+            Ok(RefreshOutcome::Renewed) => report.renewed.push(name.clone()),
+            Ok(RefreshOutcome::NativeManaged) => report.native_managed.push(name.clone()),
             Err(RefreshError::InUse) => report.deferred.push(name.clone()),
             Err(e) => report.failed.push((name.clone(), e)),
         }
@@ -998,50 +1782,20 @@ pub(crate) fn keep_alive_sweep_report(
 ) -> KeepAliveReport {
     let mut report = KeepAliveReport::default();
     for (name, dir) in slots {
-        let Some(blob) = read_credential(dir) else {
+        let Ok(credential) = read_credential(dir) else {
             continue;
         };
-        if !wants_keep_alive(blob.expose(), now_ms) {
+        if !wants_keep_alive(credential.bytes(), now_ms) {
             continue;
         }
         match refresh_slot(paths, dir, now_ms) {
-            Ok(()) => report.renewed.push(name.clone()),
+            Ok(RefreshOutcome::Renewed) => report.renewed.push(name.clone()),
+            Ok(RefreshOutcome::NativeManaged) => report.native_managed.push(name.clone()),
             Err(RefreshError::InUse) => report.deferred.push(name.clone()),
             Err(e) => report.failed.push((name.clone(), e)),
         }
     }
     report
-}
-
-#[cfg(test)]
-mod one_refresh_per_burst_tests {
-    use super::*;
-
-    /// A burst of 401s must produce ONE refresh, not one per request.
-    ///
-    /// Refresh tokens rotate: each use mints a new one and retires the old. So
-    /// N concurrent turns each refreshing the same slot spend the same token N
-    /// times, and every result but one is already invalid when it lands - the
-    /// account ends up logged out by its own renewal. teamclaude hit this as
-    /// "don't rotate the token family once per 401 in a burst".
-    ///
-    /// The gate is per-slot and time-bounded: a second refresh moments later is
-    /// the burst, a refresh minutes later is a new event.
-    #[test]
-    fn a_burst_of_refreshes_collapses_to_one() {
-        let g = RefreshGate::default();
-        let dir = std::path::Path::new("/s/a");
-        // First caller in: proceeds.
-        assert!(g.claim(dir, 1_000));
-        // Everyone else in the same burst: stands down.
-        assert!(!g.claim(dir, 1_000));
-        assert!(!g.claim(dir, 1_002));
-        // A different slot is unaffected - one account's burst must not block
-        // another's genuine refresh.
-        assert!(g.claim(std::path::Path::new("/s/b"), 1_000));
-        // Long enough later, it is a new event rather than the same burst.
-        assert!(g.claim(dir, 1_000 + BURST_SECS + 1));
-    }
 }
 
 #[cfg(test)]
@@ -1076,44 +1830,6 @@ mod point_of_effect_tests {
             claim_key(&a, "claude-code"),
             claim_key(&b, "codex"),
             "equal provider-local ids are not the same account"
-        );
-    }
-
-    /// The gate has to sit at the point of effect, not at one caller.
-    ///
-    /// `RefreshGate`'s own doc names the outcome: N concurrent renewals of one
-    /// slot spend the same refresh token N times, every result but one is dead
-    /// when it lands, and the account logs itself out. Only one of the three
-    /// paths reaching `refresh_slot` claimed it - the keep-alive sweep and
-    /// `has_usable_login` went straight through. A rule enforced at one caller
-    /// is a rule the next caller does not know exists.
-    #[test]
-    fn a_second_refresh_of_the_same_slot_in_a_burst_stands_down() {
-        let a = std::path::Path::new("/tmp/swapdex-gate-a");
-        let b = std::path::Path::new("/tmp/swapdex-gate-b");
-        assert!(
-            claim_refresh_at(a, "claude-code", 10_000),
-            "the first caller goes ahead"
-        );
-        assert!(
-            !claim_refresh_at(a, "claude-code", 10_000),
-            "a second in the same burst stands down"
-        );
-        assert!(
-            !claim_refresh_at(a, "claude-code", 10_000 + BURST_SECS),
-            "still inside the window"
-        );
-        assert!(
-            claim_refresh_at(a, "claude-code", 10_001 + BURST_SECS),
-            "a later refresh is a new event, not the same burst"
-        );
-        assert!(
-            claim_refresh_at(b, "claude-code", 10_000),
-            "another account is never blocked"
-        );
-        assert!(
-            claim_refresh_at(a, "codex", 10_000),
-            "provider namespaces are independent"
         );
     }
 

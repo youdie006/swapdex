@@ -209,6 +209,7 @@ fn running_codex(root: &Path, config_dir: &Path) -> ReapedChild {
     }
     let mut child = Command::new(&bin)
         .arg("30")
+        .env_clear()
         .env("HOME", root)
         .env("CODEX_HOME", config_dir)
         .spawn()
@@ -226,6 +227,84 @@ fn running_codex(root: &Path, config_dir: &Path) -> ReapedChild {
     let _ = child.kill();
     let _ = child.wait();
     panic!("the fake Codex process never exposed its isolated environment");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn verified_native_codex_ownership_replaces_deferral_without_hiding_expiry_or_rejection() {
+    use base64::Engine;
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_codex(
+        root.path(),
+        "native",
+        "workspace",
+        "refresh-native",
+        now_secs() + 3600,
+    );
+    let path = slot.join("auth.json");
+    let mut auth: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let subject =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"stable-user"}"#);
+    auth["tokens"]["id_token"] = format!("header.{subject}.signature").into();
+    let before = serde_json::to_vec(&auth).unwrap();
+    std::fs::write(&path, &before).unwrap();
+    let _native = running_codex(root.path(), &slot);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("oauth-count");
+    let sweep = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "--keep-alive"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    assert!(sweep.status.success(), "{}", combined(&sweep));
+    assert!(
+        combined(&sweep).contains("renewal is managed by Codex"),
+        "{}",
+        combined(&sweep)
+    );
+    assert!(
+        !combined(&sweep).contains("renewal deferred"),
+        "{}",
+        combined(&sweep)
+    );
+    assert!(
+        !count.exists(),
+        "native ownership must not spend refresh tokens"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let row = json_row(root.path(), "native");
+    assert_eq!(row["warning"], serde_json::Value::Null, "{row}");
+    assert_eq!(row["renewal_owner"]["codex"], "native", "{row}");
+
+    let fingerprint = swapdex::refresh_health::codex_credential_fingerprint(&slot).unwrap();
+    swapdex::refresh_health::record_codex_rejection(&slot, &fingerprint, now_secs() * 1000)
+        .unwrap();
+    let row = json_row(root.path(), "native");
+    assert!(
+        row["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("refresh rejected"),
+        "{row}"
+    );
+
+    swapdex::refresh_health::clear_codex_rejection(&slot, &fingerprint).unwrap();
+    auth["tokens"]["access_token"] = jwt(1).into();
+    std::fs::write(&path, serde_json::to_vec(&auth).unwrap()).unwrap();
+    let row = json_row(root.path(), "native");
+    assert!(
+        row["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expired"),
+        "{row}"
+    );
+    assert!(
+        row["renewal_owner"].get("codex").is_none(),
+        "expired access must not read as ready: {row}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -899,6 +978,76 @@ fn manual_refresh_reports_partial_failure_across_both_tools() {
             (&dirs[1], "auth.json", codex)
         };
         assert_eq!(std::fs::read(failed_dir.join(file)).unwrap(), before);
+    }
+}
+
+#[test]
+fn manual_refresh_keeps_provider_identities_separate() {
+    for codex_account in ["shared-account", "distinct-codex-account"] {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = seed_slots(
+            root.path(),
+            &[
+                ("shared", "claude-slot", "claude-code"),
+                ("shared", "codex-slot", "codex"),
+                ("second", "codex-second-slot", "codex"),
+            ],
+        );
+        let claude_identity = serde_json::json!({
+            "oauthAccount": {"accountUuid": "shared-account"}
+        });
+        std::fs::write(dirs[0].join(".claude.json"), claude_identity.to_string()).unwrap();
+        // A Codex directory can contain unrelated Claude metadata. Only its
+        // Codex identity is relevant to the Codex renewal loop.
+        std::fs::write(dirs[1].join(".claude.json"), claude_identity.to_string()).unwrap();
+        std::fs::write(dirs[2].join(".claude.json"), claude_identity.to_string()).unwrap();
+        std::fs::write(
+            dirs[0].join(".credentials.json"),
+            serde_json::json!({"claudeAiOauth": {
+                "accessToken": "old-claude-access",
+                "refreshToken": "old-claude-refresh",
+                "expiresAt": 1
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dirs[1].join("auth.json"),
+            codex_auth(codex_account, "old-codex-refresh", &jwt(1)),
+        )
+        .unwrap();
+        std::fs::write(
+            dirs[2].join("auth.json"),
+            codex_auth("second-codex-account", "second-codex-refresh", &jwt(1)),
+        )
+        .unwrap();
+        let curl = fake_curl(root.path());
+        let count = root.path().join("exchange-count");
+        let answer = serde_json::json!({
+            "access_token": jwt(now_secs() + 86_400),
+            "refresh_token": "new-synthetic-refresh",
+            "expires_in": 3600
+        })
+        .to_string();
+        let output = run_with_curl(
+            root.path(),
+            &curl,
+            &["refresh"],
+            &[
+                ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+                ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+                ("FAKE_STATUS", "200"),
+                ("FAKE_BODY", &answer),
+                ("FAKE_COUNT_PATH", count.to_str().unwrap()),
+            ],
+        );
+        let said = combined(&output);
+        assert_eq!(output.status.code(), Some(0), "{said}");
+        assert_eq!(std::fs::read(count).unwrap().len(), 3, "{said}");
+        assert!(said.contains("3 account(s) renewed"), "{said}");
+        let codex: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dirs[1].join("auth.json")).unwrap()).unwrap();
+        assert_eq!(codex["tokens"]["refresh_token"], "new-synthetic-refresh");
     }
 }
 

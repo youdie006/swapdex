@@ -166,9 +166,16 @@ pub fn record_codex_rejection(dir: &Path, expected_fingerprint: &str, now_ms: i6
 /// `None`. Missing, malformed, oversized, or symlinked files also return
 /// `None`; marker contents are never included in an error.
 pub fn codex_rejection(dir: &Path) -> Option<i64> {
-    let status = read_status(dir)?;
     let current = codex_credential_fingerprint(dir)?;
-    (status.credential_fingerprint == current).then_some(status.rejected_at_ms)
+    codex_rejection_for_fingerprint(dir, &current)
+}
+
+/// Read rejection evidence for a credential snapshot already held by a caller.
+/// This never rereads auth.json and cannot attach an old rejection to a newer
+/// native login selected while another process is replacing the file.
+pub(crate) fn codex_rejection_for_fingerprint(dir: &Path, fingerprint: &str) -> Option<i64> {
+    let status = read_status(dir)?;
+    (status.credential_fingerprint == fingerprint).then_some(status.rejected_at_ms)
 }
 
 /// Clear rejection evidence after a successful request made with

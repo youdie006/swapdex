@@ -366,6 +366,279 @@ const CODEX_SLOT: SlotVars = SlotVars {
     bare: ".codex",
 };
 
+/// One exact native CLI process's on-disk OAuth source.
+///
+/// This is intentionally narrower than [`running_config_dirs`]. The refresh
+/// guard includes children that inherit a slot variable because they can still
+/// hold a retired token in memory. A native login authority must itself have
+/// the exact `claude` or `codex` process name, and must not be using an
+/// alternate environment credential.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeLoginProcess {
+    pub(crate) source_dir: std::path::PathBuf,
+    pub(crate) identity_path: std::path::PathBuf,
+    /// Claude's raw secure-storage key. `None` is the bare Keychain service;
+    /// `Some` is hashed by the adapter. Unused for Codex.
+    pub(crate) claude_keychain_key: Option<String>,
+}
+
+#[derive(Default)]
+struct NativeProcessEnv {
+    home: Option<String>,
+    claude_config: Option<String>,
+    claude_securestorage: Option<String>,
+    codex_home: Option<String>,
+    alternate_credential: bool,
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn native_process_env(text: &str, sep: char, tool: &str) -> NativeProcessEnv {
+    let mut env = NativeProcessEnv::default();
+    for field in text.split([sep, '\n']) {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "HOME" => env.home = Some(value.to_string()),
+            "CLAUDE_CONFIG_DIR" => env.claude_config = Some(value.to_string()),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR" => env.claude_securestorage = Some(value.to_string()),
+            "CODEX_HOME" => env.codex_home = Some(value.to_string()),
+            // These bypass the native OAuth store. Seeing a matching file next
+            // to such a process does not prove that the process owns it.
+            "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN"
+                if tool == "claude-code" && !value.is_empty() =>
+            {
+                env.alternate_credential = true
+            }
+            "OPENAI_API_KEY" | "CODEX_API_KEY" if tool == "codex" && !value.is_empty() => {
+                env.alternate_credential = true
+            }
+            _ => {}
+        }
+    }
+    env
+}
+
+fn native_process_from_env(
+    paths: &crate::paths::Paths,
+    tool: &str,
+    comm: &str,
+    text: &str,
+    sep: char,
+) -> Option<NativeLoginProcess> {
+    let vars = slot_vars(tool)?;
+    if comm != vars.comm {
+        return None;
+    }
+    let env = native_process_env(text, sep, tool);
+    if env.alternate_credential {
+        return None;
+    }
+    let home = nonempty(env.home.as_deref()).map(std::path::PathBuf::from);
+    let (source_dir, identity_path, claude_keychain_key) = match tool {
+        "claude-code" => {
+            let config = nonempty(env.claude_config.as_deref());
+            let source = config
+                .map(std::path::PathBuf::from)
+                .or_else(|| home.as_ref().map(|home| home.join(".claude")))?;
+            let identity = match config {
+                Some(_) => source.join(".claude.json"),
+                None => home.as_ref()?.join(".claude.json"),
+            };
+            let key = slot_key(
+                env.claude_securestorage.as_deref(),
+                env.claude_config.as_deref(),
+            );
+            (source, identity, key)
+        }
+        "codex" => {
+            let source = nonempty(env.codex_home.as_deref())
+                .map(std::path::PathBuf::from)
+                .or_else(|| home.as_ref().map(|home| home.join(".codex")))?;
+            let identity = source.join("auth.json");
+            (source, identity, None)
+        }
+        _ => return None,
+    };
+    if !native_path_allowed(paths, &source_dir) || !native_path_allowed(paths, &identity_path) {
+        return None;
+    }
+    Some(NativeLoginProcess {
+        source_dir,
+        identity_path,
+        claude_keychain_key,
+    })
+}
+
+/// A sandbox may only inspect native sources inside its own rooted HOME.
+///
+/// The lexical check happens before `canonicalize`, so a real user's path is
+/// rejected without even resolving it. Canonical containment then catches a
+/// directory symlink that lexically starts inside the sandbox but escapes it.
+pub(crate) fn native_path_allowed(paths: &crate::paths::Paths, path: &std::path::Path) -> bool {
+    if !paths.sandboxed() {
+        return path.is_absolute();
+    }
+    let root = paths.home();
+    if !path.is_absolute()
+        || !path.starts_with(root)
+        || path.strip_prefix(root).ok().is_none_or(|relative| {
+            relative
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        })
+    {
+        return false;
+    }
+    let Some(existing) = path.ancestors().find(|candidate| candidate.exists()) else {
+        return false;
+    };
+    let (Ok(real_root), Ok(real_existing)) =
+        (std::fs::canonicalize(root), std::fs::canonicalize(existing))
+    else {
+        return false;
+    };
+    real_existing.starts_with(real_root)
+}
+
+/// Locate the NUL-delimited environment inside a macOS `KERN_PROCARGS2` blob.
+///
+/// Layout: native-endian `argc`, executable path, alignment NULs, `argc` argv
+/// strings, then environment `KEY=VALUE` strings. Returning the original byte
+/// slice keeps spaces in paths intact and never formats or logs the environment.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn kern_procargs2_environ(blob: &[u8]) -> Option<&[u8]> {
+    let argc_bytes: [u8; std::mem::size_of::<i32>()] =
+        blob.get(..std::mem::size_of::<i32>())?.try_into().ok()?;
+    let argc = i32::from_ne_bytes(argc_bytes);
+    if !(0..=1_000_000).contains(&argc) {
+        return None;
+    }
+    let mut position = std::mem::size_of::<i32>();
+
+    // Executable path.
+    position += blob.get(position..)?.iter().position(|byte| *byte == 0)? + 1;
+    // Kernel alignment padding before argv[0].
+    while blob.get(position) == Some(&0) {
+        position += 1;
+    }
+    // Exactly argc NUL-terminated arguments. Spaces are ordinary bytes here.
+    for _ in 0..argc {
+        position += blob.get(position..)?.iter().position(|byte| *byte == 0)? + 1;
+    }
+    Some(blob.get(position..).unwrap_or_default())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_environ(pid: i32) -> Option<Vec<u8>> {
+    const MAX_PROCARGS: usize = 4 * 1024 * 1024;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0usize;
+    let size_status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if size_status != 0 || size == 0 || size > MAX_PROCARGS {
+        return None;
+    }
+    let mut blob = vec![0u8; size];
+    let read_status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            blob.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read_status != 0 || size > blob.len() {
+        return None;
+    }
+    blob.truncate(size);
+    kern_procargs2_environ(&blob).map(ToOwned::to_owned)
+}
+
+/// Exact native Claude/Codex processes whose OAuth source can be identified.
+///
+/// This accessor is read-only. Unreadable environments, alternate credentials,
+/// relative paths and foreign sandbox paths are skipped conservatively.
+pub(crate) fn running_native_login_processes(
+    paths: &crate::paths::Paths,
+    tool: &str,
+) -> Vec<NativeLoginProcess> {
+    let Some(vars) = slot_vars(tool) else {
+        return Vec::new();
+    };
+    let mut processes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+            if comm.trim() != vars.comm {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(entry.path().join("environ")) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            if let Some(process) = native_process_from_env(paths, tool, comm.trim(), &text, '\0') {
+                processes.push(process);
+            }
+        }
+        return processes;
+    }
+
+    let comms = ps_comm_by_pid();
+    #[cfg(target_os = "macos")]
+    {
+        for (pid, comm) in comms {
+            if comm != vars.comm {
+                continue;
+            }
+            let Some(bytes) = pid.parse::<i32>().ok().and_then(macos_process_environ) else {
+                continue;
+            };
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                continue;
+            };
+            if let Some(process) = native_process_from_env(paths, tool, &comm, text, '\0') {
+                processes.push(process);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        for (pid, comm) in comms {
+            if comm != vars.comm {
+                continue;
+            }
+            let Ok(output) = std::process::Command::new("ps")
+                .args(["eww", "-o", "command=", "-p", &pid])
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(process) = native_process_from_env(paths, tool, &comm, &text, ' ') {
+                processes.push(process);
+            }
+        }
+    }
+    processes
+}
+
 /// The slot variables for an adapter id. `None` for a tool with no renewal
 /// path - gemini and antigravity are never refreshed, so hold no slot.
 fn slot_vars(tool: &str) -> Option<&'static SlotVars> {
@@ -997,5 +1270,100 @@ mod tests {
 
         assert!(held, "`<slot>//` and `<slot>` are the same directory");
         assert!(!other, "a neighbouring slot is still free");
+    }
+
+    #[test]
+    fn kern_procargs2_keeps_native_paths_with_spaces_and_securestorage_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let config = root
+            .path()
+            .join("Library/Application Support/swapdex/claude-personal");
+        let secure = root
+            .path()
+            .join("Library/Application Support/Claude Secure Storage");
+        std::fs::create_dir_all(&config).unwrap();
+
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&2i32.to_ne_bytes());
+        blob.extend_from_slice(b"/opt/homebrew/bin/claude\0\0\0");
+        blob.extend_from_slice(b"claude\0--resume with spaces\0");
+        blob.extend_from_slice(format!("HOME={}\0", root.path().display()).as_bytes());
+        blob.extend_from_slice(format!("CLAUDE_CONFIG_DIR={}\0", config.display()).as_bytes());
+        blob.extend_from_slice(
+            format!("CLAUDE_SECURESTORAGE_CONFIG_DIR={}\0", secure.display()).as_bytes(),
+        );
+
+        let environ = kern_procargs2_environ(&blob).expect("valid KERN_PROCARGS2 payload");
+        let text = std::str::from_utf8(environ).unwrap();
+        let process = native_process_from_env(&paths, "claude-code", "claude", text, '\0')
+            .expect("path with spaces remains one environment value");
+        assert_eq!(process.source_dir, config);
+        assert_eq!(process.identity_path, config.join(".claude.json"));
+        assert_eq!(
+            process.claude_keychain_key.as_deref(),
+            secure.to_str(),
+            "securestorage overrides CLAUDE_CONFIG_DIR for the Keychain service"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_sysctl_reads_only_the_spawned_child_environment_with_spaces() {
+        const CHILD_MARKER: &str = "SWAPDEX_NATIVE_ENV_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+        struct ReapedChild(std::process::Child);
+
+        impl Drop for ReapedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("Home With Spaces");
+        let config = home.join("Library/Application Support/Claude Work");
+        std::fs::create_dir_all(&config).unwrap();
+        let paths = crate::paths::Paths::rooted(&home);
+        // macOS can omit the environment of protected system binaries such as
+        // /bin/sleep. Re-exec this ordinary test executable as the owned fixture.
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "proc::tests::macos_sysctl_reads_only_the_spawned_child_environment_with_spaces",
+            ])
+            .env_clear()
+            .env(CHILD_MARKER, "1")
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", &config)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let child = ReapedChild(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let environ = loop {
+            if let Some(environ) = macos_process_environ(child.0.id() as i32) {
+                break environ;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the spawned child's KERN_PROCARGS2 environment remained unreadable"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let text = std::str::from_utf8(&environ).unwrap();
+        let parsed = native_process_env(text, '\0', "claude-code");
+        assert_eq!(parsed.home.as_deref(), home.to_str());
+        assert_eq!(parsed.claude_config.as_deref(), config.to_str());
+
+        let process = native_process_from_env(&paths, "claude-code", "claude", text, '\0')
+            .expect("the owned child maps to its exact native source");
+        assert_eq!(process.source_dir, config);
+        assert_eq!(process.identity_path, config.join(".claude.json"));
     }
 }
