@@ -20,7 +20,8 @@ fn quota_uses_only_the_current_slots_identity_and_credential() {
         std::fs::create_dir_all(&slot).unwrap();
         let old_id =
             serde_json::json!({"accountUuid":"old-user", "emailAddress":"old@example.com"});
-        let slot_id = serde_json::json!({"accountUuid":"current-user", "emailAddress":"current@example.com"});
+        let slot_id =
+            serde_json::json!({"accountUuid":"current-user", "emailAddress":"current@example.com"});
         let credential = |access: &str| {
             serde_json::json!({"claudeAiOauth":{
                 "accessToken":access, "expiresAt":9_000_000_000_000_i64
