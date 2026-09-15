@@ -77,6 +77,13 @@ crates.io; a successful GitHub release alone does not update those installers.
    executable found by `command -v swapdex`. Running proxies keep their old
    executable until restarted; verify their version markers after applying
    the update.
+8. Test the installed native executable, separately from the source build:
+   `python3 scripts/verify-installed-account-routing.py --swapdex /absolute/path/to/native/swapdex`.
+   This uses temporary fake accounts and loopback servers to verify generated
+   launcher behavior and next-request account switching over one connection.
+   Also run `scripts/verify-codex-session-resume.py` with the installed native
+   Swapdex and stock Codex paths to check native session listing/resume and
+   WebSocket-to-HTTP recovery. Both scripts clean up their test processes.
 
 A failed publication remains an incomplete release. Do not reuse an already
 published version or replace an old tag to repair a missing channel.

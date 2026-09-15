@@ -31,7 +31,15 @@ pub enum LockError {
     Unwritable(String),
 }
 
-pub struct LockGuard(#[allow(dead_code)] fs::File);
+pub struct LockGuard(fs::File);
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        // A forked child can retain a duplicate descriptor briefly, so closing
+        // this file alone would let the child's copy prolong the operation.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
 
 /// Exclusive lock around a read-modify-write of the slot registry.
 ///
@@ -816,6 +824,42 @@ mod tests {
         let tl = fs::read_to_string(p.store_dir().join("timeline.jsonl")).unwrap();
         assert!(!tl.contains("SENTINEL"));
         assert!(tl.contains("work") && tl.contains("codex"));
+    }
+
+    fn assert_guard_release_is_not_extended_by_a_cloned_descriptor(
+        acquire: impl Fn() -> std::result::Result<LockGuard, LockError>,
+    ) {
+        let guard = acquire().unwrap();
+        let inherited = guard.0.try_clone().unwrap();
+        assert!(
+            matches!(acquire(), Err(LockError::Busy)),
+            "an active guard must exclude another owner"
+        );
+
+        drop(guard);
+        let replacement = acquire()
+            .expect("ending the guard must release its lock while a cloned descriptor remains");
+
+        drop(inherited);
+        assert!(
+            matches!(acquire(), Err(LockError::Busy)),
+            "closing the old descriptor must not release the replacement owner's lock"
+        );
+        drop(replacement);
+        assert!(acquire().is_ok(), "the replacement guard releases normally");
+    }
+
+    #[test]
+    fn lock_guard_release_is_not_extended_by_a_cloned_descriptor() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Paths::rooted(d.path());
+        let s = Store::open(&p).unwrap();
+
+        assert_guard_release_is_not_extended_by_a_cloned_descriptor(|| s.lock());
+        assert_guard_release_is_not_extended_by_a_cloned_descriptor(|| s.lock_tool("codex"));
+        assert_guard_release_is_not_extended_by_a_cloned_descriptor(|| {
+            registry_lock(&p.store_dir())
+        });
     }
 
     #[test]

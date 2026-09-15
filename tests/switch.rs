@@ -2257,8 +2257,9 @@ fn setup_enter_through_attaches_all_tools() {
     );
 }
 
-// A corrupt LIVE ~/.claude.json must be diagnosed as such - not blamed on
-// the profile snapshot with a remedy that also fails - and doctor must flag it.
+// Corrupt selected Claude identity metadata must be diagnosed as such - not
+// blamed on the profile snapshot with a remedy that also fails - and doctor
+// must flag the concrete file when it inspects the default live layout.
 #[test]
 fn corrupt_live_claude_config_diagnosed_not_blamed_on_snapshot() {
     let root = tempfile::tempdir().unwrap();
@@ -2277,8 +2278,8 @@ fn corrupt_live_claude_config_diagnosed_not_blamed_on_snapshot() {
     let (_o, e, c) = run(root.path(), &["use", "alice", "--tool", "claude"]);
     assert_ne!(c, 0);
     assert!(
-        e.contains(".claude.json") && e.to_lowercase().contains("live"),
-        "blames the LIVE file, not the snapshot: {e}"
+        e.contains("selected Claude identity metadata") && e.contains("corrupt"),
+        "blames the selected identity metadata, not the snapshot: {e}"
     );
     let (o, _e, c) = run(root.path(), &["doctor"]);
     assert_eq!(c, 9, "doctor flags it: {o}");
@@ -2310,8 +2311,8 @@ fn add_with_corrupt_config_is_not_reported_as_not_logged_in() {
         "must not claim the user is logged out when they are: {e}"
     );
     assert!(
-        e.contains(".claude.json"),
-        "points at the corrupt file: {e}"
+        e.contains("selected Claude identity metadata") && e.contains("corrupt"),
+        "identifies the selected corrupt metadata without assuming its layout: {e}"
     );
 }
 

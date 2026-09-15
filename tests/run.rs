@@ -14,7 +14,7 @@ fn fake_claude(root: &Path) -> std::path::PathBuf {
     let f = dir.join("claude");
     std::fs::write(
         &f,
-        "#!/bin/sh\necho \"CFG=$CLAUDE_CONFIG_DIR\"\necho \"ARGS=$*\"\n",
+        "#!/bin/sh\necho \"CFG=$CLAUDE_CONFIG_DIR\"\necho \"SECURE=${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}\"\necho \"ARGS=$*\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -43,6 +43,31 @@ fn run_launches_claude_in_the_accounts_slot() {
         o.lines()
             .any(|l| l.starts_with("CFG=") && l.contains(slots.to_str().unwrap())),
         "claude launched with the slot as CLAUDE_CONFIG_DIR: {o}"
+    );
+}
+
+#[test]
+fn managed_claude_run_clears_a_conflicting_secure_storage_override() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let conflicting = root.path().join("different-claude-login");
+    let out = Command::new(bin())
+        .args(["run", "work"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &conflicting)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "SECURE=unset"),
+        "managed Claude must use the selected slot's config: {stdout}"
     );
 }
 
@@ -148,6 +173,10 @@ fn shim_makes_plain_claude_follow_use() {
         used.contains("default claude account -> work"),
         "use repoints: {used}"
     );
+    // This fixture deliberately has no login, so direct passthrough is the only
+    // authorized route. A failed managed proxy start must no longer launch the
+    // native client implicitly.
+    run_in(root.path(), &["serve", "--off"], &path);
     // Install the shim (finds the fake claude on PATH as the real one).
     let installed = run_in(root.path(), &["shim"], &path);
     assert!(
@@ -1195,6 +1224,134 @@ fn fake_codex(root: &Path) -> std::path::PathBuf {
     .unwrap();
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
     dir
+}
+
+fn slot_dir(root: &Path, name: &str, tool: &str) -> std::path::PathBuf {
+    let store = root.join(".local/share/swapdex");
+    let recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(store.join("slots.json")).unwrap()).unwrap();
+    recs.iter()
+        .find(|record| record["name"] == name && record["tool"] == tool)
+        .and_then(|record| record["config_dir"].as_str())
+        .map(std::path::PathBuf::from)
+        .expect("slot record")
+}
+
+// `swapdex run` is itself the direct, per-account launch path. Once the shims
+// win PATH, looking the tool up by its bare name loops this launch back through
+// managed proxy startup. A brand-new account has no credential for that proxy,
+// so the native login client is never reached.
+#[test]
+fn run_steps_over_installed_shims_for_fresh_accounts() {
+    for (tool_flag, tool, short, home_line) in [
+        (None, "claude-code", "claude", "CFG="),
+        (Some("codex"), "codex", "codex", "HOME_DIR="),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let bin_dir = fake_claude(root.path());
+        fake_codex(root.path());
+        let native_path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut existing_args = vec!["run", "existing", "--no-launch"];
+        if let Some(tool_flag) = tool_flag {
+            existing_args.extend(["--tool", tool_flag]);
+        }
+        run_in(root.path(), &existing_args, &native_path);
+        let existing_dir = slot_dir(root.path(), "existing", tool);
+        if tool == "codex" {
+            std::fs::write(
+                existing_dir.join("auth.json"),
+                br#"{"tokens":{"access_token":"existing","account_id":"existing"}}"#,
+            )
+            .unwrap();
+        } else {
+            std::fs::write(
+                existing_dir.join(".credentials.json"),
+                br#"{"claudeAiOauth":{"accessToken":"existing","expiresAt":32503680000000}}"#,
+            )
+            .unwrap();
+        }
+        let mut use_args = vec!["use", "existing"];
+        let mut serve_args = vec!["serve", "existing"];
+        if let Some(tool_flag) = tool_flag {
+            use_args.extend(["--tool", tool_flag]);
+            serve_args.extend(["--tool", tool_flag]);
+        }
+        run_in(root.path(), &use_args, &native_path);
+        run_in(root.path(), &serve_args, &native_path);
+        let store = root.path().join(".local/share/swapdex");
+        let active = store.join(format!("active-{short}"));
+        let serving = store.join(format!("serving-{short}"));
+        let active_before = std::fs::read(&active).expect("active pointer");
+        let serving_before = std::fs::read(&serving).expect("serving pointer");
+
+        let installed = run_in(root.path(), &["shim"], &native_path);
+        assert!(
+            installed.contains("installed the claude shim"),
+            "{installed}"
+        );
+
+        let shim_dir = root.path().join(".local/share/swapdex/bin");
+        let shim_first_path = format!("{}:{native_path}", shim_dir.display());
+        let mut args = vec!["run", "fresh"];
+        if let Some(tool_flag) = tool_flag {
+            args.extend(["--tool", tool_flag]);
+        }
+        let home = root.path().join("home");
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", shim_first_path)
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.lines().any(|line| line.starts_with(home_line)),
+            "managed {tool} run did not reach the native tool: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert_eq!(std::fs::read(&active).unwrap(), active_before);
+        assert_eq!(std::fs::read(&serving).unwrap(), serving_before);
+    }
+}
+
+#[test]
+fn run_reports_when_an_installed_shim_has_no_native_tool_behind_it() {
+    for (tool_flag, binary) in [(None, "claude"), (Some("codex"), "codex")] {
+        let root = tempfile::tempdir().unwrap();
+        let bin_dir = fake_claude(root.path());
+        fake_codex(root.path());
+        let native_path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        run_in(root.path(), &["shim"], &native_path);
+        std::fs::remove_file(bin_dir.join(binary)).unwrap();
+
+        let shim_dir = root.path().join(".local/share/swapdex/bin");
+        let mut args = vec!["run", "fresh"];
+        if let Some(tool_flag) = tool_flag {
+            args.extend(["--tool", tool_flag]);
+        }
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", &shim_dir)
+            .env("HOME", root.path().join("home"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "shim-only PATH must fail");
+        assert!(
+            stderr.contains(&format!("real `{binary}` executable")) && stderr.contains("not found"),
+            "missing-native diagnostic for {binary}: {stderr}"
+        );
+    }
 }
 
 // `run` is how an account gets its login in the first place: it makes the slot

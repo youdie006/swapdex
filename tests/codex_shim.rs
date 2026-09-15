@@ -1,7 +1,24 @@
 //! Execute the installed shell launcher shape with isolated tools and homes.
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use swapdex::shim::codex_shim_script;
+
+static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+fn fixture_exec_lock() -> MutexGuard<'static, ()> {
+    FIXTURE_EXEC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct LaunchAttempt {
+    status: i32,
+    stdout: String,
+    calls: String,
+    stderr: String,
+    native_invoked: bool,
+}
 
 struct Launch {
     args: Vec<String>,
@@ -10,19 +27,33 @@ struct Launch {
     home: String,
 }
 
-fn launch(args: &[&str], explicit_home: bool, repair_fails: bool) -> Launch {
+fn launch_attempt(
+    args: &[&str],
+    explicit_home: bool,
+    repair_fails: bool,
+    proxy_stdout: &str,
+    proxy_status: i32,
+) -> LaunchAttempt {
+    // Tests in this binary run concurrently. Serialize executable fixture writes
+    // and forks so a child cannot retain another fixture's writable descriptor
+    // long enough for execve to reject that fixture with ETXTBSY.
+    let _exec_guard = fixture_exec_lock();
     let root = tempfile::tempdir().unwrap();
     let tool = root.path().join("real codex");
     let sx = root.path().join("swapdex");
     let shim = root.path().join("shim");
     let pointer = root.path().join("active-codex");
     std::fs::write(&pointer, root.path().join("default home").to_str().unwrap()).unwrap();
-    std::fs::write(&tool, "#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\" \"$@\"\n").unwrap();
+    std::fs::write(
+        &tool,
+        "#!/bin/sh\nprintf '%s\\n' invoked > \"$NATIVE_CALL\"\nprintf '%s\\n' \"$CODEX_HOME\" \"$@\"\n",
+    )
+    .unwrap();
     std::fs::write(&sx, r#"#!/bin/sh
 printf '%s:%s\n' "$CODEX_HOME" "$*" >> "$SX_CALLS"
 case "$1" in
   repair-codex-sessions) if [ "$SX_REPAIR_FAIL" = yes ]; then echo 'repair fixture failed' >&2; exit 1; fi ;;
-  proxy) printf '%s\n' 8788 ;;
+  proxy) printf '%s' "$SX_PROXY_STDOUT"; exit "$SX_PROXY_STATUS" ;;
   serve) printf '%s\n' work ;;
 esac
 "#).unwrap();
@@ -36,25 +67,99 @@ esac
         .env_remove("CODEX_HOME")
         .env("SX_CALLS", root.path().join("calls"))
         .env("SX_REPAIR_FAIL", if repair_fails { "yes" } else { "no" })
+        .env("SX_PROXY_STDOUT", proxy_stdout)
+        .env("SX_PROXY_STATUS", proxy_status.to_string())
+        .env("NATIVE_CALL", root.path().join("native-call"))
         .env("port", "9999")
         .env("sx_plain", "yes");
     if explicit_home {
         cmd.env("CODEX_HOME", root.path().join("chosen home"));
     }
     let out = cmd.output().unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let mut lines = stdout.lines();
+    LaunchAttempt {
+        status: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        calls: std::fs::read_to_string(root.path().join("calls")).unwrap_or_default(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+        native_invoked: root.path().join("native-call").exists(),
+    }
+}
+
+fn launch(args: &[&str], explicit_home: bool, repair_fails: bool) -> Launch {
+    let attempt = launch_attempt(args, explicit_home, repair_fails, "8788", 0);
+    assert_eq!(attempt.status, 0, "{}", attempt.stderr);
+    assert!(attempt.native_invoked, "native Codex was not launched");
+    let mut lines = attempt.stdout.lines();
     Launch {
         home: lines.next().unwrap().to_string(),
         args: lines.map(str::to_string).collect(),
-        calls: std::fs::read_to_string(root.path().join("calls")).unwrap_or_default(),
-        stderr: String::from_utf8(out.stderr).unwrap(),
+        calls: attempt.calls,
+        stderr: attempt.stderr,
     }
+}
+
+#[test]
+fn managed_startup_failure_never_executes_native_codex() {
+    for (status, stdout) in [(1, ""), (1, "8788"), (127, "8788")] {
+        let got = launch_attempt(&["resume"], false, false, stdout, status);
+        assert_ne!(got.status, 0, "status={status}, stdout={stdout:?}");
+        assert!(
+            !got.native_invoked,
+            "native Codex ran after ensure status {status} with {stdout:?}"
+        );
+        assert!(got.stderr.contains("swapdex proxy --ensure --tool codex"));
+    }
+}
+
+#[test]
+fn invalid_success_output_never_executes_native_codex() {
+    for stdout in [
+        "",
+        "port",
+        "8788\n8789",
+        "0",
+        "-1",
+        "65536",
+        "99999999999999999999999999999999999999999999999999",
+    ] {
+        let got = launch_attempt(&["resume"], false, false, stdout, 0);
+        assert_ne!(got.status, 0, "stdout={stdout:?}");
+        assert!(
+            !got.native_invoked,
+            "native Codex ran with invalid port output {stdout:?}"
+        );
+        assert!(got.stderr.contains("swapdex proxy --ensure --tool codex"));
+    }
+}
+
+#[test]
+fn valid_port_boundaries_route_codex_through_the_stable_provider() {
+    for port in ["1", "8788", "65535"] {
+        let got = launch_attempt(&["resume"], false, false, port, 0);
+        assert_eq!(got.status, 0, "{}", got.stderr);
+        assert!(got.native_invoked, "port {port}");
+        assert!(
+            got.stdout
+                .lines()
+                .any(|line| line == format!("openai_base_url=http://127.0.0.1:{port}/v1")),
+            "{}",
+            got.stdout
+        );
+        assert!(!got.stdout.contains("model_provider"));
+    }
+}
+
+#[test]
+fn recognized_unmanaged_status_launches_codex_without_proxy_config() {
+    let got = launch_attempt(&["resume"], false, false, "", 3);
+    assert_eq!(got.status, 0, "{}", got.stderr);
+    assert!(got.native_invoked);
+    assert_eq!(got.stdout.lines().last(), Some("resume"));
+    assert!(!got.stdout.contains("openai_base_url"));
+
+    let malformed = launch_attempt(&["resume"], false, false, "8788", 3);
+    assert_ne!(malformed.status, 0);
+    assert!(!malformed.native_invoked);
 }
 
 #[test]
@@ -110,8 +215,11 @@ fn auth_help_and_explicit_backend_choices_bypass_routing() {
         &["--remote-auth-token-env", "LOGIN_TOKEN", "resume"],
         &["-c", "openai_base_url=https://example.test/v1", "hello"],
     ] {
-        let got = launch(args, false, false);
-        assert_eq!(got.args, args, "{args:?}");
+        let got = launch_attempt(args, false, false, "", 1);
+        assert_eq!(got.status, 0, "{args:?}: {}", got.stderr);
+        assert!(got.native_invoked, "{args:?}");
+        let got_args: Vec<_> = got.stdout.lines().skip(1).collect();
+        assert_eq!(got_args, args, "{args:?}");
         assert!(!got.calls.contains("proxy"), "{args:?}: {}", got.calls);
     }
 }

@@ -61,22 +61,43 @@ fn serving_file_for(paths: &Paths, tool: &str) -> PathBuf {
     paths.store_dir().join(format!("serving-{short}"))
 }
 
-fn read_serving_is_off(path: &std::path::Path, tool: &str) -> Result<bool> {
-    let value = match std::fs::read_to_string(path) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {tool} serving state"));
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StoredChoice {
+    Absent,
+    Off,
+    Slot(PathBuf),
+}
+
+fn read_choice(
+    path: &std::path::Path,
+    tool: &str,
+    kind: &str,
+    allow_off: bool,
+) -> Result<StoredChoice> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoredChoice::Absent);
         }
-    };
+        Err(error) => return Err(error).with_context(|| format!("inspect {tool} {kind} state")),
+    }
+    let value =
+        std::fs::read_to_string(path).with_context(|| format!("read {tool} {kind} state"))?;
     let value = value.trim();
-    if value == SERVING_OFF {
-        return Ok(true);
+    if allow_off && value == SERVING_OFF {
+        return Ok(StoredChoice::Off);
     }
     if value.is_empty() || !std::path::Path::new(value).is_absolute() {
-        bail!("invalid {tool} serving state");
+        bail!("invalid {tool} {kind} state");
     }
-    Ok(false)
+    Ok(StoredChoice::Slot(PathBuf::from(value)))
+}
+
+fn read_serving_is_off(path: &std::path::Path, tool: &str) -> Result<bool> {
+    Ok(matches!(
+        read_choice(path, tool, "serving", true)?,
+        StoredChoice::Off
+    ))
 }
 
 /// Read explicit passthrough without opening the slot registry.
@@ -86,6 +107,52 @@ fn read_serving_is_off(path: &std::path::Path, tool: &str) -> Result<bool> {
 /// silently turn uncertain state into managed credential use.
 pub fn serving_is_off_checked(paths: &Paths, tool: &str) -> Result<bool> {
     read_serving_is_off(&serving_file_for(paths, tool), tool)
+}
+
+/// Whether a launcher has a verified managed route or an intentional reason to
+/// use the native client's own login.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProxyStartupRoute {
+    Managed,
+    ExplicitPassthrough,
+    Unmanaged,
+}
+
+/// Resolve launch routing without mutating either account pointer.
+///
+/// Explicit `off` is authoritative even if the registry is unavailable. In all
+/// other cases, every pointer that exists must name a registered slot. Only a
+/// clean state with no tool slots and no pointers is unmanaged; unreadable,
+/// malformed, dangling, or missing selections remain errors so uncertainty can
+/// never authorize the native home's credential.
+pub(crate) fn proxy_startup_route(paths: &Paths, tool: &str) -> Result<ProxyStartupRoute> {
+    let serving_path = serving_file_for(paths, tool);
+    let serving = read_choice(&serving_path, tool, "serving", true)?;
+    if serving == StoredChoice::Off {
+        return Ok(ProxyStartupRoute::ExplicitPassthrough);
+    }
+
+    let slots = Slots::open_for(paths, tool)?;
+    let active = read_choice(&slots.pointer_file(), tool, "active", false)?;
+    let registered = slots.list();
+    for (kind, choice) in [("serving", &serving), ("active", &active)] {
+        if let StoredChoice::Slot(dir) = choice {
+            if !registered
+                .iter()
+                .any(|slot| slot.config_dir.as_path() == dir.as_path())
+            {
+                bail!("{tool} {kind} state names no registered account");
+            }
+        }
+    }
+
+    if registered.is_empty() {
+        return Ok(ProxyStartupRoute::Unmanaged);
+    }
+    if matches!(serving, StoredChoice::Slot(_)) || matches!(active, StoredChoice::Slot(_)) {
+        return Ok(ProxyStartupRoute::Managed);
+    }
+    bail!("no {tool} account is selected")
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -282,11 +349,15 @@ impl Slots {
     pub fn open_for(paths: &Paths, tool: &str) -> Result<Slots> {
         let store = paths.store_dir();
         let file = store.join("slots.json");
-        let all: Vec<SlotRecord> = if file.exists() {
-            let bytes = std::fs::read(&file).context("read slots.json")?;
-            serde_json::from_slice(&bytes).context("slots.json is corrupt")?
-        } else {
-            Vec::new()
+        let all: Vec<SlotRecord> = match std::fs::read(&file) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("slots.json is corrupt")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(&file) {
+                    Err(inspect) if inspect.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                    _ => return Err(error).context("read slots.json"),
+                }
+            }
+            Err(error) => return Err(error).context("read slots.json"),
         };
         let records = all.iter().filter(|r| r.tool == tool).cloned().collect();
         Ok(Slots {

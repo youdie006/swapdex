@@ -4,6 +4,47 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+## 0.163.0
+
+- **Keep Claude re-login snapshots within the selected account.** Captures
+  from a slot now read its own identity metadata together with its credential.
+  Custom `CLAUDE_CONFIG_DIR` logins use that directory's identity file, including
+  an explicitly selected default config directory. An unavailable slot Keychain
+  item cannot substitute the default login or a stale credential file.
+- **Keep managed Claude login and launch in their own secure-storage slot.**
+  An inherited `CLAUDE_SECURESTORAGE_CONFIG_DIR` could redirect a slot's child
+  process to another account's Keychain item. Managed children now clear that
+  override while ordinary live callers retain their explicit configuration.
+  Named-slot launches reach the native tool directly, so a new slot can sign
+  in even when the managed proxy is unavailable. If only the wrapper remains
+  installed, the launch reports the missing native tool instead of re-entering
+  that wrapper; existing account selections stay unchanged.
+- **Keep rooted Claude operations away from the machine Keychain.** Library
+  callers using a sandbox root now keep capture, apply and interrupted-apply
+  recovery file-only, even without a `SWAPDEX_ROOT` environment variable.
+- **Stop managed Claude and Codex launches when the proxy cannot start.**
+  A failed startup previously executed the native client with its own login,
+  which could charge a different account from the selected payer. Launchers
+  now require a successful startup and a valid local port. Known unmanaged
+  and explicit passthrough states retain direct access; invalid or unreadable
+  selection state cannot authorize that fallback.
+- **Keep Claude prompt text on the selected account.** Words such as `login`
+  in a print prompt or option value no longer disable proxy routing. The
+  launcher recognizes actual `auth login`, `auth logout`, `auth status` and
+  `setup-token` commands separately from conversation text. Optional debug
+  filters and multiple MCP config values cannot authorize an auth bypass.
+- **Release account-operation locks when the operation ends.** A child process
+  could briefly retain an inherited lock descriptor after a completed switch,
+  making the next selection fail as busy. Store, credential and registry guards
+  now explicitly release their lock while still excluding concurrent writers.
+- **Verify routing with the installed executable.** The optional
+  `scripts/verify-installed-account-routing.py` check exercises generated
+  launchers, direct named runs and Claude/Codex A-to-B-to-A payer changes over
+  a persistent connection, using synthetic accounts and local servers. It
+  resolves macOS temporary-directory aliases before checking account homes.
+
 ## 0.162.0
 
 - **Restore Codex session search and resume after account switching.** The
