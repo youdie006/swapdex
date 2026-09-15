@@ -24,8 +24,9 @@ The required behavior is:
 - Do not implicitly use the client's different account when managed renewal
   fails. Explicit passthrough and separately enabled account failover are
   different policies and must retain their explicit meaning.
-- Prevent competing refresh-token use by the proxy, manual commands,
-  background jobs and native clients.
+- Serialize refresh-token use by participating proxy, manual-command and
+  background callers. Detect and avoid native ownership conflicts until
+  an explicit cooperative handoff establishes a single renewal authority.
 
 Access-token expiry is normal. Automatic renewal preserves continuity;
 it does not disable provider expiry or guarantee that a revoked refresh
@@ -88,20 +89,20 @@ access token unusable [P1]. The background scheduler caps timer waits to
 detect expiry after a sleeping machine resumes [P2].
 
 When Home control is enabled, both Claude and Codex executors delegate
-refresh to Home. If Home is unavailable, they return an error rather than
+refresh to Home ([P5], [P6]). If Home is unavailable, they return an error rather than
 performing a competing local refresh [P3]. This is an explicit ownership
 boundary worth adopting.
 
 There are limits to the analogy. The request-level one-recovery rule does
 not mean exactly one HTTP attempt inside every provider executor. Also,
-the inspected lifecycle path ignores the result of `persist`, even though
-the persistence function uses generation ordering [P4]. Swapdex must not
+the inspected lifecycle path ignores the result of `persist` [P4], even though
+the persistence function uses generation ordering [P7]. Swapdex must not
 equate an in-memory success with a durably saved rotated credential.
 
 ### TeamClaude: shared promise, guarded response, incomplete ownership
 
 The actual inference forwarding path awaits `ensureTokenFresh`, whose normal
-threshold is five minutes before expiry. Concurrent requests share the
+threshold is five minutes before expiry [T7]. Concurrent requests share the
 account's `_refreshPromise`. Forced refreshes after a recent successful
 refresh are suppressed to avoid repeatedly rotating for old 401 responses.
 The response is discarded if a reload replaced the refresh token while
@@ -115,7 +116,7 @@ the account unavailable, but transient failure is swallowed; forwarding
 can continue with a potentially expired access token ([T1], [T2]).
 
 `importFrom` is documented as reading credentials from the native file at
-startup and reload. However, the refresh callback writes token fields to
+startup and reload [T8]. However, the refresh callback writes token fields to
 the config row without an `importFrom` guard [T4]. This is a static
 inconsistency, not a reproduced runtime bug. The dedicated save helper's
 test does not establish that every callback preserves external ownership.
@@ -141,7 +142,7 @@ The current implementation was reviewed at
 result. The claim precedes the native-holder check, so a skipped attempt can
 also make another caller report that renewal is already happening. Separate
 swapdex processes do not share that gate. Claude also lacks Codex's
-post-response check against credential replacement [W1].
+post-response check against credential replacement ([W1], [W3]).
 
 Do not remove the native-holder guard merely because the CLI points at the
 local proxy. A base URL proves where inference travels, not who owns the
@@ -227,15 +228,21 @@ recorded as such in the eventual fix PR and release record.
 [P2]: https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/sdk/cliproxy/auth/auto_refresh_loop.go#L13-L18
 [P3]: https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/internal/runtime/executor/helps/home_refresh.go#L90-L126
 [P4]: https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/sdk/cliproxy/auth/conductor_lifecycle.go#L148-L266
+[P5]: https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/internal/runtime/executor/claude_executor_auth.go#L149-L167
+[P6]: https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/internal/runtime/executor/codex_executor_auth.go#L15-L35
+[P7]: https://github.com/router-for-me/CLIProxyAPI/blob/7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b/sdk/cliproxy/auth/conductor_lifecycle.go#L403-L446
 [T1]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/src/account-manager.js#L3620-L3730
 [T2]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/src/server.js#L2117-L2122
 [T3]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/src/config.js#L171-L279
 [T4]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/src/index.js#L320-L352
 [T5]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/docs/proxy-modes.md#L19-L27
 [T6]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/src/server.js#L2503-L2510
+[T7]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/src/oauth.js#L242-L255
+[T8]: https://github.com/KarpelesLab/teamclaude/blob/9f6067437a3575326656c1c8d0f10e986f4bf8b8/docs/accounts.md#L39-L47
 [S1]: https://github.com/sasanktumpati/codex-auth-switcher/blob/433534e46a1f43c7fe09b3abe624b5f03fb4c585/internal/auth.go#L238-L265
 [S2]: https://github.com/sasanktumpati/codex-auth-switcher/blob/433534e46a1f43c7fe09b3abe624b5f03fb4c585/internal/auth.go#L412-L444
 [W1]: https://github.com/youdie006/swapdex/blob/4e41d25063a2a5cf44c94c19b950365d0f36aefe/src/refresh.rs#L173-L313
 [W2]: https://github.com/youdie006/swapdex/blob/4e41d25063a2a5cf44c94c19b950365d0f36aefe/src/proxy/mod.rs#L1610-L1718
+[W3]: https://github.com/youdie006/swapdex/blob/4e41d25063a2a5cf44c94c19b950365d0f36aefe/src/refresh.rs#L552-L568
 [N1]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/core/src/session/session.rs#L959-L985
 [N2]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/login/src/auth/manager.rs#L2354-L2371
