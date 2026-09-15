@@ -317,9 +317,17 @@ fn is_our_shim(path: &Path) -> bool {
 /// LOOKS set up while `swapdex use` silently does nothing.
 pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
     let path = std::env::var_os("PATH")?;
+    let cwd = std::env::current_dir().ok();
     for dir in std::env::split_paths(&path) {
+        let dir = if dir.is_absolute() {
+            dir
+        } else if let Some(cwd) = &cwd {
+            cwd.join(dir)
+        } else {
+            continue;
+        };
         let cand = dir.join("claude");
-        if cand.is_file() {
+        if is_executable_file(&cand) {
             let ours = is_our_shim(&cand);
             return Some((cand, ours));
         }
@@ -337,16 +345,48 @@ fn find_real_claude(shim_dir: &Path) -> Option<PathBuf> {
 /// The real `bin` on PATH, skipping our own shim dir and any shim we wrote.
 fn find_real(shim_dir: &Path, bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    let cwd = std::env::current_dir().ok();
     for dir in std::env::split_paths(&path) {
+        // PATH entries are resolved by the shell relative to the cwd at lookup
+        // time. A generated shim runs later from arbitrary project folders, so
+        // persist that resolution now. Do not canonicalize it: package managers
+        // deliberately put a stable symlink in PATH in front of versioned files.
+        let dir = if dir.is_absolute() {
+            dir
+        } else if let Some(cwd) = &cwd {
+            cwd.join(dir)
+        } else {
+            continue;
+        };
         if dir == shim_dir {
             continue;
         }
         let cand = dir.join(bin);
-        if cand.is_file() && !is_our_shim(&cand) {
+        if is_executable_file(&cand) && !is_our_shim(&cand) {
             return Some(cand);
         }
     }
     None
+}
+
+/// Match executable lookup rather than mere directory contents. A regular file
+/// without an execute bit does not win PATH and must not be baked into a shim.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Does this profile already put the shim dir on PATH?
@@ -376,6 +416,25 @@ pub enum ShimReach {
 /// Decide between those three from facts the caller has already gathered.
 /// Pure, so the interesting case can be tested without a shell to run in.
 pub fn shim_reach(active: bool, profile_text: Option<&str>, shim_dir: &Path) -> ShimReach {
+    shim_reach_at_home(active, profile_text, shim_dir, dirs::home_dir().as_deref())
+}
+
+/// The same decision using the home supplied by the caller's resolved Paths.
+pub fn shim_reach_for(
+    paths: &Paths,
+    active: bool,
+    profile_text: Option<&str>,
+    shim_dir: &Path,
+) -> ShimReach {
+    shim_reach_at_home(active, profile_text, shim_dir, Some(paths.home()))
+}
+
+fn shim_reach_at_home(
+    active: bool,
+    profile_text: Option<&str>,
+    shim_dir: &Path,
+    home: Option<&Path>,
+) -> ShimReach {
     if active {
         return ShimReach::Active;
     }
@@ -384,21 +443,29 @@ pub fn shim_reach(active: bool, profile_text: Option<&str>, shim_dir: &Path) -> 
     // real finding here - and on a machine where swapdex was ever installed,
     // that marker is always present.
     match profile_text {
-        Some(t) if profile_already_adds(t, shim_dir) => ShimReach::ConfiguredElsewhere,
+        Some(t) if profile_already_adds_at_home(t, shim_dir, home) => {
+            ShimReach::ConfiguredElsewhere
+        }
         _ => ShimReach::Missing,
     }
 }
 
 /// The shell profile's text, if there is one to read.
 pub fn shell_profile_text() -> Option<(PathBuf, String)> {
-    let p = shell_profile()?;
+    let paths = Paths::resolve().ok()?;
+    shell_profile_text_for(&paths)
+}
+
+/// The shell profile's text under a specific resolved home.
+pub fn shell_profile_text_for(paths: &Paths) -> Option<(PathBuf, String)> {
+    let p = shell_profile_at(paths.home())?;
     let t = std::fs::read_to_string(&p).ok()?;
     Some((p, t))
 }
 
-fn profile_already_adds(profile_text: &str, shim_dir: &Path) -> bool {
+fn profile_already_adds_at_home(profile_text: &str, shim_dir: &Path, home: Option<&Path>) -> bool {
     let full = shim_dir.to_string_lossy().to_string();
-    let home = dirs::home_dir().map(|h| h.to_string_lossy().to_string());
+    let home = home.map(|h| h.to_string_lossy().to_string());
     // The same dir with the home prefix written the other two ways.
     let alts: Vec<String> = home
         .iter()
@@ -426,8 +493,7 @@ const PROFILE_MARKER: &str = "# added by swapdex (claude shim)";
 /// The shell profile to teach: the one belonging to $SHELL, since that is the
 /// shell the user actually gets. Returns `None` for a shell we should not guess at
 /// (fish and friends keep PATH somewhere else entirely).
-fn shell_profile() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn shell_profile_at(home: &Path) -> Option<PathBuf> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let name = shell.rsplit('/').next().unwrap_or("");
     match name {
@@ -488,15 +554,24 @@ fn read_profile_for_edit(profile: &Path) -> Result<String> {
 /// never reaches it, and `swapdex use` appears to work while changing nothing.
 /// Idempotent - a profile that already carries the marker is left alone.
 pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
+    let paths = Paths::resolve().context("resolve paths for shell profile")?;
+    ensure_on_path_for(&paths, shim_dir)
+}
+
+/// Put the shim on PATH using the home selected by `paths`, including a rooted
+/// library call that has no matching process-wide HOME or SWAPDEX_ROOT.
+pub fn ensure_on_path_for(paths: &Paths, shim_dir: &Path) -> Result<PathSetup> {
     if already_on_path(shim_dir) {
         return Ok(PathSetup::AlreadyThere);
     }
-    let Some(profile) = shell_profile() else {
+    let Some(profile) = shell_profile_at(paths.home()) else {
         return Ok(PathSetup::Manual);
     };
     let existing = read_profile_for_edit(&profile)?;
     let line = path_line(shim_dir);
-    if existing.contains(PROFILE_MARKER) || profile_already_adds(&existing, shim_dir) {
+    if existing.contains(PROFILE_MARKER)
+        || profile_already_adds_at_home(&existing, shim_dir, Some(paths.home()))
+    {
         // Written before but not active yet: the user has not started a new shell.
         return Ok(PathSetup::Added(profile));
     }
@@ -681,7 +756,7 @@ pub enum PathVerdict {
 /// install said everything was fine, which is why nobody suspected the PATH.
 pub fn path_verdict(shim_dir: &std::path::Path, entries: &[&str]) -> PathVerdict {
     path_verdict_with(shim_dir, entries, &|d| {
-        std::path::Path::new(d).join("claude").exists()
+        is_executable_file(&std::path::Path::new(d).join("claude"))
     })
 }
 
@@ -823,7 +898,8 @@ mod tests {
     // profile ended up with three copies.
     #[test]
     fn an_existing_path_line_is_recognised_however_it_is_spelled() {
-        let home = dirs::home_dir().expect("a home dir");
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
         let shim_dir = home.join("Library/Application Support/swapdex/bin");
         let full = shim_dir.display().to_string();
         for spelling in [
@@ -832,22 +908,32 @@ mod tests {
             "export PATH=\"~/Library/Application Support/swapdex/bin:$PATH\"".to_string(),
         ] {
             assert!(
-                profile_already_adds(&format!("# something\n{spelling}\n"), &shim_dir),
+                profile_already_adds_at_home(
+                    &format!("# something\n{spelling}\n"),
+                    &shim_dir,
+                    Some(home),
+                ),
                 "not recognised: {spelling}"
             );
         }
         // A profile that does NOT add it is left alone, and a commented-out line
         // is not an active entry.
-        assert!(!profile_already_adds(
+        assert!(!profile_already_adds_at_home(
             "export PATH=\"/usr/local/bin:$PATH\"\n",
-            &shim_dir
+            &shim_dir,
+            Some(home),
         ));
-        assert!(!profile_already_adds(
+        assert!(!profile_already_adds_at_home(
             &format!("# export PATH=\"{full}:$PATH\"\n"),
-            &shim_dir
+            &shim_dir,
+            Some(home),
         ));
         // A line merely MENTIONING the dir without touching PATH is not one.
-        assert!(!profile_already_adds(&format!("echo {full}\n"), &shim_dir));
+        assert!(!profile_already_adds_at_home(
+            &format!("echo {full}\n"),
+            &shim_dir,
+            Some(home),
+        ));
     }
 
     // Signing in must reach the vendor directly: the OAuth exchange is between

@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
+import struct
 import subprocess
 import tempfile
 import threading
@@ -86,6 +88,7 @@ def safe_env(root, native_bin):
         "no_proxy": "localhost,127.0.0.1",
         "SWAPDEX_OAUTH_URL": "http://127.0.0.1:1/oauth/token",
         "SWAPDEX_CODEX_OAUTH_URL": "http://127.0.0.1:1/oauth/token",
+        "SWAPDEX_CURL": "/usr/bin/false",
         "SWAPDEX_FAKE_CLIENT_LOG": str(root / "native-client.log"),
     }
 
@@ -243,14 +246,16 @@ def verify_shims(root, env):
 class RecorderServer(http.server.ThreadingHTTPServer):
     daemon_threads = False
 
-    def __init__(self):
+    def __init__(self, reset_first=False):
         super().__init__(("127.0.0.1", 0), RecorderHandler)
         self.records = []
         self.records_lock = threading.Lock()
+        self.reset_first = reset_first
 
     def record(self, value):
         with self.records_lock:
             self.records.append(value)
+            return len(self.records)
 
     def snapshot(self):
         with self.records_lock:
@@ -287,12 +292,20 @@ class RecorderHandler(http.server.BaseHTTPRequestHandler):
             user_id = json.loads(body).get("metadata", {}).get("user_id")
         except (UnicodeDecodeError, json.JSONDecodeError):
             pass
-        self.server.record({
+        count = self.server.record({
             "authorization": self.headers.get("Authorization"),
             "account": self.headers.get("chatgpt-account-id"),
             "path": self.path,
             "user_id": user_id,
         })
+        if self.server.reset_first and count == 1:
+            # The body was accepted; a reset before response headers does not
+            # prove that a model turn can be submitted again without duplication.
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                       struct.pack("ii", 1, 0))
+            self.close_connection = True
+            self.connection.close()
+            return
         response = b'{"ok":true}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -301,8 +314,8 @@ class RecorderHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(response)
 
 
-def start_server():
-    server = RecorderServer()
+def start_server(reset_first=False):
+    server = RecorderServer(reset_first)
     thread = threading.Thread(target=server.serve_forever, name="swapdex-fixture-upstream")
     thread.start()
     return server, thread
@@ -353,7 +366,7 @@ def start_proxy(swapdex, root, env, tool, upstream):
         raise
 
 
-def post_turn(connection, tool):
+def post_turn(connection, tool, expected_status=200):
     if tool == "claude":
         path = "/v1/messages"
         body = json.dumps({"model": "fixture", "messages": [], "metadata": {
@@ -371,7 +384,10 @@ def post_turn(connection, tool):
     connection.request("POST", path, body=body, headers=headers)
     response = connection.getresponse()
     response_body = response.read()
-    require(response.status == 200 and response_body == b'{"ok":true}', f"{tool} proxy turn failed")
+    require(response.status == expected_status,
+            f"{tool} proxy turn returned {response.status}, expected {expected_status}")
+    if expected_status == 200:
+        require(response_body == b'{"ok":true}', f"{tool} proxy turn failed")
 
 
 def verify_live_switches(swapdex, root, env):
@@ -422,6 +438,31 @@ def verify_live_switches(swapdex, root, env):
         require(not marker.exists(), f"{tool} proxy marker remained after shutdown")
 
 
+def verify_accepted_posts_are_not_replayed(swapdex, root, env):
+    for tool in ("claude", "codex"):
+        run([swapdex, "serve", "a", *tool_args(tool)], env)
+        upstream, upstream_thread = start_server(reset_first=True)
+        proxy = None
+        connection = None
+        try:
+            proxy, port, _ = start_proxy(swapdex, root, env, tool, upstream)
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            post_turn(connection, tool, expected_status=502)
+            require(len(upstream.snapshot()) == 1,
+                    f"{tool} replayed a POST already accepted by the provider")
+        finally:
+            try:
+                if connection is not None:
+                    connection.close()
+            finally:
+                try:
+                    if proxy is not None:
+                        stop_process(proxy)
+                finally:
+                    stop_server(upstream, upstream_thread)
+        require(not marker_for(root, tool).exists(), f"{tool} proxy marker remained after shutdown")
+
+
 def verify(swapdex, root):
     native_bin = root / "native-bin"
     native_bin.mkdir()
@@ -435,6 +476,7 @@ def verify(swapdex, root):
     verify_named_runs(swapdex, root, env)
     verify_shims(root, env)
     verify_live_switches(swapdex, root, env)
+    verify_accepted_posts_are_not_replayed(swapdex, root, env)
 
 
 def main():
@@ -447,7 +489,7 @@ def main():
     require(swapdex.is_file() and os.access(swapdex, os.X_OK), "--swapdex is not executable")
     with tempfile.TemporaryDirectory(prefix="swapdex-installed-routing-") as temporary:
         verify(str(swapdex), Path(temporary))
-    print("PASS installed shims, direct named runs, and live Claude/Codex A-B-A routing", flush=True)
+    print("PASS installed shims, named runs, Claude/Codex A-B-A routing, and no accepted POST replay", flush=True)
 
 
 if __name__ == "__main__":

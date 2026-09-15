@@ -3145,7 +3145,7 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
 /// own accounts.
 fn slash_body(tool: &str, host: &str) -> String {
     format!(
-        "**If arguments were given**, run `swapdex use $ARGUMENTS --tool {tool}`, then \
+        "**If arguments were given**, run `swapdex serve $ARGUMENTS --tool {tool}`, then \
          report the result in one line.\n\
          \n\
          **If not**, do not make the user recall account names:\n\
@@ -3428,7 +3428,7 @@ pub fn install_slash(paths: &Paths) -> Result<i32> {
         return Ok(1);
     }
     println!("  type `/swap` to pick an account, or `/swap <name>` to go straight there");
-    println!("  (a plain `!swapdex use <account>` works too, without installing anything)");
+    println!("  shell: `swapdex serve <name> --tool claude` or `--tool codex`");
     Ok(0)
 }
 
@@ -3644,28 +3644,19 @@ pub(crate) fn recent_menu_sessions_for_tool(
     }
     // Native path: straight from ~/.claude and ~/.codex.
     let events = crate::session_link::read_timeline(paths);
-    let all = crate::native_sessions::recent_for_tool(paths, n * 4, tool);
-    let mine: Vec<crate::native_sessions::NativeSession> = all
-        .iter()
-        .filter(|s| {
-            crate::session_link::active_at(&events, s.tool, s.started).as_deref() == Some(name)
-        })
-        .map(|s| crate::native_sessions::NativeSession {
-            tool: s.tool,
-            id: s.id.clone(),
-            title: s.title.clone(),
-            cwd: s.cwd.clone(),
-            started: s.started,
-        })
-        .take(n)
-        .collect();
+    let mine = crate::native_sessions::recent_for_tool_matching(paths, n, tool, |tool, started| {
+        crate::session_link::active_at(&events, tool, started).as_deref() == Some(name)
+    });
     if !mine.is_empty() {
         return (
             mine.into_iter().map(MenuSession::Native).collect(),
             format!("recent sessions on '{name}':"),
         );
     }
-    let any: Vec<MenuSession> = all.into_iter().take(n).map(MenuSession::Native).collect();
+    let any: Vec<MenuSession> = crate::native_sessions::recent_for_tool(paths, n, tool)
+        .into_iter()
+        .map(MenuSession::Native)
+        .collect();
     if !any.is_empty() {
         let label = if first_time {
             "recent sessions (any account - attribution starts with your first switch):"
@@ -5075,8 +5066,9 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 let shim_dir = shim_dir_path.display();
                 let resolved = crate::shim::resolved_claude();
                 let active = matches!(resolved, Some((_, true)));
-                let profile = crate::shim::shell_profile_text();
-                match crate::shim::shim_reach(
+                let profile = crate::shim::shell_profile_text_for(paths);
+                match crate::shim::shim_reach_for(
+                    paths,
                     active,
                     profile.as_ref().map(|(_, t)| t.as_str()),
                     &shim_dir_path,
@@ -5301,11 +5293,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     // upgrading Node deletes it while the service still reads as installed.
     // A sandboxed run has no real service, and reading the machine's own unit
     // from a temporary store would report the developer's box, not the sandbox.
-    let home = if paths.sandboxed() {
-        None
-    } else {
-        dirs::home_dir()
-    };
+    let home = (!paths.sandboxed()).then(|| paths.home());
     // Every tool `service install --tool` accepts. It checked two of the four,
     // so a gemini or antigravity proxy could be down with doctor saying nothing.
     for tool in crate::store::KNOWN_TOOLS {
@@ -5323,7 +5311,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         };
         let label = format!("service:{}", crate::commands::tool_binary(tool));
         match crate::service::unit_program(&body) {
-            Some(prog) if std::path::Path::new(prog).exists() => {
+            Some(prog) if std::path::Path::new(&prog).exists() => {
                 let running = crate::proxy::running_proxy_for(paths, tool);
                 if let Some((_, _, build)) = &running {
                     match stale_proxy_note(build, &crate::proxy::build_id(), tool) {
@@ -5350,7 +5338,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     "points at {} which no longer exists - reinstall with \
                      `swapdex service install --tool {}` (an npm path carries the Node \
                      version, so upgrading Node breaks it)",
-                    crate::util::redact_path(prog),
+                    crate::util::redact_path(&prog),
                     pretty_tool_flag(tool)
                 ),
             ),
@@ -5905,13 +5893,14 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
     // it - so the proxy went unused and `serve` silently changed nothing for a
     // day, on two machines. Pinning the address in the tool's own settings is
     // what every competing proxy switcher does, and no PATH ordering undoes it.
-    let svc = dirs::home_dir().is_some_and(|h| {
+    let svc = {
+        let h = paths.home();
         if cfg!(target_os = "macos") {
-            crate::service::launchd_path(&h, "claude-code").exists()
+            crate::service::launchd_path(h, "claude-code").exists()
         } else {
-            crate::service::systemd_path(&h, "claude-code").exists()
+            crate::service::systemd_path(h, "claude-code").exists()
         }
-    });
+    };
     match crate::shim::pin_base_url(paths, 8787, svc)? {
         Some(f) => println!(
             "  pinned the proxy address in {} - a plain `claude` reaches it \
@@ -5931,7 +5920,7 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
     // Put it on PATH ourselves. Leaving that to the user is how the shim ends up
     // installed but never reached: `swapdex use` then flips a pointer nothing
     // reads, and the switch appears to work while changing nothing.
-    match crate::shim::ensure_on_path(&shim_dir)? {
+    match crate::shim::ensure_on_path_for(paths, &shim_dir)? {
         crate::shim::PathSetup::AlreadyThere => {
             // On the PATH is not the same as WINNING it. Reporting membership as
             // success is how the shim ends up installed and never reached: the
@@ -7766,8 +7755,16 @@ fn refresh_codex(
             println!("  {} is already current", r.name);
             continue;
         }
-        let account = slot_account_of(&r.config_dir, "codex");
-        if let Some(note) = already_renewed(&account, done, &r.name) {
+        let auth = std::fs::read(r.config_dir.join("auth.json")).ok();
+        let account = auth
+            .as_deref()
+            .and_then(|bytes| crate::refresh::credential_identity(bytes, "codex"));
+        let token_identity = auth
+            .as_deref()
+            .and_then(|bytes| crate::refresh::refresh_token_identity(bytes, "codex"));
+        if let Some(note) = already_renewed(&account, done, &r.name)
+            .or_else(|| already_renewed(&token_identity, done, &r.name))
+        {
             println!("  {note}");
             continue;
         }
@@ -7776,6 +7773,9 @@ fn refresh_codex(
                 println!("  {} renewed", r.name);
                 if let Some(a) = account {
                     done.push(a);
+                }
+                if let Some(identity) = token_identity {
+                    done.push(identity);
                 }
                 renewed += 1;
             }
@@ -7797,19 +7797,12 @@ fn refresh_codex(
 /// The selected tool's account identity, namespaced by provider. A directory
 /// may contain another tool's metadata, and provider IDs are not globally unique.
 fn slot_account_of(dir: &std::path::Path, tool: &str) -> Option<String> {
-    let id = match tool {
-        "claude-code" => crate::proxy::creds::slot_account_uuid(dir)?,
-        "codex" => {
-            let bytes = std::fs::read(dir.join("auth.json")).ok()?;
-            let v: Value = serde_json::from_slice(&bytes).ok()?;
-            v["tokens"]["account_id"]
-                .as_str()
-                .filter(|id| !id.is_empty())?
-                .to_string()
-        }
+    let file = match tool {
+        "claude-code" => ".claude.json",
+        "codex" => "auth.json",
         _ => return None,
     };
-    Some(format!("{tool}:{id}"))
+    crate::refresh::credential_identity(&std::fs::read(dir.join(file)).ok()?, tool)
 }
 
 /// Why this slot must be left alone, when its account was already renewed.
@@ -9025,19 +9018,25 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             // credential in place, while nothing refreshes a copy - so the slot
             // answers for the account and the snapshot is not consulted at all.
             let mut unreadable: Option<String> = None;
-            if let Some(dir) = slot_dir_named(paths, &p.name) {
-                let native = crate::live_login::resolve(paths, &dir, "claude-code", now_ms());
+            let slot = slot_dir_named(paths, &p.name);
+            if let Some(dir) = &slot {
+                // The name can have been reused for a different account. Even
+                // when the slot is unreadable, neither its credential nor its
+                // identity may fall back to the old snapshot.
+                token = None;
+                expired = false;
+                email = crate::proxy::creds::slot_email(dir);
+                uuid = crate::proxy::creds::slot_account_uuid(dir);
+                let native = crate::live_login::resolve(paths, dir, "claude-code", now_ms());
                 let native_current = native.is_some();
                 let reading = native
                     .map(|login| Ok(login.access_token))
-                    .unwrap_or_else(|| crate::proxy::creds::slot_token_detail(&dir));
+                    .unwrap_or_else(|| crate::proxy::creds::slot_token_detail(dir));
                 match reading {
                     Ok(t) => {
                         token = Some(String::from_utf8_lossy(t.expose()).to_string());
                         expired = !native_current
-                            && crate::proxy::creds::slot_token_expired(&dir, now_ms());
-                        email = crate::proxy::creds::slot_email(&dir).or(email);
-                        uuid = crate::proxy::creds::slot_account_uuid(&dir).or(uuid);
+                            && crate::proxy::creds::slot_token_expired(dir, now_ms());
                     }
                     // Keep WHY. Collapsing a locked keychain into "no token"
                     // tells the user an account they are signed into has no
@@ -9046,8 +9045,17 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     Err(why) => unreadable = Some(why.short().to_string()),
                 }
             }
-            let active = live_uuid.is_some() && uuid == live_uuid;
-            matched_live |= active;
+            let matches_live = live_uuid.is_some() && uuid == live_uuid;
+            let active = if slot.is_some() {
+                slot_default_name(paths, "claude-code")
+                    .map_or(matches_live, |pointed| pointed == p.name)
+            } else {
+                matches_live
+            };
+            // A selected slot remains authoritative even if the native default
+            // home holds the same identity or an older unrelated login.
+            let use_live = slot.is_none() && matches_live;
+            matched_live |= matches_live;
             rows.push(Row {
                 label: if active {
                     format!("{} (active)", p.name)
@@ -9055,16 +9063,14 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     p.name.clone()
                 },
                 name: p.name.clone(),
-                email: if active {
+                email: if use_live {
                     live_id.as_ref().and_then(|a| a.email.clone()).or(email)
                 } else {
                     email
                 },
-                token: if active { live_token.clone() } else { token },
+                token: if use_live { live_token.clone() } else { token },
                 active,
-                // The live login is refreshed by Claude itself, so only a
-                // SNAPSHOT can be stale.
-                expired: expired && !active,
+                expired: expired && !use_live,
                 unreadable,
             });
         }
@@ -9098,7 +9104,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 Some(pointed) => pointed == r.name,
                 None => live_uuid.is_some() && uuid == live_uuid,
             };
-            matched_live |= active;
+            matched_live |= live_uuid.is_some() && uuid == live_uuid;
             rows.push(Row {
                 label: if active {
                     format!("{} (active)", r.name)

@@ -6,6 +6,60 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.164.0
+
+- **Preserve the latest explicit account choice during automatic failover.**
+  A late failure from an older in-flight request can no longer overwrite a
+  newer serving choice. Automatic routing updates are tied to the request's
+  original choice generation.
+- **Keep configured Codex failover within Codex accounts.** The preemptive
+  rejected/spent-account path now reads the Codex registry and Codex token
+  expiry, instead of selecting a Claude slot and failing before forwarding.
+  Copies of one Codex login no longer count as different fallback accounts;
+  distinct workspace members with complete identities remain independent.
+- **Avoid replaying model requests after an ambiguous transport failure.**
+  A reset, broken pipe or lost response after an accepted POST now surfaces the
+  failure instead of resubmitting the body. Both retry layers apply the same
+  rule; safe connection-setup retries and explicit rejected-login recovery
+  remain available. The installed-binary verifier checks accepted POST counts
+  through a local provider that resets its connection before responding.
+- **Keep distinct Codex workspace members separate during renewal.** Complete
+  login identities now include both the JWT subject and workspace ID in
+  coordinated and manual renewal. One member's successful refresh no longer
+  suppresses another member's independent login. Older opaque identities retain
+  their existing conservative grouping, and copies of the same rotating token
+  share exclusion even when one copy lacks a readable JWT subject.
+  A replacement credential cannot inherit a previous generation's renewal
+  success; coordinator generations cover the complete credential blob.
+- **Do not substitute an old profile's usage for an unreadable Claude slot.**
+  A same-name slot now supplies its own identity and credential, including when
+  it is the selected launch account. Missing slot credentials report their
+  read error instead of using a saved or default-home login from another account.
+  An unrelated native login remains visible in its own usage row.
+- **Keep quota reset times even before a usage reading arrives.** Reset-only
+  traffic entries now survive cache reads until their windows actually expire.
+- **Launch native CLIs correctly from any project directory.** Generated shims
+  anchor relative PATH entries at installation and skip non-executable files.
+  Stable package-manager symlinks remain intact so native upgrades still apply.
+- **Keep rooted launcher setup and diagnostics inside their supplied home.**
+  Shell profile reads/writes and installed-service checks now use resolved
+  `Paths`, including direct library callers without a root environment override.
+- **Keep `/swap NAME` focused on the serving account.** Both generated Claude
+  and Codex instructions now use `serve`, matching the interactive chooser and
+  preserving the launch home of new sessions.
+- **Encode service executable paths for each supervisor.** Linux units handle
+  spaces and literal percent specifiers; macOS plists encode XML metacharacters
+  in executable/log paths. Service diagnostics decode the stored executable
+  before checking whether it still exists.
+- **Find an account's older conversations before limiting the resume menu.**
+  Native session lookup applies account attribution before its result limit,
+  so another account's newer conversations cannot hide matching sessions.
+  Directory symlink cycles and aliases are scanned once while shared session
+  roots remain supported.
+- **Stop timed-out session index commands.** A slow `sessionwiki` lookup now
+  terminates its child process group and reaps the direct child instead of
+  leaving a detached thread and command running after the five-second timeout.
+
 ## 0.163.0
 
 - **Keep Claude re-login snapshots within the selected account.** Captures

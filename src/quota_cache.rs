@@ -145,10 +145,17 @@ fn load_file_at(path: &std::path::Path, now: i64, drop_clamped: bool) -> Cache {
     for e in c.values_mut() {
         *e = expire_windows(std::mem::take(e), now);
     }
-    // An entry with nothing left to say is not an entry. A rejected token IS
-    // something to say - it is the reason no number is arriving - so it keeps
-    // the entry alive on its own.
-    c.retain(|_, e| e.five_h.is_some() || e.seven_d.is_some() || e.token_rejected_at.is_some());
+    // An entry with nothing left to say is not an entry. A future reset is still
+    // actionable without a usage reading, and a rejected token is the reason no
+    // number is arriving, so either keeps the entry alive on its own. Expired
+    // resets were cleared above and cannot resurrect an otherwise empty entry.
+    c.retain(|_, e| {
+        e.five_h.is_some()
+            || e.five_h_reset.is_some()
+            || e.seven_d.is_some()
+            || e.seven_d_reset.is_some()
+            || e.token_rejected_at.is_some()
+    });
     // Readings taken while `utilization` was misread as a fraction are all
     // exactly 100 - every account above 1% clamped there - and remembering them
     // would keep showing accounts as spent long after the reading was fixed.
@@ -562,6 +569,38 @@ mod expiry_tests {
 #[cfg(test)]
 mod resets_survive_tests {
     use super::*;
+
+    #[test]
+    fn a_reset_only_traffic_note_survives_until_its_windows_expire() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let five_h = 9_000_000_000;
+        let seven_d = 9_000_010_000;
+
+        note_resets(&paths, "codex", "reset-only", Some(five_h), Some(seven_d));
+
+        assert_eq!(
+            resets_for(&paths, "codex"),
+            vec![Some(five_h)],
+            "a served response's future reset disappeared without a usage reading"
+        );
+        let path = file_for(&paths, "codex");
+        let before = load_file_at(&path, five_h - 1, false);
+        assert_eq!(before["reset-only"].five_h_reset, Some(five_h));
+        assert_eq!(before["reset-only"].seven_d_reset, Some(seven_d));
+
+        let after_five_h = load_file_at(&path, five_h, false);
+        assert_eq!(after_five_h["reset-only"].five_h_reset, None);
+        assert_eq!(
+            after_five_h["reset-only"].seven_d_reset,
+            Some(seven_d),
+            "one expired window must not discard the other future reset"
+        );
+        assert!(
+            load_file_at(&path, seven_d, false).is_empty(),
+            "an entry with no future reset or reading must expire"
+        );
+    }
 
     /// The reset time of a SPENT account is exactly what a hold needs.
     ///

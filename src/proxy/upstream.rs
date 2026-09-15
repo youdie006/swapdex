@@ -191,6 +191,35 @@ pub fn worth_retrying(err: &str) -> bool {
         || e.contains("timeout")
 }
 
+fn bodyless_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "DELETE" | "OPTIONS"
+    )
+}
+
+/// Whether retrying this request can be shown not to duplicate a body the
+/// upstream may already have accepted.
+///
+/// Bodyless methods are safe after any transient transport failure. A request
+/// carrying a body is retried only when the failure proves the connection was
+/// never established. Reset, broken-pipe and EOF errors are ambiguous: the
+/// server may have acted on the complete request before the response was lost.
+pub fn can_retry_request(method: &str, err: &str) -> bool {
+    if !worth_retrying(err) {
+        return false;
+    }
+    if bodyless_method(method) {
+        return true;
+    }
+    let e = err.to_ascii_lowercase();
+    e.contains("lookup address")
+        || e.contains("no route to host")
+        || e.contains("connection refused")
+        || (e.contains("timeout")
+            && (e.contains("connect") || e.contains("resolve") || e.contains("lookup")))
+}
+
 pub fn forward(
     agent: &ureq::Agent,
     method: &str,
@@ -208,7 +237,7 @@ pub fn forward(
             Ok(u) => return Ok(u),
             Err(e) => {
                 let text = format!("{e:#}");
-                if attempt + 1 >= TRIES || !worth_retrying(&text) {
+                if attempt + 1 >= TRIES || !can_retry_request(method, &text) {
                     return Err(e);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250u64 << attempt));
@@ -227,10 +256,7 @@ fn forward_once(
 ) -> Result<Upstream> {
     // ureq types its builder by whether a body is allowed, so bodyless and
     // body-carrying methods cannot share one variable.
-    let bodyless = matches!(
-        method.to_ascii_uppercase().as_str(),
-        "GET" | "HEAD" | "DELETE" | "OPTIONS"
-    );
+    let bodyless = bodyless_method(method);
     if bodyless {
         let mut rb = match method.to_ascii_uppercase().as_str() {
             "HEAD" => agent.head(url),
@@ -369,6 +395,32 @@ mod transient_retry_tests {
         // caller so the account logic can act on it.
         assert!(!worth_retrying("http status 401"));
         assert!(!worth_retrying("certificate verification failed"));
+    }
+
+    #[test]
+    fn body_retries_require_proof_that_nothing_reached_upstream() {
+        for ambiguous in [
+            "io: Broken pipe (os error 32)",
+            "io: unexpected end of file",
+            "io: Connection reset by peer",
+            "timeout: global",
+        ] {
+            assert!(can_retry_request("GET", ambiguous), "{ambiguous}");
+            assert!(!can_retry_request("POST", ambiguous), "{ambiguous}");
+        }
+        for before_send in [
+            "failed to lookup address information",
+            "tcp connect error: Connection refused",
+            "tcp connect error: No route to host",
+            "connect timeout",
+        ] {
+            assert!(can_retry_request("POST", before_send), "{before_send}");
+        }
+        assert!(!can_retry_request(
+            "POST",
+            "certificate verification failed"
+        ));
+        assert!(!can_retry_request("GET", "http status 401"));
     }
 }
 

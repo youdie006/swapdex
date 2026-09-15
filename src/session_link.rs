@@ -262,9 +262,80 @@ fn sessionwiki_rows() -> Option<Vec<Value>> {
     sessionwiki_rows_for_tool(None)
 }
 
-fn sessionwiki_rows_for_tool(tool: Option<&str>) -> Option<Vec<Value>> {
+fn terminate_process_group(child: &mut std::process::Child) {
+    let Ok(group) = i32::try_from(child.id()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+    unsafe {
+        libc::kill(-group, libc::SIGTERM);
+    }
+    let grace = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    while std::time::Instant::now() < grace {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // The leader can exit before a descendant. Address the group once more,
+    // then always wait for the direct child so it cannot become a zombie.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+fn run_sessionwiki(
+    program: &std::ffi::OsStr,
+    tool: Option<&str>,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::io::{Read, Seek};
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    use std::sync::mpsc;
+
+    // Files keep a verbose sessionwiki response from filling an unread pipe
+    // while the parent is polling the process deadline.
+    let mut stdout = tempfile::tempfile().ok()?;
+    let mut stderr = tempfile::tempfile().ok()?;
+    let mut cmd = Command::new(program);
+    cmd.args(["list", "--json", "--no-sync", "-n", "50000"]);
+    if let Some(tool) = tool {
+        cmd.args(["--tool", tool]);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.try_clone().ok()?))
+        .stderr(Stdio::from(stderr.try_clone().ok()?))
+        .process_group(0);
+    let mut child = cmd.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                terminate_process_group(&mut child);
+                return None;
+            }
+        }
+    };
+    stdout.rewind().ok()?;
+    stderr.rewind().ok()?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    stdout.read_to_end(&mut stdout_bytes).ok()?;
+    stderr.read_to_end(&mut stderr_bytes).ok()?;
+    Some(std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+fn sessionwiki_rows_for_tool(tool: Option<&str>) -> Option<Vec<Value>> {
     let matches_tool = |row: &&Value| tool.is_none_or(|t| row["tool"].as_str() == Some(t));
     // Test hook: a fixture file stands in for the shell-out so the ui flow is
     // E2E-testable inside an isolated root. Only honored WITH SWAPDEX_ROOT so
@@ -281,21 +352,11 @@ fn sessionwiki_rows_for_tool(tool: Option<&str>) -> Option<Vec<Value>> {
     if std::env::var_os("SWAPDEX_ROOT").is_some() {
         return None;
     }
-    let (tx, rx) = mpsc::channel();
-    let selected_tool = tool.map(str::to_string);
-    std::thread::spawn(move || {
-        let mut cmd = Command::new("sessionwiki");
-        cmd.args(["list", "--json", "--no-sync", "-n", "50000"]);
-        if let Some(tool) = selected_tool {
-            cmd.args(["--tool", &tool]);
-        }
-        let out = cmd.stdin(Stdio::null()).output();
-        let _ = tx.send(out);
-    });
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .ok()?
-        .ok()?;
+    let out = run_sessionwiki(
+        std::ffi::OsStr::new("sessionwiki"),
+        tool,
+        std::time::Duration::from_secs(5),
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -344,6 +405,96 @@ pub fn rfc3339_to_secs(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_sessionwiki_is_terminated_with_its_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pids");
+        let fake = dir.path().join("sessionwiki");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n\
+                 sleep 30 &\n\
+                 child=$!\n\
+                 printf '%s %s\\n' \"$$\" \"$child\" > '{}'\n\
+                 trap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; exit 143' TERM INT\n\
+                 wait \"$child\"\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake, permissions).unwrap();
+
+        let started = std::time::Instant::now();
+        let output = run_sessionwiki(
+            fake.as_os_str(),
+            None,
+            std::time::Duration::from_millis(250),
+        );
+        assert!(output.is_none(), "a timed-out command has no usable output");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the timeout is bounded"
+        );
+
+        let pids: Vec<i32> = std::fs::read_to_string(&pid_file)
+            .expect("the fake started and recorded both processes")
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        for _ in 0..50 {
+            if pids.iter().all(|pid| !process_exists(*pid)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let survivors: Vec<i32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| process_exists(*pid))
+            .collect();
+        for pid in &survivors {
+            unsafe {
+                libc::kill(*pid, libc::SIGKILL);
+            }
+        }
+        assert!(survivors.is_empty(), "processes still alive: {survivors:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_sessionwiki_output_is_captured() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("sessionwiki");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '[]\\n'\n").unwrap();
+        let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake, permissions).unwrap();
+
+        let output = run_sessionwiki(
+            fake.as_os_str(),
+            Some("codex"),
+            std::time::Duration::from_secs(1),
+        )
+        .expect("fast successful command");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"[]\n");
+    }
 
     fn ev(ts: i64, tool: &str, acct: &str) -> Event {
         Event {

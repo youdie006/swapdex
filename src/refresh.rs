@@ -217,7 +217,16 @@ enum GateEntry {
 
 enum GateDecision {
     Leader,
-    Shared(RefreshResult),
+    Shared {
+        result: RefreshResult,
+        result_generation: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChangedSuccessPolicy {
+    Retry,
+    Defer,
 }
 
 #[derive(Default)]
@@ -227,7 +236,13 @@ struct RefreshGate {
 }
 
 impl RefreshGate {
-    fn begin(&self, key: &Path, generation: &str, source: &str) -> GateDecision {
+    fn begin(
+        &self,
+        key: &Path,
+        generation: &str,
+        source: &str,
+        changed_success: ChangedSuccessPolicy,
+    ) -> GateDecision {
         let wait_started = Instant::now();
         let mut entries = self
             .entries
@@ -254,7 +269,10 @@ impl RefreshGate {
                         // exchange in this or another process.
                         entries.remove(key);
                         self.changed.notify_all();
-                        return GateDecision::Shared(Err(RefreshError::AlreadyRefreshing));
+                        return GateDecision::Shared {
+                            result: Err(RefreshError::AlreadyRefreshing),
+                            result_generation: None,
+                        };
                     }
                     let remaining = WAIT_FOR_REFRESH.saturating_sub(elapsed);
                     let waited = self
@@ -274,12 +292,31 @@ impl RefreshGate {
                         // Two directories carrying one provider identity may be
                         // stale copies. They share exclusion, but never inherit a
                         // success that was persisted somewhere else.
-                        return GateDecision::Shared(Err(RefreshError::AlreadyRefreshing));
+                        return GateDecision::Shared {
+                            result: Err(RefreshError::AlreadyRefreshing),
+                            result_generation: None,
+                        };
                     }
                     if completed.generation == generation
                         || completed.result_generation.as_deref() == Some(generation)
                     {
-                        return GateDecision::Shared(completed.result.clone());
+                        return GateDecision::Shared {
+                            result: completed.result.clone(),
+                            result_generation: completed.result_generation.clone(),
+                        };
+                    }
+                    if changed_success == ChangedSuccessPolicy::Defer
+                        && matches!(&completed.result, Ok(RefreshOutcome::Renewed))
+                    {
+                        // A successful exchange may have retired the shared
+                        // rotating token even when its response did not return
+                        // a replacement. A changed credential blob cannot claim
+                        // that success, but retrying it could spend the token
+                        // again.
+                        return GateDecision::Shared {
+                            result: Err(RefreshError::AlreadyRefreshing),
+                            result_generation: None,
+                        };
                     }
                     // A replacement generation after a failure is a new login,
                     // so an old refusal must not poison it.
@@ -367,22 +404,62 @@ fn identity_file(dir: &Path, name: &str) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+/// Stable, non-secret refresh ownership encoded in one credential blob.
+///
+/// Codex workspace ids identify the payer, but multiple users can belong to one
+/// workspace and hold independent refresh-token families. A complete Codex
+/// identity therefore includes the JWT subject, matching live-login selection.
+/// Older or opaque credentials retain the workspace-only identity they used
+/// before subjects were considered.
+pub(crate) fn credential_identity(bytes: &[u8], tool: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    match tool {
+        "claude-code" => value["oauthAccount"]["accountUuid"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("claude:{id}")),
+        "codex" => {
+            let workspace = value["tokens"]["account_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())?;
+            match crate::live_login::identity_from_credential(bytes, "codex") {
+                Some(crate::live_login::LoginIdentity::Codex {
+                    subject,
+                    workspace_id,
+                }) => Some(format!(
+                    "codex-user:{}:{subject}:{workspace_id}",
+                    subject.len()
+                )),
+                _ => Some(format!("codex:{workspace}")),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Provider-qualified, non-secret identity for one rotating refresh token.
+/// This joins stale credential copies even when one copy has richer account
+/// metadata. The raw token is never used as a lock name or diagnostic.
+pub(crate) fn refresh_token_identity(bytes: &[u8], tool: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let token = match tool {
+        "claude-code" => value["claudeAiOauth"]["refreshToken"].as_str(),
+        "codex" => value["tokens"]["refresh_token"].as_str(),
+        _ => None,
+    }
+    .filter(|token| !token.is_empty())?;
+    Some(refresh_token_identity_from_token(token, tool))
+}
+
+fn refresh_token_identity_from_token(token: &str, tool: &str) -> String {
+    format!("refresh-token:{tool}:{}", fingerprint(token.as_bytes()))
+}
+
 fn account_from_identity(path: &Path, tool: &str) -> Option<String> {
-    let (field, prefix) = match tool {
-        "claude-code" => (&["oauthAccount", "accountUuid"][..], "claude"),
-        "codex" => (&["tokens", "account_id"][..], "codex"),
-        _ => return None,
-    };
     let parent = path.parent()?;
     let name = path.file_name()?.to_str()?;
     let bytes = identity_file(parent, name)?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    field
-        .iter()
-        .try_fold(&v, |value, key| value.get(key))?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|id| format!("{prefix}:{id}"))
+    credential_identity(&bytes, tool)
 }
 
 fn account_of(dir: &Path, tool: &str) -> Option<String> {
@@ -392,6 +469,18 @@ fn account_of(dir: &Path, tool: &str) -> Option<String> {
         _ => return None,
     };
     account_from_identity(&dir.join(name), tool)
+}
+
+fn refresh_token_identity_of(dir: &Path, tool: &str) -> Option<String> {
+    let name = match tool {
+        "codex" => "auth.json",
+        // Claude's native identity path is a separate metadata file. Preserve
+        // its existing account match rather than pretending that file carries
+        // the credential selected from a file or Keychain.
+        _ => return None,
+    };
+    let bytes = identity_file(dir, name)?;
+    refresh_token_identity(&bytes, tool)
 }
 
 /// The key a claim is held under: the ACCOUNT, not the directory.
@@ -496,6 +585,7 @@ struct Attempt {
     result: RefreshResult,
     result_generation: Option<String>,
     cache: bool,
+    shared: bool,
 }
 
 impl Attempt {
@@ -504,6 +594,7 @@ impl Attempt {
             result,
             result_generation: None,
             cache: false,
+            shared: false,
         }
     }
 
@@ -512,6 +603,7 @@ impl Attempt {
             result,
             result_generation: None,
             cache: true,
+            shared: false,
         }
     }
 
@@ -520,6 +612,16 @@ impl Attempt {
             result,
             result_generation: generation,
             cache: true,
+            shared: false,
+        }
+    }
+
+    fn shared(result: RefreshResult, result_generation: Option<String>) -> Self {
+        Self {
+            result,
+            result_generation,
+            cache: true,
+            shared: true,
         }
     }
 }
@@ -561,7 +663,10 @@ fn write_disk_completion(file: &mut std::fs::File, completion: &DiskCompletion) 
 }
 
 enum DiskDecision {
-    Shared(RefreshResult),
+    Shared {
+        result: RefreshResult,
+        result_generation: Option<String>,
+    },
     RetryAllowed,
 }
 
@@ -569,6 +674,7 @@ fn disk_decision_for(
     completion: DiskCompletion,
     generation: &str,
     source: &str,
+    changed_success: ChangedSuccessPolicy,
 ) -> Option<DiskDecision> {
     if completion.version != 1 {
         return None;
@@ -581,12 +687,29 @@ fn disk_decision_for(
         return Some(DiskDecision::RetryAllowed);
     }
     if completion.source != source {
-        return Some(DiskDecision::Shared(Err(RefreshError::AlreadyRefreshing)));
+        return Some(DiskDecision::Shared {
+            result: Err(RefreshError::AlreadyRefreshing),
+            result_generation: None,
+        });
     }
     if completion.generation == generation
         || completion.result_generation.as_deref() == Some(generation)
     {
-        return Some(DiskDecision::Shared(completion.result.into_result()));
+        return Some(DiskDecision::Shared {
+            result: completion.result.into_result(),
+            result_generation: completion.result_generation,
+        });
+    }
+    if changed_success == ChangedSuccessPolicy::Defer
+        && matches!(completion.result, DiskResult::Renewed)
+    {
+        // This blob is not the persisted result generation. The earlier
+        // exchange may still have retired the shared rotating token, so do not
+        // report its success or exchange that token again.
+        return Some(DiskDecision::Shared {
+            result: Err(RefreshError::AlreadyRefreshing),
+            result_generation: None,
+        });
     }
     None
 }
@@ -614,10 +737,14 @@ mod disk_clock_tests {
             },
             "old",
             "slot",
+            ChangedSuccessPolicy::Retry,
         );
         assert!(matches!(
             decision,
-            Some(DiskDecision::Shared(Ok(RefreshOutcome::Renewed)))
+            Some(DiskDecision::Shared {
+                result: Ok(RefreshOutcome::Renewed),
+                ..
+            })
         ));
     }
 }
@@ -627,6 +754,7 @@ fn coordinate_across_processes<F>(
     key: &Path,
     generation: &str,
     source: &str,
+    changed_success: ChangedSuccessPolicy,
     action: F,
 ) -> Attempt
 where
@@ -672,11 +800,15 @@ where
         (contended
             || reusable_without_contention
             || matches!(completion.result, DiskResult::NoAttempt))
-        .then(|| disk_decision_for(completion, generation, source))
+        .then(|| disk_decision_for(completion, generation, source, changed_success))
         .flatten()
     });
-    if let Some(DiskDecision::Shared(result)) = disk_decision {
-        return Attempt::after_exchange(result);
+    if let Some(DiskDecision::Shared {
+        result,
+        result_generation,
+    }) = disk_decision
+    {
+        return Attempt::shared(result, result_generation);
     }
     if contended && !matches!(disk_decision, Some(DiskDecision::RetryAllowed)) {
         // The previous holder may have exited after sending the request but
@@ -720,6 +852,28 @@ where
     attempt
 }
 
+fn coordinate_refresh_attempt<F>(
+    paths: &Paths,
+    dir: &Path,
+    tool: &str,
+    generation: &str,
+    action: F,
+) -> Attempt
+where
+    F: FnOnce() -> Attempt,
+{
+    let key = claim_key(dir, tool);
+    let source = source_fingerprint(dir);
+    coordinate_with_key(
+        paths,
+        &key,
+        generation,
+        &source,
+        ChangedSuccessPolicy::Retry,
+        action,
+    )
+}
+
 fn coordinate_refresh<F>(
     paths: &Paths,
     dir: &Path,
@@ -730,17 +884,65 @@ fn coordinate_refresh<F>(
 where
     F: FnOnce() -> Attempt,
 {
-    let key = claim_key(dir, tool);
+    coordinate_refresh_attempt(paths, dir, tool, generation, action).result
+}
+
+fn coordinate_token_refresh<F>(
+    paths: &Paths,
+    dir: &Path,
+    tool: &str,
+    token: &str,
+    generation: &str,
+    action: F,
+) -> Attempt
+where
+    F: FnOnce() -> Attempt,
+{
+    // Callers already hold the provider-account claim. Every exchange therefore
+    // takes locks in the same account-then-token order.
+    let identity = refresh_token_identity_from_token(token, tool);
+    let key = PathBuf::from(&identity);
     let source = source_fingerprint(dir);
-    match gate().begin(&key, generation, &source) {
-        GateDecision::Shared(result) => result,
+    coordinate_with_key(
+        paths,
+        &key,
+        generation,
+        &source,
+        ChangedSuccessPolicy::Defer,
+        action,
+    )
+}
+
+fn coordinate_with_key<F>(
+    paths: &Paths,
+    key: &Path,
+    generation: &str,
+    source: &str,
+    changed_success: ChangedSuccessPolicy,
+    action: F,
+) -> Attempt
+where
+    F: FnOnce() -> Attempt,
+{
+    match gate().begin(key, generation, source, changed_success) {
+        GateDecision::Shared {
+            result,
+            result_generation,
+        } => Attempt::shared(result, result_generation),
         GateDecision::Leader => {
-            let attempt = coordinate_across_processes(paths, &key, generation, &source, action);
+            let attempt = coordinate_across_processes(
+                paths,
+                key,
+                generation,
+                source,
+                changed_success,
+                action,
+            );
             let cached = attempt
                 .cache
                 .then(|| (attempt.result.clone(), attempt.result_generation.clone()));
-            gate().finish(&key, generation, &source, cached);
-            attempt.result
+            gate().finish(key, generation, source, cached);
+            attempt
         }
     }
 }
@@ -931,14 +1133,58 @@ fn inside_paths(paths: &Paths, dir: &Path) -> bool {
         .is_some_and(|(root, dir)| dir.starts_with(root))
 }
 
+fn credential_owner_matches(
+    bytes: &[u8],
+    tool: &str,
+    account: Option<&str>,
+    refresh_token: Option<&str>,
+) -> bool {
+    account.is_some_and(|candidate| credential_identity(bytes, tool).as_deref() == Some(candidate))
+        || refresh_token.is_some_and(|candidate| {
+            refresh_token_identity(bytes, tool).as_deref() == Some(candidate)
+        })
+}
+
+fn credential_owner_matches_path(
+    path: &Path,
+    tool: &str,
+    account: Option<&str>,
+    refresh_token: Option<&str>,
+) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    identity_file(parent, name)
+        .is_some_and(|bytes| credential_owner_matches(&bytes, tool, account, refresh_token))
+}
+
+fn credential_owner_matches_dir(
+    dir: &Path,
+    tool: &str,
+    account: Option<&str>,
+    refresh_token: Option<&str>,
+) -> bool {
+    let name = match tool {
+        "claude-code" => ".claude.json",
+        "codex" => "auth.json",
+        _ => return false,
+    };
+    credential_owner_matches_path(&dir.join(name), tool, account, refresh_token)
+}
+
 fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
     let running = crate::proc::running_config_dirs(tool);
     if running.iter().any(|active| same_dir(active, dir)) {
         return true;
     }
-    let Some(candidate) = account_of(dir, tool) else {
+    let candidate_account = account_of(dir, tool);
+    let candidate_token = refresh_token_identity_of(dir, tool);
+    if candidate_account.is_none() && candidate_token.is_none() {
         return false;
-    };
+    }
     // A default Claude process reads identity from HOME/.claude.json, not from
     // ~/.claude/.claude.json. The usable-login resolver intentionally returns
     // None for expired or unverified access, but that must never erase the
@@ -947,14 +1193,24 @@ fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
     if crate::proc::running_native_login_processes(paths, tool)
         .into_iter()
         .any(|process| {
-            account_from_identity(&process.identity_path, tool).is_some_and(|id| id == candidate)
+            credential_owner_matches_path(
+                &process.identity_path,
+                tool,
+                candidate_account.as_deref(),
+                candidate_token.as_deref(),
+            )
         })
     {
         return true;
     }
     running.into_iter().any(|active| {
         (!paths.sandboxed() || inside_paths(paths, &active))
-            && account_of(&active, tool).is_some_and(|id| id == candidate)
+            && credential_owner_matches_dir(
+                &active,
+                tool,
+                candidate_account.as_deref(),
+                candidate_token.as_deref(),
+            )
     })
 }
 
@@ -1302,11 +1558,12 @@ fn refresh_codex_slot_inner(
                 .map(str::to_string)
         })
         .ok_or(RefreshError::NoCredential)?;
-    let fingerprint = crate::refresh_health::codex_credential_fingerprint_from_blob(blob.expose())
-        .ok_or(RefreshError::NoCredential)?;
-    let generation = fingerprint.clone();
+    let health_fingerprint =
+        crate::refresh_health::codex_credential_fingerprint_from_blob(blob.expose())
+            .ok_or(RefreshError::NoCredential)?;
+    let generation = fingerprint(blob.expose());
 
-    coordinate_refresh(paths, dir, "codex", &generation, || {
+    let attempt = coordinate_refresh_attempt(paths, dir, "codex", &generation, || {
         if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
             return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
         }
@@ -1317,44 +1574,78 @@ fn refresh_codex_slot_inner(
             return Attempt::before_exchange(Err(RefreshError::InUse));
         }
 
-        let response = post_codex(&token);
-        if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
-            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+        coordinate_token_refresh(paths, dir, "codex", &token, &generation, || {
+            // The token lock can wait behind a stale copy with a different
+            // account key, so every guard is checked again after acquiring it.
+            if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+                return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
+                return Attempt::before_exchange(result);
+            }
+            if slot_in_use(paths, dir, "codex") {
+                return Attempt::before_exchange(Err(RefreshError::InUse));
+            }
+
+            let response = post_codex(&token);
+            if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+                return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            let (body, status) = match response {
+                Ok(response) => response,
+                Err(error) => return Attempt::after_exchange(Err(error)),
+            };
+            if status == 429 {
+                return Attempt::after_exchange(Err(RefreshError::Busy));
+            }
+            if matches!(status, 400 | 401 | 403) {
+                let _ =
+                    crate::refresh_health::record_codex_rejection(dir, &health_fingerprint, now_ms);
+                return Attempt::after_exchange(Err(RefreshError::Expired));
+            }
+            if !(200..300).contains(&status) {
+                return Attempt::after_exchange(Err(RefreshError::Refused(format!(
+                    "HTTP {status}"
+                ))));
+            }
+            let Some(merged) =
+                merge_codex_response(blob.expose(), &body, &rfc3339_utc(now_ms / 1000))
+            else {
+                return Attempt::after_exchange(Err(RefreshError::Refused(
+                    "the server's answer had no access token".into(),
+                )));
+            };
+            if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
+                return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            let result = crate::atomic::write_secret(&path, &merged)
+                .map(|()| RefreshOutcome::Renewed)
+                .map_err(|error| RefreshError::Refused(error.to_string()));
+            if result.is_ok() {
+                let _ = crate::refresh_health::clear_codex_rejection_before(
+                    dir,
+                    &health_fingerprint,
+                    now_ms,
+                );
+            }
+            let result_generation = result.is_ok().then(|| fingerprint(&merged));
+            Attempt::after_exchange_with_generation(result, result_generation)
+        })
+    });
+    if attempt.shared && matches!(&attempt.result, Ok(RefreshOutcome::Renewed)) {
+        // A concurrent follower may share success for the input blob it read,
+        // but only while the credential file contains the generation that the
+        // leader actually persisted. If the old input was restored, reporting
+        // Renewed would leave that replacement stale and could encourage reuse
+        // of a rotating token the earlier exchange may have retired.
+        let current_generation = std::fs::read(&path).ok().map(|bytes| fingerprint(&bytes));
+        if current_generation.as_deref() != attempt.result_generation.as_deref()
+            || attempt.result_generation.is_none()
+        {
+            return Err(RefreshError::AlreadyRefreshing);
         }
-        let (body, status) = match response {
-            Ok(response) => response,
-            Err(error) => return Attempt::after_exchange(Err(error)),
-        };
-        if status == 429 {
-            return Attempt::after_exchange(Err(RefreshError::Busy));
-        }
-        if matches!(status, 400 | 401 | 403) {
-            let _ = crate::refresh_health::record_codex_rejection(dir, &fingerprint, now_ms);
-            return Attempt::after_exchange(Err(RefreshError::Expired));
-        }
-        if !(200..300).contains(&status) {
-            return Attempt::after_exchange(Err(RefreshError::Refused(format!("HTTP {status}"))));
-        }
-        let Some(merged) = merge_codex_response(blob.expose(), &body, &rfc3339_utc(now_ms / 1000))
-        else {
-            return Attempt::after_exchange(Err(RefreshError::Refused(
-                "the server's answer had no access token".into(),
-            )));
-        };
-        if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
-            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
-        }
-        let result = crate::atomic::write_secret(&path, &merged)
-            .map(|()| RefreshOutcome::Renewed)
-            .map_err(|error| RefreshError::Refused(error.to_string()));
-        if result.is_ok() {
-            let _ = crate::refresh_health::clear_codex_rejection_before(dir, &fingerprint, now_ms);
-        }
-        let result_generation = result
-            .is_ok()
-            .then(|| crate::refresh_health::codex_credential_fingerprint_from_blob(&merged));
-        Attempt::after_exchange_with_generation(result, result_generation.flatten())
-    })
+    }
+    attempt.result
 }
 
 fn post_codex(refresh_token: &str) -> Result<(String, u32), RefreshError> {
@@ -1801,6 +2092,186 @@ pub(crate) fn keep_alive_sweep_report(
 #[cfg(test)]
 mod point_of_effect_tests {
     use super::*;
+
+    fn codex_identity_blob(subject: Option<&str>, workspace: &str) -> Vec<u8> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+        let id_token = subject.map(|subject| {
+            format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&serde_json::json!({"sub": subject})).unwrap())
+            )
+        });
+        serde_json::to_vec(&serde_json::json!({
+            "tokens": {
+                "id_token": id_token,
+                "account_id": workspace
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn codex_subject_qualifies_a_shared_workspace_identity() {
+        let first = credential_identity(
+            &codex_identity_blob(Some("subject-one"), "shared-workspace"),
+            "codex",
+        );
+        let second = credential_identity(
+            &codex_identity_blob(Some("subject-two"), "shared-workspace"),
+            "codex",
+        );
+
+        assert_ne!(first, second, "distinct users are not one refresh owner");
+    }
+
+    #[test]
+    fn opaque_codex_identity_keeps_the_workspace_fallback() {
+        let missing =
+            credential_identity(&codex_identity_blob(None, "fallback-workspace"), "codex");
+        let malformed = serde_json::to_vec(&serde_json::json!({
+            "tokens": {
+                "id_token": "not-a-jwt",
+                "account_id": "fallback-workspace"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(missing.as_deref(), Some("codex:fallback-workspace"));
+        assert_eq!(
+            credential_identity(&malformed, "codex").as_deref(),
+            Some("codex:fallback-workspace")
+        );
+    }
+
+    #[test]
+    fn refresh_token_identity_is_provider_qualified_and_non_secret() {
+        let raw = "ROTATING-SECRET";
+        let codex = serde_json::to_vec(&serde_json::json!({
+            "tokens": {"refresh_token": raw}
+        }))
+        .unwrap();
+        let claude = serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {"refreshToken": raw}
+        }))
+        .unwrap();
+
+        let codex_identity = refresh_token_identity(&codex, "codex").unwrap();
+        let claude_identity = refresh_token_identity(&claude, "claude-code").unwrap();
+        assert_ne!(codex_identity, claude_identity);
+        assert!(codex_identity.starts_with("refresh-token:codex:"));
+        assert!(claude_identity.starts_with("refresh-token:claude-code:"));
+        assert!(!codex_identity.contains(raw));
+        assert!(!claude_identity.contains(raw));
+    }
+
+    #[test]
+    fn token_alias_retries_a_changed_generation_but_shares_the_same_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let slot = root.path().join("slot");
+        std::fs::create_dir_all(&slot).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let action = || {
+            calls.set(calls.get() + 1);
+            Attempt::after_exchange(Err(RefreshError::Busy))
+        };
+
+        let first = coordinate_token_refresh(
+            &paths,
+            &slot,
+            "codex",
+            "GENERATION-RETRY-RT",
+            "credential-generation-one",
+            action,
+        );
+        let unchanged = coordinate_token_refresh(
+            &paths,
+            &slot,
+            "codex",
+            "GENERATION-RETRY-RT",
+            "credential-generation-one",
+            || {
+                calls.set(calls.get() + 1);
+                Attempt::after_exchange(Ok(RefreshOutcome::Renewed))
+            },
+        );
+        let changed = coordinate_token_refresh(
+            &paths,
+            &slot,
+            "codex",
+            "GENERATION-RETRY-RT",
+            "credential-generation-two",
+            || {
+                calls.set(calls.get() + 1);
+                Attempt::after_exchange(Ok(RefreshOutcome::Renewed))
+            },
+        );
+
+        assert!(matches!(first.result, Err(RefreshError::Busy)));
+        assert!(matches!(unchanged.result, Err(RefreshError::Busy)));
+        assert_eq!(
+            changed.result,
+            Ok(RefreshOutcome::Renewed),
+            "a replacement credential carrying the same token inherited an old failure"
+        );
+        assert_eq!(calls.get(), 2, "the unchanged generation reran its action");
+    }
+
+    #[test]
+    fn token_alias_reuses_only_the_exact_success_result_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let slot = root.path().join("slot");
+        std::fs::create_dir_all(&slot).unwrap();
+        let calls = std::cell::Cell::new(0);
+
+        let first = coordinate_token_refresh(
+            &paths,
+            &slot,
+            "codex",
+            "SUCCESSFUL-SHARED-RT",
+            "input-generation",
+            || {
+                calls.set(calls.get() + 1);
+                Attempt::after_exchange_with_generation(
+                    Ok(RefreshOutcome::Renewed),
+                    Some("persisted-result-generation".into()),
+                )
+            },
+        );
+        let persisted = coordinate_token_refresh(
+            &paths,
+            &slot,
+            "codex",
+            "SUCCESSFUL-SHARED-RT",
+            "persisted-result-generation",
+            || {
+                calls.set(calls.get() + 1);
+                Attempt::after_exchange(Err(RefreshError::Busy))
+            },
+        );
+        let unrelated = coordinate_token_refresh(
+            &paths,
+            &slot,
+            "codex",
+            "SUCCESSFUL-SHARED-RT",
+            "unrelated-replacement-generation",
+            || {
+                calls.set(calls.get() + 1);
+                Attempt::after_exchange(Ok(RefreshOutcome::Renewed))
+            },
+        );
+
+        assert_eq!(first.result, Ok(RefreshOutcome::Renewed));
+        assert_eq!(persisted.result, Ok(RefreshOutcome::Renewed));
+        assert!(matches!(
+            unrelated.result,
+            Err(RefreshError::AlreadyRefreshing)
+        ));
+        assert_eq!(calls.get(), 1, "a shared success reran its action");
+    }
 
     #[test]
     fn dedupe_uses_provider_qualified_account_identity() {
