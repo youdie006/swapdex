@@ -6,6 +6,13 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Document the renewal-ownership investigation.** Compare request-time
+  renewal, concurrent callers, native CLI token reconciliation and failure
+  handling in four public tools. Record the evidence, remaining ownership
+  risks and acceptance criteria for fixing deferred renewals in
+  [the research note](docs/research/2026-09-15-oauth-renewal-ownership.md).
+  This is a documentation change; renewal and routing behavior are unchanged.
+
 ## 0.160.0
 
 - **An early curl failure cannot terminate the picker or renewal command.**
