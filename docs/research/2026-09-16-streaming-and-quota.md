@@ -46,6 +46,10 @@ must be verified and recorded separately in the version-specific release.
   exactly one upstream request. Linux and macOS CI run this verifier.
 - Stock Codex session-resume verifier: passed, including WebSocket-to-HTTP
   fallback, native session listing/resume and preserved conversation bytes.
+- The candidate kept a heartbeat stream open for 305.003 seconds, delivered
+  completion before EOF and made exactly one upstream request.
+- `cargo publish --dry-run --locked --allow-dirty --jobs 2`: passed archive
+  creation and compilation; no package was uploaded.
 - First-use verifier in foreground mode: all six fresh/existing-login cases
   passed. Default autostart mode correctly refused because live services held
   ports 8787/8788; those services were not stopped for this fixture.
@@ -54,6 +58,9 @@ Initial streaming tests also exposed external usage calls in routing fixtures.
 The proxy fixtures now default to a failing local curl stub unless a test
 explicitly supplies its fake usage endpoint. A concurrent late-refusal test
 failed once before that isolation, then passed alone and in the full suite.
+The first macOS CI run caught unused Linux-only quota fixture helpers under
+warnings-as-errors. The helpers and their imports now share their callers'
+Linux target guard; release verification records the subsequent CI result.
 
 ## Scope and limits
 

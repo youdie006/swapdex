@@ -3,12 +3,19 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::Child;
+use std::process::{Command, Output};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 struct ReapedChild(Option<Child>);
 
+#[cfg(target_os = "linux")]
 impl Drop for ReapedChild {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
@@ -18,6 +25,7 @@ impl Drop for ReapedChild {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for(path: &Path) {
     let started = Instant::now();
     while !path.exists() {
