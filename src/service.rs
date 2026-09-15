@@ -68,8 +68,9 @@ pub fn launchd_plist(exe: &Path, tool: &str, log_dir: &Path) -> String {
 </dict>
 </plist>
 "#,
-        exe = exe.display(),
-        log = log_dir.display(),
+        exe = xml_text(&exe.to_string_lossy()),
+        log = xml_text(&log_dir.to_string_lossy()),
+        tool = xml_text(tool),
     )
 }
 
@@ -89,8 +90,35 @@ pub fn systemd_service(exe: &Path, tool: &str) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        exe = exe.display(),
+        exe = systemd_executable(&exe.to_string_lossy()),
     )
+}
+
+fn xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// ExecStart uses systemd quoting, not shell quoting. Percent specifiers are
+/// expanded even inside quotes; dollars in the executable token are literal.
+fn systemd_executable(path: &str) -> String {
+    let mut out = String::from("\"");
+    for c in path.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '%' => out.push_str("%%"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Where the agent file belongs on macOS.
@@ -143,18 +171,75 @@ pub fn manages_the_real_machine(paths: &Paths) -> bool {
 /// path is resolved at install time; for an npm install it contains the Node
 /// version, so upgrading Node deletes it and the proxy silently never starts
 /// again - the service still reads as installed.
-pub fn unit_program(body: &str) -> Option<&str> {
+pub fn unit_program(body: &str) -> Option<String> {
     if let Some(line) = body
         .lines()
         .find_map(|l| l.trim().strip_prefix("ExecStart="))
     {
-        return line.split_whitespace().next();
+        return systemd_program(line);
     }
     // launchd: the first <string> after <key>ProgramArguments</key>.
     let rest = body.split("ProgramArguments").nth(1)?;
     let open = rest.find("<string>")? + "<string>".len();
     let close = rest[open..].find("</string>")? + open;
-    Some(rest[open..close].trim())
+    let mut text = &rest[open..close];
+    let mut out = String::new();
+    while let Some((before, entity)) = text.split_once('&') {
+        out.push_str(before);
+        let (entity, after) = entity.split_once(';')?;
+        out.push(match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => return None,
+        });
+        text = after;
+    }
+    out.push_str(text);
+    (!out.is_empty()).then_some(out)
+}
+
+/// Decode the executable written by this version and legacy unquoted units.
+/// Unknown escapes/specifiers cannot identify a concrete on-disk program.
+fn systemd_program(line: &str) -> Option<String> {
+    let mut chars = line.trim_start().chars().peekable();
+    let quote = chars.next_if(|c| matches!(c, '\'' | '"'));
+    let mut closed = quote.is_none();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if quote == Some(c) {
+            closed = true;
+            if chars.peek().is_some_and(|c| !c.is_whitespace()) {
+                return None;
+            }
+            break;
+        }
+        if quote.is_none() && c.is_whitespace() {
+            break;
+        }
+        out.push(match c {
+            '\\' => match chars.next()? {
+                '\\' => '\\',
+                '"' => '"',
+                '\'' => '\'',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                's' => ' ',
+                _ => return None,
+            },
+            '%' => {
+                if chars.next()? != '%' {
+                    return None;
+                }
+                '%'
+            }
+            c => c,
+        });
+    }
+    (closed && !out.is_empty()).then_some(out)
 }
 
 /// The command that asks this machine's supervisor to restart one tool's proxy.
@@ -593,6 +678,36 @@ mod tests {
 mod unit_program_tests {
     use super::*;
 
+    #[test]
+    fn systemd_keeps_spaces_and_literal_specifiers_in_the_executable_path() {
+        let path = Path::new("/opt/Node Versions/100% ready/$tools/swapdex");
+        let body = systemd_service(path, "codex");
+        assert!(body.contains("ExecStart=\"/opt/Node Versions/100%% ready/$tools/swapdex\" proxy"));
+        assert_eq!(unit_program(&body).as_deref(), path.to_str());
+    }
+
+    #[test]
+    fn launchd_encodes_paths_as_xml_and_doctor_recovers_the_actual_path() {
+        let path = Path::new("/Users/Research & Development/<tools>/swapdex");
+        let log = Path::new("/Users/Research & Development/Logs");
+        let body = launchd_plist(path, "codex", log);
+        assert!(body
+            .contains("<string>/Users/Research &amp; Development/&lt;tools&gt;/swapdex</string>"));
+        assert!(body.contains("<string>/Users/Research &amp; Development/Logs/io.github.youdie006.swapdex.codex.log</string>"));
+        assert_eq!(unit_program(&body).as_deref(), path.to_str());
+    }
+
+    #[test]
+    fn malformed_unit_paths_are_not_reported_as_existing_programs() {
+        assert_eq!(unit_program("ExecStart=\"/unfinished path proxy"), None);
+        assert_eq!(
+            unit_program(
+                "<key>ProgramArguments</key><array><string>/bad&unknown;/swapdex</string></array>"
+            ),
+            None
+        );
+    }
+
     /// The health check must be able to see what a service unit will run.
     ///
     /// The proxy service is the one part whose failure takes every session down
@@ -607,12 +722,18 @@ mod unit_program_tests {
         let systemd = "[Unit]\nDescription=x\n[Service]\n\
                        ExecStart=/opt/swapdex/bin/swapdex proxy --tool claude-code --port 8787\n\
                        Restart=always\n";
-        assert_eq!(unit_program(systemd), Some("/opt/swapdex/bin/swapdex"));
+        assert_eq!(
+            unit_program(systemd).as_deref(),
+            Some("/opt/swapdex/bin/swapdex")
+        );
 
         let plist = "<plist><dict>\n<key>ProgramArguments</key>\n<array>\n\
                      <string>/usr/local/bin/swapdex</string>\n<string>proxy</string>\n\
                      </array>\n</dict></plist>\n";
-        assert_eq!(unit_program(plist), Some("/usr/local/bin/swapdex"));
+        assert_eq!(
+            unit_program(plist).as_deref(),
+            Some("/usr/local/bin/swapdex")
+        );
 
         assert_eq!(unit_program("nothing here"), None);
     }

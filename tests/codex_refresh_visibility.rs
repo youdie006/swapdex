@@ -982,6 +982,113 @@ fn manual_refresh_reports_partial_failure_across_both_tools() {
 }
 
 #[test]
+fn manual_refresh_distinguishes_workspace_members_and_preserves_opaque_fallback() {
+    use base64::Engine;
+    for complete_identity in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = seed_slots(
+            root.path(),
+            &[
+                ("first", "first-user", "codex"),
+                ("second", "second-user", "codex"),
+            ],
+        );
+        for (index, dir) in dirs.iter().enumerate() {
+            let mut auth: serde_json::Value = serde_json::from_slice(&codex_auth(
+                "shared-workspace",
+                &format!("refresh-user-{index}"),
+                &jwt(1),
+            ))
+            .unwrap();
+            if complete_identity {
+                let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::json!({"sub": format!("user-{index}")}).to_string());
+                auth["tokens"]["id_token"] = format!("header.{payload}.signature").into();
+            }
+            std::fs::write(dir.join("auth.json"), auth.to_string()).unwrap();
+        }
+        let curl = fake_curl(root.path());
+        let count = root.path().join("exchange-count");
+        let answer = serde_json::json!({"access_token": jwt(now_secs() + 86_400)}).to_string();
+        let output = run_with_curl(
+            root.path(),
+            &curl,
+            &["refresh"],
+            &[
+                ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+                ("FAKE_STATUS", "200"),
+                ("FAKE_BODY", &answer),
+                ("FAKE_COUNT_PATH", count.to_str().unwrap()),
+            ],
+        );
+        let said = combined(&output);
+        assert!(output.status.success(), "{said}");
+        let expected = if complete_identity { 2 } else { 1 };
+        assert_eq!(std::fs::read(count).unwrap().len(), expected, "{said}");
+        assert_eq!(
+            said.contains("holds the login just renewed"),
+            !complete_identity,
+            "{said}"
+        );
+    }
+}
+
+#[test]
+fn manual_refresh_groups_copied_tokens_with_mixed_identity_metadata() {
+    use base64::Engine;
+    for complete_first in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = seed_slots(
+            root.path(),
+            &[
+                ("first", "first-copy", "codex"),
+                ("second", "second-copy", "codex"),
+            ],
+        );
+        for (i, dir) in dirs.iter().enumerate() {
+            let mut auth: serde_json::Value = serde_json::from_slice(&codex_auth(
+                "shared-workspace",
+                "shared-rotating-refresh",
+                &jwt(1),
+            ))
+            .unwrap();
+            if (i == 0) == complete_first {
+                let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(br#"{"sub":"shared-user"}"#);
+                auth["tokens"]["id_token"] = format!("header.{payload}.signature").into();
+            }
+            std::fs::write(dir.join("auth.json"), auth.to_string()).unwrap();
+        }
+        let curl = fake_curl(root.path());
+        let count = root.path().join("exchange-count");
+        let answer = serde_json::json!({
+            "access_token": jwt(now_secs() + 86_400),
+            "refresh_token": "new-rotating-refresh"
+        })
+        .to_string();
+        let output = run_with_curl(
+            root.path(),
+            &curl,
+            &["refresh"],
+            &[
+                ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+                ("FAKE_STATUS", "200"),
+                ("FAKE_BODY", &answer),
+                ("FAKE_COUNT_PATH", count.to_str().unwrap()),
+            ],
+        );
+        let said = combined(&output);
+        assert_eq!(
+            std::fs::read(count).unwrap().len(),
+            1,
+            "one rotating token was spent twice: {said}"
+        );
+        assert!(output.status.success(), "{said}");
+        assert!(said.contains("holds the login just renewed"), "{said}");
+    }
+}
+
+#[test]
 fn manual_refresh_keeps_provider_identities_separate() {
     for codex_account in ["shared-account", "distinct-codex-account"] {
         let root = tempfile::tempdir().unwrap();

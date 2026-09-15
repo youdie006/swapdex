@@ -81,6 +81,8 @@ crates.io; a successful GitHub release alone does not update those installers.
    `python3 scripts/verify-installed-account-routing.py --swapdex /absolute/path/to/native/swapdex`.
    This uses temporary fake accounts and loopback servers to verify generated
    launcher behavior and next-request account switching over one connection.
+   It also accepts a POST at a fake provider and resets the connection before
+   responding, verifying that neither tool submits that accepted turn again.
    Also run `scripts/verify-codex-session-resume.py` with the installed native
    Swapdex and stock Codex paths to check native session listing/resume and
    WebSocket-to-HTTP recovery. Both scripts clean up their test processes.

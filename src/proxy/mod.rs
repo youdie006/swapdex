@@ -354,117 +354,210 @@ fn skip_response_header(name: &str) -> bool {
 /// otherwise the registry and the `active-claude` pointer are re-read PER
 /// REQUEST, which is what lets `swapdex use <name>` (or Enter in the TUI) move a
 /// conversation that is already running.
-fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slots::SlotRecord> {
-    let slots = crate::slots::Slots::open_for(paths, &opts.tool)?;
+#[derive(Clone)]
+struct ServingObservation {
+    pointer: Option<std::path::PathBuf>,
+    generation: Option<crate::slots::PointerGeneration>,
+}
+
+impl ServingObservation {
+    /// Whether the human-visible serving choice is still the one this request
+    /// began under. The file generation matters even when the path is the same:
+    /// an explicit `serve A` after an automatic move is a newer decision.
+    fn is_current(&self, paths: &Paths, tool: &str) -> bool {
+        if !matches!(crate::slots::serving_is_off_checked(paths, tool), Ok(false)) {
+            return false;
+        }
+        crate::slots::Slots::open_for(paths, tool)
+            .map(|slots| slots.serving_choice())
+            .is_ok_and(|(pointer, generation)| {
+                pointer == self.pointer && generation == self.generation
+            })
+    }
+}
+
+/// Commit automatic choice state only while it still belongs to this request's
+/// observed serving generation. Holding `chooser` makes the check and writes a
+/// single critical section with `choose_observed`: if a human rewrites the
+/// pointer after this check, the next chooser observation necessarily clears
+/// the now-stale rotation.
+#[derive(Clone, Copy)]
+enum CornerUpdate {
+    Keep,
+    AfterMeasurement(Option<bool>),
+    Set(Option<pick::Corner>),
+}
+
+fn commit_automatic_choice(
+    paths: &Paths,
+    opts: &Opts,
+    sh: &Shared,
+    observed: Option<&ServingObservation>,
+    rotation: Option<&str>,
+    corner: CornerUpdate,
+    note_preempt: bool,
+) -> bool {
+    let _chooser = sh.chooser.held();
+    if !observed.is_some_and(|observed| observed.is_current(paths, &opts.tool)) {
+        return false;
+    }
+    match corner {
+        CornerUpdate::Keep => {}
+        CornerUpdate::AfterMeasurement(measured_full) => {
+            let mut current = sh.cornered.held();
+            *current = pick::corner_after(measured_full, *current);
+        }
+        CornerUpdate::Set(corner) => *sh.cornered.held() = corner,
+    }
+    if let Some(name) = rotation {
+        *sh.rotated.held() = Some(name.to_string());
+    }
+    if note_preempt {
+        *sh.last_preempt.held() = Some(std::time::Instant::now());
+    }
+    true
+}
+
+fn pick_slot(
+    paths: &Paths,
+    opts: &Opts,
+    sh: &Arc<Shared>,
+) -> Result<(crate::slots::SlotRecord, Option<ServingObservation>)> {
     if let Some(name) = &opts.account {
+        let slots = crate::slots::Slots::open_for(paths, &opts.tool)?;
         return slots
             .get(name)
+            .map(|slot| (slot, None))
             .ok_or_else(|| anyhow!("no account slot named '{name}' - `swapdex slots` lists them"));
     }
-    let list = slots.list();
-    // Who serves is its own answer when one was given: `swapdex serve <name>`
-    // hands turns to an account without moving where sessions start, so a
-    // conversation keeps living where it began while another account pays.
-    let (pointer, generation) = slots.serving_choice();
-    let mut chooser = sh.chooser.held();
-    let mut rotated = sh.rotated.held();
-    let chosen = chooser
-        .choose_observed(pointer.as_deref(), generation, &mut rotated, &list)
-        .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))?;
-    drop(rotated);
-    drop(chooser);
-    // With --auto, an account already known to be out of quota should not serve
-    // the next turn: the previous response said a window was spent, so start
-    // elsewhere instead of walking into the wall. The turn that OBSERVED this was
-    // still served by that account (rotating mid-turn would drop the prompt cache
-    // for nothing), which is why the check belongs here and not there.
-    let (auto, live_threshold) = live(paths, opts);
-    // Read the windows whether or not rotation is on. This used to live inside
-    // `if auto`, so with rotation off nothing re-read them: the cache aged, its
-    // readings expired at their reset times, and the usage vanished from every
-    // screen. Turning rotation off should cost the rotation, not the numbers.
-    if should_measure(auto, &opts.tool) {
-        refresh_measured(paths, &list, sh);
-    }
-    if auto {
-        // Stepping off BEFORE the wall needs a reading, and the only zero-spend
-        // reading that exists is Anthropic's usage endpoint. Codex has none, so
-        // its accounts are moved when one actually refuses a turn - never by
-        // asking one API about another's account.
-        if let Some(t) = live_threshold.filter(|_| opts.tool != "codex") {
-            refresh_measured(paths, &list, sh);
-            // Some(true/false) when this account HAS a reading; None when it has
-            // none. The two are not the same, and only the first can lift a
-            // corner - see `pick::corner_after`.
-            let measured_full = sh
-                .measured
-                .held()
-                .1
-                .get(&chosen.name)
-                .map(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits));
-            let full = measured_full.unwrap_or(false);
-            // The corner is a state, not a verdict that outlives its cause. Its
-            // only clear-to-None lived inside the `if full` block below, so once
-            // the windows reset and `full` went false that block was skipped and
-            // the latch stayed set - every turn silently rewritten to the
-            // fallback model, with full quota, for the life of the process.
-            {
-                let mut c = sh.cornered.held();
-                *c = pick::corner_after(measured_full, *c);
+    // Quota reads can outlive several explicit choices. Reselect a bounded
+    // number of times so normal churn converges while a continuously rewritten
+    // pointer returns an actionable error instead of spinning a request forever.
+    const MAX_RESELECTS: usize = 4;
+    for _ in 0..MAX_RESELECTS {
+        let slots = crate::slots::Slots::open_for(paths, &opts.tool)?;
+        let list = slots.list();
+        // Who serves is its own answer when one was given: `swapdex serve <name>`
+        // hands turns to an account without moving where sessions start, so a
+        // conversation keeps living where it began while another account pays.
+        let mut chooser = sh.chooser.held();
+        match crate::slots::serving_is_off_checked(paths, &opts.tool) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(anyhow!(
+                    "serving changed to passthrough while choosing an account; retry this turn"
+                ));
             }
-            // A move made moments ago stands: without this, two accounts either
-            // side of the line trade the session back and forth.
-            let cooling = sh
-                .last_preempt
-                .held()
-                .is_some_and(|t| t.elapsed() < PREEMPT_COOLDOWN);
-            if full && !cooling {
-                match usable_under_threshold(paths, sh, &chosen.name, t) {
-                    Some(better) => {
-                        println!(
-                            "{} is near its limit - starting this turn on {}",
-                            chosen.name, better.name
-                        );
-                        std::io::stdout().flush().ok();
-                        *sh.cornered.held() = None;
-                        *sh.rotated.held() = Some(better.name.clone());
-                        *sh.last_preempt.held() = Some(std::time::Instant::now());
-                        return Ok(better);
-                    }
-                    // Staying put on a full account is the right call when every
-                    // other one is full too - but silence here is indistinguishable
-                    // from the threshold not working at all.
-                    None => {
-                        // WHY nothing else could take it, not merely that
-                        // nothing could. The filter rejects an account for six
-                        // different reasons and only one of them is the
-                        // threshold; an account at 97% left and refusing is not
-                        // near its limit, and saying it is sends the reader to
-                        // a quota page where nothing is wrong.
-                        let over: Vec<bool> = {
-                            let m = sh.measured.held();
-                            list.iter()
-                                .filter(|r| r.name != chosen.name)
-                                .filter_map(|r| m.1.get(&r.name))
-                                .map(|m| {
-                                    pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits)
-                                })
-                                .collect()
-                        };
-                        let corner = pick::why_no_move(&over);
-                        println!("{} - staying on {}", corner.describe(), chosen.name);
-                        std::io::stdout().flush().ok();
-                        // Nowhere to rotate. If a fallback model is configured,
-                        // the request path may ask for it rather than let the
-                        // turn hit the wall - the LAST thing swapdex tries,
-                        // never the first, because rotating gives the user what
-                        // they asked for and this does not.
-                        *sh.cornered.held() = Some(corner);
-                    }
-                }
+            Err(error) => {
+                return Err(error)
+                    .context("serving state changed while choosing an account; retry this turn");
             }
         }
-        let known_spent = sh
+        // Read the generation while holding the same lock that records it.
+        // Otherwise an older request can read A, a newer request record C, then
+        // the older one acquire the lock and clobber the chooser back to A.
+        let (pointer, generation) = slots.serving_choice();
+        let observation = ServingObservation {
+            pointer: pointer.clone(),
+            generation: generation.clone(),
+        };
+        let mut rotated = sh.rotated.held();
+        let chosen = chooser
+            .choose_observed(pointer.as_deref(), generation, &mut rotated, &list)
+            .ok_or_else(|| anyhow!("no account slots yet - `swapdex run <name>` creates one"))?;
+        drop(rotated);
+        drop(chooser);
+        // With --auto, an account already known to be out of quota should not serve
+        // the next turn: the previous response said a window was spent, so start
+        // elsewhere instead of walking into the wall. The turn that OBSERVED this was
+        // still served by that account (rotating mid-turn would drop the prompt cache
+        // for nothing), which is why the check belongs here and not there.
+        let (auto, live_threshold) = live(paths, opts);
+        // Read the windows whether or not rotation is on. This used to live inside
+        // `if auto`, so with rotation off nothing re-read them: the cache aged, its
+        // readings expired at their reset times, and the usage vanished from every
+        // screen. Turning rotation off should cost the rotation, not the numbers.
+        if should_measure(auto, &opts.tool) {
+            refresh_measured(paths, &list, sh);
+        }
+        if auto {
+            // Stepping off BEFORE the wall needs a reading, and the only zero-spend
+            // reading that exists is Anthropic's usage endpoint. Codex has none, so
+            // its accounts are moved when one actually refuses a turn - never by
+            // asking one API about another's account.
+            if let Some(t) = live_threshold.filter(|_| opts.tool != "codex") {
+                refresh_measured(paths, &list, sh);
+                // Some(true/false) when this account HAS a reading; None when it has
+                // none. The two are not the same, and only the first can lift a
+                // corner - see `pick::corner_after`.
+                let measured_full = sh
+                    .measured
+                    .held()
+                    .1
+                    .get(&chosen.name)
+                    .map(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits));
+                let full = measured_full.unwrap_or(false);
+                // A move made moments ago stands: without this, two accounts either
+                // side of the line trade the session back and forth.
+                let cooling = sh
+                    .last_preempt
+                    .held()
+                    .is_some_and(|t| t.elapsed() < PREEMPT_COOLDOWN);
+                let better = (full && !cooling)
+                    .then(|| usable_under_threshold(paths, sh, &chosen.name, t))
+                    .flatten();
+                // The corner is a state, not a verdict that outlives its cause. Its
+                // update is committed with the rotation under the same observed
+                // pointer generation, because the quota read above can block while
+                // another request observes a newer human choice.
+                let corner_update = if better.is_some() {
+                    CornerUpdate::Set(None)
+                } else if full && !cooling {
+                    // WHY nothing else could take it, not merely that nothing
+                    // could. The filter rejects an account for several unrelated
+                    // reasons and only one of them is the threshold.
+                    let over: Vec<bool> = {
+                        let m = sh.measured.held();
+                        list.iter()
+                            .filter(|r| r.name != chosen.name)
+                            .filter_map(|r| m.1.get(&r.name))
+                            .map(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits))
+                            .collect()
+                    };
+                    CornerUpdate::Set(Some(pick::why_no_move(&over)))
+                } else {
+                    CornerUpdate::AfterMeasurement(measured_full)
+                };
+                if !commit_automatic_choice(
+                    paths,
+                    opts,
+                    sh,
+                    Some(&observation),
+                    better.as_ref().map(|slot| slot.name.as_str()),
+                    corner_update,
+                    better.is_some(),
+                ) {
+                    continue;
+                }
+                if let Some(better) = better {
+                    println!(
+                        "{} is near its limit - starting this turn on {}",
+                        chosen.name, better.name
+                    );
+                    std::io::stdout().flush().ok();
+                    return Ok((better, Some(observation)));
+                }
+                if let CornerUpdate::Set(Some(corner)) = corner_update {
+                    println!("{} - staying on {}", corner.describe(), chosen.name);
+                    std::io::stdout().flush().ok();
+                }
+            }
+            let expired = if opts.tool == "codex" {
+                codex::slot_token_expired(&chosen.config_dir, now_secs())
+            } else {
+                creds::slot_token_expired(&chosen.config_dir, now_ms())
+            };
+            let known_spent = sh
             .quota
             .held()
             .get(&chosen.name)
@@ -474,33 +567,52 @@ fn pick_slot(paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<crate::slot
                 .held()
                 .contains(&chosen.name, std::time::Instant::now())
             // A lapsed token cannot serve and cannot be refreshed from here, so
-            // treat it the same as spent when choosing where to start.
-            || creds::slot_token_expired(&chosen.config_dir, now_ms());
-        if !known_spent {
-            // Served without redirection: the episode is over, so its return is
-            // worth announcing again.
-            pick::clear_bench_note(&mut sh.benched_note.held());
-        }
-        if known_spent {
-            if let Some(better) = next_account(paths, sh, std::slice::from_ref(&chosen.name)) {
-                // Say it - once. This used to be the quietest path in the proxy:
-                // the account the rotation had settled on was benched, every turn
-                // fell back here, and the log showed only the fallback serving
-                // turn after turn with no reason given. Saying it on EVERY turn
-                // was the opposite mistake: a `serve` pointer stuck on a benched
-                // account repeated one sentence until nobody read any of them.
-                if pick::announce_bench(&mut sh.benched_note.held(), &chosen.name, &better.name) {
-                    println!(
-                        "{} is benched - turns go to {} until it comes back",
-                        chosen.name, better.name
-                    );
-                    std::io::stdout().flush().ok();
+            // treat it the same as spent when choosing where to start. Each
+            // tool owns a different credential format and expiry clock.
+            || expired;
+            if !known_spent {
+                // Served without redirection: the episode is over, so its return is
+                // worth announcing again.
+                pick::clear_bench_note(&mut sh.benched_note.held());
+            }
+            if known_spent {
+                if let Some(better) =
+                    next_account_for(paths, opts, sh, std::slice::from_ref(&chosen.name))
+                {
+                    if !commit_automatic_choice(
+                        paths,
+                        opts,
+                        sh,
+                        Some(&observation),
+                        None,
+                        CornerUpdate::Keep,
+                        false,
+                    ) {
+                        continue;
+                    }
+                    // Say it - once. This used to be the quietest path in the proxy:
+                    // the account the rotation had settled on was benched, every turn
+                    // fell back here, and the log showed only the fallback serving
+                    // turn after turn with no reason given. Saying it on EVERY turn
+                    // was the opposite mistake: a `serve` pointer stuck on a benched
+                    // account repeated one sentence until nobody read any of them.
+                    if pick::announce_bench(&mut sh.benched_note.held(), &chosen.name, &better.name)
+                    {
+                        println!(
+                            "{} is benched - turns go to {} until it comes back",
+                            chosen.name, better.name
+                        );
+                        std::io::stdout().flush().ok();
+                    }
+                    return Ok((better, Some(observation)));
                 }
-                return Ok(better);
             }
         }
+        return Ok((chosen, Some(observation)));
     }
-    Ok(chosen)
+    Err(anyhow!(
+        "serving choice kept changing while choosing an account; retry this turn"
+    ))
 }
 
 /// How long a utilization reading is trusted before being taken again. Long
@@ -1320,6 +1432,20 @@ fn next_account(paths: &Paths, sh: &Shared, tried: &[String]) -> Option<crate::s
     next_account_in(paths, "claude-code", sh, tried)
 }
 
+/// Non-secret payer identity used to keep one refused account from being
+/// retried through a twin slot. Codex needs subject plus workspace when both are
+/// present: a workspace can contain several independent users. Opaque legacy
+/// credentials retain the workspace fallback. Claude keeps its account UUID.
+fn rotation_identity(tool: &str, dir: &std::path::Path) -> Option<String> {
+    if tool == "codex" {
+        return crate::refresh::credential_identity(
+            &std::fs::read(dir.join("auth.json")).ok()?,
+            tool,
+        );
+    }
+    creds::slot_account_uuid(dir)
+}
+
 fn next_account_in(
     paths: &Paths,
     tool: &str,
@@ -1358,7 +1484,9 @@ fn next_account_in(
         .iter()
         .map(|r| pick::Candidate {
             name: r.name.clone(),
-            uuid: creds::slot_account_uuid(&r.config_dir),
+            // `Candidate` retains the historical field name, but this is the
+            // provider-qualified payer identity for the selected tool.
+            uuid: rotation_identity(tool, &r.config_dir),
             ruled_out: tried.contains(&r.name)
                 || unusable.contains(&r.name, now)
                 || spent
@@ -1880,19 +2008,39 @@ fn forward_turn(
     let serving_off = crate::slots::serving_is_off_checked(paths, &opts.tool)
         .context("cannot safely read serving state; refusing to choose managed credentials")?;
     if serving_off {
-        // Off ends the previous automatic-choice episode. Without clearing both
-        // halves, re-enabling the same account can lose to the account chosen by
-        // a rotation that happened before passthrough.
-        sh.chooser.held().reset();
-        *sh.rotated.held() = None;
-        note_client_serving(paths, &opts.tool);
-        println!("  [{}] {method} {path} -> passthrough", stamp());
-        std::io::stdout().flush().ok();
-        let mut headers = client_headers.clone();
-        if let Some(auth) = client_auth {
-            headers.push(("authorization".into(), auth));
+        let confirmed_off = {
+            // Serialize the second pointer read and reset with ordinary request
+            // choice. If the user re-enables managed serving after the first
+            // read, this older request cannot clear a newer rotation.
+            let mut chooser = sh.chooser.held();
+            let mut rotated = sh.rotated.held();
+            match crate::slots::serving_is_off_checked(paths, &opts.tool) {
+                Ok(true) => {
+                    // Off ends the previous automatic-choice episode. Without
+                    // clearing both halves, re-enabling the same account can lose
+                    // to a rotation that happened before passthrough.
+                    chooser.reset();
+                    *rotated = None;
+                    note_client_serving(paths, &opts.tool);
+                    true
+                }
+                Ok(false) => false,
+                Err(error) => {
+                    return Err(error).context(
+                        "cannot safely read serving state; refusing to choose managed credentials",
+                    );
+                }
+            }
+        };
+        if confirmed_off {
+            println!("  [{}] {method} {path} -> passthrough", stamp());
+            std::io::stdout().flush().ok();
+            let mut headers = client_headers.clone();
+            if let Some(auth) = client_auth {
+                headers.push(("authorization".into(), auth));
+            }
+            return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
         }
-        return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
     }
 
     let known_uuids: Vec<String> = crate::slots::Slots::open(paths)
@@ -1904,7 +2052,7 @@ fn forward_turn(
         })
         .unwrap_or_default();
 
-    let mut slot = pick_slot(paths, opts, sh)?;
+    let (mut slot, serving_observation) = pick_slot(paths, opts, sh)?;
     // Choosing a slot does not establish that it can serve the request. Write
     // the serving mark only when its credential is committed to an upstream call.
     let mut tried: Vec<String> = Vec::new();
@@ -2060,20 +2208,23 @@ fn forward_turn(
                 loop {
                     match upstream::forward(&sh.agent, &method, &url, &headers, &client_body) {
                         Ok(u) => break u,
-                        Err(e) => match transport_retry(t) {
-                            Some(wait) => {
-                                println!(
-                                    "[{}] {} {path} -> connection lost, retrying in {}ms",
-                                    stamp(),
-                                    slot.name,
-                                    wait.as_millis()
-                                );
-                                std::io::stdout().flush().ok();
-                                t += 1;
-                                std::thread::sleep(wait);
+                        Err(e) if upstream::can_retry_request(&method, &format!("{e:#}")) => {
+                            match transport_retry(t) {
+                                Some(wait) => {
+                                    println!(
+                                        "[{}] {} {path} -> connection lost, retrying in {}ms",
+                                        stamp(),
+                                        slot.name,
+                                        wait.as_millis()
+                                    );
+                                    std::io::stdout().flush().ok();
+                                    t += 1;
+                                    std::thread::sleep(wait);
+                                }
+                                None => return Err(e),
                             }
-                            None => return Err(e),
-                        },
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
             };
@@ -2176,10 +2327,30 @@ fn forward_turn(
                     e.0.rejected = true;
                     e.1 = now_secs();
                 }
-                if let Some(next) = next_account_for(paths, opts, sh, &tried) {
+                let next = next_account_for(paths, opts, sh, &tried);
+                // This response belongs to the choice observed when the request
+                // began. A newer explicit `serve` wins even if no later request
+                // has noticed it yet; the old turn keeps its own refusal instead
+                // of installing a rotation over the human's choice.
+                if !commit_automatic_choice(
+                    paths,
+                    opts,
+                    sh,
+                    serving_observation.as_ref(),
+                    next.as_ref().map(|slot| slot.name.as_str()),
+                    CornerUpdate::Keep,
+                    false,
+                ) {
+                    println!(
+                        "  serving choice changed while {} was in flight - keeping the newer choice",
+                        slot.name
+                    );
+                    std::io::stdout().flush().ok();
+                    break up;
+                }
+                if let Some(next) = next {
                     println!("  {} is out - continuing on {}", slot.name, next.name);
                     std::io::stdout().flush().ok();
-                    *sh.rotated.held() = Some(next.name.clone());
                     note_serving_for(paths, &opts.tool, &next.name);
                     // Retries are evidence about the account they were made against.
                     // Carrying the count across a rotation benched the next account
@@ -2467,19 +2638,36 @@ fn forward_turn(
             break up;
         }
         tried.push(slot.name.clone());
+        let next = next_account(paths, sh, &tried);
+        let corner = next.is_none().then_some(pick::Corner::AllRefused);
+        // The request may have been waiting upstream while the user chose a new
+        // payer. Do not let this older refusal overwrite that newer decision.
+        if !commit_automatic_choice(
+            paths,
+            opts,
+            sh,
+            serving_observation.as_ref(),
+            next.as_ref().map(|slot| slot.name.as_str()),
+            CornerUpdate::Set(corner),
+            false,
+        ) {
+            println!(
+                "serving choice changed while {} was in flight - keeping the newer choice",
+                slot.name
+            );
+            std::io::stdout().flush().ok();
+            refused_by = Some(slot.name.clone());
+            break up;
+        }
         // Cornered by refusal rather than by measurement: every account has now
         // said no to THIS turn. Same corner, and it needs no usage reading.
-        *sh.cornered.held() = next_account(paths, sh, &tried)
-            .is_none()
-            .then_some(pick::Corner::AllRefused);
-        match next_account(paths, sh, &tried) {
+        match next {
             Some(next) => {
                 println!(
                     "{} cannot serve this turn - retrying on {}",
                     slot.name, next.name
                 );
                 std::io::stdout().flush().ok();
-                *sh.rotated.held() = Some(next.name.clone());
                 drop(up); // discard the failed response; the retry replaces it
                           // Retries are evidence about the account they were made against.
                           // Carrying the count across a rotation benched the next account
