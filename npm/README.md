@@ -453,13 +453,15 @@ external consumers need their own login instead of a copy of a managed slot.
 Account selection and listing use local state. Managed launches and `serve`
 can start a local proxy; its scheduled renewal work contacts OAuth endpoints
 for idle logins. `quota` and the dashboard contact provider usage endpoints;
-`quota` can first renew eligible expired Claude slot credentials through the
-same coordinated path. Saved snapshots remain read-only, and running native
-sessions keep renewal ownership. `doctor` checks the published version online. Login commands invoke the
-native tool's sign-in flow. The proxy relays model requests with the selected
-credential using `ureq`, rustls and bundled roots; CI excludes heavy async
-runtimes and system-TLS dependencies. An ordinary account selection does not
-submit a model request.
+they never invoke OAuth renewal or update saved credentials. Expired credentials
+are reported without a usage request, while a running native Claude session may
+supply its current token for the same account. `doctor` checks the published
+version online. Login commands invoke the native tool's sign-in flow. The proxy
+relays model requests with the selected credential using `ureq`, rustls and
+bundled roots. Its Hyper HTTP/1 listener uses a single-thread Tokio runtime to
+flush streamed responses and close failed streams. CI limits runtime features
+and excludes additional client frameworks and system-TLS dependencies. An
+ordinary account selection does not submit a model request.
 
 Explicit account selection, launch defaults and configured proxy failover are
 separate controls. A local file lock coordinates participating Swapdex callers;

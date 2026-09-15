@@ -8,6 +8,8 @@ pub mod creds;
 pub mod identity;
 pub mod pick;
 pub mod ratelimit;
+mod relay;
+mod server;
 pub mod upstream;
 
 use crate::paths::Paths;
@@ -342,6 +344,12 @@ fn skip_response_header(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "host"
             | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "upgrade"
             | "content-length"
             | "transfer-encoding"
             // The length and the encoding both describe bytes that no longer
@@ -1247,16 +1255,12 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     }
     // Loopback only: this holds a live credential, so it must never be
     // reachable off the machine.
-    let server = match tiny_http::Server::http(("127.0.0.1", opts.port)) {
+    let server = match server::Server::http(("127.0.0.1", opts.port)) {
         Ok(s) => s,
         Err(e) => take_the_port(paths, &opts.tool, opts.port)
             .ok_or_else(|| anyhow!("cannot bind 127.0.0.1:{}: {e}", opts.port))?,
     };
-    let port = server
-        .server_addr()
-        .to_ip()
-        .ok_or_else(|| anyhow!("proxy did not get a TCP port"))?
-        .port();
+    let port = server.server_addr().port();
     // Announce the proxy so the installed `claude` shim points at it by itself -
     // "<pid> <port>", pid so a stale marker (killed proxy) is detectable.
     let marker = crate::shim::proxy_marker_for(paths, &opts.tool);
@@ -1886,7 +1890,7 @@ fn recover_rejected_bearer(
         .filter(|replacement| replacement.expose() != rejected)
 }
 
-fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<()> {
+fn handle(mut rq: server::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<()> {
     if is_codex_responses_websocket(&rq, opts) {
         rq.respond(tiny_http::Response::empty(tiny_http::StatusCode(426)))?;
         return Ok(());
@@ -1913,29 +1917,14 @@ fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Share
             return Err(anyhow!(msg));
         }
     };
-    let out_headers: Vec<tiny_http::Header> = up
-        .headers
-        .iter()
-        .filter(|(n, _)| !skip_response_header(n))
-        .filter_map(|(n, v)| tiny_http::Header::from_bytes(n.as_bytes(), v.as_bytes()).ok())
-        .collect();
-    // The length is unknown (responses stream, and SSE has no length at all), so
-    // answer chunked and let the reader drive.
-    let resp = tiny_http::Response::new(
-        tiny_http::StatusCode(up.status),
-        out_headers,
-        up.reader,
-        None,
-        None,
-    );
-    rq.respond(resp)?;
+    relay::respond(rq, up)?;
     Ok(())
 }
 
 /// Codex probes Responses over WebSocket before using the HTTP transport. This
 /// proxy is HTTP-only, so reject that probe locally and let Codex fall back
 /// without selecting an account or contacting upstream.
-fn is_codex_responses_websocket(rq: &tiny_http::Request, opts: &Opts) -> bool {
+fn is_codex_responses_websocket(rq: &server::Request, opts: &Opts) -> bool {
     if opts.tool != "codex" || !rq.method().as_str().eq_ignore_ascii_case("GET") {
         return false;
     }
@@ -1949,7 +1938,7 @@ fn is_codex_responses_websocket(rq: &tiny_http::Request, opts: &Opts) -> bool {
 /// Choose the account, serve the turn (retrying and rotating as needed), and hand
 /// back the upstream response for the caller to relay.
 fn forward_turn(
-    rq: &mut tiny_http::Request,
+    rq: &mut server::Request,
     paths: &Paths,
     opts: &Opts,
     sh: &Arc<Shared>,
@@ -1983,8 +1972,7 @@ fn forward_turn(
     };
     let method = rq.method().as_str().to_string();
     let path = rq.url().to_string();
-    let mut client_body = Vec::new();
-    rq.as_reader().read_to_end(&mut client_body)?;
+    let client_body = rq.take_body();
 
     // Authentication is the user's own business with the vendor. Pass it straight
     // through with the credential the client sent - no account chosen, no token
@@ -2856,7 +2844,7 @@ pub fn tz_offset() -> i64 {
 /// times on a real machine before anyone looked. Only a swapdex proxy serving
 /// THIS tool is displaced: anything else on the port is somebody else's and is
 /// left alone, so the error still surfaces.
-fn take_the_port(paths: &Paths, tool: &str, port: u16) -> Option<tiny_http::Server> {
+fn take_the_port(paths: &Paths, tool: &str, port: u16) -> Option<server::Server> {
     let (pid, held, _) = running_proxy_for(paths, tool)?;
     if held != port {
         return None;
@@ -2868,7 +2856,7 @@ fn take_the_port(paths: &Paths, tool: &str, port: u16) -> Option<tiny_http::Serv
     // be the supervisor's restart loop moved inside the process.
     for _ in 0..40 {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Ok(s) = tiny_http::Server::http(("127.0.0.1", port)) {
+        if let Ok(s) = server::Server::http(("127.0.0.1", port)) {
             return Some(s);
         }
     }

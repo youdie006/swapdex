@@ -1,20 +1,21 @@
-//! Quota reads must use the credential produced by an eligible slot renewal.
+//! Quota reads must never renew or rewrite a saved credential.
 
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::Child;
+use std::process::{Command, Output};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 struct ReapedChild(Option<Child>);
 
-impl ReapedChild {
-    fn wait_with_output(&mut self) -> Output {
-        self.0.take().unwrap().wait_with_output().unwrap()
-    }
-}
-
+#[cfg(target_os = "linux")]
 impl Drop for ReapedChild {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.take() {
@@ -24,6 +25,7 @@ impl Drop for ReapedChild {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for(path: &Path) {
     let started = Instant::now();
     while !path.exists() {
@@ -121,24 +123,15 @@ case "$cfg" in
   *oauth.test*)
     printf x >> "$HOME/oauth-calls"
     case "$cfg" in *OLD-REFRESH*) ;; *) exit 92 ;; esac
-    if [ "${TEST_PAUSE_OAUTH:-}" = 1 ]; then
-      : > "$HOME/oauth-started"
-      n=0
-      while [ ! -f "$HOME/oauth-release" ]; do
-        n=$((n + 1))
-        [ "$n" -lt 1000 ] || exit 93
-        sleep 0.01
-      done
-    fi
-    if [ "${TEST_OAUTH_RESULT:-ok}" = refused ]; then
-      printf '{"error_description":"refresh refused"}\n401'
-    else
-      printf '{"access_token":"NEW-ACCESS","refresh_token":"NEW-REFRESH","expires_in":3600}\n200'
-    fi
+    printf '{"access_token":"NEW-ACCESS","refresh_token":"NEW-REFRESH","expires_in":3600}\n200'
     ;;
   *OLD-ACCESS*)
     printf x >> "$HOME/old-usage-calls"
     printf '{"error":"old access rejected"}\n401'
+    ;;
+  *VALID-ACCESS*)
+    printf x >> "$HOME/valid-usage-calls"
+    printf '{"five_hour":{"utilization":12}}\n200'
     ;;
   *OLD-SNAPSHOT-ACCESS*)
     printf x >> "$HOME/snapshot-usage-calls"
@@ -152,9 +145,13 @@ case "$cfg" in
     printf x >> "$HOME/native-usage-calls"
     printf '{"five_hour":{"utilization":23}}\n200'
     ;;
-  *REPLACEMENT-ACCESS*)
-    printf x >> "$HOME/replacement-usage-calls"
-    printf '{"five_hour":{"utilization":34}}\n200'
+  *LIVE-EXPIRED-ACCESS*)
+    printf x >> "$HOME/live-expired-usage-calls"
+    printf '{"five_hour":{"utilization":77}}\n200'
+    ;;
+  *SAVED-ACCESS*)
+    printf x >> "$HOME/saved-usage-calls"
+    printf '{"five_hour":{"utilization":99}}\n200'
     ;;
   *) exit 91 ;;
 esac
@@ -166,10 +163,10 @@ esac
         Self { root, slot, curl }
     }
 
-    fn quota_command(&self) -> Command {
+    fn quota_command_with_json(&self, json: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_swapdex"));
         command
-            .args(["quota", "--json"])
+            .arg("quota")
             .env("SWAPDEX_ROOT", self.root.path())
             .env("HOME", self.root.path())
             .env("SWAPDEX_CURL", &self.curl)
@@ -179,12 +176,43 @@ esac
             .env_remove("SWAPDEX_TEST_REFRESH_COUNT")
             .env_remove("SWAPDEX_TEST_REFRESH_STARTED")
             .env_remove("SWAPDEX_TEST_REFRESH_RELEASE");
+        if json {
+            command.arg("--json");
+        }
         command
+    }
+
+    fn quota_command(&self) -> Command {
+        self.quota_command_with_json(true)
     }
 
     fn quota(&self) -> serde_json::Value {
         let out = self.quota_command().output().unwrap();
         self.output(out)
+    }
+
+    fn human_quota(&self) -> Output {
+        self.quota_command_with_json(false).output().unwrap()
+    }
+
+    fn credential_bytes(&self) -> Vec<u8> {
+        std::fs::read(self.slot.join(".credentials.json")).unwrap()
+    }
+
+    fn write_credential(&self, access_token: &str, expires_at: i64) {
+        std::fs::write(
+            self.slot.join(".credentials.json"),
+            serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": access_token,
+                    "refreshToken": "OLD-REFRESH",
+                    "expiresAt": expires_at,
+                    "refreshTokenExpiresAt": 9_000_000_000_000_i64
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
     }
 
     fn output(&self, out: Output) -> serde_json::Value {
@@ -217,64 +245,78 @@ esac
             .expect("work quota row")
     }
 
-    fn assert_first_read_used_renewal(&self, value: &serde_json::Value) {
+    fn assert_expired_read_was_read_only(
+        &self,
+        value: &serde_json::Value,
+        credential_before: &[u8],
+    ) {
         let row = self.row(value);
-        assert_eq!(row["status"], "ok", "{row}");
+        assert_eq!(row["status"], "offline", "{row}");
         assert_eq!(row["email"], "current@example.com", "{row}");
-        assert_eq!(row["five_hour"]["used_pct"], 12.0, "{row}");
-        assert_eq!(self.calls("oauth-calls"), 1, "one OAuth exchange");
-        assert_eq!(self.calls("new-usage-calls"), 1, "new access token used");
-        assert_eq!(self.calls("old-usage-calls"), 0, "old access token leaked");
+        assert!(
+            row["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("expired")),
+            "expired state was hidden: {row}"
+        );
+        assert_eq!(self.calls("oauth-calls"), 0, "quota invoked OAuth");
+        assert_eq!(self.calls("new-usage-calls"), 0, "renewed token was used");
+        assert_eq!(self.calls("old-usage-calls"), 0, "expired token was used");
         assert_eq!(
             self.calls("snapshot-usage-calls"),
             0,
             "saved profile substituted for its backing slot"
         );
-        let credential: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(self.slot.join(".credentials.json")).unwrap())
-                .unwrap();
-        assert_eq!(credential["claudeAiOauth"]["accessToken"], "NEW-ACCESS");
-        assert_eq!(credential["claudeAiOauth"]["refreshToken"], "NEW-REFRESH");
+        assert_eq!(
+            std::fs::read(self.slot.join(".credentials.json")).unwrap(),
+            credential_before,
+            "quota rewrote the saved credential"
+        );
     }
 }
 
 #[test]
-fn slot_only_quota_uses_the_renewed_credential_on_its_first_read() {
+fn slot_only_quota_json_reports_expired_without_oauth_or_a_credential_write() {
     let fixture = Fixture::new(false);
+    let credential_before = fixture.credential_bytes();
 
     let value = fixture.quota();
 
-    fixture.assert_first_read_used_renewal(&value);
+    fixture.assert_expired_read_was_read_only(&value, &credential_before);
 }
 
 #[test]
-fn failed_renewal_is_explicit_and_does_not_send_the_old_access_token() {
+fn slot_only_human_quota_reports_expired_without_oauth_or_a_credential_write() {
     let fixture = Fixture::new(false);
+    let credential_before = fixture.credential_bytes();
 
-    let out = fixture
-        .quota_command()
-        .env("TEST_OAUTH_RESULT", "refused")
-        .output()
-        .unwrap();
-    let value = fixture.output(out);
-    let row = fixture.row(&value);
-
-    assert_eq!(row["status"], "offline", "{row}");
+    let out = fixture.human_quota();
     assert!(
-        row["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("refresh refused")),
-        "renewal failure was hidden: {row}"
+        out.status.success(),
+        "quota exited {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(fixture.calls("oauth-calls"), 1, "one OAuth attempt");
-    assert_eq!(fixture.calls("old-usage-calls"), 0, "old access token used");
-    assert_eq!(fixture.calls("new-usage-calls"), 0, "failed answer used");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("work (active)"),
+        "account missing: {stdout}"
+    );
+    assert!(stdout.contains("expired"), "expired state hidden: {stdout}");
+    assert_eq!(fixture.calls("oauth-calls"), 0, "quota invoked OAuth");
+    assert_eq!(
+        fixture.calls("old-usage-calls"),
+        0,
+        "expired token was used"
+    );
+    assert_eq!(fixture.credential_bytes(), credential_before);
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn in_use_renewal_is_deferred_without_oauth_or_an_old_quota_read() {
+fn an_expired_slot_owned_by_native_claude_is_still_only_reported() {
     let fixture = Fixture::new(false);
+    let credential_before = fixture.credential_bytes();
     let claude = fixture.root.path().join("claude");
     std::os::unix::fs::symlink("/bin/sleep", &claude).unwrap();
     let mut held = ReapedChild(Some(
@@ -296,11 +338,16 @@ fn in_use_renewal_is_deferred_without_oauth_or_an_old_quota_read() {
     assert!(
         row["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("renewal deferred")),
-        "deferred ownership was hidden: {row}"
+            .is_some_and(|detail| detail.contains("expired")),
+        "expired state was hidden: {row}"
     );
-    assert_eq!(fixture.calls("oauth-calls"), 0, "OAuth ran behind Claude");
-    assert_eq!(fixture.calls("old-usage-calls"), 0, "old access token used");
+    assert_eq!(fixture.calls("oauth-calls"), 0, "quota invoked OAuth");
+    assert_eq!(
+        fixture.calls("old-usage-calls"),
+        0,
+        "expired token was used"
+    );
+    assert_eq!(fixture.credential_bytes(), credential_before);
     held.0.as_mut().unwrap().kill().unwrap();
     held.0.as_mut().unwrap().wait().unwrap();
     held.0 = None;
@@ -310,6 +357,7 @@ fn in_use_renewal_is_deferred_without_oauth_or_an_old_quota_read() {
 #[cfg(target_os = "linux")]
 fn a_current_native_owner_supplies_only_the_same_accounts_credential() {
     let fixture = Fixture::new(false);
+    let credential_before = fixture.credential_bytes();
     let native = fixture.root.path().join(".claude");
     std::fs::create_dir_all(&native).unwrap();
     std::fs::write(
@@ -363,81 +411,133 @@ fn a_current_native_owner_supplies_only_the_same_accounts_credential() {
         0,
         "slot token substituted"
     );
+    assert_eq!(fixture.credential_bytes(), credential_before);
     held.0.as_mut().unwrap().kill().unwrap();
     held.0.as_mut().unwrap().wait().unwrap();
     held.0 = None;
 }
 
 #[test]
-fn a_login_replaced_during_renewal_does_not_leak_the_stale_identity_or_token() {
+fn a_valid_slot_token_is_read_without_oauth_or_a_credential_write() {
     let fixture = Fixture::new(false);
-    let mut quota = fixture.quota_command();
-    quota
-        .env("TEST_PAUSE_OAUTH", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = ReapedChild(Some(quota.spawn().unwrap()));
-    wait_for(&fixture.root.path().join("oauth-started"));
+    fixture.write_credential("VALID-ACCESS", 9_000_000_000_000_i64);
+    let credential_before = fixture.credential_bytes();
 
+    let value = fixture.quota();
+    let row = fixture.row(&value);
+
+    assert_eq!(row["status"], "ok", "{row}");
+    assert_eq!(row["email"], "current@example.com", "{row}");
+    assert_eq!(row["five_hour"]["used_pct"], 12.0, "{row}");
+    assert_eq!(fixture.calls("oauth-calls"), 0, "quota invoked OAuth");
+    assert_eq!(fixture.calls("valid-usage-calls"), 1, "usage was not read");
+    assert_eq!(fixture.credential_bytes(), credential_before);
+}
+
+#[test]
+fn saved_profile_quota_reads_its_expired_authoritative_slot_without_oauth_or_a_write() {
+    let fixture = Fixture::new(true);
+    let credential_before = fixture.credential_bytes();
+    let snapshot = fixture
+        .root
+        .path()
+        .join(".local/share/swapdex/accounts/work/claude-code/credentials");
+    let snapshot_before = std::fs::read(&snapshot).unwrap();
+
+    let value = fixture.quota();
+
+    fixture.assert_expired_read_was_read_only(&value, &credential_before);
+    assert_eq!(
+        std::fs::read(snapshot).unwrap(),
+        snapshot_before,
+        "quota rewrote the saved profile credential"
+    );
+}
+
+#[test]
+fn matching_unslotted_profile_does_not_send_an_expired_live_credential() {
+    let fixture = Fixture::new(true);
+    let store = fixture.root.path().join(".local/share/swapdex");
+    std::fs::remove_file(store.join("slots.json")).unwrap();
+    std::fs::remove_file(store.join("active-claude")).unwrap();
+
+    let profile = store.join("accounts/work/claude-code");
     std::fs::write(
-        fixture.slot.join(".claude.json"),
+        profile.join("oauth_account"),
         serde_json::json!({
-            "oauthAccount": {
-                "accountUuid": "replacement-user",
-                "organizationUuid": "replacement-org",
-                "emailAddress": "replacement@example.com"
-            }
+            "accountUuid": "current-user",
+            "emailAddress": "current@example.com"
         })
         .to_string(),
     )
     .unwrap();
     std::fs::write(
-        fixture.slot.join(".credentials.json"),
+        profile.join("credentials"),
         serde_json::json!({
             "claudeAiOauth": {
-                "accessToken": "REPLACEMENT-ACCESS",
-                "refreshToken": "REPLACEMENT-REFRESH",
+                "accessToken": "SAVED-ACCESS",
                 "expiresAt": 9_000_000_000_000_i64
             }
         })
         .to_string(),
     )
     .unwrap();
-    std::fs::write(fixture.root.path().join("oauth-release"), b"go").unwrap();
-    let value = fixture.output(child.wait_with_output());
+
+    let native = fixture.root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(
+        fixture.root.path().join(".claude.json"),
+        serde_json::json!({
+            "oauthAccount": {
+                "accountUuid": "current-user",
+                "organizationUuid": "current-org",
+                "emailAddress": "current@example.com"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let live_credential = native.join(".credentials.json");
+    std::fs::write(
+        &live_credential,
+        serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "LIVE-EXPIRED-ACCESS",
+                "refreshToken": "LIVE-EXPIRED-REFRESH",
+                "expiresAt": 1,
+                "refreshTokenExpiresAt": 9_000_000_000_000_i64
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let live_before = std::fs::read(&live_credential).unwrap();
+    let saved_before = std::fs::read(profile.join("credentials")).unwrap();
+
+    let value = fixture.quota();
     let row = fixture.row(&value);
 
     assert_eq!(row["status"], "offline", "{row}");
-    assert_eq!(row["email"], "replacement@example.com", "{row}");
     assert!(
         row["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("already being renewed")),
-        "replacement deferral was hidden: {row}"
+            .is_some_and(|detail| detail.contains("expired")),
+        "expired live credential was hidden: {row}"
     );
-    assert_eq!(fixture.calls("oauth-calls"), 1, "OAuth retried");
+    assert_eq!(fixture.calls("oauth-calls"), 0, "quota invoked OAuth");
     assert_eq!(
-        fixture.calls("old-usage-calls"),
+        fixture.calls("live-expired-usage-calls"),
         0,
-        "stale access token used"
-    );
-    assert_eq!(
-        fixture.calls("new-usage-calls"),
-        0,
-        "discarded response used"
+        "expired live token reached the usage endpoint"
     );
     assert_eq!(
-        fixture.calls("replacement-usage-calls"),
+        fixture.calls("saved-usage-calls"),
         0,
-        "replacement account was queried under the old row"
+        "saved snapshot substituted for the matching live login"
     );
-}
-
-#[test]
-fn saved_profile_quota_renews_and_reads_its_authoritative_slot() {
-    let fixture = Fixture::new(true);
-
-    let value = fixture.quota();
-
-    fixture.assert_first_read_used_renewal(&value);
+    assert_eq!(std::fs::read(live_credential).unwrap(), live_before);
+    assert_eq!(
+        std::fs::read(profile.join("credentials")).unwrap(),
+        saved_before
+    );
 }

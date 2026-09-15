@@ -9066,10 +9066,11 @@ fn slot_dir_named(paths: &Paths, name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// `swapdex quota` reads each account's provider-reported usage without sending
-/// a model message. Slot credentials remain authoritative and may be renewed
-/// through the coordinated refresh path before their first quota request; saved
-/// copies stay read-only and can expire. Provider transport and response parsing
-/// live in the quota modules; this function selects each credential and renders.
+/// a model message. Slot credentials remain authoritative, but quota never renews
+/// or rewrites them: expired tokens are reported locally and are not sent. A
+/// running native Claude owner may supply its current token for the same account.
+/// Provider transport and response parsing live in the quota modules; this
+/// function selects each credential and renders.
 pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     use crate::quota::{self as q, Fetch};
 
@@ -9094,7 +9095,6 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         uuid: Option<String>,
         identity: Option<crate::live_login::LoginIdentity>,
         token: Option<String>,
-        fingerprint: Option<String>,
         expired: bool,
         unreadable: Option<String>,
     }
@@ -9136,7 +9136,6 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 uuid,
                 identity,
                 token: None,
-                fingerprint: None,
                 expired: false,
                 unreadable: Some("slot identity changed while quota was reading its login".into()),
             };
@@ -9147,9 +9146,6 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 uuid,
                 identity,
                 token: q::token_from_credentials(credential.bytes()),
-                fingerprint: Some(crate::refresh::claude_credential_fingerprint_from_blob(
-                    credential.bytes(),
-                )),
                 // Match the serving path's one-minute slack without reading a
                 // second credential generation after the access token.
                 expired: q::credentials_expired(credential.bytes(), now.saturating_add(60_000)),
@@ -9160,7 +9156,6 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 uuid,
                 identity,
                 token: None,
-                fingerprint: None,
                 expired: false,
                 unreadable: Some(match error {
                     K::Locked => "signed in, but this shell cannot read the keychain".into(),
@@ -9170,7 +9165,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         }
     }
 
-    fn slot_quota_read(paths: &Paths, name: &str, dir: &std::path::Path) -> SlotQuotaRead {
+    fn slot_quota_read(paths: &Paths, dir: &std::path::Path) -> SlotQuotaRead {
         let now = now_ms();
         let native = crate::live_login::resolve(paths, dir, "claude-code", now);
         let initial = slot_quota_state(dir, now);
@@ -9194,91 +9189,12 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 ),
             };
         }
-        if !initial.expired {
-            return SlotQuotaRead {
-                email: initial.email,
-                uuid: initial.uuid,
-                token: initial.token,
-                expired: false,
-                unreadable: initial.unreadable,
-            };
-        }
-
-        let refreshed = match initial.fingerprint.as_deref() {
-            Some(fingerprint) => crate::refresh::refresh_slot_if_current(
-                paths,
-                dir,
-                now,
-                fingerprint,
-                initial.uuid.as_deref(),
-                initial.identity.as_ref(),
-            ),
-            None => Err(crate::refresh::RefreshError::NoCredential),
-        };
-        let fresh = slot_quota_state(dir, now_ms());
-        match refreshed {
-            Ok(crate::refresh::RefreshOutcome::Renewed) => {
-                if initial.uuid != fresh.uuid {
-                    return SlotQuotaRead {
-                        email: fresh.email,
-                        uuid: fresh.uuid,
-                        token: None,
-                        expired: false,
-                        unreadable: Some(format!(
-                            "'{name}' changed accounts while its login was being renewed; \
-                             quota was not read"
-                        )),
-                    };
-                }
-                SlotQuotaRead {
-                    email: fresh.email,
-                    uuid: fresh.uuid,
-                    token: fresh.token,
-                    expired: fresh.expired,
-                    unreadable: fresh.unreadable,
-                }
-            }
-            Ok(crate::refresh::RefreshOutcome::NativeManaged) => {
-                let native = crate::live_login::resolve(paths, dir, "claude-code", now_ms());
-                if initial.uuid == fresh.uuid {
-                    if let Some(native) = native.filter(|login| {
-                        fresh
-                            .identity
-                            .as_ref()
-                            .is_some_and(|id| id == &login.identity)
-                    }) {
-                        return SlotQuotaRead {
-                            email: fresh.email,
-                            uuid: fresh.uuid,
-                            token: Some(
-                                String::from_utf8_lossy(native.access_token.expose()).to_string(),
-                            ),
-                            expired: false,
-                            unreadable: None,
-                        };
-                    }
-                }
-                SlotQuotaRead {
-                    email: fresh.email,
-                    uuid: fresh.uuid,
-                    token: None,
-                    expired: false,
-                    unreadable: Some(format!(
-                        "'{name}' renewal is owned by a running native Claude session; \
-                         its current login could not be read safely"
-                    )),
-                }
-            }
-            Err(why) => SlotQuotaRead {
-                // A concurrent login may have replaced the row while renewal
-                // was waiting. Show its current non-secret label, but never send
-                // either the rejected token or the replacement account's token.
-                email: fresh.email,
-                uuid: fresh.uuid,
-                token: None,
-                expired: false,
-                unreadable: Some(why.remedy(name, "claude-code")),
-            },
+        SlotQuotaRead {
+            email: initial.email,
+            uuid: initial.uuid,
+            token: initial.token,
+            expired: initial.expired,
+            unreadable: initial.unreadable,
         }
     }
 
@@ -9287,9 +9203,13 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         .as_ref()
         .map(|a| a.account_id.clone())
         .filter(|s| !s.is_empty());
-    let live_token = adapters::claude::live_credentials(paths)
+    let live_credential = adapters::claude::live_credentials(paths);
+    let live_token = live_credential
         .as_deref()
         .and_then(q::token_from_credentials);
+    let live_expired = live_credential
+        .as_deref()
+        .is_some_and(|credential| q::credentials_expired(credential, now_ms()));
 
     let mut rows: Vec<Row> = Vec::new();
     let mut matched_live = false;
@@ -9327,7 +9247,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 // The name can have been reused for a different account. Even
                 // when the slot is unreadable, neither its credential nor its
                 // identity may fall back to the old snapshot.
-                let current = slot_quota_read(paths, &p.name, dir);
+                let current = slot_quota_read(paths, dir);
                 email = current.email;
                 uuid = current.uuid;
                 token = current.token;
@@ -9359,7 +9279,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 },
                 token: if use_live { live_token.clone() } else { token },
                 active,
-                expired: expired && !use_live,
+                expired: if use_live { live_expired } else { expired },
                 unreadable,
             });
         }
@@ -9372,7 +9292,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             if rows.iter().any(|x| x.name == r.name) {
                 continue;
             }
-            let current = slot_quota_read(paths, &r.name, &r.config_dir);
+            let current = slot_quota_read(paths, &r.config_dir);
             let uuid = current.uuid;
             // The pointer decides this wherever there is one. Matching against
             // the tool's own config dir - which a slot switch never writes -
@@ -9411,7 +9331,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 email: live_id.as_ref().and_then(|a| a.email.clone()),
                 token: live_token.clone(),
                 active: true,
-                expired: false,
+                expired: live_expired,
                 unreadable: None,
             },
         );

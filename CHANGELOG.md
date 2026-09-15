@@ -6,6 +6,27 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.165.3
+
+- **Keep a started response streaming past five minutes.** The locked ureq
+  client inherited the response-header timeout during body reads, interrupting
+  active Claude/Codex streams with `timeout: receive response`. Require ureq
+  3.4.2 and verify that a body continues beyond the header deadline. Connection
+  and response-header waits stay bounded; streaming bodies have no total timer.
+- **Deliver available streaming responses immediately.** Claude and Codex SSE
+  headers, small heartbeats and completion events no longer wait for an 8 KiB
+  response buffer or upstream EOF. The HTTP/1 listener flushes each available
+  fragment, preserves healthy connection reuse and closes a failed stream
+  without reporting a successful HTTP completion. Response headers used only
+  by the upstream connection are removed, and HEAD/bodyless responses do not
+  drain an upstream body. Accepted model requests are not replayed.
+- **Keep quota inspection read-only for credentials (#22).** `quota` and
+  `quota --json` no longer renew expired Claude slot tokens, including slots
+  backed by same-name saved profiles. They report expiry without an OAuth
+  exchange, a credential write or a usage request with the expired token.
+  Valid credentials and a verified current native login for the same account
+  still support usage reads; explicit refresh and proxy renewal remain separate.
+
 ## 0.165.2
 
 - **Use only the selected account's authentication for managed requests.**

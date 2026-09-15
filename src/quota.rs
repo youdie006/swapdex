@@ -2,18 +2,18 @@
 //!
 //! `swapdex quota` reads each Claude account's remaining quota from Anthropic's
 //! official OAuth usage endpoint with that account's own access token. Codex
-//! quota reads use the same curl transport through [`run_curl_cfg`], as do the
-//! coordinated OAuth exchanges that renew eligible idle slot credentials.
+//! quota reads use the same curl transport through [`run_curl_cfg`]. Explicit
+//! refresh and proxy renewal use that transport separately.
 //!
 //! The request shells out to `curl` with its config on STDIN (never argv), so
 //! the token stays off `ps` - the same discipline the Keychain writer uses -
-//! and quota reads and renewal exchanges share one hardened process boundary.
+//! while quota reads and renewal exchanges share one hardened process boundary.
 //!
-//! Quota requests are read-only and submit no model message. Before a quota
-//! request, command orchestration may ask the refresh module to renew an expired
-//! slot; that module preserves native-client ownership and coordinates refresh
-//! token rotation across callers and processes. This module never chooses an
-//! account, refreshes a credential, or proxies a model request itself.
+//! Quota requests are read-only and submit no model message. They never invoke
+//! OAuth renewal or update a saved credential. Expired credentials are reported
+//! without a usage request; a running native Claude owner may supply the current
+//! token for the same account. This module never chooses an account, refreshes a
+//! credential, or proxies a model request itself.
 
 use serde_json::Value;
 
