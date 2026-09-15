@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH swapdex 1  "swapdex 0.161.0"
+.TH swapdex 1  "swapdex 0.162.0"
 .SH NAME
 swapdex \- Switch Claude Code / Codex / Gemini / Antigravity login accounts, locally and safely.
 .SH SYNOPSIS
@@ -15,6 +15,9 @@ Print help
 \fB\-V\fR, \fB\-\-version\fR
 Print version
 .SH SUBCOMMANDS
+.TP
+swapdex\-repair\-codex\-sessions(1)
+Repair provider metadata written by older Swapdex Codex shims
 .TP
 swapdex\-add(1)
 Save the current live login as a named profile
@@ -136,4 +139,4 @@ Print the man page (roff) to stdout
 swapdex\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v0.161.0
+v0.162.0

@@ -6754,10 +6754,8 @@ pub fn unhonoured_ask(
 
 /// What a screen should call the account paying the next turn.
 ///
-/// Codex prints this on /status, and it is the only identity it prints. A name
-/// alone would claim an account is paying even when it has no login to pay
-/// with, which is the case the proxy handles by quietly forwarding the client's
-/// own credential instead. So the reason travels with the name.
+/// Used by Swapdex's status surfaces and `serve --quiet`. Include login health
+/// so an account without usable credentials is not represented as ready to pay.
 pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
     let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
     let who = slots.payer()?;
@@ -6789,12 +6787,8 @@ pub fn payer_label(paths: &Paths, tool: &str) -> Option<String> {
 
 /// Where the session's files live, when that is NOT the account paying for it.
 ///
-/// swapdex keeps two pointers on purpose: `serve` decides who PAYS, `use`
-/// decides where new sessions LIVE. Codex shows one field, so it showed the
-/// payer - and a session billed to `work` while its history piled up in
-/// `codex-main` looked, from that one line, like it was running as `work`.
-/// Naming the home too costs a few characters and only when they differ; when
-/// they agree there is nothing to disambiguate.
+/// `serve` decides who pays; `use` decides where new sessions live. Include
+/// the home in Swapdex's payer label when those choices differ.
 pub fn home_note(payer: &str, home: Option<&str>) -> String {
     match home {
         Some(h) if h != payer => format!(" - home: {h}"),
@@ -6802,11 +6796,8 @@ pub fn home_note(payer: &str, home: Option<&str>) -> String {
     }
 }
 
-/// The one line Codex has room for. Its `/status` prints the provider name and
-/// nothing else about identity, so this is where the account has to appear -
-/// and a SLOT NAME is not an account. `work` is a label its owner chose; it
-/// does not say which login is being billed, which is the question somebody
-/// reads that line to answer.
+/// A compact payer label for Swapdex status. The email identifies the login
+/// behind a user-chosen slot name such as `work`.
 pub fn payer_line(name: &str, email: Option<&str>, has_login: bool) -> String {
     match (email.filter(|e| *e != name), has_login) {
         (Some(e), true) => format!("{name} ({e})"),
@@ -7003,12 +6994,8 @@ pub fn serve(
     }
     if live {
         println!("  the session you have open moves from its next turn");
-        // Codex reads its provider label once, at launch. The turn is billed to
-        // the new account immediately, but a window already open keeps printing
-        // the old name on /status - say so rather than let the screen argue with
-        // the truth.
         if tool == "codex" {
-            println!("  a codex window already open still shows the old name on /status");
+            println!("  check the paying account with `swapdex serve --tool codex --quiet`");
         }
     } else {
         println!(

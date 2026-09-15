@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod atomic;
 pub mod banner;
 pub mod codex_limits;
+pub mod codex_sessions;
 pub mod codex_usage;
 pub mod commands;
 pub mod live_login;

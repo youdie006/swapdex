@@ -4,6 +4,31 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.162.0
+
+- **Restore Codex session search and resume after account switching.** The
+  launcher now keeps Codex's built-in `openai` provider and routes it through
+  `openai_base_url`. Account names no longer become persistent provider IDs
+  that hide earlier conversations. `resume`, `fork` and new turns use the same
+  route; login/logout and explicit provider/profile/remote choices retain their
+  own configuration.
+- **Repair legacy Swapdex session providers without replacing conversations.**
+  `repair-codex-sessions` also runs automatically from the Codex shim. It keeps
+  a private recovery journal, patches only the old provider metadata in place,
+  and updates compatible existing search indexes across known Codex homes.
+  Conversation bytes, IDs and paginated history remain intact. Busy sessions
+  are deferred; unsupported compressed files and repair failures are reported.
+  `--dry-run` previews the repair without writes.
+- **Use Codex's HTTP fallback immediately.** The local proxy answers Responses
+  WebSocket probes with HTTP 426 before selecting an account or contacting the
+  upstream, allowing the built-in provider to use the existing HTTP transport.
+- **Parse Codex commands separately from prompt text.** A prompt such as
+  `codex exec login` no longer disables proxy routing. Option values, explicit
+  backends and the `--` separator retain their intended meaning. The paying
+  account remains available through `swapdex serve --tool codex --quiet`. If the
+  proxy cannot start, the launcher now announces its existing direct-login
+  fallback.
+
 ## 0.161.0
 
 - **Use the selected account's current native login when its saved slot is
