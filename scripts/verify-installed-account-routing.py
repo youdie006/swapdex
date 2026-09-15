@@ -313,6 +313,9 @@ class RecorderHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
 
+    def do_GET(self):
+        self.do_POST()
+
 
 def start_server(reset_first=False):
     server = RecorderServer(reset_first)
@@ -438,8 +441,9 @@ def verify_live_switches(swapdex, root, env):
         require(not marker.exists(), f"{tool} proxy marker remained after shutdown")
 
 
-def verify_accepted_posts_are_not_replayed(swapdex, root, env):
-    for tool in ("claude", "codex"):
+def verify_transport_retry_boundaries(swapdex, root, env):
+    for tool, method in ((tool, method) for tool in ("claude", "codex")
+                         for method in ("POST", "GET")):
         run([swapdex, "serve", "a", *tool_args(tool)], env)
         upstream, upstream_thread = start_server(reset_first=True)
         proxy = None
@@ -447,9 +451,20 @@ def verify_accepted_posts_are_not_replayed(swapdex, root, env):
         try:
             proxy, port, _ = start_proxy(swapdex, root, env, tool, upstream)
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-            post_turn(connection, tool, expected_status=502)
-            require(len(upstream.snapshot()) == 1,
-                    f"{tool} replayed a POST already accepted by the provider")
+            if method == "POST":
+                post_turn(connection, tool, expected_status=502)
+                require(len(upstream.snapshot()) == 1,
+                        f"{tool} replayed a POST already accepted by the provider")
+            else:
+                connection.request("GET", "/v1/models", headers={
+                    "Authorization": "Bearer fixture-client-token",
+                    "chatgpt-account-id": "fixture-client-account",
+                })
+                response = connection.getresponse()
+                response.read()
+                require(response.status == 200, f"{tool} did not recover a bodyless GET")
+                require(len(upstream.snapshot()) == 2,
+                        f"{tool} did not retry the disconnected GET exactly once")
         finally:
             try:
                 if connection is not None:
@@ -476,7 +491,7 @@ def verify(swapdex, root):
     verify_named_runs(swapdex, root, env)
     verify_shims(root, env)
     verify_live_switches(swapdex, root, env)
-    verify_accepted_posts_are_not_replayed(swapdex, root, env)
+    verify_transport_retry_boundaries(swapdex, root, env)
 
 
 def main():
@@ -489,7 +504,7 @@ def main():
     require(swapdex.is_file() and os.access(swapdex, os.X_OK), "--swapdex is not executable")
     with tempfile.TemporaryDirectory(prefix="swapdex-installed-routing-") as temporary:
         verify(str(swapdex), Path(temporary))
-    print("PASS installed shims, named runs, Claude/Codex A-B-A routing, and no accepted POST replay", flush=True)
+    print("PASS installed shims, named runs, Claude/Codex A-B-A routing, no accepted POST replay, and safe GET retry", flush=True)
 
 
 if __name__ == "__main__":

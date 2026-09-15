@@ -186,6 +186,7 @@ pub fn worth_retrying(err: &str) -> bool {
         || e.contains("broken pipe")
         || e.contains("no route to host")
         || e.contains("unexpected end of file")
+        || e.contains("peer disconnected")
         || e.contains("connection reset")
         || e.contains("connection refused")
         || e.contains("timeout")
@@ -390,6 +391,7 @@ mod transient_retry_tests {
         assert!(worth_retrying("io: Broken pipe (os error 32)"));
         assert!(worth_retrying("io: No route to host"));
         assert!(worth_retrying("io: unexpected end of file"));
+        assert!(worth_retrying("io: Peer disconnected"));
         assert!(worth_retrying("timeout: global"));
         // A refusal from the server is an answer, not a blip - it must reach the
         // caller so the account logic can act on it.
@@ -403,6 +405,7 @@ mod transient_retry_tests {
             "io: Broken pipe (os error 32)",
             "io: unexpected end of file",
             "io: Connection reset by peer",
+            "io: Peer disconnected",
             "timeout: global",
         ] {
             assert!(can_retry_request("GET", ambiguous), "{ambiguous}");
