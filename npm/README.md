@@ -450,8 +450,10 @@ external consumers need their own login instead of a copy of a managed slot.
 
 Account selection and listing use local state. Managed launches and `serve`
 can start a local proxy; its scheduled renewal work contacts OAuth endpoints
-for idle logins. `quota` and the dashboard contact provider usage endpoints,
-and `doctor` checks the published version online. Login commands invoke the
+for idle logins. `quota` and the dashboard contact provider usage endpoints;
+`quota` can first renew eligible expired Claude slot credentials through the
+same coordinated path. Saved snapshots remain read-only, and running native
+sessions keep renewal ownership. `doctor` checks the published version online. Login commands invoke the
 native tool's sign-in flow. The proxy relays model requests with the selected
 credential using `ureq`, rustls and bundled roots; CI excludes heavy async
 runtimes and system-TLS dependencies. An ordinary account selection does not

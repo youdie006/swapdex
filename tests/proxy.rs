@@ -1286,6 +1286,227 @@ fn a_threshold_steps_off_before_the_account_refuses() {
     );
 }
 
+fn assert_subpercent_threshold_routes(pinned: bool, consume_first: bool) {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "nearly", "aaaa1111", "AT-NEARLY", true);
+    seed_slot(root.path(), "fresh", "bbbb2222", "AT-FRESH", false);
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    swapdex::settings::save(
+        &paths,
+        &swapdex::settings::Settings {
+            proxy_threshold: (!pinned).then_some(0.005),
+            proxy_strategy: Some(
+                if consume_first {
+                    "consume-first"
+                } else {
+                    "roomiest"
+                }
+                .into(),
+            ),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let curl = fake_curl(root.path(), "AT-NEARLY");
+    let script = std::fs::read_to_string(&curl)
+        .unwrap()
+        .replace("99.0", "1.0")
+        .replace("4.0", "0.1");
+    std::fs::write(&curl, script).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.to_string());
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{\"ok\":true}"))
+            .unwrap();
+    });
+    let extra: &[&str] = if pinned {
+        &["--auto", "--threshold", "0.005"]
+    } else {
+        &["--auto"]
+    };
+    let curl_value = curl.to_string_lossy().into_owned();
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        extra,
+        &[("SWAPDEX_CURL", &curl_value)],
+    );
+    let proxy = ReapedChild::new(child);
+    post_through(port, "{\"turn\":1}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    let expected = if consume_first {
+        "Bearer AT-FRESH"
+    } else {
+        "Bearer AT-NEARLY"
+    };
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Some(expected.to_string())],
+        "0.5% threshold, pinned={pinned}, consume_first={consume_first}: {output}"
+    );
+    assert!(
+        output.contains("at 0.5% used"),
+        "threshold display differs: {output}"
+    );
+    if !consume_first {
+        assert!(
+            !output.contains("every account is refusing turns"),
+            "a 10-point movement margin is not a provider refusal: {output}"
+        );
+        assert!(
+            output.contains("no eligible alternative account"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn a_saved_subpercent_threshold_rotates_at_the_configured_value() {
+    assert_subpercent_threshold_routes(false, true);
+}
+
+#[test]
+fn a_pinned_subpercent_threshold_rotates_at_the_configured_value() {
+    assert_subpercent_threshold_routes(true, true);
+}
+
+#[test]
+fn a_threshold_movement_margin_does_not_claim_healthy_accounts_are_refusing() {
+    assert_subpercent_threshold_routes(false, false);
+}
+
+/// A missing reading must not disappear from the evidence for "every account".
+#[test]
+fn a_threshold_corner_keeps_unmeasured_alternatives_in_its_diagnosis() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "nearly", "aaaa1111", "AT-NEARLY", true);
+    seed_slot(root.path(), "full", "bbbb2222", "AT-FULL", false);
+    seed_slot(root.path(), "unknown", "cccc3333", "AT-UNKNOWN", false);
+    let curl = fake_curl(root.path(), "AT-UNKNOWN");
+    let script = std::fs::read_to_string(&curl)
+        .unwrap()
+        .replace("99.0", "null")
+        .replace("4.0", "99.0");
+    std::fs::write(&curl, script).unwrap();
+    let upstream = ControlledUpstream::start(|request| {
+        request
+            .respond(tiny_http::Response::from_string("{}"))
+            .unwrap();
+    });
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--threshold", "0.98"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(child);
+    post_through(port, "{}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    assert!(
+        !output.contains("every account is past the threshold"),
+        "{output}"
+    );
+    assert!(
+        output.contains("no eligible alternative account"),
+        "{output}"
+    );
+}
+
+/// One refusal cannot establish what a disabled alternative would have done.
+#[test]
+fn a_refusal_corner_does_not_count_a_disabled_account_as_refusing() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
+    seed_slot(root.path(), "disabled", "bbbb2222", "AT-DISABLED", false);
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    swapdex::settings::save(
+        &paths,
+        &swapdex::settings::Settings {
+            disabled: vec!["disabled".into()],
+            fallback_model: Some("claude-sonnet-5".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let curl = fake_curl(root.path(), "UNUSED");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.to_string())
+            .unwrap();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(403))
+            .unwrap();
+    });
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(child);
+    for _ in 0..2 {
+        post_through(port, r#"{"model":"claude-opus-5","messages":[]}"#);
+    }
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer AT-ONE", "Bearer AT-ONE"]
+    );
+    assert!(
+        !output.contains("every account is refusing turns"),
+        "{output}"
+    );
+    assert!(
+        output.contains("no eligible alternative account"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_proxy_thresholds_fail_before_a_listener_is_started() {
+    for value in ["0", "-0.1", "1.01", "NaN", "inf", "-inf"] {
+        let root = tempfile::tempdir().unwrap();
+        let child = Command::new(bin())
+            .args(["proxy", "--port", "0", &format!("--threshold={value}")])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = ReapedChild::new(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.0.as_mut().unwrap().try_wait().unwrap() {
+                assert_eq!(status.code(), Some(2), "invalid threshold {value}");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "proxy accepted invalid threshold {value} and kept running"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!root.path().join(".local/share/swapdex/proxy").exists());
+    }
+}
+
 /// A quota read happens outside the choice lock and may take long enough for a
 /// human to turn managed serving off. The old request must stop rather than
 /// repeatedly reselecting the now-inapplicable account or forwarding its token.

@@ -31,6 +31,17 @@ pub enum LockError {
     Unwritable(String),
 }
 
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => f.write_str("another swapdex operation holds the store lock"),
+            Self::Unwritable(reason) => write!(f, "the store lock is not writable: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for LockError {}
+
 pub struct LockGuard(fs::File);
 
 impl Drop for LockGuard {

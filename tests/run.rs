@@ -1516,6 +1516,130 @@ fn threshold_setting_accepts_both_notations_and_off() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+#[test]
+fn threshold_percentages_keep_their_literal_value_after_reloading() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    for (input, expected, displayed) in [
+        ("0.5%", 0.005, "0.5%"),
+        ("1%", 0.01, "1%"),
+        ("0.01%", 0.0001, "0.01%"),
+        ("0.29%", 0.0029, "0.29%"),
+        (" 0.25% ", 0.0025, "0.25%"),
+        ("29%", 0.29, "29%"),
+        ("99.9%", 0.999, "99.9%"),
+        ("100%", 1.0, "100%"),
+        ("0.5", 0.5, "50%"),
+        ("1", 1.0, "100%"),
+        ("95", 0.95, "95%"),
+        ("1e-8%", 1e-10, "0.00000001%"),
+        ("1e-13%", 1e-15, "1e-13%"),
+    ] {
+        let output = Command::new(bin())
+            .args(["threshold", input])
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{input}: {output:?}");
+        let settings = swapdex::settings::load(&paths);
+        let stored = settings.proxy_threshold.expect("stored threshold");
+        assert!(
+            (stored - expected).abs() < expected * 1e-12,
+            "{input}: stored {stored}, expected {expected}"
+        );
+        assert_eq!(
+            settings.threshold(),
+            Some(stored),
+            "{input}: silently clamped"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("at {displayed} used")),
+            "{input}: {stdout}"
+        );
+        let reread = Command::new(bin())
+            .arg("threshold")
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(reread.status.success());
+        let stdout = String::from_utf8_lossy(&reread.stdout);
+        assert!(
+            stdout.contains(&format!("at {displayed} used")),
+            "{input}: {stdout}"
+        );
+        let used_percent = stored * 100.0;
+        assert!(swapdex::proxy::pick::over_threshold(
+            Some(used_percent),
+            None,
+            stored
+        ));
+        assert!(!swapdex::proxy::pick::over_threshold(
+            Some(used_percent / 2.0),
+            None,
+            stored
+        ));
+    }
+}
+
+#[test]
+fn threshold_invalid_values_leave_the_previous_setting_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    swapdex::settings::save(
+        &paths,
+        &swapdex::settings::Settings {
+            proxy_threshold: Some(0.82),
+            proxy_auto: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let settings = paths.store_dir().join("settings.json");
+    let before = std::fs::read(&settings).unwrap();
+    for input in [
+        "50%%", "1%%", "50%junk", "%", "NaN", "inf", "0", "-0.5", "100.1%", "101",
+    ] {
+        let output = Command::new(bin())
+            .args(["threshold", "--", input])
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "accepted {input}: {output:?}"
+        );
+        assert_eq!(
+            std::fs::read(&settings).unwrap(),
+            before,
+            "changed settings for {input}"
+        );
+    }
+}
+
+#[test]
+fn threshold_runtime_preserves_small_values_and_ignores_invalid_stored_values() {
+    for threshold in [0.005, 0.01, 0.049, 0.05, 0.9, 1.0] {
+        let settings = swapdex::settings::Settings {
+            proxy_threshold: Some(threshold),
+            ..Default::default()
+        };
+        assert_eq!(settings.threshold(), Some(threshold));
+    }
+    for threshold in [0.0, -0.1, 1.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let settings = swapdex::settings::Settings {
+            proxy_threshold: Some(threshold),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.threshold(),
+            None,
+            "invalid stored threshold: {threshold}"
+        );
+    }
+}
+
 /// A stand-in `codex` that reports the home it was launched with.
 fn fake_codex(root: &Path) -> std::path::PathBuf {
     let dir = root.join("fakebin");

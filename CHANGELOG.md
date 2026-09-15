@@ -6,6 +6,40 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.165.1
+
+- **Honor fractional usage thresholds.** `threshold 0.5%` now stores half a
+  percent instead of 50%, retains precise display, and rejects repeated `%`
+  suffixes. Saved and explicit proxy thresholds below 5% are honored instead
+  of silently raised; invalid explicit fractions fail before a listener starts.
+  The Roomiest strategy retains its existing 10 percentage point movement margin.
+- **Keep allowed Claude accounts available when extra usage is disabled.** A
+  rejected overage window no longer marks an allowed plan as exhausted or
+  appears among exhausted plan windows. Real plan rejection still triggers
+  failover; a bare throttle retains its bounded retry behavior.
+- **Use the renewed credential for the first quota read.** Expired Claude slots
+  renew before the final credential read, including slots with a same-name saved
+  profile. The old token no longer earns a spurious rejection immediately after
+  successful renewal. Native ownership, renewal failures and account replacement
+  during the exchange remain explicit without sending an unsafe credential.
+- **Preserve concurrent usage observations.** Per-tool cache locks serialize
+  read/modify/write operations so endpoint reads and served-response notes no
+  longer erase another account or independent reset/rejection fields. A usage
+  reading that omits a reset retains the still-future reset learned from traffic;
+  reading ages and successful-token recovery keep their existing meanings.
+- **Preserve settings when the store lock is unavailable.** Prolonged contention
+  and lock I/O failures now return exit 4 without writing unlocked settings.
+  Rename and removal warn if their completed registry operation could not update
+  rotation preferences, instead of silently losing that follow-up.
+- **Keep Homebrew services launchable after an upgrade.** Service installation
+  uses the stable formula `opt` executable only when it resolves to the current
+  binary. Removing the previous Cellar version then leaves the installed service
+  launchable; unrelated PATH entries and opt links are ignored.
+- **Explain why automatic rotation has no candidate.** A paused account, missing
+  usage reading or insufficient headroom no longer becomes evidence that every
+  account refused or passed its threshold. Actual all-account refusals retain
+  their distinct explanation, including when a configured fallback model is used.
+
 ## 0.165.0
 
 - **Set up the native client a new user actually has.** Codex-only machines

@@ -2947,6 +2947,10 @@ pub fn proxy(
         eprintln!("{}", crate::proxy::cannot_carry(tool));
         return Ok(2);
     }
+    if threshold.is_some_and(|value| !crate::settings::valid_threshold(value)) {
+        eprintln!("swapdex: --threshold expects a finite fraction greater than 0 and at most 1");
+        return Ok(2);
+    }
     if ensure {
         return proxy_ensure(paths, port, tool);
     }
@@ -2966,7 +2970,7 @@ pub fn proxy(
         account,
         tool: slot_tool(sel).to_string(),
         auto,
-        threshold: threshold.map(|t| t.clamp(0.05, 1.0)),
+        threshold,
         threshold_pinned,
     };
     crate::proxy::serve(paths, &opts)?;
@@ -3201,8 +3205,8 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
     let Some(value) = value else {
         match cfg.threshold() {
             Some(t) => println!(
-                "stepping off an account at {:.0}% used",
-                (t * 100.0).round()
+                "stepping off an account at {} used",
+                crate::settings::threshold_label(t)
             ),
             None => println!(
                 "no threshold - the proxy waits for an account to refuse a turn \
@@ -3218,12 +3222,15 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
         return Ok(0);
     }
     // Accept "0.9" and "90%"/"90" alike: both are how people say this.
-    let parsed =
-        v.trim_end_matches('%')
-            .parse::<f64>()
-            .ok()
-            .map(|n| if n > 1.0 { n / 100.0 } else { n });
-    let Some(t) = parsed.filter(|t| *t > 0.0 && *t <= 1.0) else {
+    let percentage = v.strip_suffix('%');
+    let parsed = percentage.unwrap_or(v).parse::<f64>().ok().map(|n| {
+        if percentage.is_some() || n > 1.0 {
+            n / 100.0
+        } else {
+            n
+        }
+    });
+    let Some(t) = parsed.filter(|t| crate::settings::valid_threshold(*t)) else {
         eprintln!(
             "swapdex: expected a fraction like 0.9, a percentage like 90%, or `off` - got '{v}'"
         );
@@ -3233,11 +3240,10 @@ pub fn threshold(paths: &Paths, value: Option<&str>) -> Result<i32> {
     crate::settings::update(paths, |c| c.proxy_threshold = Some(t))?;
     // Report what was just stored, not the value read before the write: `cfg`
     // is the pre-edit snapshot and would print the OLD threshold back.
-    let eff = t;
     println!(
-        "stepping off an account at {:.0}% used - it hands the session on before \
+        "stepping off an account at {} used - it hands the session on before \
          being refused",
-        (eff * 100.0).round()
+        crate::settings::threshold_label(t)
     );
     Ok(0)
 }
@@ -5614,7 +5620,9 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
 /// slot-only rename never reaches. None of it is worth failing a rename that
 /// already happened on disk.
 fn carry_side_state(paths: &Paths, old: &str, new: &str) {
-    let _ = crate::settings::update(paths, |s| s.rename_account(old, new));
+    if crate::settings::update(paths, |s| s.rename_account(old, new)).is_err() {
+        eprintln!("swapdex: account renamed, but its rotation preferences could not be moved; check pause and order settings");
+    }
     crate::quota_cache::rename_account(paths, old, new);
     if let Ok(st) = Store::open(paths) {
         let _ = st.rename_timeline_account(old, new);
@@ -5627,7 +5635,9 @@ fn carry_side_state(paths: &Paths, old: &str, new: &str) {
 ///
 /// The ledger is retired rather than dropped - see `retire_timeline_account`.
 fn drop_side_state(paths: &Paths, name: &str) {
-    let _ = crate::settings::update(paths, |s| s.forget_account(name));
+    if crate::settings::update(paths, |s| s.forget_account(name)).is_err() {
+        eprintln!("swapdex: account removed, but its rotation preferences could not be cleared; check pause and order settings before reusing the name");
+    }
     crate::quota_cache::forget_account(paths, name);
     if let Ok(st) = Store::open(paths) {
         let _ = st.retire_timeline_account(name);
@@ -9055,12 +9065,11 @@ fn slot_dir_named(paths: &Paths, name: &str) -> Option<std::path::PathBuf> {
         .map(|r| r.config_dir)
 }
 
-/// `swapdex quota` - the one opt-in network command. Reads each Claude account's
-/// REMAINING quota from Anthropic's usage endpoint (that account's own token,
-/// read-only, zero message spend). The active account uses its live token; a
-/// saved-but-inactive account uses its snapshot token, which may have expired
-/// (swapdex does not refresh tokens - that is the switcher/rotator line). All
-/// network rules live in src/quota.rs; this function only orchestrates + renders.
+/// `swapdex quota` reads each account's provider-reported usage without sending
+/// a model message. Slot credentials remain authoritative and may be renewed
+/// through the coordinated refresh path before their first quota request; saved
+/// copies stay read-only and can expire. Provider transport and response parsing
+/// live in the quota modules; this function selects each credential and renders.
 pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     use crate::quota::{self as q, Fetch};
 
@@ -9078,6 +9087,199 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         /// Set when the login could not be READ, carrying why - a locked
         /// keychain is not an account without a login.
         unreadable: Option<String>,
+    }
+
+    struct SlotQuotaState {
+        email: Option<String>,
+        uuid: Option<String>,
+        identity: Option<crate::live_login::LoginIdentity>,
+        token: Option<String>,
+        fingerprint: Option<String>,
+        expired: bool,
+        unreadable: Option<String>,
+    }
+
+    struct SlotQuotaRead {
+        email: Option<String>,
+        uuid: Option<String>,
+        token: Option<String>,
+        expired: bool,
+        unreadable: Option<String>,
+    }
+
+    fn slot_quota_state(dir: &std::path::Path, now: i64) -> SlotQuotaState {
+        use crate::adapters::claude::KeychainReadError as K;
+
+        let identity_path = dir.join(".claude.json");
+        let identity_before = std::fs::read(&identity_path).ok();
+        let credential = crate::adapters::claude::slot_credential(dir);
+        let identity_after = std::fs::read(&identity_path).ok();
+        let identity_value = identity_after
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
+        let email = identity_value.as_ref().and_then(|value| {
+            value["oauthAccount"]["emailAddress"]
+                .as_str()
+                .map(str::to_string)
+        });
+        let uuid = identity_value.as_ref().and_then(|value| {
+            value["oauthAccount"]["accountUuid"]
+                .as_str()
+                .map(str::to_string)
+        });
+        let identity = identity_after
+            .as_deref()
+            .and_then(|bytes| crate::live_login::identity_from_credential(bytes, "claude-code"));
+        if identity_before != identity_after {
+            return SlotQuotaState {
+                email,
+                uuid,
+                identity,
+                token: None,
+                fingerprint: None,
+                expired: false,
+                unreadable: Some("slot identity changed while quota was reading its login".into()),
+            };
+        }
+        match credential {
+            Ok(credential) => SlotQuotaState {
+                email,
+                uuid,
+                identity,
+                token: q::token_from_credentials(credential.bytes()),
+                fingerprint: Some(crate::refresh::claude_credential_fingerprint_from_blob(
+                    credential.bytes(),
+                )),
+                // Match the serving path's one-minute slack without reading a
+                // second credential generation after the access token.
+                expired: q::credentials_expired(credential.bytes(), now.saturating_add(60_000)),
+                unreadable: None,
+            },
+            Err(error) => SlotQuotaState {
+                email,
+                uuid,
+                identity,
+                token: None,
+                fingerprint: None,
+                expired: false,
+                unreadable: Some(match error {
+                    K::Locked => "signed in, but this shell cannot read the keychain".into(),
+                    K::Missing | K::NotApplicable => "no saved token".into(),
+                }),
+            },
+        }
+    }
+
+    fn slot_quota_read(paths: &Paths, name: &str, dir: &std::path::Path) -> SlotQuotaRead {
+        let now = now_ms();
+        let native = crate::live_login::resolve(paths, dir, "claude-code", now);
+        let initial = slot_quota_state(dir, now);
+        if let Some(native) = native {
+            if initial.identity.as_ref() == Some(&native.identity) {
+                return SlotQuotaRead {
+                    email: initial.email,
+                    uuid: initial.uuid,
+                    token: Some(String::from_utf8_lossy(native.access_token.expose()).to_string()),
+                    expired: false,
+                    unreadable: None,
+                };
+            }
+            return SlotQuotaRead {
+                email: initial.email,
+                uuid: initial.uuid,
+                token: None,
+                expired: false,
+                unreadable: Some(
+                    "slot identity changed while quota was reading its native login".into(),
+                ),
+            };
+        }
+        if !initial.expired {
+            return SlotQuotaRead {
+                email: initial.email,
+                uuid: initial.uuid,
+                token: initial.token,
+                expired: false,
+                unreadable: initial.unreadable,
+            };
+        }
+
+        let refreshed = match initial.fingerprint.as_deref() {
+            Some(fingerprint) => crate::refresh::refresh_slot_if_current(
+                paths,
+                dir,
+                now,
+                fingerprint,
+                initial.uuid.as_deref(),
+                initial.identity.as_ref(),
+            ),
+            None => Err(crate::refresh::RefreshError::NoCredential),
+        };
+        let fresh = slot_quota_state(dir, now_ms());
+        match refreshed {
+            Ok(crate::refresh::RefreshOutcome::Renewed) => {
+                if initial.uuid != fresh.uuid {
+                    return SlotQuotaRead {
+                        email: fresh.email,
+                        uuid: fresh.uuid,
+                        token: None,
+                        expired: false,
+                        unreadable: Some(format!(
+                            "'{name}' changed accounts while its login was being renewed; \
+                             quota was not read"
+                        )),
+                    };
+                }
+                SlotQuotaRead {
+                    email: fresh.email,
+                    uuid: fresh.uuid,
+                    token: fresh.token,
+                    expired: fresh.expired,
+                    unreadable: fresh.unreadable,
+                }
+            }
+            Ok(crate::refresh::RefreshOutcome::NativeManaged) => {
+                let native = crate::live_login::resolve(paths, dir, "claude-code", now_ms());
+                if initial.uuid == fresh.uuid {
+                    if let Some(native) = native.filter(|login| {
+                        fresh
+                            .identity
+                            .as_ref()
+                            .is_some_and(|id| id == &login.identity)
+                    }) {
+                        return SlotQuotaRead {
+                            email: fresh.email,
+                            uuid: fresh.uuid,
+                            token: Some(
+                                String::from_utf8_lossy(native.access_token.expose()).to_string(),
+                            ),
+                            expired: false,
+                            unreadable: None,
+                        };
+                    }
+                }
+                SlotQuotaRead {
+                    email: fresh.email,
+                    uuid: fresh.uuid,
+                    token: None,
+                    expired: false,
+                    unreadable: Some(format!(
+                        "'{name}' renewal is owned by a running native Claude session; \
+                         its current login could not be read safely"
+                    )),
+                }
+            }
+            Err(why) => SlotQuotaRead {
+                // A concurrent login may have replaced the row while renewal
+                // was waiting. Show its current non-secret label, but never send
+                // either the rejected token or the replacement account's token.
+                email: fresh.email,
+                uuid: fresh.uuid,
+                token: None,
+                expired: false,
+                unreadable: Some(why.remedy(name, "claude-code")),
+            },
+        }
     }
 
     let live_id = adapters::claude::Claude.identity(paths).ok().flatten();
@@ -9125,27 +9327,12 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 // The name can have been reused for a different account. Even
                 // when the slot is unreadable, neither its credential nor its
                 // identity may fall back to the old snapshot.
-                token = None;
-                expired = false;
-                email = crate::proxy::creds::slot_email(dir);
-                uuid = crate::proxy::creds::slot_account_uuid(dir);
-                let native = crate::live_login::resolve(paths, dir, "claude-code", now_ms());
-                let native_current = native.is_some();
-                let reading = native
-                    .map(|login| Ok(login.access_token))
-                    .unwrap_or_else(|| crate::proxy::creds::slot_token_detail(dir));
-                match reading {
-                    Ok(t) => {
-                        token = Some(String::from_utf8_lossy(t.expose()).to_string());
-                        expired = !native_current
-                            && crate::proxy::creds::slot_token_expired(dir, now_ms());
-                    }
-                    // Keep WHY. Collapsing a locked keychain into "no token"
-                    // tells the user an account they are signed into has no
-                    // login - the one reading this over ssh sees that for every
-                    // account on the machine.
-                    Err(why) => unreadable = Some(why.short().to_string()),
-                }
+                let current = slot_quota_read(paths, &p.name, dir);
+                email = current.email;
+                uuid = current.uuid;
+                token = current.token;
+                expired = current.expired;
+                unreadable = current.unreadable;
             }
             let matches_live = live_uuid.is_some() && uuid == live_uuid;
             let active = if slot.is_some() {
@@ -9185,16 +9372,8 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             if rows.iter().any(|x| x.name == r.name) {
                 continue;
             }
-            let native = crate::live_login::resolve(paths, &r.config_dir, "claude-code", now_ms());
-            let native_current = native.is_some();
-            let read = native
-                .map(|login| Ok(login.access_token))
-                .unwrap_or_else(|| crate::proxy::creds::slot_token_detail(&r.config_dir));
-            let unreadable = read.as_ref().err().map(|w| w.short().to_string());
-            let token = read
-                .ok()
-                .map(|t| String::from_utf8_lossy(t.expose()).to_string());
-            let uuid = crate::proxy::creds::slot_account_uuid(&r.config_dir);
+            let current = slot_quota_read(paths, &r.name, &r.config_dir);
+            let uuid = current.uuid;
             // The pointer decides this wherever there is one. Matching against
             // the tool's own config dir - which a slot switch never writes -
             // called every slot inactive on a machine that has only slots, so
@@ -9214,22 +9393,11 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     r.name.clone()
                 },
                 name: r.name.clone(),
-                email: crate::proxy::creds::slot_email(&r.config_dir),
-                token,
+                email: current.email,
+                token: current.token,
                 active,
-                // A slot's token is renewable, so renew it rather than report it
-                // dead - an account idle for an hour is not an account with a
-                // problem, and it is usually the one with quota left.
-                expired: {
-                    if !native_current
-                        && crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms())
-                    {
-                        let _ = crate::refresh::refresh_slot(paths, &r.config_dir, now_ms());
-                    }
-                    !native_current
-                        && crate::proxy::creds::slot_token_expired(&r.config_dir, now_ms())
-                },
-                unreadable,
+                expired: current.expired,
+                unreadable: current.unreadable,
             });
         }
     }

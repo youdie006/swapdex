@@ -516,12 +516,15 @@ fn pick_slot(
                     // WHY nothing else could take it, not merely that nothing
                     // could. The filter rejects an account for several unrelated
                     // reasons and only one of them is the threshold.
-                    let over: Vec<bool> = {
+                    let over: Vec<Option<bool>> = {
                         let m = sh.measured.held();
                         list.iter()
                             .filter(|r| r.name != chosen.name)
-                            .filter_map(|r| m.1.get(&r.name))
-                            .map(|m| pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits))
+                            .map(|r| {
+                                m.1.get(&r.name).map(|m| {
+                                    pick::over_threshold_with(m.five_h, m.seven_d, t, m.credits)
+                                })
+                            })
                             .collect()
                     };
                     CornerUpdate::Set(Some(pick::why_no_move(&over)))
@@ -1313,8 +1316,8 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     let (auto_now_, thr_now) = live(paths, opts);
     match (auto_now_, thr_now.filter(|_| !is_codex)) {
         (true, Some(t)) => println!(
-            "  auto: hands the session on at {:.0}% used, or when an account refuses",
-            (t * 100.0).round()
+            "  auto: hands the session on at {} used, or when an account refuses",
+            crate::settings::threshold_label(t)
         ),
         (true, None) => println!("  auto: hands the session on when an account refuses"),
         (false, _) => println!("  auto is off - `swapdex auto on` lets it move by itself"),
@@ -2639,7 +2642,21 @@ fn forward_turn(
         }
         tried.push(slot.name.clone());
         let next = next_account(paths, sh, &tried);
-        let corner = next.is_none().then_some(pick::Corner::AllRefused);
+        let corner = next.is_none().then(|| {
+            // Disabled, unreadable or already spent alternatives were never
+            // asked. Only accounts actually tried can establish a refusal.
+            let all_refused = crate::slots::Slots::open(paths)
+                .map(|slots| {
+                    let accounts = slots.list();
+                    !accounts.is_empty() && accounts.iter().all(|r| tried.contains(&r.name))
+                })
+                .unwrap_or(false);
+            if all_refused {
+                pick::Corner::AllRefused
+            } else {
+                pick::Corner::NoEligibleAlternative
+            }
+        });
         // The request may have been waiting upstream while the user chose a new
         // payer. Do not let this older refusal overwrite that newer decision.
         if !commit_automatic_choice(
@@ -2659,8 +2676,8 @@ fn forward_turn(
             refused_by = Some(slot.name.clone());
             break up;
         }
-        // Cornered by refusal rather than by measurement: every account has now
-        // said no to THIS turn. Same corner, and it needs no usage reading.
+        // No candidate remains, either because it refused this turn or because
+        // another eligibility rule excluded it. Keep that distinction above.
         match next {
             Some(next) => {
                 println!(

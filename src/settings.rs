@@ -53,11 +53,10 @@ impl Settings {
         self.proxy_auto.unwrap_or(false)
     }
 
-    /// The threshold to step off an account at, if one is set. Clamped to a range
-    /// that means something: below 5% every account looks full, and above 1.0 is
-    /// unreachable.
+    /// Preserve the selected fraction, including thresholds below 5%. Invalid
+    /// stored values are ignored instead of silently selecting another limit.
     pub fn threshold(&self) -> Option<f64> {
-        self.proxy_threshold.map(|t| t.clamp(0.05, 1.0))
+        self.proxy_threshold.filter(|t| valid_threshold(*t))
     }
 
     pub fn is_disabled(&self, name: &str) -> bool {
@@ -113,6 +112,23 @@ impl Settings {
     }
 }
 
+pub(crate) fn valid_threshold(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value <= 1.0
+}
+
+/// Keep fractional percentages visible without floating-point multiplication
+/// noise. Very small limits use scientific notation rather than displaying 0%.
+pub(crate) fn threshold_label(value: f64) -> String {
+    let percent = value * 100.0;
+    let rounded = format!("{percent:.12}");
+    let number = rounded.trim_end_matches('0').trim_end_matches('.');
+    if number == "0" && percent > 0.0 {
+        format!("{percent:e}%")
+    } else {
+        format!("{number}%")
+    }
+}
+
 pub(crate) fn file(paths: &Paths) -> std::path::PathBuf {
     paths.store_dir().join("settings.json")
 }
@@ -134,39 +150,28 @@ pub fn load(paths: &Paths) -> Settings {
 /// token-refresh loss": a freshly refreshed token clobbered by an unrelated
 /// preference write seconds later.
 ///
-/// The store's own lock serialises it. A lock that cannot be taken is not worth
-/// failing a preference over - the write still happens, exactly as it did
-/// before, so this is never worse than the old behaviour.
+/// The store lock serializes the whole operation. Brief contention is retried;
+/// after the deadline or an I/O failure, leave settings unchanged and report it.
 pub fn update(paths: &Paths, edit: impl FnOnce(&mut Settings)) -> Result<()> {
-    // The store's own lock. If it cannot be taken the write still happens -
-    // never worse than before - but say so rather than lose a change in
-    // silence, since that silence is what made this hard to see at all.
-    // The store's own lock, waited for rather than skipped. Contention here is
-    // brief - a read, an edit, an atomic write - and giving up on the first
-    // `Busy` is what let one change silently erase another.
-    let store = crate::store::Store::open(paths);
-    let mut _guard = None;
-    if let Ok(s) = &store {
-        for attempt in 0..50 {
-            match s.lock() {
-                Ok(g) => {
-                    _guard = Some(g);
-                    break;
-                }
-                Err(crate::store::LockError::Busy) => {
-                    if attempt == 49 {
-                        eprintln!(
-                            "swapdex: settings stayed locked - a concurrent change may be lost"
-                        );
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                // An unwritable store is not contention: waiting cannot help,
-                // and the write below will report the real problem.
-                Err(_) => break,
+    let store = crate::store::Store::open(paths).context("open settings store")?;
+    let mut attempt = 0;
+    let _guard = loop {
+        match store.lock() {
+            Ok(guard) => break guard,
+            Err(crate::store::LockError::Busy) if attempt < 49 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(crate::store::LockError::Busy) => {
+                return Err(anyhow::Error::new(crate::store::LockError::Busy))
+                    .context("settings stayed locked; retry after the other operation finishes");
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error))
+                    .context("cannot lock settings; check the store permissions");
             }
         }
-    }
+    };
     let mut cfg = load(paths);
     edit(&mut cfg);
     save(paths, &cfg)
@@ -188,7 +193,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_threshold_persists_and_is_clamped_to_a_meaningful_range() {
+    fn the_threshold_persists_and_invalid_stored_limits_are_ignored() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted(root.path());
         assert_eq!(load(&paths).threshold(), None, "off until asked for");
@@ -201,18 +206,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load(&paths).threshold(), Some(0.9));
-        // Nonsense values are pulled back rather than making every account look
-        // full (or the setting unreachable).
+        // Nonsense values must not silently select a different threshold.
         let low = Settings {
             proxy_threshold: Some(0.0),
             ..Default::default()
         };
-        assert_eq!(low.threshold(), Some(0.05));
+        assert_eq!(low.threshold(), None);
         let high = Settings {
             proxy_threshold: Some(5.0),
             ..Default::default()
         };
-        assert_eq!(high.threshold(), Some(1.0));
+        assert_eq!(high.threshold(), None);
     }
 
     #[test]

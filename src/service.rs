@@ -159,11 +159,52 @@ pub fn manages_the_real_machine(paths: &Paths) -> bool {
     dirs::home_dir().is_some_and(|h| h == paths.home())
 }
 
-/// Install (or replace) the agent for one tool and start it.
+/// Prefer Homebrew's formula-scoped stable path when it names this executable.
 ///
-/// The binary path is written in FULL, resolved now: an agent that looked a name
-/// up on PATH would be at the mercy of whatever a login shell happens to set, and
-/// that is precisely the ambiguity that made two installs of swapdex fight.
+/// `current_exe` resolves a Homebrew launch to its versioned Cellar path, which
+/// `brew cleanup` removes after an upgrade. Deriving the corresponding `opt`
+/// path avoids PATH lookup, and resolving it back to the running executable
+/// prevents an unrelated or stale candidate from entering a service unit.
+fn service_executable(exe: PathBuf) -> PathBuf {
+    let resolved = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let Some(stable) = homebrew_opt_executable(&resolved) else {
+        return resolved;
+    };
+    match std::fs::canonicalize(&stable) {
+        Ok(target) if target == resolved => stable,
+        _ => resolved,
+    }
+}
+
+fn homebrew_opt_executable(exe: &Path) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+
+    if exe.file_name()? != OsStr::new("swapdex") {
+        return None;
+    }
+    let bin = exe.parent()?;
+    if bin.file_name()? != OsStr::new("bin") {
+        return None;
+    }
+    let version = bin.parent()?;
+    let formula = version.parent()?;
+    if formula.file_name()? != OsStr::new("swapdex") {
+        return None;
+    }
+    let cellar = formula.parent()?;
+    if cellar.file_name()? != OsStr::new("Cellar") {
+        return None;
+    }
+    Some(
+        cellar
+            .parent()?
+            .join("opt")
+            .join("swapdex")
+            .join("bin")
+            .join("swapdex"),
+    )
+}
+
 /// The program a service unit will run, read back from the unit itself.
 ///
 /// The proxy is the one part whose failure takes every session down at once, so
@@ -488,7 +529,7 @@ fn for_how_long(secs: u64) -> String {
 pub fn install(paths: &Paths, tool: &str) -> anyhow::Result<PathBuf> {
     use anyhow::Context;
     let exe = std::env::current_exe().context("cannot find swapdex's own path")?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = service_executable(exe);
     let logs = log_dir(paths);
     std::fs::create_dir_all(&logs).ok();
 
