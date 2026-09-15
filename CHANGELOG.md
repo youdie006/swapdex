@@ -6,6 +6,16 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.165.2
+
+- **Use only the selected account's authentication for managed requests.**
+  Claude and Codex forwarding now remove client `x-api-key` headers before
+  adding the managed OAuth credential, including duplicate and mixed-case
+  headers. A stale client key can no longer override the selected bearer,
+  produce a misleading login rejection or sideline a healthy managed account.
+  Explicit passthrough and native authentication exchanges preserve the
+  client's original authentication headers.
+
 ## 0.165.1
 
 - **Honor fractional usage thresholds.** `threshold 0.5%` now stores half a

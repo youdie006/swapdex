@@ -432,8 +432,10 @@ For an HTTP request rejected with 401, the managed proxy first attempts bounded
 recovery of the same selected account: reread a changed usable native access
 token, or await a coordinated Swapdex renewal for an idle login. It retries
 only with a changed usable token, before any explicitly configured failover.
-An unavailable selected login produces an error instead of silently using the
-client's different account.
+Managed requests remove client API-key headers before applying the selected
+account's OAuth credential. An unavailable selected login produces an error
+instead of silently using the client's different account. Explicit passthrough
+and native authentication exchanges preserve client authentication.
 
 The launch default and proxy selection control different operations: the first
 affects new native launches, and the second affects subsequent managed HTTP
