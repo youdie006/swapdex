@@ -1,8 +1,9 @@
 //! The permanent-slot registry: a name -> slot mapping persisted to
 //! `<store_dir>/slots.json`. Each slot is a directory under
 //! `<store_dir>/slots/<id>/` handed to the tool as its own home - Claude's
-//! `CLAUDE_CONFIG_DIR`, Codex's `CODEX_HOME`. swapdex never writes a credential
-//! into a slot; the tool's own login does. The id is opaque and
+//! `CLAUDE_CONFIG_DIR`, Codex's `CODEX_HOME`. Native login initializes the
+//! credential; coordinated renewal may replace it, while switching never copies
+//! a credential between slots. The id is opaque and
 //! name-independent so a rename never changes the directory (and therefore never
 //! changes the Keychain service, which is derived from the dir string).
 //!

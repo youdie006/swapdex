@@ -527,7 +527,12 @@ fn main() {
         Err(e) => {
             // Redact home paths from any error before it reaches a terminal/log.
             eprintln!("swapdex: {}", swapdex::util::redact_path(&format!("{e:#}")));
-            std::process::exit(1);
+            let code = if e.downcast_ref::<swapdex::store::LockError>().is_some() {
+                4
+            } else {
+                1
+            };
+            std::process::exit(code);
         }
     }
 }

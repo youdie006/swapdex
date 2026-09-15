@@ -6,8 +6,10 @@
 //! live) means the picture degrades instead of disappearing.
 
 use crate::paths::Paths;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::os::unix::fs::OpenOptionsExt;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Entry {
@@ -63,6 +65,37 @@ fn file_for(paths: &Paths, tool: &str) -> std::path::PathBuf {
         t => format!("{t}-quota-cache.json"),
     };
     paths.store_dir().join(name)
+}
+
+struct CacheLock(std::fs::File);
+
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+/// One lock per tool cache, held from read through atomic replacement.
+///
+/// Atomic rename keeps readers from seeing partial JSON, but it cannot merge
+/// two snapshots that were read at the same time. A distinct lock from the
+/// profile store avoids lock nesting with account rename/removal callers, and
+/// a blocking lock lets every writer apply its change instead of dropping a
+/// contending observation.
+fn lock_for(paths: &Paths, tool: &str) -> Option<CacheLock> {
+    std::fs::create_dir_all(paths.store_dir()).ok()?;
+    let cache = file_for(paths, tool);
+    let name = cache.file_name()?.to_string_lossy();
+    let path = paths.store_dir().join(format!(".{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .ok()?;
+    FileExt::lock_exclusive(&file).ok()?;
+    Some(CacheLock(file))
 }
 
 /// Read the cache. Anything unreadable yields an empty one: a stale-value cache
@@ -184,10 +217,21 @@ pub fn update_for(paths: &Paths, tool: &str, fresh: &[(String, Entry)]) {
     if fresh.is_empty() {
         return;
     }
+    let Some(_lock) = lock_for(paths, tool) else {
+        return;
+    };
     let path = file_for(paths, tool);
     let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
     for (name, e) in fresh {
-        c.insert(name.clone(), e.clone());
+        let mut e = e.clone();
+        if let Some(old) = c.get(name) {
+            // A response-carried reset is independent of a usage reading. Some
+            // usage endpoints omit it, so absence in the fresh reading must
+            // not erase a future reset learned from served traffic.
+            e.five_h_reset = e.five_h_reset.or(old.five_h_reset);
+            e.seven_d_reset = e.seven_d_reset.or(old.seven_d_reset);
+        }
+        c.insert(name.clone(), e);
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
         let _ = std::fs::create_dir_all(paths.store_dir());
@@ -213,6 +257,9 @@ pub fn note_resets(
     if five_h.is_none() && seven_d.is_none() {
         return;
     }
+    let Some(_lock) = lock_for(paths, tool) else {
+        return;
+    };
     let path = file_for(paths, tool);
     let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
     // This runs on every served response; rewriting the file to store what it
@@ -247,6 +294,9 @@ pub fn note_resets(
 /// remembered gets an entry carrying only the stamp, because "its token is
 /// being rejected" is worth saying about an account that has never read.
 pub fn note_token_rejected(paths: &Paths, tool: &str, name: &str, at: i64) {
+    let Some(_lock) = lock_for(paths, tool) else {
+        return;
+    };
     let path = file_for(paths, tool);
     let mut c = load_file_at(&path, now_secs(), drops_clamped(tool));
     let e = c.entry(name.to_string()).or_default();
@@ -269,6 +319,9 @@ pub fn note_token_rejected(paths: &Paths, tool: &str, name: &str, at: i64) {
 /// rename must not be the thing that discards another account's history.
 pub fn rename_account(paths: &Paths, old: &str, new: &str) {
     for tool in crate::adapters::names() {
+        let Some(_lock) = lock_for(paths, tool) else {
+            continue;
+        };
         let path = file_for(paths, tool);
         let mut c = read_raw(&path);
         if let Some(e) = c.remove(old) {
@@ -284,6 +337,9 @@ pub fn rename_account(paths: &Paths, old: &str, new: &str) {
 /// about somebody else.
 pub fn forget_account(paths: &Paths, name: &str) {
     for tool in crate::adapters::names() {
+        let Some(_lock) = lock_for(paths, tool) else {
+            continue;
+        };
         let path = file_for(paths, tool);
         let mut c = read_raw(&path);
         if c.remove(name).is_some() {
