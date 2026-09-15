@@ -39,6 +39,10 @@ All notable changes to swapdex are documented here. This project follows
   could briefly retain an inherited lock descriptor after a completed switch,
   making the next selection fail as busy. Store, credential and registry guards
   now explicitly release their lock while still excluding concurrent writers.
+- **Verify routing with the installed executable.** The optional
+  `scripts/verify-installed-account-routing.py` check exercises generated
+  launchers, direct named runs and Claude/Codex A-to-B-to-A payer changes over
+  a persistent connection, using synthetic accounts and local servers.
 
 ## 0.162.0
 

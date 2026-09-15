@@ -87,6 +87,14 @@ fork could retain a newly written executable's writable descriptor, causing
 Claude passed 300 consecutive runs and Codex passed 100. Production launcher
 logic was unchanged by this follow-up.
 
+The new `scripts/verify-installed-account-routing.py` utility runs against an
+absolute installed native executable without a Rust toolchain. Main review
+reproduced the managed-startup failure against installed 0.162.0, then verified
+the optimized 0.163.0 candidate: generated shims, direct named runs, preserved
+selection pointers, and coherent Claude/Codex A-to-B-to-A payer changes through
+one persistent proxy and client connection. These are synthetic account tests;
+they do not consume a real account's quota or modify the target's account store.
+
 Protected-branch integration, publication and target installation results are
 recorded on [PR #30](https://github.com/youdie006/swapdex/pull/30) and the
 [0.163.0 release](https://github.com/youdie006/swapdex/releases/tag/v0.163.0)
