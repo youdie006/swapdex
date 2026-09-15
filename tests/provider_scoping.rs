@@ -339,6 +339,54 @@ fn codex_slot_identity_outranks_same_provider_snapshot_copy() {
 }
 
 #[test]
+fn ls_uses_slot_identity_and_reports_a_conflicting_snapshot_in_json() {
+    let t = fixture();
+    seed_codex_snapshot(t.path(), "shared", "old-copy@example.com");
+    seed_codex_slot(t.path(), "shared", "live-slot@example.com");
+    let output = Command::new(bin())
+        .args(["ls", "--json"])
+        .env("SWAPDEX_ROOT", t.path())
+        .env("HOME", t.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let row = &rows[0];
+    assert_eq!(row["email"], "live-slot@example.com", "{row}");
+    assert!(
+        row["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("different accounts")),
+        "JSON must expose the profile/slot conflict: {row}"
+    );
+    assert!(
+        row["tier"].is_null(),
+        "cannot borrow the other account's tier: {row}"
+    );
+}
+
+#[test]
+fn ls_does_not_pair_a_codex_slot_email_with_a_claude_snapshot_tier() {
+    let t = fixture();
+    seed_claude_snapshot(t.path(), "shared", "claude@example.com");
+    seed_codex_slot(t.path(), "shared", "codex@example.com");
+    let output = Command::new(bin())
+        .args(["ls", "--json"])
+        .env("SWAPDEX_ROOT", t.path())
+        .env("HOME", t.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rows[0]["email"], "claude@example.com", "{rows}");
+    assert_eq!(rows[0]["tier"], "max", "{rows}");
+    assert_eq!(
+        rows[0]["tools"],
+        serde_json::json!(["claude-code", "codex"])
+    );
+}
+
+#[test]
 fn healthy_codex_slot_does_not_inherit_broken_snapshot_warning() {
     let t = fixture();
     seed_codex_snapshot(t.path(), "shared", "old-copy@example.com");

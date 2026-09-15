@@ -6,6 +6,88 @@ use serde_json::Value;
 
 pub struct Claude;
 
+#[cfg(test)]
+mod native_login_tests {
+    use super::*;
+
+    #[test]
+    fn native_default_and_custom_processes_choose_their_actual_keychain_service() {
+        assert_eq!(native_service_for_key(None), KEYCHAIN_PREFIX);
+        assert_eq!(
+            native_service_for_key(Some("/Users/me/Library/Application Support/Claude Work")),
+            "Claude Code-credentials-77ae3295"
+        );
+    }
+
+    #[test]
+    fn a_native_keychain_blob_is_one_coherent_source() {
+        let stale_file = br#"{"claudeAiOauth":{"accessToken":"OLD","expiresAt":1}}"#;
+        let fresh_keychain =
+            br#"{"claudeAiOauth":{"accessToken":"NEW","expiresAt":9999999999999}}"#;
+        assert_eq!(
+            choose_native_blob(
+                true,
+                Some(stale_file.to_vec()),
+                Some(fresh_keychain.to_vec())
+            ),
+            Some(fresh_keychain.to_vec()),
+            "token and expiry both come from the authoritative Keychain blob"
+        );
+        assert_eq!(
+            choose_native_blob(true, Some(stale_file.to_vec()), None),
+            None,
+            "an unreadable Keychain must not fall back to a stale file"
+        );
+        assert_eq!(
+            choose_native_blob(
+                false,
+                Some(stale_file.to_vec()),
+                Some(fresh_keychain.to_vec())
+            ),
+            Some(stale_file.to_vec()),
+            "file-backed platforms read their actual native file"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slot_credential_selection_tests {
+    use super::*;
+
+    const STALE_FILE: &[u8] = br#"{"claudeAiOauth":{"accessToken":"OLD"}}"#;
+    const FRESH_KEYCHAIN: &[u8] = br#"{"claudeAiOauth":{"accessToken":"NEW"}}"#;
+
+    #[test]
+    fn a_ready_keychain_selects_its_complete_generation() {
+        let selected =
+            choose_slot_credential(Some(STALE_FILE.to_vec()), Ok(FRESH_KEYCHAIN.to_vec()))
+                .expect("Keychain credential");
+        assert_eq!(selected.bytes(), FRESH_KEYCHAIN);
+        assert_eq!(selected.source(), SlotCredentialSource::Keychain);
+    }
+
+    #[test]
+    fn a_locked_or_missing_keychain_never_falls_back_to_a_stale_file() {
+        for unavailable in [KeychainReadError::Locked, KeychainReadError::Missing] {
+            assert!(matches!(
+                choose_slot_credential(Some(STALE_FILE.to_vec()), Err(unavailable)),
+                Err(error) if error == unavailable
+            ));
+        }
+    }
+
+    #[test]
+    fn a_file_is_selected_only_when_keychain_is_not_applicable() {
+        let selected = choose_slot_credential(
+            Some(STALE_FILE.to_vec()),
+            Err(KeychainReadError::NotApplicable),
+        )
+        .expect("file credential");
+        assert_eq!(selected.bytes(), STALE_FILE);
+        assert_eq!(selected.source(), SlotCredentialSource::File);
+    }
+}
+
 /// Absolute path to `security`: Claude Code creates its Keychain item by
 /// shelling out to `/usr/bin/security`, so the item's ACL trusts THAT binary.
 /// Using the same absolute path means swapdex is the same trusted app - no
@@ -57,6 +139,49 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The exact service a native Claude process derives from its environment.
+/// `None` is the default bare service; an explicit secure-storage/config key
+/// is hashed. The process accessor already applies secure-storage precedence.
+pub(crate) fn native_service_for_key(key: Option<&str>) -> String {
+    match key {
+        None => KEYCHAIN_PREFIX.to_string(),
+        Some(key) => format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(key.as_bytes())[..8]),
+    }
+}
+
+fn choose_native_blob(
+    keychain_in_play: bool,
+    file: Option<Vec<u8>>,
+    keychain: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if keychain_in_play {
+        keychain
+    } else {
+        file
+    }
+}
+
+/// Read the one credential blob an actual native Claude process uses.
+///
+/// macOS native sessions use their exact environment-derived Keychain item.
+/// A leftover credential file is never mixed with that item or used as a
+/// fallback when the Keychain cannot be read. File-backed platforms, unit
+/// tests and rooted sandboxes read only the regular credential file.
+pub(crate) fn native_credentials(
+    paths: &Paths,
+    dir: &std::path::Path,
+    key: Option<&str>,
+) -> Option<Vec<u8>> {
+    let keychain_in_play = keychain_enabled() && !paths.sandboxed();
+    let file = (!keychain_in_play)
+        .then(|| crate::atomic::read_regular(&dir.join(".credentials.json")).ok())
+        .flatten();
+    let keychain = keychain_in_play
+        .then(|| keychain_read_service_detail(&native_service_for_key(key)).ok())
+        .flatten();
+    choose_native_blob(keychain_in_play, file, keychain)
 }
 
 /// The service name computed from the env, exactly the way Claude Code derives
@@ -269,6 +394,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// does not have - `errSecInteractionNotAllowed`, exit 36). Reporting that as
 /// "no login" would send the user to re-sign-in an account that is already
 /// signed in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeychainReadError {
     /// Not a Keychain environment at all (non-macOS, tests, SWAPDEX_ROOT).
     NotApplicable,
@@ -276,6 +402,60 @@ pub(crate) enum KeychainReadError {
     Locked,
     /// No such item, or it is empty.
     Missing,
+}
+
+/// The store Claude Code actually reads for one slot in this environment.
+/// Carrying it beside the bytes keeps a later renewal write in the same store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SlotCredentialSource {
+    File,
+    Keychain,
+}
+
+/// One complete credential generation and the store that supplied it.
+///
+/// The bytes deliberately have no `Debug` implementation: test failures and
+/// error reports must not print tokens.
+#[derive(Eq, PartialEq)]
+pub(crate) struct SlotCredential {
+    bytes: Vec<u8>,
+    source: SlotCredentialSource,
+}
+
+impl SlotCredential {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn source(&self) -> SlotCredentialSource {
+        self.source
+    }
+}
+
+/// Pick one whole credential generation from injected store outcomes.
+///
+/// A usable Keychain is authoritative on production macOS. Locked and missing
+/// are terminal there: a leftover file is not a fallback. `NotApplicable` is
+/// the file-backed contract for Linux, unit tests, and rooted sandboxes.
+pub(crate) fn choose_slot_credential(
+    file: Option<Vec<u8>>,
+    keychain: std::result::Result<Vec<u8>, KeychainReadError>,
+) -> std::result::Result<SlotCredential, KeychainReadError> {
+    let selected = match keychain {
+        Ok(bytes) => (bytes, SlotCredentialSource::Keychain),
+        Err(KeychainReadError::NotApplicable) => (
+            file.ok_or(KeychainReadError::Missing)?,
+            SlotCredentialSource::File,
+        ),
+        Err(error) => return Err(error),
+    };
+    if selected.0.is_empty() {
+        return Err(KeychainReadError::Missing);
+    }
+    Ok(SlotCredential {
+        bytes: selected.0,
+        source: selected.1,
+    })
 }
 
 /// Write a credential to the Keychain item belonging to `dir` - the same item
@@ -309,12 +489,30 @@ pub(crate) fn slot_keychain_read_detail(
     if !keychain_enabled() {
         return Err(KeychainReadError::NotApplicable);
     }
-    let service = slot_service(dir);
+    keychain_read_service_detail(&slot_service(dir))
+}
+
+/// Read exactly the credential generation Claude Code uses for this slot.
+/// The file is not even inspected when Keychain is applicable, so a stale copy
+/// cannot supply a token, deadline, plan, or refresh token by accident.
+pub(crate) fn slot_credential(
+    dir: &std::path::Path,
+) -> std::result::Result<SlotCredential, KeychainReadError> {
+    match slot_keychain_read_detail(dir) {
+        Err(KeychainReadError::NotApplicable) => choose_slot_credential(
+            crate::atomic::read_regular(&dir.join(".credentials.json")).ok(),
+            Err(KeychainReadError::NotApplicable),
+        ),
+        keychain => choose_slot_credential(None, keychain),
+    }
+}
+
+fn keychain_read_service_detail(service: &str) -> std::result::Result<Vec<u8>, KeychainReadError> {
     let out = std::process::Command::new(SECURITY)
         .args([
             "find-generic-password",
             "-s",
-            &service,
+            service,
             "-a",
             &keychain_account_name(),
             "-w",

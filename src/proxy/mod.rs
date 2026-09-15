@@ -556,6 +556,9 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
         for name in &report.renewed {
             println!("keep-alive: renewed {name}");
         }
+        for name in &report.native_managed {
+            println!("keep-alive: '{name}' uses a live {tool} login; renewal is managed by the native session");
+        }
         for name in &report.deferred {
             println!(
                 "keep-alive: {}",
@@ -565,7 +568,11 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
         for (name, why) in &report.failed {
             println!("keep-alive: {}", why.remedy(name, &tool));
         }
-        if !report.renewed.is_empty() || !report.deferred.is_empty() || !report.failed.is_empty() {
+        if !report.renewed.is_empty()
+            || !report.native_managed.is_empty()
+            || !report.deferred.is_empty()
+            || !report.failed.is_empty()
+        {
             std::io::stdout().flush().ok();
         }
     });
@@ -840,7 +847,10 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // wrapper, and "not readable" covers two different situations - a
         // keychain that will not release the secret to this process, and a slot
         // with nothing signed in - whose remedies are opposites.
-        let tok = match creds::slot_token_detail(&r.config_dir) {
+        let reading = crate::live_login::resolve(paths, &r.config_dir, "claude-code", now_ms())
+            .map(|login| Ok(login.access_token))
+            .unwrap_or_else(|| creds::slot_token_detail(&r.config_dir));
+        let tok = match reading {
             Ok(t) => t,
             Err(why) => {
                 unread.push((r.name.clone(), why.short().to_string()));
@@ -1409,6 +1419,9 @@ pub fn cannot_carry(tool: &str) -> String {
 /// logout this project exists to prevent. A lapsed token still counts as a
 /// login here, because it is renewable.
 pub fn has_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
+    if crate::live_login::resolve(paths, dir, tool, now_ms()).is_some() {
+        return true;
+    }
     match tool {
         "codex" => codex::slot_auth(dir).is_some(),
         // What a login looks like differs per tool, and the adapter is what
@@ -1436,6 +1449,9 @@ pub fn login_present(read: Result<crate::secret::Secret, creds::TokenUnavailable
 
 /// Can this slot serve a turn for `tool` right now?
 fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
+    if crate::live_login::resolve(paths, dir, tool, now_ms()).is_some() {
+        return true;
+    }
     // A lapsed Claude token is renewable, so try before ruling the account out:
     // the accounts idle long enough to lapse are the ones with quota left.
     if tool != "codex" && creds::slot_token_expired(dir, now_ms()) {
@@ -1473,6 +1489,274 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// The non-secret account and refresh generation that served a Codex request.
+///
+/// `identity` is optional because older and synthetic credentials may not carry
+/// an ID token. The workspace remains mandatory; when both are available the
+/// subject distinguishes two users of the same workspace.
+struct CodexRecoveryBinding {
+    account_id: String,
+    identity: Option<crate::live_login::LoginIdentity>,
+    refresh_fingerprint: Option<String>,
+}
+
+/// The selected Claude identity and exact credential source generation that
+/// supplied one outgoing request.
+struct ClaudeRecoveryBinding {
+    account_uuid: Option<String>,
+    identity: Option<crate::live_login::LoginIdentity>,
+    credential_fingerprint: Option<String>,
+}
+
+impl ClaudeRecoveryBinding {
+    fn same_account(
+        &self,
+        account_uuid: Option<&str>,
+        identity: Option<&crate::live_login::LoginIdentity>,
+    ) -> bool {
+        self.account_uuid
+            .as_ref()
+            .is_none_or(|expected| account_uuid == Some(expected.as_str()))
+            && self
+                .identity
+                .as_ref()
+                .is_none_or(|expected| identity == Some(expected))
+    }
+}
+
+impl CodexRecoveryBinding {
+    fn same_account(
+        &self,
+        account_id: Option<&str>,
+        identity: Option<&crate::live_login::LoginIdentity>,
+    ) -> bool {
+        account_id == Some(self.account_id.as_str())
+            && self
+                .identity
+                .as_ref()
+                .is_none_or(|expected| identity == Some(expected))
+    }
+}
+
+/// Read the bearer, workspace, optional subject, and refresh generation from
+/// one Codex auth blob so a concurrent replacement cannot mix snapshots.
+fn codex_recovery_credential(dir: &std::path::Path) -> Option<(codex::Auth, CodexRecoveryBinding)> {
+    let bytes = std::fs::read(dir.join("auth.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let token = value["tokens"]["access_token"]
+        .as_str()
+        .filter(|value| !value.is_empty())?;
+    let account_id = value["tokens"]["account_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let auth = codex::Auth {
+        token: crate::secret::Secret::new(token.as_bytes().to_vec()),
+        account_id: account_id.clone(),
+    };
+    let binding = CodexRecoveryBinding {
+        account_id,
+        identity: crate::live_login::identity_from_credential(&bytes, "codex"),
+        refresh_fingerprint: crate::refresh_health::codex_credential_fingerprint_from_blob(&bytes),
+    };
+    Some((auth, binding))
+}
+
+/// Read Claude's identity around the exact credential-source read. On macOS
+/// this keeps the Keychain generation selected by Claude's own precedence;
+/// elsewhere it keeps the regular file generation. A changing identity is not
+/// safe to send as either account.
+fn claude_recovery_credential(
+    dir: &std::path::Path,
+) -> std::result::Result<(crate::secret::Secret, ClaudeRecoveryBinding), creds::TokenUnavailable> {
+    use crate::adapters::claude::KeychainReadError as K;
+
+    let identity_path = dir.join(".claude.json");
+    let identity_before = std::fs::read(&identity_path).ok();
+    let credential = match crate::adapters::claude::slot_credential(dir) {
+        Ok(credential) => credential,
+        Err(K::Locked) => return Err(creds::TokenUnavailable::KeychainLocked),
+        Err(K::Missing | K::NotApplicable) => return Err(creds::TokenUnavailable::NoLogin),
+    };
+    if std::fs::read(&identity_path).ok() != identity_before {
+        return Err(creds::TokenUnavailable::NoLogin);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(credential.bytes()).map_err(|_| creds::TokenUnavailable::NoLogin)?;
+    let token = value["claudeAiOauth"]["accessToken"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(creds::TokenUnavailable::NoLogin)?;
+    let account_uuid = identity_before.as_deref().and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|value| {
+                value["oauthAccount"]["accountUuid"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+    });
+    let binding = ClaudeRecoveryBinding {
+        account_uuid,
+        identity: identity_before
+            .as_deref()
+            .and_then(|bytes| crate::live_login::identity_from_credential(bytes, "claude-code")),
+        credential_fingerprint: Some(crate::refresh::claude_credential_fingerprint_from_blob(
+            credential.bytes(),
+        )),
+    };
+    Ok((
+        crate::secret::Secret::new(token.as_bytes().to_vec()),
+        binding,
+    ))
+}
+
+/// The bearer that can actually serve from this slot after a recovery attempt.
+/// Prefer a verified native owner and otherwise mirror the request path's
+/// provider-specific expiry checks. A Codex replacement must still name the
+/// account whose rejected request initiated recovery.
+fn usable_bearer(
+    paths: &Paths,
+    tool: &str,
+    dir: &std::path::Path,
+    codex_binding: Option<&CodexRecoveryBinding>,
+    claude_binding: Option<&ClaudeRecoveryBinding>,
+) -> Option<crate::secret::Secret> {
+    let now = now_ms();
+    if let Some(login) = crate::live_login::resolve(paths, dir, tool, now) {
+        if let Some(expected) = codex_binding {
+            if !expected.same_account(login.provider_account_id.as_deref(), Some(&login.identity)) {
+                return None;
+            }
+        }
+        if let Some(expected) = claude_binding {
+            if !expected.same_account(login.provider_account_id.as_deref(), Some(&login.identity)) {
+                return None;
+            }
+        }
+        return Some(login.access_token);
+    }
+    match tool {
+        "codex" => {
+            let (auth, current) = codex_recovery_credential(dir)?;
+            if codex::auth_token_expired(&auth, now / 1000)
+                || !codex_binding?
+                    .same_account(Some(current.account_id.as_str()), current.identity.as_ref())
+            {
+                return None;
+            }
+            Some(auth.token)
+        }
+        "claude-code" => {
+            if creds::slot_token_expired(dir, now) {
+                return None;
+            }
+            let (token, current) = claude_recovery_credential(dir).ok()?;
+            if !claude_binding?
+                .same_account(current.account_uuid.as_deref(), current.identity.as_ref())
+            {
+                return None;
+            }
+            Some(token)
+        }
+        _ => None,
+    }
+}
+
+/// Try one same-account recovery after inference rejects a bearer.
+///
+/// Native authority gets first refusal: a changed usable native bearer can be
+/// retried, while an unchanged one proves that swapdex must not spend its
+/// refresh token. With no verified native owner, the regular coordinated
+/// refresh path remains responsible for all holder and generation guards.
+fn recover_rejected_bearer(
+    paths: &Paths,
+    tool: &str,
+    slot: &crate::slots::SlotRecord,
+    rejected: &[u8],
+    codex_binding: Option<&CodexRecoveryBinding>,
+    claude_binding: Option<&ClaudeRecoveryBinding>,
+) -> Option<crate::secret::Secret> {
+    if let Some(native) = crate::live_login::resolve(paths, &slot.config_dir, tool, now_ms()) {
+        if let Some(expected) = codex_binding {
+            if !expected.same_account(
+                native.provider_account_id.as_deref(),
+                Some(&native.identity),
+            ) {
+                return None;
+            }
+        }
+        if let Some(expected) = claude_binding {
+            if !expected.same_account(
+                native.provider_account_id.as_deref(),
+                Some(&native.identity),
+            ) {
+                return None;
+            }
+        }
+        return (native.access_token.expose() != rejected).then_some(native.access_token);
+    }
+
+    // Another participating process may already have replaced the rejected
+    // access token. Reuse that result when the stable account identity still
+    // matches; spending its refresh token again would retire the replacement
+    // before it served a single request. A later filesystem swap remains
+    // covered by the guarded refresh operation below.
+    if tool == "codex" {
+        let expected = codex_binding?;
+        let (current_auth, current) = codex_recovery_credential(&slot.config_dir)?;
+        if !expected.same_account(Some(current.account_id.as_str()), current.identity.as_ref())
+            || codex::auth_token_expired(&current_auth, now_secs())
+        {
+            return None;
+        }
+        if current_auth.token.expose() != rejected {
+            return Some(current_auth.token);
+        }
+    }
+    let refreshed = match tool {
+        "codex" => {
+            let expected = codex_binding?;
+            let fingerprint = expected.refresh_fingerprint.as_deref()?;
+            crate::refresh::refresh_codex_slot_if_current(
+                paths,
+                &slot.config_dir,
+                now_ms(),
+                fingerprint,
+                expected.identity.as_ref(),
+            )
+        }
+        "claude-code" => {
+            let expected = claude_binding?;
+            let fingerprint = expected.credential_fingerprint.as_deref()?;
+            crate::refresh::refresh_slot_if_current(
+                paths,
+                &slot.config_dir,
+                now_ms(),
+                fingerprint,
+                expected.account_uuid.as_deref(),
+                expected.identity.as_ref(),
+            )
+        }
+        _ => return None,
+    };
+    match refreshed {
+        Ok(crate::refresh::RefreshOutcome::Renewed) => {
+            println!(
+                "  {}: renewed its login after upstream rejected it",
+                slot.name
+            )
+        }
+        Ok(crate::refresh::RefreshOutcome::NativeManaged) => {}
+        Err(why) => println!("  {}", why.remedy(&slot.name, tool)),
+    }
+    std::io::stdout().flush().ok();
+
+    usable_bearer(paths, tool, &slot.config_dir, codex_binding, claude_binding)
+        .filter(|replacement| replacement.expose() != rejected)
 }
 
 fn handle(mut rq: tiny_http::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<()> {
@@ -1527,8 +1811,8 @@ fn forward_turn(
 ) -> Result<upstream::Upstream> {
     // The client's request, read once and reusable: serving the same turn on
     // another account means sending these bytes again with a different token.
-    // Keep the client's own Authorization: if swapdex cannot supply a login, the
-    // honest fallback is to send what Claude itself would have sent.
+    // Client authentication belongs only to explicit passthrough and client-bound
+    // authentication routes. Managed failures must not spend another login.
     let client_auth = rq
         .headers()
         .iter()
@@ -1607,11 +1891,8 @@ fn forward_turn(
         .unwrap_or_default();
 
     let mut slot = pick_slot(paths, opts, sh)?;
-    // The mark is NOT written here. Choosing a slot is not the same as paying
-    // with it: when the chosen one has no usable login the proxy forwards the
-    // CLIENT's own credential, and a mark written at the moment of choosing then
-    // named an account that paid for nothing - for as long as it kept being
-    // chosen. It is written where a credential is actually committed to.
+    // Choosing a slot does not establish that it can serve the request. Write
+    // the serving mark only when its credential is committed to an upstream call.
     let mut tried: Vec<String> = Vec::new();
     // Retries of the CURRENT account after a throttle, counted so a wall is never
     // mistaken for a pause and retried forever.
@@ -1620,51 +1901,62 @@ fn forward_turn(
     // rotate around: the last account tried, and whether anything else could have
     // taken the turn.
     let mut refused_by: Option<String> = None;
-    let up = loop {
-        // An already-lapsed token earns a 401 and cannot be refreshed from here,
-        // so treat it exactly like having no login: step aside rather than spend
-        // the turn proving it.
-        // An expired access token is renewable, and until now it was simply
-        // stepped over - which retired the accounts with the most quota left.
-        // Renewing is skipped when the tool is running in that slot: see
-        // refresh's module note.
-        // One renewal per slot per burst. Refresh tokens rotate, so N concurrent
-        // turns each renewing this slot spend the same token N times and all but
-        // one result is stale on arrival - the account logs itself out by its own
-        // renewal. A caller that stands down here simply uses the credential the
-        // winner is about to write.
-        // The claim used to live in this condition, so the two other paths that
-        // reach `refresh_slot` - the keep-alive sweep and `has_usable_login` -
-        // spent the token unguarded. It now lives inside `refresh_slot` itself,
-        // which is why there is no claim here: claiming twice would make this
-        // caller stand down against itself.
-        if creds::slot_token_expired(&slot.config_dir, now_ms()) {
+    // A provider rejection earns one same-account recovery per account on this
+    // request. If the replacement is rejected too, normal explicit failover or
+    // the original failure policy resumes without another OAuth exchange.
+    let mut unauthorized_recovery: Vec<String> = Vec::new();
+    // Recovery returns the exact replacement snapshot it validated. Carry it
+    // across the loop boundary so a later directory replacement cannot change
+    // which account performs the one retry.
+    let mut recovered_codex: Option<(crate::secret::Secret, CodexRecoveryBinding)> = None;
+    let mut recovered_claude: Option<(crate::secret::Secret, ClaudeRecoveryBinding)> = None;
+    let up = 'accounts: loop {
+        // Hold token and expiry from the same verified native snapshot. A newer
+        // login in the CLI's actual store must not be condemned by a stale slot
+        // copy, and its refresh token remains exclusively with that CLI.
+        let mut native_login =
+            crate::live_login::resolve(paths, &slot.config_dir, &opts.tool, now_ms());
+        let mut renewal_problem = None;
+        // Renew an expired managed token through the shared refresh operation.
+        // Native ownership remains protected, including when its source cannot
+        // provide a usable token. Every path rereads after the operation, and an
+        // unavailable selected login surfaces an error before forwarding.
+        if !is_codex
+            && native_login.is_none()
+            && creds::slot_token_expired(&slot.config_dir, now_ms())
+        {
             match crate::refresh::refresh_slot(paths, &slot.config_dir, now_ms()) {
-                Ok(()) => {
+                Ok(crate::refresh::RefreshOutcome::Renewed) => {
                     // A new credential: any refusal the OLD one earned is not
                     // about this one, so record when it was replaced.
                     sh.replaced_at.held().insert(slot.name.clone(), now_secs());
                     println!("  {}: renewed its login", slot.name)
                 }
-                // Another turn is renewing it; the credential it writes is the
-                // one this turn will use. Not worth a line on the request path.
+                Ok(crate::refresh::RefreshOutcome::NativeManaged) => {}
+                // Waiting or generation ambiguity did not establish success;
+                // the usability check below decides whether we can proceed.
                 Err(crate::refresh::RefreshError::AlreadyRefreshing) => {}
-                Err(why) => println!("  {}", why.remedy(&slot.name, &opts.tool)),
+                Err(why) => {
+                    let remedy = why.remedy(&slot.name, &opts.tool);
+                    println!("  {remedy}");
+                    renewal_problem = Some(remedy);
+                }
             }
+            native_login =
+                crate::live_login::resolve(paths, &slot.config_dir, &opts.tool, now_ms());
             std::io::stdout().flush().ok();
         }
-        if creds::slot_token_expired(&slot.config_dir, now_ms()) {
-            println!(
-                "{}: its login has expired - passing your own login through \
-                 (`swapdex run {}` once refreshes it)",
-                slot.name, slot.name
-            );
-            std::io::stdout().flush().ok();
-            let mut headers = client_headers.clone();
-            if let Some(auth) = client_auth.clone() {
-                headers.push(("authorization".into(), auth));
-            }
-            return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+        if !is_codex
+            && native_login.is_none()
+            && creds::slot_token_expired(&slot.config_dir, now_ms())
+        {
+            return Err(anyhow!(
+                "selected account '{}' has no usable Claude access token: {}",
+                slot.name,
+                renewal_problem.unwrap_or_else(|| {
+                    "renewal did not produce a usable login; check `swapdex refresh`".into()
+                })
+            ));
         }
         // Codex expresses the serving account as a header PAIR - the OAuth
         // bearer and the account id it belongs to - and sends no account
@@ -1677,44 +1969,68 @@ fn forward_turn(
             // expired days earlier and reports the 401 as a rejected account.
             // That lesson reached the ROTATION candidates and not the account
             // actually serving, which is the one that keeps sending the turn.
-            if codex::slot_token_expired(&slot.config_dir, now_secs()) {
+            if native_login.is_none() && codex::slot_token_expired(&slot.config_dir, now_secs()) {
                 match crate::refresh::refresh_codex_slot(paths, &slot.config_dir, now_ms()) {
-                    Ok(()) => {
+                    Ok(crate::refresh::RefreshOutcome::Renewed) => {
                         // A new credential: any refusal the OLD one earned is
                         // not about this one.
                         sh.replaced_at.held().insert(slot.name.clone(), now_secs());
                         println!("  {}: renewed its Codex login", slot.name);
                     }
+                    Ok(crate::refresh::RefreshOutcome::NativeManaged) => {}
                     // Another turn is renewing it; the credential it writes is
                     // the one this turn will use.
                     Err(crate::refresh::RefreshError::AlreadyRefreshing) => {}
-                    Err(why) => println!("  {}", why.remedy(&slot.name, &opts.tool)),
+                    Err(why) => {
+                        let remedy = why.remedy(&slot.name, &opts.tool);
+                        println!("  {remedy}");
+                        renewal_problem = Some(remedy);
+                    }
                 }
+                native_login =
+                    crate::live_login::resolve(paths, &slot.config_dir, &opts.tool, now_ms());
                 std::io::stdout().flush().ok();
             }
             // Still past its deadline means renewing did not help. Sending it
             // anyway buys a 401 and names this account as having paid for it.
-            let expired = codex::slot_token_expired(&slot.config_dir, now_secs());
-            let usable = codex::slot_auth(&slot.config_dir).filter(|_| !expired);
-            let Some(auth) = usable else {
-                println!(
-                    "account '{}' {} - passing your own through \
-                     (`swapdex run {} --tool codex` once signs it in)",
-                    slot.name,
-                    if expired {
-                        "has a Codex login that expired and could not be renewed"
-                    } else {
-                        "has no usable Codex login"
+            let usable = match recovered_codex.take() {
+                Some((token, binding)) => Some((
+                    codex::Auth {
+                        token,
+                        account_id: binding.account_id.clone(),
                     },
-                    slot.name
-                );
-                std::io::stdout().flush().ok();
-                note_client_serving(paths, &opts.tool);
-                let mut headers = client_headers.clone();
-                if let Some(a) = client_auth.clone() {
-                    headers.push(("authorization".into(), a));
-                }
-                return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+                    binding,
+                )),
+                None => match native_login.take() {
+                    Some(login) => login.provider_account_id.map(|account_id| {
+                        let binding = CodexRecoveryBinding {
+                            account_id: account_id.clone(),
+                            identity: Some(login.identity),
+                            // A native bearer did not come from the selected slot's
+                            // refresh generation. If its owner vanishes after a 401,
+                            // no stored refresh token is proven to have served it.
+                            refresh_fingerprint: None,
+                        };
+                        (
+                            codex::Auth {
+                                token: login.access_token,
+                                account_id,
+                            },
+                            binding,
+                        )
+                    }),
+                    None => codex_recovery_credential(&slot.config_dir)
+                        .filter(|(auth, _)| !codex::auth_token_expired(auth, now_secs())),
+                },
+            };
+            let Some((auth, recovery_binding)) = usable else {
+                return Err(anyhow!(
+                    "selected account '{}' has no usable Codex login: {}",
+                    slot.name,
+                    renewal_problem.unwrap_or_else(|| {
+                        "check `swapdex refresh` or sign in to this account".into()
+                    })
+                ));
             };
             let mut headers = client_headers.clone();
             codex::apply_auth(&mut headers, &auth);
@@ -1747,6 +2063,24 @@ fn forward_turn(
                     }
                 }
             };
+            if up.status == 401 && !unauthorized_recovery.contains(&slot.name) {
+                unauthorized_recovery.push(slot.name.clone());
+                if let Some(replacement) = recover_rejected_bearer(
+                    paths,
+                    &opts.tool,
+                    &slot,
+                    auth.token.expose(),
+                    Some(&recovery_binding),
+                    None,
+                ) {
+                    recovered_codex = Some((replacement, recovery_binding));
+                    sh.replaced_at.held().insert(slot.name.clone(), now_secs());
+                    println!("  {}: retrying once with its replacement login", slot.name);
+                    std::io::stdout().flush().ok();
+                    drop(up);
+                    continue 'accounts;
+                }
+            }
             // Decide the retry BEFORE recording anything: a 429 that is about
             // to be retried on this same account is not the account refusing,
             // and stamping it as one sidelined accounts for being briefly slow.
@@ -1843,26 +2177,33 @@ fn forward_turn(
             }
             break up;
         }
-        let token = match creds::slot_token_detail(&slot.config_dir) {
-            Ok(t) => t,
-            Err(why) => {
-                // swapdex has no login to offer for this account. Rather than
-                // failing the turn, get out of the way: forward what the CLIENT
-                // sent, which is the login Claude would have used with no proxy at
-                // all. Being unable to help is not a reason to break the tool.
-                println!(
-                    "{} - passing your own login through",
-                    why.remedy(&slot.name, &opts.tool)
-                );
-                std::io::stdout().flush().ok();
-                note_client_serving(paths, &opts.tool);
-                let mut headers = client_headers.clone();
-                if let Some(auth) = client_auth.clone() {
-                    headers.push(("authorization".into(), auth));
+        let credential = match recovered_claude.take() {
+            Some(recovered) => Ok(recovered),
+            None => match native_login.take() {
+                Some(login) => {
+                    let account_uuid = login.provider_account_id;
+                    Ok((
+                        login.access_token,
+                        ClaudeRecoveryBinding {
+                            account_uuid,
+                            identity: Some(login.identity),
+                            // A native bearer did not come from the selected slot's
+                            // credential generation. If its owner vanishes after a
+                            // 401, no stored refresh token is proven to have served it.
+                            credential_fingerprint: None,
+                        },
+                    ))
                 }
-                return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+                None => claude_recovery_credential(&slot.config_dir),
+            },
+        };
+        let (token, recovery_binding) = match credential {
+            Ok(credential) => credential,
+            Err(why) => {
+                return Err(anyhow!("{}", why.remedy(&slot.name, &opts.tool)));
             }
         };
+        let serving_uuid = recovery_binding.account_uuid.clone();
         let mut headers = client_headers.clone();
         headers.push((
             "authorization".into(),
@@ -1894,7 +2235,7 @@ fn forward_turn(
         } else {
             *sh.corner_note.held() = None;
         }
-        if let Some(serving) = creds::slot_account_uuid(&slot.config_dir) {
+        if let Some(serving) = serving_uuid {
             if let Some(aligned) = identity::align_account(&body, &known_uuids, &serving) {
                 body = aligned;
             }
@@ -1912,6 +2253,24 @@ fn forward_turn(
         // fixed by waiting and retrying this same account.
         let mut up = loop {
             let up = upstream::forward(&sh.agent, &method, &url, &headers, &body)?;
+            if up.status == 401 && !unauthorized_recovery.contains(&slot.name) {
+                unauthorized_recovery.push(slot.name.clone());
+                if let Some(replacement) = recover_rejected_bearer(
+                    paths,
+                    &opts.tool,
+                    &slot,
+                    token.expose(),
+                    None,
+                    Some(&recovery_binding),
+                ) {
+                    recovered_claude = Some((replacement, recovery_binding));
+                    sh.replaced_at.held().insert(slot.name.clone(), now_secs());
+                    println!("  {}: retrying once with its replacement login", slot.name);
+                    std::io::stdout().flush().ok();
+                    drop(up);
+                    continue 'accounts;
+                }
+            }
             // The server says the REQUEST is wrong, and swapdex is the only
             // thing that touched it. What the client wrote is known-good by
             // construction - it is what would have been sent with no proxy at
@@ -2115,21 +2474,6 @@ fn forward_turn(
                 slot = next;
             }
             None => {
-                // Nothing swapdex offers can serve this turn. Before failing,
-                // fall back to the login the CLIENT sent - that is what Claude
-                // would have used with no proxy, and it is the difference between
-                // "your accounts are all spent" and "you cannot work".
-                if let Some(auth) = client_auth.clone() {
-                    println!(
-                        "{}: no account of mine can serve this - passing your own login through",
-                        slot.name
-                    );
-                    std::io::stdout().flush().ok();
-                    drop(up);
-                    let mut headers = client_headers.clone();
-                    headers.push(("authorization".into(), auth));
-                    return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
-                }
                 // Nothing left to try. Say WHY in a way the client will render:
                 // a bare 401 relayed from upstream reads as "log in to Claude",
                 // when the fix is to re-run one account so its token refreshes.
@@ -2140,9 +2484,8 @@ fn forward_turn(
                 if held_out > 0 && held_out >= names.len().max(1) {
                     let first = names.first().cloned().unwrap_or_else(|| "<name>".into());
                     return Err(anyhow!(
-                        "every account's login has expired. Run `swapdex run {first}` once \
-                         (its own login refreshes there), then try again - swapdex does not \
-                         mint tokens itself."
+                        "the managed accounts' credentials were rejected. Check `swapdex refresh {first}` \
+                         and the selected account's login before retrying."
                     ));
                 }
                 println!("{}: no other account can serve this turn", slot.name);

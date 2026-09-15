@@ -38,21 +38,21 @@ account -- a work seat and a personal subscription, a client's org and your own
 -- switching means logging out and back in every time.
 
 swapdex gives each account its **own permanent space** -- its own
-`CLAUDE_CONFIG_DIR` slot -- and flips between them without ever copying a token.
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` slot -- and switches the default pointer.
 `swapdex use work` points your default account there and a plain `claude`
 follows it; `swapdex run work` launches straight into that account (each terminal
-can be a different one). Because nothing is copied, **a switch can never log an
-account out** -- even if a session is still running when you switch.
+can be a different one). Existing native sessions keep their own slot when the
+default changes.
 `swapdex onboard` sets this up in a few prompts.
 
-It is a **switcher, not a rotator.** It manages accounts you already own for
-distinct purposes, with no feature for cycling them to get around a rate limit
--- see [What it will not do](#what-it-will-not-do).
+It manages accounts you already own, with separate launch defaults, proxy
+selection and configurable failover. See [How it works](#how-it-works) for the
+difference between permanent slots and legacy saved snapshots.
 
-Safety is the design center: in the slot model swapdex never writes a credential
-at all -- each account's own login creates and refreshes its token, in its own
-slot -- and it only ever hands the official CLI its own credentials: no wrapper,
-no proxy, no client spoofing.
+Each account signs in within its own slot. The optional local proxy uses the
+selected account's credential for requests and can renew idle slots in place.
+When an actual native session owns the same login, Swapdex leaves renewal to
+that application and uses a verified, read-only access snapshot when available.
 
 ## Concepts
 
@@ -224,10 +224,9 @@ personal   you@personal.com
 
 It reads each account's remaining quota from Anthropic's official OAuth usage
 endpoint using that account's **own** token -- read-only, and it spends zero
-message quota. The active account is always live; a saved account whose token
-has expired reports so rather than showing a stale number (swapdex never
-refreshes tokens -- that is the line between a switcher and a rotator). It is
-also in `swapdex ui` under the `%` key.
+message quota. It uses the slot or a verified current native login for that
+account. An unavailable or expired credential reports its state rather than
+inventing current quota. It is also in `swapdex ui` under the `%` key.
 
 ### The dashboard
 
@@ -242,10 +241,10 @@ setup is one keystroke and a name.
 
 ## Keeping accounts from expiring
 
-An account nobody opens dies on its own. These refresh tokens go stale when
-they are not exercised -- measured across two machines, an idle Codex slot
-stops working about ten days after its last run -- and once the refresh token
-is gone only a browser sign-in brings the account back.
+Access tokens expire by design. An idle slot can renew while its refresh token
+remains valid, but provider expiry, revocation or renewal by another credential
+holder can make a new browser sign-in necessary. Keep-alive reduces avoidable
+idle expiry; it cannot guarantee that a login never expires.
 
 swapdex renews idle accounts for you, but **only while its proxy is running**,
 because that is the process holding the timer:
@@ -280,9 +279,9 @@ own slot*. swapdex never copies a token between slots: `swapdex run <name>`
 `exec`s `claude` with that slot's `CLAUDE_CONFIG_DIR`, and `swapdex use <name>`
 writes a one-line pointer that a small `claude` shim on your PATH reads. Shared
 config (`settings.json`, global `CLAUDE.md`) is symlinked into each new slot;
-the token and history stay per-slot. Because no credential is ever moved, a
-token refresh in one account can never revoke another -- **a switch cannot log
-you out**.
+the token and history stay per-slot. Independently signed-in slots avoid sharing
+a rotating refresh chain. Copies of one login remain coupled even if they live
+in different directories; the warning below applies to those copies.
 
 **Classic snapshots (still supported).** Each CLI also keeps its login in a
 small on-disk file:
@@ -340,49 +339,48 @@ Already-current accounts and successful or empty runs return 0. Missing or
 unreadable logins produce a sign-in remedy without an OAuth request.
 
 `swapdex refresh --keep-alive` runs the same check without a proxy. If a local
-session holds a due account, renewal is deferred to avoid retiring the token
-that session holds. The account list and picker then show that renewal is
-deferred and its refresh validity is unverified; this does not mean the access
-token has expired or the account needs a new login. A confirmed refresh
-rejection is reported separately as requiring re-login.
+session holds a due account, Swapdex leaves its refresh token alone. A verified
+usable native login is shown as managed by Claude or Codex, including
+`renewal_owner` in `ls --json`; this is not an OAuth renewal by Swapdex. When
+that native login cannot be verified, renewal remains deferred and unverified.
+Actual access expiry and recorded refresh rejection are separate warnings.
+An inaccessible macOS Keychain is a read-access problem, not proof that the
+login expired.
+
+For an HTTP request rejected with 401, the managed proxy first attempts bounded
+recovery of the same selected account: reread a changed usable native access
+token, or await a coordinated Swapdex renewal for an idle login. It retries
+only with a changed usable token, before any explicitly configured failover.
+An unavailable selected login produces an error instead of silently using the
+client's different account.
+
+The launch default and proxy selection control different operations: the first
+affects new native launches, and the second affects subsequent managed HTTP
+requests. Changing a file or default does not switch every existing native
+process, in-flight request or WebSocket conversation. Explicit account pins
+retain their selected account.
 
 An external copy can renew without changing any local file. Neither the local
 access token's issue time nor `last_refresh` reveals that remote event. These
 checks therefore cannot certify refresh validity after unseen remote activity;
 external consumers need their own login instead of a copy of a managed slot.
 
-### What it will not do
+### Network and credential behavior
 
-These are structural properties, not promises -- the code is built so they
-cannot happen:
+Account selection and listing read local state. Opt-in quota lookups contact
+provider usage endpoints. The optional proxy relays API requests with the
+selected credential, and its scheduled renewal work contacts OAuth endpoints
+for idle logins. It uses `ureq` with rustls and bundled roots; CI excludes heavy
+async runtimes and system-TLS dependencies.
 
-- **No HTTP client, no background network.** The binary has no HTTP client in
-  its dependency graph (CI asserts this on every commit), so it cannot phone
-  home or exfiltrate a token. Switching, `ls`, `status`, `usage` -- all 100%
-  local. The one exception is the opt-in `swapdex quota` command, which shells
-  out to `curl` to read your *own* remaining balance from Anthropic's official
-  usage endpoint (that account's own token, read-only, spends zero message
-  quota). It runs only when you type it, sends no data anywhere, and touches no
-  other endpoint.
-- **No auto-rotation.** There is no `--auto`, `--next`, or
-  `--when-rate-limited` flag. `use` only ever switches to a name you type.
-- **No token export.** There is no command that prints a saved credential.
-- **No wrapper, no client spoofing.** swapdex swaps the credential file that the
-  official `claude` / `codex` binary already reads, then gets out of the way. It
-  never sits between the CLI and the API, never proxies requests, and never
-  presents itself as the official client. Your traffic is the real CLI's traffic.
-  (Launching the official tool once, on your explicit pick - `login`'s sign-in
-  flow, `ui`'s session resume - is a hand-off, not a wrapper: swapdex `exec`s
-  and is gone.)
+Explicit account selection, launch defaults and configured proxy failover are
+separate controls. A local file lock coordinates participating Swapdex callers;
+it cannot lock an independent native CLI or another machine. Native renewal
+ownership and access availability are therefore reported separately.
 
-Anthropic and OpenAI both permit multiple accounts for genuinely different
-purposes but forbid using multiple accounts to get around a single workload's
-rate limit, and forbid routing subscription OAuth tokens through third-party
-tools or spoofing the official client. swapdex is built for the former and
-structurally cannot do the latter -- it only ever hands the real CLI its own
-credentials. See
-[Anthropic Usage Policy](https://www.anthropic.com/legal/usage-policy) and
-[OpenAI Usage Policies](https://openai.com/policies/usage-policies/).
+There is no command that prints a saved credential. OAuth request secrets are
+passed to curl on stdin, and diagnostics redact credentials. Native launches
+execute the installed official CLI with the chosen account's configuration.
 
 ## MCP (read-only)
 
@@ -412,18 +410,16 @@ that project's README, July 2026):
 
 - [claude-swap](https://github.com/realiti4/claude-swap) -- Claude Code only,
   a TUI with live usage bars, and *optional auto-switching* near your limit.
-  If you want auto-rotation, use it -- swapdex deliberately refuses to have
-  that feature.
+  This older comparison should be read alongside the current source review below.
 - [aisw](https://github.com/burakdede/aisw) -- cross-tool including Gemini,
   OS-keyring storage, Windows support. More features, bigger surface.
 - [caam](https://github.com/Dicklesworthstone/coding_agent_account_manager) --
-  cross-tool with a shell wrapper and automatic rotation on rate limits; the
-  philosophical opposite of swapdex.
+  cross-tool with a shell wrapper and automatic rotation on rate limits.
 
-Pick swapdex if you want the smallest thing that switches your AI CLIs
-together, can always undo (`restore`), diagnoses itself (`doctor`), shows
-your remaining balance (`quota`), and structurally cannot rotate, proxy, or
-spoof the official client.
+For current Codex switching and renewal mechanisms, see the
+[2026-09-15 source survey](docs/research/2026-09-15-codex-switcher-survey.md):
+pinned implementations, regression-test coverage and the limits of file-based
+switching while native sessions keep running.
 
 ## Roadmap
 

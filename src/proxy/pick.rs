@@ -346,7 +346,7 @@ pub fn refusal_survives(
     // A credential written AFTER the refusal is a different credential; the
     // refusal is not about it. Written before, and the refusal is about this
     // one and stands.
-    !replaced.is_some_and(|at| at > bad)
+    replaced.is_none_or(|at| at <= bad)
 }
 
 pub fn currently_refusing(

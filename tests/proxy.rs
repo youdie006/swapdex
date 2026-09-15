@@ -42,6 +42,18 @@ impl ReapedChild {
             child.wait().unwrap();
         }
     }
+
+    fn stop_with_stdout(mut self) -> String {
+        let Some(mut child) = self.0.take() else {
+            return String::new();
+        };
+        let mut stdout = child.stdout.take().unwrap();
+        child.kill().ok();
+        child.wait().unwrap();
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
+        output
+    }
 }
 
 impl Drop for ReapedChild {
@@ -51,6 +63,37 @@ impl Drop for ReapedChild {
             child.wait().ok();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_native_cli(
+    root: &std::path::Path,
+    comm: &str,
+    env: &[(&str, &std::path::Path)],
+) -> ReapedChild {
+    let binary = root.join(comm);
+    std::os::unix::fs::symlink("/bin/sleep", &binary).unwrap();
+    let mut command = Command::new(&binary);
+    command.arg("120").env_clear();
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    let child = ReapedChild::new(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        != comm
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake native {comm} process did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child
 }
 
 impl ControlledUpstream {
@@ -285,12 +328,24 @@ fn start_proxy(
     upstream: &str,
     extra: &[&str],
 ) -> (std::process::Child, u16) {
+    start_proxy_with_env(root, upstream, extra, &[])
+}
+
+fn start_proxy_with_env(
+    root: &std::path::Path,
+    upstream: &str,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> (std::process::Child, u16) {
     let mut args = vec!["proxy", "--port", "0"];
     args.extend_from_slice(extra);
     let mut child = Command::new(bin())
         .args(&args)
         .env("SWAPDEX_ROOT", root)
         .env("SWAPDEX_UPSTREAM", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .envs(env.iter().copied())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1033,6 +1088,7 @@ fn a_threshold_steps_off_before_the_account_refuses() {
         .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .env("SWAPDEX_CURL", &curl)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -1070,7 +1126,7 @@ fn a_threshold_steps_off_before_the_account_refuses() {
 /// would have sent with no proxy at all. Being unable to help is not a reason to
 /// break the tool.
 #[test]
-fn an_unusable_account_falls_back_to_the_clients_own_login() {
+fn an_unusable_selected_account_does_not_send_the_clients_other_login() {
     let root = tempfile::tempdir().unwrap();
     // A slot in the registry whose credential is unreadable - and a second one
     // that IS readable, because a proxy able to read nothing at all now refuses
@@ -1104,14 +1160,10 @@ fn an_unusable_account_falls_back_to_the_clients_own_login() {
     child.kill().ok();
     child.wait().ok();
 
+    assert!(body.contains("swapdex_proxy_error"), "{body}");
     assert!(
-        body.contains("\"ok\":true"),
-        "the turn still went through: {body}"
-    );
-    assert_eq!(
-        auths(&sink),
-        vec!["Bearer CLIENT-TOKEN".to_string()],
-        "the client's own login was forwarded, not a failure"
+        auths(&sink).is_empty(),
+        "no credential was authorized to serve"
     );
 }
 
@@ -1127,7 +1179,7 @@ fn an_expired_slot_token_never_reaches_upstream() {
     // Signed in once, long ago: readable, and long past its expiry.
     std::fs::write(
         slot.join(".credentials.json"),
-        br#"{"claudeAiOauth":{"accessToken":"AT-STALE","refreshToken":"R","expiresAt":1}}"#,
+        br#"{"claudeAiOauth":{"accessToken":"AT-STALE","expiresAt":1}}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1151,23 +1203,132 @@ fn an_expired_slot_token_never_reaches_upstream() {
     child.kill().ok();
     child.wait().ok();
 
-    assert!(
-        body.contains("\"ok\":true"),
-        "the turn went through: {body}"
-    );
+    assert!(body.contains("swapdex_proxy_error"), "{body}");
     let seen = auths(&sink);
     assert!(
         !seen.iter().any(|a| a.contains("AT-STALE")),
         "the lapsed token was never sent: {seen:?}"
     );
-    assert_eq!(seen, vec!["Bearer CLIENT-TOKEN".to_string()]);
+    assert!(
+        seen.is_empty(),
+        "no implicit client-account fallback: {seen:?}"
+    );
 }
 
-/// Even when every account swapdex manages refuses, the user must still be able
-/// to work: the turn falls back to the login the client sent, which is what Claude
-/// would have used with no proxy at all.
+#[cfg(target_os = "linux")]
 #[test]
-fn a_turn_still_goes_through_when_every_account_is_refused() {
+fn a_stale_claude_slot_uses_its_verified_native_login_without_copying_or_refreshing() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "selected", "selected-slot", "OLD-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/selected-slot");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    // The default CLI's identity lives beside .claude, not inside it.
+    let old = br#"{"claudeAiOauth":{"accessToken":"OLD-ACCESS","refreshToken":"OLD-REFRESH","expiresAt":1}}"#;
+    let live = br#"{"claudeAiOauth":{"accessToken":"NATIVE-ACCESS","refreshToken":"NATIVE-REFRESH","expiresAt":9999999999999}}"#;
+    std::fs::write(slot.join(".credentials.json"), old).unwrap();
+    std::fs::write(native.join(".credentials.json"), live).unwrap();
+
+    let fake_cli = root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &fake_cli).unwrap();
+    let cli = Command::new(&fake_cli)
+        .arg("120")
+        .env("HOME", root.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .spawn()
+        .unwrap();
+    let pid = cli.id();
+    let _cli = ReapedChild::new(cli);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        != "claude"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake native process did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&calls);
+    let upstream = ControlledUpstream::start(move |rq| {
+        let auth = rq
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("authorization"))
+            .map(|h| h.value.as_str().to_owned())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        rq.respond(tiny_http::Response::from_string("{\"ok\":true}"))
+            .unwrap();
+    });
+    let curl = root.path().join("curl-no-oauth");
+    std::fs::write(
+        &curl,
+        r#"#!/bin/sh
+config=$(cat)
+case "$config" in
+  *'/oauth/token'*) printf x >> "$SWAPDEX_ROOT/oauth-calls" ;;
+esac
+printf '%s\n' '{}' '400'
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(proxy);
+    assert!(post_through(port, "{}").contains("\"ok\":true"));
+    assert_eq!(*calls.lock().unwrap(), vec!["Bearer NATIVE-ACCESS"]);
+    assert_eq!(std::fs::read(slot.join(".credentials.json")).unwrap(), old);
+    assert_eq!(
+        std::fs::read(native.join(".credentials.json")).unwrap(),
+        live
+    );
+    assert!(!root.path().join("oauth-calls").exists());
+
+    let list = Command::new(bin())
+        .args(["ls", "--json"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "selected")
+        .unwrap();
+    assert!(
+        !row["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expired"),
+        "{row}"
+    );
+    assert_eq!(row["renewal_owner"]["claude-code"], "native");
+    proxy.stop();
+    upstream.close();
+}
+
+/// Exhausting the managed accounts must surface failure without silently billing
+/// the unrelated login the client supplied.
+#[test]
+fn all_accounts_refused_does_not_authorize_the_clients_own_login() {
     let root = tempfile::tempdir().unwrap();
     seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
     let sink = Arc::new(Mutex::new(Vec::new()));
@@ -1209,13 +1370,10 @@ fn a_turn_still_goes_through_when_every_account_is_refused() {
     child.kill().ok();
     child.wait().ok();
 
+    assert!(!body.contains("\"ok\":true"), "{body}");
     assert!(
-        body.contains("\"ok\":true"),
-        "the user can still work: {body}"
-    );
-    assert!(
-        auths(&sink).contains(&"Bearer CLIENT-TOKEN".to_string()),
-        "it fell back to the client's own login: {:?}",
+        !auths(&sink).contains(&"Bearer CLIENT-TOKEN".to_string()),
+        "unselected client login was sent: {:?}",
         auths(&sink)
     );
 }
@@ -1247,6 +1405,7 @@ fn a_preemptive_move_does_not_flap_between_two_full_accounts() {
         .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .env("SWAPDEX_CURL", &curl)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -1345,6 +1504,8 @@ fn ensure_replaces_a_proxy_from_an_older_build() {
         .args(["proxy", "--ensure"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .output()
         .unwrap();
     let printed: u16 = String::from_utf8_lossy(&out.stdout)
@@ -1466,6 +1627,7 @@ fn a_running_codex_session_follows_a_pointer_change() {
         .args(["proxy", "--port", "0", "--tool", "codex"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM_CODEX", &upstream)
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1592,6 +1754,8 @@ fn start_codex_proxy(
         .args(&args)
         .env("SWAPDEX_ROOT", root)
         .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -3094,6 +3258,7 @@ fn a_proxy_with_nothing_to_serve_with_refuses_to_start() {
         .args(["proxy", "--port", "0"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:9")
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -3216,6 +3381,7 @@ fn a_second_proxy_for_the_same_tool_takes_the_port_rather_than_failing() {
         .args(["proxy", "--port", &port.to_string()])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -3310,6 +3476,18 @@ fn hold_seconds_actually_delays_a_spent_turn() {
 
 const CODEX_JWT_LAPSED: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjEwMDAwMDAwMDB9.sig";
 const CODEX_JWT_LIVE: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
+const CODEX_JWT_LIVE_NEW: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDI0NDQ4MDB9.new";
+const CODEX_JWT_LIVE_B: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDI0NDQ4MDB9.account-b";
+const CODEX_JWT_LIVE_B_NEW: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDI0NDQ4MDB9.account-b-renewed";
+
+fn codex_id_token(subject: &str) -> String {
+    use base64::Engine;
+    let payload = serde_json::to_vec(&serde_json::json!({ "sub": subject })).unwrap();
+    format!(
+        "eyJhbGciOiJub25lIn0.{}.sig",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    )
+}
 
 /// A fake curl standing in for the OAuth token endpoint.
 fn fake_oauth_curl(root: &std::path::Path, answer: &str, status: u16) -> std::path::PathBuf {
@@ -3317,7 +3495,13 @@ fn fake_oauth_curl(root: &std::path::Path, answer: &str, status: u16) -> std::pa
     let p = root.join("fake-oauth-curl");
     std::fs::write(
         &p,
-        format!("#!/bin/sh\ncat > /dev/null\nprintf '{answer}\\n{status}'\n"),
+        format!(
+            "#!/bin/sh\nconfig=$(cat)\n\
+             case \"$config\" in\n\
+               *'/oauth/token'*) if [ -n \"$FAKE_OAUTH_COUNT\" ]; then printf x >> \"$FAKE_OAUTH_COUNT\"; fi ;;\n\
+             esac\n\
+             printf '{answer}\\n{status}'\n"
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3333,6 +3517,8 @@ fn start_codex_proxy_env(
         .args(["proxy", "--port", "0", "--tool", "codex"])
         .env("SWAPDEX_ROOT", root)
         .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .envs(envs.iter().copied())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -3350,6 +3536,631 @@ fn start_codex_proxy_env(
     let port =
         parse_port(&line).unwrap_or_else(|| panic!("codex proxy did not announce a port: {line}"));
     (child, port)
+}
+
+#[test]
+fn claude_401_renews_the_same_account_before_returning_success() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"AT-NEW","refresh_token":"R2","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == "Bearer AT-NEW" { 200 } else { 401 };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--account", "work"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer AT-OLD".to_string(), "Bearer AT-NEW".to_string()],
+        "the refused turn is retried on the same selected account"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn claude_repeated_401_is_bounded_to_one_same_account_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"AT-NEW","refresh_token":"R2","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 401);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer AT-OLD".to_string(), "Bearer AT-NEW".to_string()],
+        "the replacement's 401 is returned without a recovery loop"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn claude_401_does_not_refresh_after_the_selected_identity_is_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "account-a", "id-work", "AT-OLD", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let identity_path = slot.join(".claude.json");
+    let identity_a = br#"{"oauthAccount":{"accountUuid":"account-a","organizationUuid":"org-a"}}"#;
+    let identity_b = br#"{"oauthAccount":{"accountUuid":"account-b","organizationUuid":"org-b"}}"#;
+    std::fs::write(&identity_path, identity_a).unwrap();
+    let original_credential = std::fs::read(slot.join(".credentials.json")).unwrap();
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"AT-NEW","refresh_token":"RT-NEW","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replace_path = identity_path.clone();
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == "Bearer AT-OLD" {
+            std::fs::write(&replace_path, identity_b).unwrap();
+            401
+        } else {
+            200
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--account", "account-a"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let status = post_through_status(port, "{}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+
+    assert_eq!(status, 401, "replacement account B must not carry A's turn");
+    assert_eq!(*seen.lock().unwrap(), vec!["Bearer AT-OLD".to_string()]);
+    assert!(
+        !count.exists(),
+        "account B's selected chain must not be spent"
+    );
+    assert_eq!(
+        std::fs::read(slot.join(".credentials.json")).unwrap(),
+        original_credential
+    );
+    assert_eq!(std::fs::read(&identity_path).unwrap(), identity_b);
+    assert!(
+        !output.contains("account-a: renewed its login after upstream rejected it"),
+        "account A must not be credited with an exchange after B replaced it: {output}"
+    );
+}
+
+#[test]
+fn codex_401_renews_the_same_account_before_returning_success() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_NEW}","refresh_token":"RT2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let header = |name: &'static str| {
+            request
+                .headers()
+                .iter()
+                .find(|candidate| candidate.field.equiv(name))
+                .map(|candidate| candidate.value.as_str().to_string())
+                .unwrap_or_default()
+        };
+        let auth = header("authorization");
+        sink.lock()
+            .unwrap()
+            .push((auth.clone(), header("chatgpt-account-id")));
+        let status = if auth == format!("Bearer {CODEX_JWT_LIVE_NEW}") {
+            200
+        } else {
+            401
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (format!("Bearer {CODEX_JWT_LIVE}"), "acct-work".into()),
+            (format!("Bearer {CODEX_JWT_LIVE_NEW}"), "acct-work".into()),
+        ],
+        "the bearer changes while the selected account-id stays coherent"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn codex_repeated_401_is_bounded_to_one_same_account_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_NEW}","refresh_token":"RT2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 401);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            format!("Bearer {CODEX_JWT_LIVE}"),
+            format!("Bearer {CODEX_JWT_LIVE_NEW}"),
+        ],
+        "the replacement's 401 is returned without a recovery loop"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn codex_401_does_not_refresh_a_replacement_subject_in_the_same_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "account-a",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "workspace-shared",
+        true,
+    );
+    let auth_path = root
+        .path()
+        .join(".local/share/swapdex/slots/id-work/auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": CODEX_JWT_LIVE,
+                "refresh_token": "RT-A",
+                "id_token": codex_id_token("subject-a"),
+                "account_id": "workspace-shared"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let replacement = serde_json::to_vec_pretty(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": CODEX_JWT_LIVE_B,
+            // Keep the fingerprint inputs equal to account A. The optional
+            // ID-token subject must be the field that rejects this replacement.
+            "refresh_token": "RT-A",
+            "id_token": codex_id_token("subject-b"),
+            "account_id": "workspace-shared"
+        }
+    }))
+    .unwrap();
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_B_NEW}","refresh_token":"RT-B2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replace_path = auth_path.clone();
+    let replacement_for_upstream = replacement.clone();
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == format!("Bearer {CODEX_JWT_LIVE}") {
+            std::fs::write(&replace_path, &replacement_for_upstream).unwrap();
+            401
+        } else {
+            200
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let status = post_codex_turn(port).0;
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+
+    assert_eq!(status, 401, "replacement account B must not carry A's turn");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![format!("Bearer {CODEX_JWT_LIVE}")]
+    );
+    assert!(
+        !count.exists(),
+        "account B's refresh token must not be spent"
+    );
+    assert_eq!(std::fs::read(&auth_path).unwrap(), replacement);
+    assert!(
+        !output.contains("account-a: renewed its login after upstream rejected it"),
+        "account A must not be credited with renewing account B: {output}"
+    );
+}
+
+#[test]
+fn codex_401_retries_a_same_account_replacement_without_oauth() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "workspace-a",
+        true,
+    );
+    let auth_path = root
+        .path()
+        .join(".local/share/swapdex/slots/id-work/auth.json");
+    let auth = |access_token: &str| {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": access_token,
+                "refresh_token": "RT-A",
+                "id_token": codex_id_token("subject-a"),
+                "account_id": "workspace-a"
+            }
+        }))
+        .unwrap()
+    };
+    std::fs::write(&auth_path, auth(CODEX_JWT_LIVE)).unwrap();
+    let replacement = auth(CODEX_JWT_LIVE_B);
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_B_NEW}","refresh_token":"RT-A2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replace_path = auth_path.clone();
+    let replacement_for_upstream = replacement.clone();
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == format!("Bearer {CODEX_JWT_LIVE}") {
+            std::fs::write(&replace_path, &replacement_for_upstream).unwrap();
+            401
+        } else if auth == format!("Bearer {CODEX_JWT_LIVE_B}") {
+            200
+        } else {
+            401
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            format!("Bearer {CODEX_JWT_LIVE}"),
+            format!("Bearer {CODEX_JWT_LIVE_B}"),
+        ]
+    );
+    assert!(!count.exists(), "a replacement bearer needs no OAuth call");
+    assert_eq!(std::fs::read(&auth_path).unwrap(), replacement);
+    proxy.stop();
+    upstream.close();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unchanged_native_bearer_401_never_spends_its_refresh_token() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "SLOT-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    std::fs::write(
+        native.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"NATIVE-SAME","refreshToken":"NATIVE-RT","expiresAt":9999999999999}}"#,
+    )
+    .unwrap();
+    let _native = spawn_native_cli(root.path(), "claude", &[("HOME", root.path())]);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"MUST-NOT-BE-USED","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 401);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer NATIVE-SAME".to_string()]
+    );
+    assert!(
+        !count.exists(),
+        "native ownership must spend zero OAuth calls"
+    );
+    proxy.stop();
+    upstream.close();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_native_replacement_after_401_retries_without_oauth() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "SLOT-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    std::fs::write(
+        native.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"NATIVE-OLD","refreshToken":"NATIVE-RT","expiresAt":9999999999999}}"#,
+    )
+    .unwrap();
+    let _native = spawn_native_cli(root.path(), "claude", &[("HOME", root.path())]);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"MUST-NOT-BE-USED","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replacement = native.join(".credentials.json");
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == "Bearer NATIVE-OLD" {
+            std::fs::write(
+                &replacement,
+                br#"{"claudeAiOauth":{"accessToken":"NATIVE-NEW","refreshToken":"NATIVE-RT2","expiresAt":9999999999999}}"#,
+            )
+            .unwrap();
+            401
+        } else {
+            200
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "Bearer NATIVE-OLD".to_string(),
+            "Bearer NATIVE-NEW".to_string()
+        ]
+    );
+    assert!(
+        !count.exists(),
+        "native replacement must spend zero OAuth calls"
+    );
+    proxy.stop();
+    upstream.close();
 }
 
 /// The serving path asked only "is a login there".
@@ -3405,7 +4216,7 @@ fn a_lapsed_codex_slot_renews_itself_before_serving_a_turn() {
 /// serving a turn with a token known to be dead earns a 401 and names this
 /// account as having paid for it.
 #[test]
-fn a_codex_slot_that_cannot_be_renewed_passes_your_own_login_through() {
+fn a_codex_slot_that_cannot_be_renewed_does_not_send_another_login() {
     let root = tempfile::tempdir().unwrap();
     seed_codex_slot(
         root.path(),
@@ -3430,18 +4241,12 @@ fn a_codex_slot_that_cannot_be_renewed_passes_your_own_login_through() {
     let (status, _) = post_codex_turn(port);
     proxy.kill().ok();
     proxy.wait().ok();
-    assert_eq!(status, 200);
+    assert_eq!(status, 502);
 
     let seen = sink.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1, "{seen:?}");
-    assert_eq!(
-        seen[0].0, "Bearer CLIENT-TOKEN",
-        "the client's own login carried the turn: {seen:?}"
-    );
-    assert_ne!(
-        seen[0].0,
-        format!("Bearer {CODEX_JWT_LAPSED}"),
-        "a token known to be dead is never sent: {seen:?}"
+    assert!(
+        seen.is_empty(),
+        "no implicit client-account fallback: {seen:?}"
     );
 }
 

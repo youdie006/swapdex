@@ -47,8 +47,8 @@ contributions are the most useful right now.
 
 ## Non-negotiables
 
-- No HTTP client or any network dependency may enter the graph. CI enforces
-  this.
+- Keep the existing lightweight proxy transport (`ureq` with rustls and bundled
+  roots). CI rejects heavy async runtimes, HTTP frameworks and system-TLS bindings.
 - No command or MCP tool may print a credential, and none may switch accounts
   automatically. swapdex is a switcher, not a rotator.
 - Do not add an `--auto`/`--next`/`--when-rate-limited` flag or a token-export
