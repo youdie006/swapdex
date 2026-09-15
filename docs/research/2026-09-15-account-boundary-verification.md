@@ -95,6 +95,17 @@ selection pointers, and coherent Claude/Codex A-to-B-to-A payer changes through
 one persistent proxy and client connection. These are synthetic account tests;
 they do not consume a real account's quota or modify the target's account store.
 
+A macOS pre-install run exposed a verifier-only path comparison error:
+`/var/folders/...` and `/private/var/folders/...` named the same temporary
+directory. Canonicalizing the recorded client home removed that false failure.
+The corrected verifier reaches the expected managed-startup regression on the
+installed M3 0.162.0 binary and passes against the Linux 0.163.0 candidate.
+Main review also built the tracked candidate in an isolated M3 directory and
+passed the corrected installed-routing verifier against its macOS arm64 binary.
+The separate stock-Codex verifier also passed against the Linux candidate: WebSocket
+426 to HTTP recovery, legacy-provider reproduction, restored native listing and
+resume, and unchanged synthetic conversation bytes.
+
 Protected-branch integration, publication and target installation results are
 recorded on [PR #30](https://github.com/youdie006/swapdex/pull/30) and the
 [0.163.0 release](https://github.com/youdie006/swapdex/releases/tag/v0.163.0)

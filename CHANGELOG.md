@@ -42,7 +42,8 @@ All notable changes to swapdex are documented here. This project follows
 - **Verify routing with the installed executable.** The optional
   `scripts/verify-installed-account-routing.py` check exercises generated
   launchers, direct named runs and Claude/Codex A-to-B-to-A payer changes over
-  a persistent connection, using synthetic accounts and local servers.
+  a persistent connection, using synthetic accounts and local servers. It
+  resolves macOS temporary-directory aliases before checking account homes.
 
 ## 0.162.0
 

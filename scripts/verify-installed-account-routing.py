@@ -200,7 +200,10 @@ def verify_named_runs(swapdex, root, env):
         after_calls = calls(root)
         require(len(after_calls) == count + 1, f"named {tool} run missed native client")
         record = after_calls[-1]
-        require(f"home={slot_dir(root, fresh, tool)}" in record, f"named {tool} run used wrong home")
+        homes = [line[5:] for line in record if line.startswith("home=")]
+        require(len(homes) == 1 and homes[0], f"named {tool} run did not report its home")
+        require(Path(homes[0]).resolve() == slot_dir(root, fresh, tool),
+                f"named {tool} run used wrong home")
         require("arg=fixture-run" in record, f"named {tool} run lost arguments")
         require(not any("openai_base_url=" in line for line in record), f"named {tool} run used proxy")
         require((active.read_bytes(), serving.read_bytes()) == before, f"named {tool} run changed pointers")
