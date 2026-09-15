@@ -5121,3 +5121,136 @@ fn a_codex_proxy_starts_when_one_account_is_readable() {
     proxy.wait().ok();
     assert_eq!(status, 200, "the readable account served the turn");
 }
+
+/// Managed requests use one selected credential; passthrough and native auth
+/// exchanges preserve the client's authentication, including duplicate keys.
+fn assert_api_key_boundary(tool: &str, passthrough: bool, auth_exchange: bool) {
+    let root = tempfile::tempdir().unwrap();
+    if tool == "codex" {
+        seed_codex_slot(
+            root.path(),
+            "selected",
+            "abc12345",
+            "AT-SELECTED",
+            "acct-selected",
+            true,
+        );
+    } else {
+        seed_slot(root.path(), "selected", "abc12345", "AT-SELECTED", true);
+    }
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    if passthrough {
+        swapdex::slots::Slots::open_for(&paths, tool)
+            .unwrap()
+            .set_serving_off()
+            .unwrap();
+    }
+    let preserve = passthrough || auth_exchange;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let keys: Vec<_> = request
+            .headers()
+            .iter()
+            .filter(|header| header.field.equiv("x-api-key"))
+            .map(|header| header.value.to_string())
+            .collect();
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.to_string());
+        let status = if !preserve && !keys.is_empty() {
+            401
+        } else {
+            200
+        };
+        sink.lock().unwrap().push((keys, auth));
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(status))
+            .unwrap();
+    });
+    let curl = fake_curl(root.path(), "unused");
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--tool", tool],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_UPSTREAM_CODEX", upstream.url()),
+        ],
+    );
+    let proxy = ReapedChild::new(child);
+    let path = if auth_exchange {
+        "/v1/oauth/token"
+    } else if tool == "codex" {
+        "/v1/responses"
+    } else {
+        "/v1/messages"
+    };
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut statuses = Vec::new();
+    for spelling in ["x-api-key", "X-API-Key"] {
+        let mut response = agent
+            .post(format!("http://127.0.0.1:{port}{path}"))
+            .header("authorization", "Bearer CLIENT-TOKEN")
+            .header(spelling, "CLIENT-KEY-ONE")
+            .header(spelling, "CLIENT-KEY-TWO")
+            .header("content-type", "application/json")
+            .send(b"{}".as_slice())
+            .unwrap();
+        statuses.push(response.status().as_u16());
+        response.body_mut().read_to_string().unwrap();
+    }
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        statuses,
+        vec![200, 200],
+        "{tool}: foreign keys must not reject the managed account"
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "one provider request per client request");
+    for (keys, auth) in seen.iter() {
+        if preserve {
+            assert_eq!(keys, &["CLIENT-KEY-ONE", "CLIENT-KEY-TWO"]);
+            assert_eq!(auth.as_deref(), Some("Bearer CLIENT-TOKEN"));
+        } else {
+            assert!(keys.is_empty(), "client API keys survived managed routing");
+            assert_eq!(auth.as_deref(), Some("Bearer AT-SELECTED"));
+        }
+    }
+}
+
+#[test]
+fn managed_claude_removes_client_api_key_headers() {
+    assert_api_key_boundary("claude-code", false, false);
+}
+
+#[test]
+fn managed_codex_removes_client_api_key_headers() {
+    assert_api_key_boundary("codex", false, false);
+}
+
+#[test]
+fn claude_passthrough_preserves_client_api_key_headers() {
+    assert_api_key_boundary("claude-code", true, false);
+}
+
+#[test]
+fn codex_passthrough_preserves_client_api_key_headers() {
+    assert_api_key_boundary("codex", true, false);
+}
+
+#[test]
+fn claude_auth_exchange_preserves_client_api_key_headers() {
+    assert_api_key_boundary("claude-code", false, true);
+}
+
+#[test]
+fn codex_auth_exchange_preserves_client_api_key_headers() {
+    assert_api_key_boundary("codex", false, true);
+}

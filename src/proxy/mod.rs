@@ -1963,7 +1963,7 @@ fn forward_turn(
         .iter()
         .find(|h| h.field.equiv("authorization"))
         .map(|h| h.value.as_str().to_string());
-    let client_headers: Vec<(String, String)> = rq
+    let mut client_headers: Vec<(String, String)> = rq
         .headers()
         .iter()
         .filter(|h| !skip_header(h.field.as_str().as_str()))
@@ -2045,6 +2045,11 @@ fn forward_turn(
             return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
         }
     }
+
+    // The selected OAuth account owns managed traffic. A client API key can
+    // otherwise override or invalidate that bearer and wrongly sideline it.
+    // Client-bound authentication paths above retain their original headers.
+    client_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
 
     let known_uuids: Vec<String> = crate::slots::Slots::open(paths)
         .map(|s| {
