@@ -431,6 +431,44 @@ mod transient_retry_tests {
 mod wait_tests {
     use super::*;
 
+    #[test]
+    fn a_started_response_can_stream_beyond_the_header_timeout() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nA")
+                .unwrap();
+            socket.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            socket.write_all(b"B").ok();
+        });
+        let agent = agent_with(Duration::from_secs(1), Duration::from_millis(150));
+        let mut response =
+            forward(&agent, "GET", &format!("http://{address}/stream"), &[], &[]).unwrap();
+        let mut body = Vec::new();
+        let read = response.reader.read_to_end(&mut body);
+        server.join().unwrap();
+        assert_eq!(response.status, 200);
+        assert!(
+            read.is_ok(),
+            "header timeout cut a started response short: {read:?}"
+        );
+        assert_eq!(body, b"AB");
+    }
+
     /// Every wait that could hang forever is bounded; the body is not.
     ///
     /// The agent had no timeouts at all. Every retry in this file fires on an

@@ -1,6 +1,6 @@
 [package]
 name = "swapdex"
-version = "0.165.2"
+version = "0.165.3"
 edition = "2021"
 description = "Switch between multiple Claude Code, Codex, Gemini, and Antigravity login accounts, locally and safely."
 license = "MIT"
@@ -29,4 +29,8 @@ sha2 = "0.11.0"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 libc = "0.2.186"
 tiny_http = "0.12"
-ureq = "3.3"
+ureq = "3.4.2"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt", "net", "sync", "macros", "time"] }

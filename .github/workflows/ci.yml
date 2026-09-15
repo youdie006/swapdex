@@ -42,6 +42,8 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts -p 'test_deps_automerge.py'
       - name: Verify first-use account setup and managed requests
         run: python3 -B scripts/verify-first-use.py --swapdex "$GITHUB_WORKSPACE/target/debug/swapdex"
+      - name: Verify streaming before upstream EOF
+        run: python3 -B scripts/verify-streaming.py --swapdex "$GITHUB_WORKSPACE/target/debug/swapdex"
       - name: Test the npm launcher and the publish checks
         # The launcher decides what a user sees when the binary dies. The
         # publish checks decide whether a half-landed release reports success -
@@ -50,19 +52,23 @@ jobs:
         # The pattern is quoted so node expands it, not the shell: a bare
         # directory argument makes node try to load it as a module.
         run: node --test 'npm/**/*.test.mjs'
-      - name: No async runtime or heavy HTTP stack in the graph
+      - name: Keep the HTTP listener runtime bounded
         run: |
-          # Provider usage/version reads and proxy forwarding/renewal use the
-          # network. The proxy needs a listener and a client, so tiny_http +
-          # ureq/rustls are in the graph by design.
-          #
-          # What stays banned is the heavy async stack: an embedded runtime, a
-          # full client framework, or a system-TLS binding. Those would change
-          # what this binary is (and native-tls would make behaviour differ per
-          # platform, which the Linux/WSL/macOS support promise rules out).
-          if cargo tree -e normal | grep -qiE '(^|[^[:alnum:]_])(tokio|async-std|smol|hyper|reqwest|isahc|native-tls|openssl|quinn)([^[:alnum:]_]|$)'; then
-            echo "A banned async runtime / heavy HTTP stack is in the dependency graph."
-            cargo tree -e normal | grep -iE '(^|[^[:alnum:]_])(tokio|async-std|smol|hyper|reqwest|isahc|native-tls|openssl|quinn)([^[:alnum:]_]|$)'
+          # Hyper's HTTP/1 listener can flush small SSE fragments and close a
+          # failed stream without completing it or breaking healthy keep-alive.
+          # Permit only its current-thread Tokio runtime. Upstream HTTP remains
+          # synchronous ureq/rustls with bundled roots on every platform.
+          if cargo tree --locked -e normal | grep -qiE '(^|[^[:alnum:]_])(async-std|smol|reqwest|isahc|native-tls|openssl|quinn)([^[:alnum:]_]|$)'; then
+            echo "An additional runtime, client framework or system-TLS binding is in the graph."
+            cargo tree --locked -e normal
+            exit 1
+          fi
+          if cargo tree --locked -e features -i tokio | grep -qE 'tokio feature "(full|rt-multi-thread|fs|process|signal)"'; then
+            echo "The listener must not enable unrelated Tokio runtime features."
+            exit 1
+          fi
+          if cargo tree --locked -e features -i hyper | grep -qE 'hyper feature "(full|client|http2)"'; then
+            echo "Hyper is limited to the HTTP/1 listener."
             exit 1
           fi
       - name: TLS is rustls with bundled roots (identical on Linux, WSL, macOS)

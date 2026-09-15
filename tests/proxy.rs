@@ -510,6 +510,9 @@ fn start_proxy_with_env(
         .env("SWAPDEX_UPSTREAM", upstream)
         .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        // Individual fixtures replace this with their fake usage endpoint.
+        // Streaming/routing tests must not wait on external provider usage.
+        .env("SWAPDEX_CURL", "/bin/false")
         .envs(env.iter().copied())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -2236,6 +2239,7 @@ fn start_codex_proxy(
         .env("SWAPDEX_UPSTREAM_CODEX", upstream)
         .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -5253,4 +5257,325 @@ fn claude_auth_exchange_preserves_client_api_key_headers() {
 #[test]
 fn codex_auth_exchange_preserves_client_api_key_headers() {
     assert_api_key_boundary("codex", false, true);
+}
+
+mod streaming_delivery {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const PING: &[u8] = b"event: ping\ndata: {}\n\n";
+    const STOP: &[u8] = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    fn start_stream_proxy(
+        root: &std::path::Path,
+        upstream: &str,
+        tool: &str,
+    ) -> (std::process::Child, u16) {
+        start_proxy_with_env(
+            root,
+            upstream,
+            &["--tool", tool],
+            &[
+                ("SWAPDEX_CURL", "/bin/false"),
+                ("SWAPDEX_UPSTREAM_CODEX", upstream),
+            ],
+        )
+    }
+
+    fn received_body(wire: &[u8]) -> Vec<u8> {
+        let Some(start) = wire.windows(4).position(|part| part == b"\r\n\r\n") else {
+            return Vec::new();
+        };
+        let mut chunks = &wire[start + 4..];
+        let mut body = Vec::new();
+        while let Some(end) = chunks.windows(2).position(|part| part == b"\r\n") {
+            let Ok(size) = usize::from_str_radix(std::str::from_utf8(&chunks[..end]).unwrap(), 16)
+            else {
+                break;
+            };
+            chunks = &chunks[end + 2..];
+            if size == 0 || chunks.len() < size + 2 {
+                break;
+            }
+            body.extend_from_slice(&chunks[..size]);
+            assert_eq!(&chunks[size..size + 2], b"\r\n");
+            chunks = &chunks[size + 2..];
+        }
+        body
+    }
+
+    fn receive_until(
+        client: &mut TcpStream,
+        wire: &mut Vec<u8>,
+        ready: impl Fn(&[u8]) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !ready(wire) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            let mut buffer = [0; 4096];
+            match client.read(&mut buffer) {
+                Ok(0) => return false,
+                Ok(count) => wire.extend_from_slice(&buffer[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("stream read failed: {error}"),
+            }
+        }
+        true
+    }
+
+    fn assert_unbuffered_sse(tool: &str) {
+        let root = tempfile::tempdir().unwrap();
+        let (advance, next) = mpsc::channel();
+        let (announced, sent) = mpsc::channel();
+        let upstream = ControlledUpstream::start(move |mut request| {
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body).unwrap();
+            let mut writer = request.into_writer();
+            writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\nX-Relay-Test: preserved\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+            writer.flush().unwrap();
+            announced.send(()).unwrap();
+            for event in [PING, STOP] {
+                next.recv_timeout(Duration::from_secs(5)).unwrap();
+                write!(writer, "{:x}\r\n", event.len()).unwrap();
+                writer.write_all(event).unwrap();
+                writer.write_all(b"\r\n").unwrap();
+                writer.flush().unwrap();
+                announced.send(()).unwrap();
+            }
+            next.recv_timeout(Duration::from_secs(5)).unwrap();
+            writer.write_all(b"0\r\n\r\n").unwrap();
+            writer.flush().unwrap();
+        });
+        let (child, port) = if tool == "codex" {
+            seed_codex_slot(root.path(), "a", "slot-a", "AT-A", "ACCT-A", true);
+            start_stream_proxy(root.path(), upstream.url(), "codex")
+        } else {
+            seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+            start_stream_proxy(root.path(), upstream.url(), "claude-code")
+        };
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        sent.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut wire = Vec::new();
+        let headers_early = receive_until(&mut client, &mut wire, |wire| {
+            wire.windows(4).any(|part| part == b"\r\n\r\n")
+        });
+        advance.send(()).unwrap();
+        sent.recv_timeout(Duration::from_secs(3)).unwrap();
+        let ping_early = receive_until(&mut client, &mut wire, |wire| received_body(wire) == PING);
+        advance.send(()).unwrap();
+        sent.recv_timeout(Duration::from_secs(3)).unwrap();
+        let expected = [PING, STOP].concat();
+        let stop_early = receive_until(&mut client, &mut wire, |wire| {
+            received_body(wire) == expected
+        });
+        advance.send(()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.read_to_end(&mut wire).unwrap();
+        proxy.stop();
+        upstream.close();
+        assert!(String::from_utf8_lossy(&wire).starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(String::from_utf8_lossy(&wire)
+            .to_ascii_lowercase()
+            .contains("x-relay-test: preserved\r\n"));
+        assert_eq!(
+            received_body(&wire),
+            expected,
+            "SSE bytes changed in transit"
+        );
+        assert!(wire.ends_with(b"0\r\n\r\n"));
+        assert!(headers_early && ping_early && stop_early,
+            "{tool} withheld SSE while upstream remained open: headers={headers_early}, ping={ping_early}, completion={stop_early}");
+    }
+
+    #[test]
+    fn claude_sse_is_delivered_while_upstream_remains_open() {
+        assert_unbuffered_sse("claude");
+    }
+
+    #[test]
+    fn codex_sse_is_delivered_while_upstream_remains_open() {
+        assert_unbuffered_sse("codex");
+    }
+
+    #[test]
+    fn sse_and_json_responses_can_share_a_keep_alive_connection() {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+        let mut count = 0;
+        let upstream = ControlledUpstream::start(move |mut request| {
+            request.as_reader().read_to_end(&mut Vec::new()).unwrap();
+            count += 1;
+            let (body, content_type) = if count == 1 {
+                (PING.to_vec(), "text/event-stream")
+            } else {
+                (b"{\"ok\":true}".to_vec(), "application/json")
+            };
+            request
+                .respond(tiny_http::Response::from_data(body).with_header(
+                    tiny_http::Header::from_bytes("content-type", content_type).unwrap(),
+                ))
+                .unwrap();
+        });
+        let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        client
+            .write_all(
+                b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .unwrap();
+        let mut first = Vec::new();
+        let complete = receive_until(&mut client, &mut first, |wire| wire.ends_with(b"0\r\n\r\n"));
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        let mut second = Vec::new();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.read_to_end(&mut second).unwrap();
+        proxy.stop();
+        upstream.close();
+        assert!(complete, "first SSE response did not finish");
+        assert_eq!(received_body(&first), PING);
+        assert_eq!(received_body(&second), b"{\"ok\":true}");
+        assert!(String::from_utf8_lossy(&second).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+
+    #[test]
+    fn head_and_bodyless_sse_responses_never_forward_a_body() {
+        for (method, status) in [("HEAD", 200), ("GET", 204), ("GET", 205), ("GET", 304)] {
+            let root = tempfile::tempdir().unwrap();
+            seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+            let upstream = ControlledUpstream::start(move |request| {
+                request
+                    .respond(
+                        tiny_http::Response::empty(tiny_http::StatusCode(status)).with_header(
+                            tiny_http::Header::from_bytes("content-type", "text/event-stream")
+                                .unwrap(),
+                        ),
+                    )
+                    .unwrap();
+            });
+            let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+            let proxy = ReapedChild::new(child);
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(
+                client,
+                "{method} /v1/messages HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            client.read_to_end(&mut wire).unwrap();
+            proxy.stop();
+            upstream.close();
+            let text = String::from_utf8(wire).unwrap();
+            assert!(text.starts_with(&format!("HTTP/1.1 {status} ")));
+            assert!(
+                text.split_once("\r\n\r\n").unwrap().1.is_empty(),
+                "{method} {status} sent a body"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_upstream_sse_does_not_report_a_complete_http_body() {
+        assert_invalid_upstream_closes(false);
+    }
+
+    #[test]
+    fn invalid_upstream_sse_closes_a_keep_alive_connection() {
+        assert_invalid_upstream_closes(true);
+    }
+
+    fn assert_invalid_upstream_closes(keep_alive: bool) {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+        let upstream = ControlledUpstream::start(move |mut request| {
+            request.as_reader().read_to_end(&mut Vec::new()).unwrap();
+            let mut writer = request.into_writer();
+            writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            write!(writer, "{:x}\r\n", PING.len()).unwrap();
+            writer.write_all(PING).unwrap();
+            writer.write_all(b"\r\nnot-hex\r\n").unwrap();
+            writer.flush().unwrap();
+        });
+        let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let connection = if keep_alive { "keep-alive" } else { "close" };
+        write!(client, "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: {connection}\r\n\r\n{{}}").unwrap();
+        let mut wire = Vec::new();
+        let closed = client.read_to_end(&mut wire).is_ok();
+        client.shutdown(std::net::Shutdown::Both).ok();
+        proxy.stop();
+        upstream.close();
+        assert!(closed, "failed SSE left the downstream connection open");
+        assert!(String::from_utf8_lossy(&wire).starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(
+            !wire.ends_with(b"0\r\n\r\n"),
+            "upstream failure was turned into successful EOF"
+        );
+    }
+
+    #[test]
+    fn upstream_connection_headers_are_removed_from_sse() {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+        let upstream = ControlledUpstream::start(move |mut request| {
+            request.as_reader().read_to_end(&mut Vec::new()).unwrap();
+            let mut writer = request.into_writer();
+            writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive, X-Private-Hop\r\nX-Private-Hop: hidden\r\nKeep-Alive: timeout=100\r\nTE: trailers\r\nTrailer: X-Trailer\r\nUpgrade: h2c\r\nProxy-Authenticate: Basic realm=upstream\r\nX-End-To-End: preserved\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n").unwrap();
+            writer.flush().unwrap();
+        });
+        let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        let mut wire = String::new();
+        client.read_to_string(&mut wire).unwrap();
+        proxy.stop();
+        upstream.close();
+        let headers = wire.split_once("\r\n\r\n").unwrap().0.to_ascii_lowercase();
+        assert!(headers.contains("x-end-to-end: preserved\r\n"));
+        for name in [
+            "x-private-hop",
+            "keep-alive",
+            "te",
+            "trailer",
+            "upgrade",
+            "proxy-authenticate",
+        ] {
+            assert!(
+                !headers.contains(&format!("\r\n{name}:")),
+                "forwarded connection header {name}"
+            );
+        }
+    }
 }
