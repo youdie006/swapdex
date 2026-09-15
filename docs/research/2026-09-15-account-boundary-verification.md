@@ -67,6 +67,28 @@ variadic MCP configuration arguments are deliberately treated as ambiguous
 by the launcher. Fixed plugin-path and plugin-URL arguments consume one value.
 
 GitHub CI runs the repository checks on Ubuntu and macOS 14. Its final status
-and run links belong to the pull request for the pushed commit. This change
-does not bump a version, publish a release or update WSL/M3 executables,
-launchers, services or running sessions.
+and run links belong to the pull request for the pushed commit. The initial
+fix commit was source-only. The user subsequently requested release and
+installation; the follow-up below records preparation, and PR #30 plus the
+version-specific GitHub release record publication and machine verification.
+
+
+## 0.163.0 release preparation
+
+The release candidate carries matching Cargo/lock/npm/platform-pin/man-page
+versions and moves these fixes into the 0.163.0 changelog section. The optimized
+Linux build, full Rust suite (1,095 passed, one existing ignored), Clippy, format,
+Python (22) and Node (7) checks passed again.
+
+A pre-release rerun exposed a test-fixture concurrency fault: another test's
+fork could retain a newly written executable's writable descriptor, causing
+`exec` to return `ETXTBSY`. The unpatched Claude stress run failed on iteration
+18. Serializing fixture construction and process launch fixed the test harness;
+Claude passed 300 consecutive runs and Codex passed 100. Production launcher
+logic was unchanged by this follow-up.
+
+Protected-branch integration, publication and target installation results are
+recorded on [PR #30](https://github.com/youdie006/swapdex/pull/30) and the
+[0.163.0 release](https://github.com/youdie006/swapdex/releases/tag/v0.163.0)
+once those operations complete. Local verification alone does not establish
+that a running service has been updated.

@@ -2,7 +2,16 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use swapdex::shim::shim_script;
+
+static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+fn fixture_exec_lock() -> MutexGuard<'static, ()> {
+    FIXTURE_EXEC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct LaunchAttempt {
     status: i32,
@@ -17,6 +26,10 @@ fn launch_attempt(
     proxy_status: i32,
     extra_env: &[(&str, &str)],
 ) -> LaunchAttempt {
+    // Tests in this binary run concurrently. Serialize executable fixture writes
+    // and forks so a child cannot retain another fixture's writable descriptor
+    // long enough for execve to reject that fixture with ETXTBSY.
+    let _exec_guard = fixture_exec_lock();
     let root = tempfile::tempdir().unwrap();
     let tool = root.path().join("real claude");
     let sx = root.path().join("swapdex");
@@ -328,6 +341,7 @@ fn swapdex_bin() -> PathBuf {
 }
 
 fn ensure(root: &Path, tool: &str) -> std::process::Output {
+    let _exec_guard = fixture_exec_lock();
     Command::new(swapdex_bin())
         .args(["proxy", "--ensure", "--tool", tool])
         .env("SWAPDEX_ROOT", root)

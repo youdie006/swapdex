@@ -1,7 +1,16 @@
 //! Execute the installed shell launcher shape with isolated tools and homes.
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use swapdex::shim::codex_shim_script;
+
+static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+fn fixture_exec_lock() -> MutexGuard<'static, ()> {
+    FIXTURE_EXEC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct LaunchAttempt {
     status: i32,
@@ -25,6 +34,10 @@ fn launch_attempt(
     proxy_stdout: &str,
     proxy_status: i32,
 ) -> LaunchAttempt {
+    // Tests in this binary run concurrently. Serialize executable fixture writes
+    // and forks so a child cannot retain another fixture's writable descriptor
+    // long enough for execve to reject that fixture with ETXTBSY.
+    let _exec_guard = fixture_exec_lock();
     let root = tempfile::tempdir().unwrap();
     let tool = root.path().join("real codex");
     let sx = root.path().join("swapdex");

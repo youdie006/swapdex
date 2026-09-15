@@ -6,6 +6,8 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.163.0
+
 - **Keep Claude re-login snapshots within the selected account.** Captures
   from a slot now read its own identity metadata together with its credential.
   Custom `CLAUDE_CONFIG_DIR` logins use that directory's identity file, including
