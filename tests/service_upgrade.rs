@@ -42,7 +42,12 @@ mod unix {
     impl BrewFixture {
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
-            let prefix = temp.path().join("Homebrew 100% \"QA\" & tools");
+            let actual_prefix = temp.path().join("Homebrew 100% \"QA\" & tools");
+            fs::create_dir_all(&actual_prefix).unwrap();
+            // Exercise home aliases on every OS, including macOS /var versus
+            // /private/var, without resolving the version-independent opt link.
+            let prefix = temp.path().join("homebrew alias");
+            symlink(&actual_prefix, &prefix).unwrap();
             let home = temp.path().join("isolated home");
             let old_executable = prefix.join("Cellar/swapdex/0.165.0/bin/swapdex");
             let new_executable = prefix.join("Cellar/swapdex/0.165.1/bin/swapdex");
@@ -153,7 +158,10 @@ mod unix {
         let installed = installed_program(&body);
 
         assert_eq!(
-            installed, fixture.stable_executable,
+            installed,
+            fs::canonicalize(&fixture.prefix)
+                .unwrap()
+                .join("opt/swapdex/bin/swapdex"),
             "the service must retain Homebrew's version-independent opt path"
         );
 
@@ -170,6 +178,10 @@ mod unix {
             version.status.success(),
             "the generated unit path must execute after cleanup: {}",
             String::from_utf8_lossy(&version.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&version.stdout).trim(),
+            concat!("swapdex ", env!("CARGO_PKG_VERSION"))
         );
     }
 

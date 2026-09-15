@@ -95,3 +95,14 @@ independent billing audit or a promise that providers never expire credentials.
 Exact publication, installed native hashes, running service identities and
 post-install checks are recorded in the version-specific GitHub release and
 its source PR. A mocked renewal test does not certify actual provider login UI.
+
+## Cross-platform fixture correction
+
+The first PR CI passed on Linux but failed one Homebrew upgrade assertion on
+macOS: `/var/.../opt/swapdex/bin/swapdex` and its equivalent
+`/private/var/.../opt/swapdex/bin/swapdex` were compared as literal prefixes.
+The production unit retained the correct stable opt path. Adding an explicit
+prefix alias reproduced the assertion failure on Linux as well. The fixture
+now resolves only the prefix before appending the literal opt path, and still
+removes the old Cellar directory, executes the unchanged service path and
+checks the candidate version. This does not weaken the stable-path assertion.
