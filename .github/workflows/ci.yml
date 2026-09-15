@@ -40,6 +40,8 @@ jobs:
           python-version: "3.12"
       - name: Test dependency auto-merge gate
         run: python3 -m unittest discover -s .github/scripts -p 'test_deps_automerge.py'
+      - name: Verify first-use account setup and managed requests
+        run: python3 -B scripts/verify-first-use.py --swapdex "$GITHUB_WORKSPACE/target/debug/swapdex"
       - name: Test the npm launcher and the publish checks
         # The launcher decides what a user sees when the binary dies. The
         # publish checks decide whether a half-landed release reports success -
@@ -50,10 +52,9 @@ jobs:
         run: node --test 'npm/**/*.test.mjs'
       - name: No async runtime or heavy HTTP stack in the graph
         run: |
-          # swapdex talks to the network in exactly two places, both of which the
-          # user asks for explicitly: `quota` (shells out to curl) and `proxy`
-          # (relays Claude's own API traffic). Proxy mode needs a listener and a
-          # client, so tiny_http + ureq/rustls ARE in the graph by design.
+          # Provider usage/version reads and proxy forwarding/renewal use the
+          # network. The proxy needs a listener and a client, so tiny_http +
+          # ureq/rustls are in the graph by design.
           #
           # What stays banned is the heavy async stack: an embedded runtime, a
           # full client framework, or a system-TLS binding. Those would change

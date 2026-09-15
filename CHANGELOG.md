@@ -6,6 +6,36 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.165.0
+
+- **Set up the native client a new user actually has.** Codex-only machines
+  can now install their shim and complete onboarding without Claude installed.
+  Claude and Codex are detected independently, each gets its own PATH check,
+  and missing optional clients are skipped. With neither client installed, the
+  command fails with an installation remedy. Onboarding offers available
+  missing shims and can add Codex later without rewriting an existing Claude
+  shim; cancellation and non-interactive input remain non-mutating for shims.
+- **Keep a working installation when an upgrade fails.** The shell installer
+  now requires a valid SHA-256 response and a working checksum tool, verifies
+  the candidate's executable version before atomic replacement, cleans staged
+  files, and rejects directory targets. Empty checksums, failed downloads and
+  unusable binaries no longer report a successful install. Custom-directory
+  PATH hints preserve literal spaces, quotes and dollar signs, and the piped
+  environment-variable example now configures the installer shell.
+- **Guide first-time Claude and Codex users through a complete managed launch.**
+  The quickstart now covers native sign-in per slot, shim activation, launch
+  defaults and next-request serving selection. Existing-login preservation,
+  direct-session resumption, saved snapshots and network activity are stated
+  explicitly. Setup no longer promises immediate switching for a session that
+  has never used the proxy, Codex serving hints retain their tool selector, and
+  rejected quota credentials are no longer labeled as conclusively expired.
+- **Verify the published first-use journey on Linux and macOS.** A new binary
+  verifier exercises fresh and already signed-in homes with Claude only,
+  Codex only and both clients, including proxy autostart, the first request,
+  next-turn payer changes, cross-tool isolation and unchanged native logins.
+  It uses fake native sign-ins and a loopback provider; real login UI and
+  billing-ledger verification remain outside these fixtures.
+
 ## 0.164.1
 
 - **Retry bodyless requests when macOS reports a peer disconnect.** The same

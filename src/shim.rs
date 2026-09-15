@@ -755,8 +755,13 @@ pub enum PathVerdict {
 /// the proxy was never used, and `swapdex serve` silently did nothing. The
 /// install said everything was fine, which is why nobody suspected the PATH.
 pub fn path_verdict(shim_dir: &std::path::Path, entries: &[&str]) -> PathVerdict {
+    path_verdict_for(shim_dir, entries, "claude")
+}
+
+/// Report whether the shim for one concrete executable wins `PATH`.
+pub fn path_verdict_for(shim_dir: &std::path::Path, entries: &[&str], binary: &str) -> PathVerdict {
     path_verdict_with(shim_dir, entries, &|d| {
-        is_executable_file(&std::path::Path::new(d).join("claude"))
+        is_executable_file(&std::path::Path::new(d).join(binary))
     })
 }
 
@@ -787,13 +792,20 @@ pub fn path_verdict_with(
 /// Install (or refresh) the shim. Returns (shim_path, shim_dir) so the caller
 /// can print PATH guidance.
 pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
+    install_claude(paths)?.context("could not find the real `claude` on PATH - install it first")
+}
+
+/// Install the Claude shim when Claude is available. A machine that only uses
+/// another supported client is valid, so absence is reported to the caller.
+pub fn install_claude(paths: &Paths) -> Result<Option<(PathBuf, PathBuf)>> {
     let shim = shim_path(paths);
     let shim_dir = shim
         .parent()
         .map(|p| p.to_path_buf())
         .context("shim path has no parent")?;
-    let real = find_real_claude(&shim_dir)
-        .context("could not find the real `claude` on PATH - install it first")?;
+    let Some(real) = find_real_claude(&shim_dir) else {
+        return Ok(None);
+    };
     let pointer = paths.store_dir().join("active-claude");
     // The shim calls back into THIS binary, by absolute path: whatever swapdex
     // installed the shim is the one that will start its proxy, even if PATH
@@ -802,7 +814,7 @@ pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(&shim_dir).context("create shim dir")?;
     std::fs::write(&shim, shim_script(&pointer, &real, &me)).context("write shim")?;
     make_executable(&shim)?;
-    Ok((shim, shim_dir))
+    Ok(Some((shim, shim_dir)))
 }
 
 /// Install the `codex` shim beside Claude's. Returns the path, or `None` when
