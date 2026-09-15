@@ -100,3 +100,12 @@ Systemd syntax was checked against the official
 and [quoting rules](https://github.com/systemd/systemd/blob/main/man/systemd.syntax.xml),
 then verified with the machine's actual unit parser. A literal dollar in the
 executable token is preserved; doubling it changes the executable name.
+
+## CI fixture correction
+
+The first PR CI rejected the new quota fixture because its synthetic email
+domain was outside the repository guard's explicit placeholder list. The local
+pre-commit run had not scanned that then-untracked file. After tracking it, the
+same guard reproduced the failure locally. The fixture now uses the already
+approved example.com domain; the guard remains unchanged. Release metadata and
+quota behavior checks were rerun after the correction, followed by final CI.

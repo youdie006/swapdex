@@ -19,8 +19,8 @@ fn quota_uses_only_the_current_slots_identity_and_credential() {
         let saved = store.join("accounts/work/claude-code");
         std::fs::create_dir_all(&slot).unwrap();
         let old_id =
-            serde_json::json!({"accountUuid":"old-user", "emailAddress":"old@example.test"});
-        let slot_id = serde_json::json!({"accountUuid":"current-user", "emailAddress":"current@example.test"});
+            serde_json::json!({"accountUuid":"old-user", "emailAddress":"old@example.com"});
+        let slot_id = serde_json::json!({"accountUuid":"current-user", "emailAddress":"current@example.com"});
         let credential = |access: &str| {
             serde_json::json!({"claudeAiOauth":{
                 "accessToken":access, "expiresAt":9_000_000_000_000_i64
@@ -103,7 +103,7 @@ printf '{"five_hour":{"utilization":%s}}\n200' "$usage"
             !root.path().join("old-profile-used").exists(),
             "unreadable slot used a different saved login"
         );
-        assert_eq!(row["email"], "current@example.test", "{row}");
+        assert_eq!(row["email"], "current@example.com", "{row}");
         assert_eq!(row["active"], true, "{row}");
         let native = value["accounts"]
             .as_array()
