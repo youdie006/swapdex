@@ -199,6 +199,9 @@ impl ResetAfterReadUpstream {
                     }
                     Err(_) => break,
                 };
+                // macOS inherits the listener's nonblocking mode on accept.
+                // Wait for the body before simulating a post-send reset.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                     .unwrap();

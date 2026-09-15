@@ -61,6 +61,12 @@ failed once before that isolation, then passed alone and in the full suite.
 The first macOS CI run caught unused Linux-only quota fixture helpers under
 warnings-as-errors. The helpers and their imports now share their callers'
 Linux target guard; release verification records the subsequent CI result.
+The next macOS run exposed an inherited nonblocking mode in the raw TCP-reset
+fixture: it could close before receiving the request. A standalone M3 socket
+probe reproduced immediate `WouldBlock` despite the read timeout, then read the
+delayed byte after switching the accepted socket to blocking mode. The fixture
+now makes that switch before its existing bounded read; production networking
+is unchanged by this fixture correction.
 
 ## Scope and limits
 

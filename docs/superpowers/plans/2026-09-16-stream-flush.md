@@ -33,6 +33,7 @@ existing tiny_http types, fake-OAuth and loopback fixtures.
 - [x] Run all locked Rust tests, all-target Clippy with `-D warnings`, fmt,
   Python/npm checks and dependency audit; update `CHANGELOG.md`.
 - [x] Review the quota contract and HTTP listener independently; resolve findings.
-- [ ] Commit and push the feature branch, create a PR and integrate after CI.
+- [x] Commit and push the feature branch and create PR #37.
+- [ ] Integrate after Linux/macOS CI; record delivery in the versioned release.
 - [ ] Record exact installed binaries/services after any authorized deployment,
   and publish issue-resolution evidence only for completed work.
