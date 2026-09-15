@@ -8,6 +8,10 @@ use crate::paths::Paths;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Private `proxy --ensure` outcome meaning that Rust verified an intentional
+/// or unmanaged direct route. Generated shims accept it only with empty stdout.
+pub(crate) const PROXY_PASSTHROUGH_EXIT_STATUS: i32 = 3;
+
 /// Where swapdex installs the shim: `<store_dir>/bin/claude`.
 pub fn shim_path(paths: &Paths) -> PathBuf {
     shim_path_for(paths, "claude-code")
@@ -38,6 +42,47 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Validate the machine-readable result of `proxy --ensure` inside a generated
+/// POSIX shell shim. Numeric comparison happens only after digit and length
+/// checks, so arbitrarily long output cannot overflow a shell integer parser.
+fn proxy_result_script(tool: &str) -> String {
+    format!(
+        r#"sx_proxy_status=$?
+sx_use_proxy=no
+sx_proxy_bad=no
+if [ "$sx_proxy_status" -eq {passthrough} ] && [ -z "$port" ]; then
+    :
+elif [ "$sx_proxy_status" -ne 0 ]; then
+    sx_proxy_bad=yes
+else
+    case "$port" in
+        ''|*[!0-9]*) sx_proxy_bad=yes ;;
+        *)
+            sx_port=$port
+            while [ "${{sx_port#0}}" != "$sx_port" ]; do sx_port=${{sx_port#0}}; done
+            case "$sx_port" in
+                ''|??????*) sx_proxy_bad=yes ;;
+                *)
+                    if [ "$sx_port" -gt 65535 ]; then
+                        sx_proxy_bad=yes
+                    else
+                        port=$sx_port
+                        sx_use_proxy=yes
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+fi
+if [ "$sx_proxy_bad" = yes ]; then
+    printf '%s\n' 'swapdex: managed proxy startup failed; run `swapdex proxy --ensure --tool {tool}` for details.' >&2
+    exit 1
+fi"#,
+        passthrough = PROXY_PASSTHROUGH_EXIT_STATUS,
+        tool = tool,
+    )
+}
+
 /// The shim script body. The default-account pointer only fills in when nothing
 /// has already chosen a config dir: an explicit `CLAUDE_CONFIG_DIR` (what
 /// `swapdex run <account>` sets, or what a user exports by hand) is a decision
@@ -45,10 +90,10 @@ fn sh_quote(p: &Path) -> String {
 ///
 /// It also gets proxy mode for free: the shim asks `swapdex proxy --ensure`,
 /// which prints the port of a running proxy and starts one in the background if
-/// there is none. So mid-session account switching works without the user
-/// launching or exporting anything, and a proxy that cannot start is not an
-/// error - the shim just runs Claude directly.
+/// there is none. Managed startup must succeed with one valid port; only Rust's
+/// private, verified passthrough outcome may launch directly.
 pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String {
+    let proxy_result = proxy_result_script("claude-code").replace('\n', "\n\t");
     format!(
         "#!/bin/sh\n\
          # swapdex claude shim - launch claude in the default account's slot.\n\
@@ -58,15 +103,65 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
          # code exchange and answers with whichever account it already has - so a\n\
          # fresh slot looks signed in as somebody else, or the prompt takes no\n\
          # input at all.\n\
-         sx_login=no\n\
+         # Only documented top-level authentication commands bypass managed\n\
+         # routing. Prompt text and option values can contain words like login.\n\
+         sx_plain=no\n\
+         sx_options=yes\n\
+         sx_skip=\n\
+         sx_command=\n\
+         sx_auth_command=\n\
          for a in \"$@\"; do\n\
-         \tcase \"$a\" in login|/login|logout|/logout|setup-token) sx_login=yes ;; esac\n\
+         \tif [ -n \"$sx_skip\" ]; then\n\
+         \t\tsx_skip=\n\
+         \t\tcontinue\n\
+         \tfi\n\
+         \tif [ \"$sx_command\" = auth ] && [ -z \"$sx_auth_command\" ]; then\n\
+         \t\tsx_auth_command=other\n\
+         \t\tcase \"$a\" in login|logout|status|-h|--help) sx_auth_command=\"$a\" ;; esac\n\
+         \t\tcontinue\n\
+         \tfi\n\
+         \tif [ -n \"$sx_command\" ] && [ \"$sx_command\" != ambiguous ]; then continue; fi\n\
+         \tif [ \"$sx_options\" = no ]; then\n\
+         \t\tsx_command=prompt\n\
+         \t\tcontinue\n\
+         \tfi\n\
+         \tcase \"$a\" in\n\
+         \t\t--) sx_options=no; sx_command=prompt ;;\n\
+         \t\t-h|--help|-v|--version) sx_plain=yes ;;\n\
+         \t\t-p|--print|--print=*|-p?*) sx_command=prompt ;;\n\
+         \t\t-m|--model|--permission-mode|--settings) sx_skip=value ;;\n\
+         \t\t--setting-sources|--plugin-dir|--plugin-url|--cwd) sx_skip=value ;;\n\
+         \t\t--debug-file) sx_skip=value ;;\n\
+         \t\t-m?*|--model=*|--permission-mode=*|--settings=*) ;;\n\
+         \t\t--setting-sources=*|--plugin-dir=*|--plugin-url=*|--cwd=*) ;;\n\
+         \t\t--debug-file=*) ;;\n\
+         \t\t# Optional and variadic values are indistinguishable from a later\n\
+         \t\t# command token, so these forms cannot authorize direct auth.\n\
+         \t\t-d|--debug|--debug=*|-d?*|--mcp-config|--mcp-config=*) sx_command=ambiguous ;;\n\
+         \t\t--verbose) ;;\n\
+         \t\t-*) sx_command=unknown ;;\n\
+         \t\t*) if [ \"$sx_command\" != ambiguous ]; then sx_command=\"$a\"; fi ;;\n\
+         \tesac\n\
          done\n\
-         # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
-         # port); silence and a non-zero status mean \"run without one\".\n\
-         if [ \"$sx_login\" = no ]; then\n\
-         \tport=$({sx} proxy --ensure 2>/dev/null)\n\
-         \tif [ -n \"$port\" ]; then\n\
+         case \"$sx_command:$sx_auth_command\" in\n\
+         \tauth:login|auth:logout|auth:status|auth:-h|auth:--help|setup-token:) sx_plain=yes ;;\n\
+         esac\n\
+         # Match the documented opt-in value 1 for alternate providers. Empty,\n\
+         # 0, and false remain managed by swapdex.\n\
+         if [ -n \"$ANTHROPIC_BASE_URL\" ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_BEDROCK\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_MANTLE\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_VERTEX\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_FOUNDRY\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_ANTHROPIC_AWS\" = 1 ]; then\n\
+         \tsx_plain=yes\n\
+         fi\n\
+         # Ask swapdex for a live proxy (it starts one if needed and prints one\n\
+         # validated port). Any uncertain managed state stops before Claude.\n\
+         if [ \"$sx_plain\" = no ]; then\n\
+         \tport=$({sx} proxy --ensure --tool claude-code 2>/dev/null)\n\
+         \t{proxy_result}\n\
+         \tif [ \"$sx_use_proxy\" = yes ]; then\n\
          \t\tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
          \t\texport ANTHROPIC_BASE_URL\n\
          \tfi\n\
@@ -82,6 +177,7 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_claude),
+        proxy_result = proxy_result,
     )
 }
 
@@ -93,6 +189,7 @@ pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> S
     // Provider identity is persisted in Codex rollouts and filters its native
     // picker. Route the built-in provider by URL instead of creating an
     // ephemeral provider for each paying account.
+    let proxy_result = proxy_result_script("codex");
     format!(
         r#"#!/bin/sh
 # swapdex codex shim - launch codex in the default account's slot.
@@ -154,10 +251,9 @@ if [ "$sx_plain" = no ]; then
         printf '%s\n' 'swapdex: session repair was incomplete; run swapdex repair-codex-sessions for details.' >&2
     fi
     port=$({sx} proxy --ensure --tool codex 2>/dev/null)
-    if [ -n "$port" ]; then
+    {proxy_result}
+    if [ "$sx_use_proxy" = yes ]; then
         set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
-    else
-        printf '%s\n' "swapdex: Codex proxy unavailable; using this Codex home's login directly." >&2
     fi
 fi
 exec {real} "$@"
@@ -165,6 +261,7 @@ exec {real} "$@"
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_codex),
+        proxy_result = proxy_result,
     )
 }
 
@@ -766,15 +863,17 @@ mod tests {
         );
         // The proxy is asked for only when this is not a sign-in.
         assert!(
-            s.contains("sx_login=no"),
+            s.contains("sx_plain=no"),
             "it decides whether this is a sign-in: {s}"
         );
-        for verb in ["login", "/login", "logout", "setup-token"] {
-            assert!(s.contains(verb), "recognised: {verb}");
+        for command in ["auth:login", "auth:logout", "auth:status", "setup-token:"] {
+            assert!(s.contains(command), "recognised: {command}");
         }
         // And the base-url export sits INSIDE that condition, not before it.
-        let guard = s.find("if [ \"$sx_login\" = no ]").expect("the guard");
-        let export = s.find("ANTHROPIC_BASE_URL").expect("the export");
+        let guard = s.find("if [ \"$sx_plain\" = no ]").expect("the guard");
+        let export = s
+            .find("ANTHROPIC_BASE_URL=\"http://")
+            .expect("the proxy export");
         assert!(
             guard < export,
             "the proxy address is only set when not signing in"
@@ -797,9 +896,9 @@ mod tests {
             "routes the built-in provider without changing session identity: {s}"
         );
         assert!(!s.contains("set -- -c model_provider="));
-        // Without a proxy, codex runs exactly as it would have.
+        // A validated port is the only result that adds the proxy override.
         assert!(
-            s.contains("if [ -n \"$port\" ]"),
+            s.contains("if [ \"$sx_use_proxy\" = yes ]"),
             "the overrides are conditional: {s}"
         );
     }
@@ -879,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn script_gets_its_proxy_from_swapdex_and_tolerates_none() {
+    fn script_gets_its_proxy_from_swapdex_and_checks_the_result() {
         let s = shim_script(
             Path::new("/store/active-claude"),
             Path::new("/usr/bin/claude"),
@@ -898,8 +997,10 @@ mod tests {
             "loopback only, port from swapdex"
         );
         assert!(
-            s.contains("2>/dev/null") && s.contains("if [ -n \"$port\" ]"),
-            "no proxy is not an error - claude still runs: {s}"
+            s.contains("2>/dev/null")
+                && s.contains("sx_proxy_status=$?")
+                && s.contains("if [ \"$sx_use_proxy\" = yes ]"),
+            "the proxy status and validated port decide whether Claude is routed: {s}"
         );
     }
 

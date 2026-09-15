@@ -2999,9 +2999,9 @@ pub fn default_port_for(tool: &str) -> u16 {
 
 /// `proxy --ensure` - print the port of a live proxy, starting one in the
 /// background if there is none. This is what lets a plain `claude` (through the
-/// shim) get proxy mode without the user running or remembering anything. Exits
-/// non-zero and prints nothing when a proxy cannot be had, so the shim simply
-/// runs Claude directly.
+/// shim) get proxy mode without the user running or remembering anything. The
+/// private passthrough exit is reserved for a checked direct route; all other
+/// failures stop the shim before the native client can use another login.
 fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
     // A hermetic root is a sandbox, and the proxy is deliberately DETACHED so it
     // outlives the shell that asked for it. Under a temporary store that is wrong
@@ -3011,6 +3011,11 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
     // been deleted.
     // Two proxies cannot share a port. Codex takes the next one, so the shim for
     // either tool can start its own without asking the user to pick.
+    let startup = crate::slots::proxy_startup_route(paths, tool)?;
+    if startup == crate::slots::ProxyStartupRoute::Unmanaged {
+        return Ok(crate::shim::PROXY_PASSTHROUGH_EXIT_STATUS);
+    }
+
     let mut port = if tool == "codex" && port == DEFAULT_PROXY_PORT {
         port + 1
     } else {
@@ -3060,13 +3065,12 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
         }
         port = running;
     }
-    // Proxy mode is only useful with slot accounts; without one there is nothing
-    // to serve and starting a proxy would just add a moving part.
-    if crate::slots::Slots::open_for(paths, tool)
-        .map(|s| s.list().is_empty())
-        .unwrap_or(true)
-    {
-        return Ok(1);
+    // A live proxy keeps explicit passthrough switchable: `serve <account>` can
+    // move the next turn of the same session back onto a managed payer. Without
+    // one, `off` intentionally authorizes the native client's own route and must
+    // not start a new background service merely to pass traffic through.
+    if startup == crate::slots::ProxyStartupRoute::ExplicitPassthrough {
+        return Ok(crate::shim::PROXY_PASSTHROUGH_EXIT_STATUS);
     }
     let Ok(exe) = std::env::current_exe() else {
         return Ok(1);
@@ -6358,8 +6362,20 @@ pub fn run_account(
         eprintln!("swapdex: `{bin}` isn't on your PATH. Install it, then retry.");
         return Ok(3);
     }
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(args).env(home_var, &rec.config_dir);
+    // A named run is the direct path used to create or refresh this slot's own
+    // login. If our shim wins PATH, invoking the bare name loops through managed
+    // proxy startup before the new slot has a credential and the login client
+    // never opens. Step over that shim exactly as the dashboard sign-in does.
+    let Some(exe) = crate::shim::real_tool(paths, tool) else {
+        eprintln!(
+            "swapdex: real `{bin}` executable not found behind the installed shim. \
+             Reinstall `{bin}`, then retry."
+        );
+        return Ok(3);
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
+    configure_managed_tool_home(&mut cmd, tool, home_var, &rec.config_dir);
     // This is the path a sign-in takes, and signing in must reach the vendor
     // directly. An inherited proxy address both breaks the OAuth code exchange
     // and answers with whichever account the proxy already holds - so a fresh
@@ -6456,7 +6472,15 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
     // served by the account that was already paying. An account with no login
     // came up looking signed in, and nothing about it was true. So: the REAL
     // binary, never the shim, and the subcommand that actually signs in.
-    let exe = crate::shim::real_tool(paths, tool).unwrap_or_else(|| std::path::PathBuf::from(bin));
+    let Some(exe) = crate::shim::real_tool(paths, tool) else {
+        return (
+            false,
+            format!(
+                "real `{bin}` executable not found behind the installed shim; \
+                 reinstall `{bin}`, then retry"
+            ),
+        );
+    };
     match spawn_tool_login_in(&exe, tool, Some((home_var, rec.config_dir.as_path()))) {
         Ok(_) => {
             // Whether the sign-in succeeded is the credential's story, not the
@@ -8316,7 +8340,7 @@ fn spawn_tool_login_in(
     let prev_quit = unsafe { libc::signal(libc::SIGQUIT, ride_out as libc::sighandler_t) };
     let mut cmd = Command::new(bin);
     if let Some((var, dir)) = home {
-        cmd.env(var, dir);
+        configure_managed_tool_home(&mut cmd, tool, var, dir);
     }
     // A sign-in must reach the vendor directly: an inherited proxy address
     // answers with whichever account the proxy already holds.
@@ -8347,6 +8371,75 @@ fn spawn_tool_login_in(
         libc::signal(libc::SIGQUIT, prev_quit);
     }
     status.map_err(|e| anyhow::anyhow!("could not run {}: {e}", bin.display()))
+}
+
+/// Point a managed child at one account's home. Claude's secure-storage
+/// override has higher precedence than CLAUDE_CONFIG_DIR, so inheriting it
+/// would send login and renewal writes to another account's Keychain item.
+fn configure_managed_tool_home(
+    command: &mut Command,
+    tool: &str,
+    home_var: &str,
+    dir: &std::path::Path,
+) {
+    command.env(home_var, dir);
+    if tool == "claude-code" {
+        command.env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR");
+    }
+}
+
+#[cfg(test)]
+mod managed_tool_home_tests {
+    use super::configure_managed_tool_home;
+    use std::ffi::{OsStr, OsString};
+    use std::process::Command;
+
+    fn command_env(command: &Command, key: &str) -> Option<Option<OsString>> {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(key))
+            .map(|(_, value)| value.map(OsStr::to_os_string))
+    }
+
+    #[test]
+    fn a_managed_claude_login_targets_one_coherent_child_environment() {
+        let slot = std::path::Path::new("/tmp/swapdex-managed-claude");
+        let mut command = Command::new("claude");
+        command.env(
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            "/tmp/a-different-claude-login",
+        );
+
+        configure_managed_tool_home(&mut command, "claude-code", "CLAUDE_CONFIG_DIR", slot);
+
+        assert_eq!(
+            command_env(&command, "CLAUDE_CONFIG_DIR"),
+            Some(Some(slot.as_os_str().to_os_string()))
+        );
+        assert_eq!(
+            command_env(&command, "CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+            Some(None),
+            "the conflicting higher-precedence source must be removed"
+        );
+    }
+
+    #[test]
+    fn another_tools_managed_home_does_not_rewrite_claude_storage() {
+        let mut command = Command::new("codex");
+        command.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/tmp/intentional-live");
+
+        configure_managed_tool_home(
+            &mut command,
+            "codex",
+            "CODEX_HOME",
+            std::path::Path::new("/tmp/swapdex-managed-codex"),
+        );
+
+        assert_eq!(
+            command_env(&command, "CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+            Some(Some(OsString::from("/tmp/intentional-live")))
+        );
+    }
 }
 
 /// Remove the live credential files so the tool's next run prompts a fresh
@@ -11629,6 +11722,18 @@ mod cached_quota_tools_tests {
 #[cfg(test)]
 mod slot_capture_tests {
 
+    fn write_credentials(dir: &std::path::Path, who: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let value = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": format!("AT-{who}"),
+                "refreshToken": "RT",
+                "expiresAt": 9999999999999i64
+            }
+        });
+        std::fs::write(dir.join(".credentials.json"), value.to_string()).unwrap();
+    }
+
     /// Capturing from a slot must read THAT slot, never the default home.
     ///
     /// This is the check that could not be written before: a SWAPDEX_ROOT
@@ -11641,20 +11746,31 @@ mod slot_capture_tests {
         let td = tempfile::tempdir().unwrap();
         let root = td.path();
         let paths = crate::paths::Paths::rooted(root);
-        let mk = |d: &std::path::Path, who: &str| {
-            std::fs::create_dir_all(d).unwrap();
-            let v = serde_json::json!({
-                "claudeAiOauth": {
-                    "accessToken": format!("AT-{who}"),
-                    "refreshToken": "RT",
-                    "expiresAt": 9999999999999i64
+        write_credentials(paths.claude_dir(), "DEFAULT");
+        std::fs::write(
+            paths.claude_config_json(),
+            serde_json::json!({
+                "oauthAccount": {
+                    "accountUuid": "UUID-DEFAULT",
+                    "emailAddress": "default@example.com"
                 }
-            });
-            std::fs::write(d.join(".credentials.json"), v.to_string()).unwrap();
-        };
-        mk(paths.claude_dir(), "DEFAULT");
+            })
+            .to_string(),
+        )
+        .unwrap();
         let slot = root.join("slotdir");
-        mk(&slot, "SLOT");
+        write_credentials(&slot, "SLOT");
+        std::fs::write(
+            slot.join(".claude.json"),
+            serde_json::json!({
+                "oauthAccount": {
+                    "accountUuid": "UUID-SLOT",
+                    "emailAddress": "slot@example.com"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         let at = paths.with_tool_dir("claude-code", &slot);
         let snap = crate::adapters::by_name("claude-code")
@@ -11667,6 +11783,67 @@ mod slot_capture_tests {
             !creds.contains("AT-DEFAULT"),
             "must NOT read the default home: {creds}"
         );
+        let oauth: serde_json::Value = serde_json::from_slice(
+            snap.part("oauth_account")
+                .expect("capture always includes identity metadata")
+                .expose(),
+        )
+        .unwrap();
+        assert_eq!(oauth["accountUuid"], "UUID-SLOT");
+        assert_eq!(oauth["emailAddress"], "slot@example.com");
+    }
+
+    #[test]
+    fn missing_slot_metadata_is_absent_instead_of_borrowed_from_default() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(td.path());
+        write_credentials(paths.claude_dir(), "DEFAULT");
+        std::fs::write(
+            paths.claude_config_json(),
+            r#"{"oauthAccount":{"accountUuid":"UUID-DEFAULT","emailAddress":"default@example.com"}}"#,
+        )
+        .unwrap();
+        let slot = td.path().join("slotdir");
+        write_credentials(&slot, "SLOT");
+
+        let at = paths.with_tool_dir("claude-code", &slot);
+        let snap = crate::adapters::by_name("claude-code")
+            .unwrap()
+            .capture(&at)
+            .unwrap();
+        let oauth: serde_json::Value =
+            serde_json::from_slice(snap.part("oauth_account").unwrap().expose()).unwrap();
+
+        assert!(
+            oauth.is_null(),
+            "default metadata leaked into slot: {oauth}"
+        );
+    }
+
+    #[test]
+    fn corrupt_slot_metadata_is_reported_instead_of_borrowing_default() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(td.path());
+        write_credentials(paths.claude_dir(), "DEFAULT");
+        std::fs::write(
+            paths.claude_config_json(),
+            r#"{"oauthAccount":{"accountUuid":"UUID-DEFAULT","emailAddress":"default@example.com"}}"#,
+        )
+        .unwrap();
+        let slot = td.path().join("slotdir");
+        write_credentials(&slot, "SLOT");
+        std::fs::write(slot.join(".claude.json"), b"not json {").unwrap();
+
+        let at = paths.with_tool_dir("claude-code", &slot);
+        let error = match crate::adapters::by_name("claude-code")
+            .unwrap()
+            .capture(&at)
+        {
+            Ok(_) => panic!("corrupt slot identity must stop capture"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("corrupt"), "{error:#}");
     }
 }
 
