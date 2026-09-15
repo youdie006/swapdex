@@ -247,7 +247,7 @@ def token():
     def part(value):
         return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
     return part({"alg": "none"}) + "." + part({"exp": 4102444800, "sub": "fixture-user",
-        "email": "fixture@example.invalid", "https://api.openai.com/auth": {
+        "email": "fixture@example.com", "https://api.openai.com/auth": {
             "chatgpt_account_id": "fixture-account", "chatgpt_plan_type": "plus"}}) + ".fixture"
 
 
