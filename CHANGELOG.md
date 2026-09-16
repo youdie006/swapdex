@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Update platform-directory lookup to dirs 7 (#25).** Builds use the current
+  directory helper while preserving the existing account and session store
+  locations on Linux, WSL and macOS. The upstream Windows preference-directory
+  change does not affect Swapdex, which uses only home and data directories.
+
 ## 0.165.6
 
 - **Preserve selected-account routing when Codex jobs add configuration.**
