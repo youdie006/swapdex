@@ -6,6 +6,10 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Update CI Python setup to actions/setup-python 7 (#26).** Both continuous
+  integration and the dependency review workflow use the maintained action,
+  including its manifest-fetch retries and corrected warning annotations.
+  Python 3.12 remains pinned; the removed `pip-install` input is not used.
 - **Update platform-directory lookup to dirs 7 (#25).** Builds use the current
   directory helper while preserving the existing account and session store
   locations on Linux, WSL and macOS. The upstream Windows preference-directory
