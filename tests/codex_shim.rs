@@ -208,8 +208,6 @@ fn auth_help_and_explicit_backend_choices_bypass_routing() {
             "--config= openai_base_url = \"https://example.test/v1\"",
             "resume",
         ],
-        &["--profile", "custom", "resume"],
-        &["-pcustom", "resume"],
         &["--oss", "hello"],
         &["resume", "--remote", "unix:///tmp/server"],
         &["--remote-auth-token-env", "LOGIN_TOKEN", "resume"],
@@ -221,6 +219,25 @@ fn auth_help_and_explicit_backend_choices_bypass_routing() {
         let got_args: Vec<_> = got.stdout.lines().skip(1).collect();
         assert_eq!(got_args, args, "{args:?}");
         assert!(!got.calls.contains("proxy"), "{args:?}: {}", got.calls);
+    }
+}
+
+#[test]
+fn profile_choices_remain_managed_and_reach_codex_unchanged() {
+    for args in [
+        &["-p", "worker", "resume"][..],
+        &["--profile", "worker", "resume"],
+        &["-pworker", "resume"],
+        &["--profile=worker", "resume"],
+    ] {
+        let got = launch(args, true, false);
+        assert_eq!(
+            &got.args[..2],
+            &["-c", "openai_base_url=http://127.0.0.1:8788/v1"],
+            "{args:?}"
+        );
+        assert_eq!(&got.args[2..], args, "{args:?}");
+        assert!(got.home.ends_with("chosen home"));
     }
 }
 

@@ -6,6 +6,17 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+## 0.165.5
+
+- **Apply the selected Codex account to profile-based jobs.** Launches such as
+  `codex exec -p worker` previously bypassed the managed proxy solely because
+  they selected a profile, silently charging the launch home's login. All
+  `-p`/`--profile` forms now receive the same built-in OpenAI routing as ordinary
+  sessions. The profile, original arguments, credentials, and session home are
+  preserved. Named custom providers and explicit command-line provider
+  overrides retain their own routes. The fix applies to new launches;
+  already-running direct jobs keep their original connection until they end.
+
 ## 0.165.4
 
 - **Keep a disconnected client from terminating every proxy session.** The

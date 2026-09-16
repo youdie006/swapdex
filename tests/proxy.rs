@@ -3361,53 +3361,101 @@ fn serve_moves_who_pays_for_codex_without_moving_its_transcripts() {
 
 /// Environment variables must not override the shim's routing decision.
 mod codex_routing_ignores_inherited_shell_state {
+    use std::sync::{Mutex, MutexGuard};
     use swapdex::shim::codex_shim_script;
 
-    /// Run the generated shim with stubs and return the argument line the tool
-    /// was handed. `env` is prepended to the command as `name=value` pairs, so
-    /// it arrives the way a caller's exported variable would.
-    fn args_tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> String {
-        let tmp = std::env::temp_dir().join(format!("sx-guard-{}-{nonce}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let sx = tmp.join("swapdex");
+    static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_exec_lock() -> MutexGuard<'static, ()> {
+        FIXTURE_EXEC_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Launch {
+        home: String,
+        args: Vec<String>,
+    }
+
+    /// Run the generated shim with stubs and return exactly what the real tool
+    /// receives. `env` arrives the way a caller's exported variables would.
+    fn tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> Launch {
+        let _exec_guard = fixture_exec_lock();
+        let prefix = format!("sx-guard-{nonce}-");
+        let tmp = tempfile::Builder::new().prefix(&prefix).tempdir().unwrap();
+        let root = tmp.path();
+        let pointer = root.join("ptr");
+        let pointed_home = root.join("pointed-home");
+        std::fs::write(&pointer, pointed_home.to_string_lossy().as_bytes()).unwrap();
+        let sx = root.join("swapdex");
         std::fs::write(
             &sx,
             "#!/bin/sh\nfor a in \"$@\"; do\n\tcase \"$a\" in\n\t--ensure) echo 8788; exit 0 ;;\n\tserve) shift; printf '%s' work; exit 0 ;;\n\tesac\ndone\nexit 0\n",
         )
         .unwrap();
-        let tool = tmp.join("tool");
-        std::fs::write(&tool, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-        let shim = tmp.join("shim");
-        std::fs::write(&shim, codex_shim_script(&tmp.join("ptr"), &tool, &sx)).unwrap();
+        let tool = root.join("tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nprintf 'home=%s\\n' \"$CODEX_HOME\"\nfor a in \"$@\"; do printf 'arg=%s\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        let shim = root.join("shim");
+        std::fs::write(&shim, codex_shim_script(&pointer, &tool, &sx)).unwrap();
         for f in [&sx, &tool, &shim] {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut cmd = std::process::Command::new("sh");
         cmd.arg(&shim).args(args);
+        cmd.env_remove("CODEX_HOME");
         for (k, v) in env {
             cmd.env(k, v);
         }
         let out = cmd.output().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        assert!(
+            out.status.success(),
+            "shim failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let mut lines = stdout.lines();
+        let home = lines
+            .next()
+            .and_then(|line| line.strip_prefix("home="))
+            .expect("tool reported CODEX_HOME")
+            .to_owned();
+        let args = lines
+            .map(|line| {
+                line.strip_prefix("arg=")
+                    .expect("tool reported one argument per line")
+                    .to_owned()
+            })
+            .collect();
+        Launch { home, args }
+    }
+
+    fn managed_args(original: &[&str]) -> Vec<String> {
+        ["-c", "openai_base_url=http://127.0.0.1:8788/v1"]
+            .into_iter()
+            .chain(original.iter().copied())
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]
     fn resume_uses_the_reported_proxy_without_changing_provider() {
-        let got = args_tool_receives("resume", &[("port", "3000")], &["resume"]);
-        assert!(!got.contains("model_provider"));
-        assert!(got.contains("openai_base_url=http://127.0.0.1:8788/v1"));
-        assert_eq!(got.lines().last(), Some("resume"));
+        let got = tool_receives("resume", &[("port", "3000")], &["resume"]);
+        assert!(!got.args.iter().any(|arg| arg.contains("model_provider")));
+        assert_eq!(got.args, managed_args(&["resume"]));
     }
 
     #[test]
     fn an_inherited_port_does_not_reopen_the_override_on_login() {
-        let got = args_tool_receives("login", &[("port", "3000")], &["login"]);
+        let got = tool_receives("login", &[("port", "3000")], &["login"]);
         assert!(
-            !got.contains("model_provider"),
-            "a sign-in must reach the real backend, got:\n{got}"
+            !got.args.iter().any(|arg| arg.contains("model_provider")),
+            "a sign-in must reach the real backend, got: {got:?}"
         );
     }
 
@@ -3415,12 +3463,66 @@ mod codex_routing_ignores_inherited_shell_state {
     /// override, so the fix cannot be "never apply it".
     #[test]
     fn a_talking_turn_still_gets_the_override() {
-        let got = args_tool_receives("talk", &[("port", "3000")], &["hello"]);
+        let got = tool_receives("talk", &[("port", "3000")], &["hello"]);
         assert!(
-            got.lines()
-                .any(|l| l == "openai_base_url=http://127.0.0.1:8788/v1"),
-            "a turn routes through the proxy swapdex reported, got:\n{got}"
+            got.args
+                .iter()
+                .any(|arg| arg == "openai_base_url=http://127.0.0.1:8788/v1"),
+            "a turn routes through the proxy swapdex reported, got: {got:?}"
         );
+    }
+
+    #[test]
+    fn profile_forms_stay_managed_and_preserve_arguments_and_home() {
+        for (nonce, profile) in [
+            ("profile-short", vec!["-p", "worker"]),
+            ("profile-long", vec!["--profile", "worker"]),
+            ("profile-short-attached", vec!["-pworker"]),
+            ("profile-long-attached", vec!["--profile=worker"]),
+        ] {
+            let mut original = vec!["--strict-config", "exec"];
+            original.extend(profile);
+            original.extend(["resume", "thread-42"]);
+            let got = tool_receives(nonce, &[("CODEX_HOME", "/keep/codex-home")], &original);
+            assert_eq!(got.home, "/keep/codex-home", "profile form: {original:?}");
+            assert_eq!(
+                got.args,
+                managed_args(&original),
+                "profile form: {original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_profile_value_named_login_is_not_an_auth_command() {
+        let original = ["-p", "login", "exec", "hello"];
+        let got = tool_receives("profile-named-login", &[], &original);
+        assert_eq!(got.args, managed_args(&original));
+    }
+
+    #[test]
+    fn explicit_provider_config_with_a_profile_still_bypasses_routing() {
+        let original = [
+            "--profile=worker",
+            "exec",
+            "-c",
+            "model_provider=company",
+            "hello",
+        ];
+        let got = tool_receives("profile-explicit-provider", &[], &original);
+        assert_eq!(got.args, original.map(str::to_owned));
+    }
+
+    #[test]
+    fn auth_commands_with_a_profile_still_bypass_routing() {
+        for (nonce, command) in [
+            ("profile-auth-login", "login"),
+            ("profile-auth-logout", "logout"),
+        ] {
+            let original = ["--profile=worker", command];
+            let got = tool_receives(nonce, &[], &original);
+            assert_eq!(got.args, original.map(str::to_owned));
+        }
     }
 }
 
