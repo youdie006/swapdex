@@ -232,8 +232,10 @@ for a in "$@"; do
         -c|--config) sx_skip=config ;;
         --config=*) if sx_explicit_config "${{a#--config=}}"; then sx_plain=yes; fi ;;
         -c?*) if sx_explicit_config "${{a#-c}}"; then sx_plain=yes; fi ;;
-        -p|--profile|--remote|--remote-auth-token-env|--local-provider) sx_plain=yes; sx_skip=value ;;
-        -p?*|--profile=*|--remote=*|--remote-auth-token-env=*|--local-provider=*|--oss) sx_plain=yes ;;
+        -p|--profile) sx_skip=value ;;
+        -p?*|--profile=*) ;;
+        --remote|--remote-auth-token-env|--local-provider) sx_plain=yes; sx_skip=value ;;
+        --remote=*|--remote-auth-token-env=*|--local-provider=*|--oss) sx_plain=yes ;;
         -i|--image) sx_skip=images ;;
         -C|--cd|-m|--model|-s|--sandbox|-a|--ask-for-approval|--add-dir|--enable|--disable) sx_skip=value ;;
         -h|--help|-V|--version) sx_plain=yes ;;
