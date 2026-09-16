@@ -889,6 +889,18 @@ pub trait TuiCtx {
     /// Run `quota` and return its lines (remaining quota per Claude account -
     /// the one opt-in network read).
     fn quota(&mut self) -> Vec<String>;
+    /// Start a panel read without holding up keyboard or mouse handling.
+    /// The default serves simple test contexts; production starts a worker.
+    fn usage_async(&mut self) -> PanelReceiver {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(Ok(self.usage()));
+        rx.into()
+    }
+    fn quota_async(&mut self) -> PanelReceiver {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(Ok(self.quota()));
+        rx.into()
+    }
     /// Per-account session (5h) and weekly (7d) utilization from the live quota
     /// endpoint, for the inline bars. Network; called lazily. Default empty so
     /// test contexts need not implement it.
@@ -1059,18 +1071,17 @@ enum Screen {
         scroll: u16,
         pending: bool,
     },
-    /// Read-only `usage` output (consumed tokens per account, local).
+    /// Live `usage` output (consumed tokens per account, local).
     Usage {
         lines: Vec<String>,
         scroll: u16,
-        pending: bool,
+        refresh: PanelRefresh,
     },
-    /// Read-only `quota` output (remaining quota per Claude account). `pending`
-    /// draws a "fetching..." frame first because this one hits the network.
+    /// Live `quota` output (remaining quota per account).
     Quota {
         lines: Vec<String>,
         scroll: u16,
-        pending: bool,
+        refresh: PanelRefresh,
     },
 }
 
@@ -1263,6 +1274,541 @@ impl Timing {
 
 type RowKey = AccountKey;
 type QuotaReceiver = std::sync::mpsc::Receiver<Vec<(AccountKey, Usage)>>;
+type PanelReading = std::result::Result<Vec<String>, String>;
+
+/// Test contexts can supply a channel. Production keeps the child process here
+/// so dropping a panel can stop and reap its read, including any descendants.
+pub struct PanelReceiver {
+    source: PanelSource,
+}
+
+enum PanelSource {
+    Channel(std::sync::mpsc::Receiver<PanelReading>),
+    Child(PanelChild),
+}
+
+fn panel_launch_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        "close this screen and reopen swapdex; its executable is unavailable".into()
+    } else {
+        error.to_string()
+    }
+}
+
+impl From<std::sync::mpsc::Receiver<PanelReading>> for PanelReceiver {
+    fn from(rx: std::sync::mpsc::Receiver<PanelReading>) -> Self {
+        Self {
+            source: PanelSource::Channel(rx),
+        }
+    }
+}
+
+impl PanelReceiver {
+    pub(crate) fn command(name: &'static str) -> Self {
+        match std::env::current_exe()
+            .and_then(|executable| PanelChild::spawn_program(executable, &[], name))
+        {
+            Ok(child) => Self {
+                source: PanelSource::Child(child),
+            },
+            Err(e) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = tx.send(Err(format!("{name} failed: {}", panel_launch_error(e))));
+                rx.into()
+            }
+        }
+    }
+
+    fn try_recv(&mut self) -> std::result::Result<PanelReading, std::sync::mpsc::TryRecvError> {
+        match &mut self.source {
+            PanelSource::Channel(rx) => rx.try_recv(),
+            PanelSource::Child(child) => child.try_recv(),
+        }
+    }
+}
+
+struct PanelChild {
+    child: std::process::Child,
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+    name: &'static str,
+    finished: bool,
+}
+
+impl PanelChild {
+    fn spawn_program(
+        executable: impl AsRef<std::ffi::OsStr>,
+        args: &[&str],
+        name: &'static str,
+    ) -> std::io::Result<Self> {
+        use std::process::{Command, Stdio};
+        let stdout = tempfile::tempfile()?;
+        let stderr = tempfile::tempfile()?;
+        let mut command = Command::new(executable);
+        command
+            .args(args)
+            .arg(name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout.try_clone()?))
+            .stderr(Stdio::from(stderr.try_clone()?));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
+        Ok(Self {
+            child,
+            stdout,
+            stderr,
+            name,
+            finished: false,
+        })
+    }
+
+    fn try_recv(&mut self) -> std::result::Result<PanelReading, std::sync::mpsc::TryRecvError> {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.finished = true;
+                status
+            }
+            Ok(None) => return Err(std::sync::mpsc::TryRecvError::Empty),
+            Err(e) => return Ok(Err(format!("{} failed: {e}", self.name))),
+        };
+        Ok(self.read_output(status))
+    }
+
+    fn read_output(&mut self, status: std::process::ExitStatus) -> PanelReading {
+        use std::io::{Read, Seek};
+        let read = |file: &mut std::fs::File| -> std::io::Result<Vec<u8>> {
+            file.rewind()?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        };
+        let stdout = read(&mut self.stdout).map_err(|e| format!("{} failed: {e}", self.name))?;
+        let stderr = read(&mut self.stderr).map_err(|e| format!("{} failed: {e}", self.name))?;
+        let mut text = String::from_utf8_lossy(&stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&stderr));
+        if !status.success() {
+            let reason = text.lines().find(|line| !line.trim().is_empty());
+            return Err(format!(
+                "{} failed: {}",
+                self.name,
+                reason.unwrap_or("command returned an error")
+            ));
+        }
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        if self.name == "usage" {
+            lines.push(String::new());
+            lines.push("swapdex is local: this is tokens USED here, not remaining quota.".into());
+        }
+        Ok(lines)
+    }
+}
+
+impl Drop for PanelChild {
+    fn drop(&mut self) {
+        if !self.finished {
+            #[cfg(unix)]
+            unsafe {
+                // The subprocess may start its own helpers. Its dedicated
+                // process group contains only this panel read and its children.
+                libc::killpg(self.child.id() as i32, libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// A text panel owns its read, so leaving the panel drops the receiver and
+/// prevents a late answer from an older visit replacing a newer one.
+struct PanelRefresh {
+    rx: Option<PanelReceiver>,
+    last_finished: Option<std::time::Instant>,
+    last_success: Option<std::time::Instant>,
+    queued: bool,
+    failure: Option<String>,
+}
+
+impl PanelRefresh {
+    fn new() -> Self {
+        Self {
+            rx: None,
+            last_finished: None,
+            last_success: None,
+            queued: false,
+            failure: None,
+        }
+    }
+
+    fn request(&mut self) {
+        self.queued = true;
+    }
+
+    fn tick(
+        &mut self,
+        now: std::time::Instant,
+        lines: &mut Vec<String>,
+        scroll: &mut u16,
+        start: impl FnOnce() -> PanelReceiver,
+    ) {
+        if let Some(rx) = self.rx.as_mut() {
+            match rx.try_recv() {
+                Ok(Ok(fresh)) => {
+                    *lines = fresh;
+                    let last = lines.len().saturating_sub(1).min(u16::MAX as usize) as u16;
+                    *scroll = (*scroll).min(last);
+                    self.last_success = Some(now);
+                    self.last_finished = Some(now);
+                    self.failure = None;
+                    self.rx = None;
+                }
+                Ok(Err(reason)) => {
+                    if self.last_success.is_none() {
+                        *lines = vec![reason.clone()];
+                        *scroll = 0;
+                    }
+                    self.failure = Some(reason);
+                    self.last_finished = Some(now);
+                    self.rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if self.last_success.is_none() {
+                        *lines = vec!["reader stopped before returning a reading".into()];
+                        *scroll = 0;
+                    }
+                    self.failure = Some("reader stopped".into());
+                    self.last_finished = Some(now);
+                    self.queued = false; // a crashed reader must not restart in a hot loop
+                    self.rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let due = self.last_finished.is_none_or(|finished| {
+            now.saturating_duration_since(finished).as_secs() >= QUOTA_REFRESH_SECS
+        });
+        if self.rx.is_none() && (due || self.queued) {
+            self.queued = false;
+            self.rx = Some(start());
+        }
+    }
+
+    fn status(&self, now: std::time::Instant) -> String {
+        if self.rx.is_some() {
+            return if self.last_success.is_some() {
+                "refreshing... showing previous reading".into()
+            } else {
+                "reading... esc to go back".into()
+            };
+        }
+        if let Some(reason) = &self.failure {
+            return format!("refresh failed: {reason}; r to retry");
+        }
+        if let Some(done) = self.last_success {
+            let age = now.saturating_duration_since(done).as_secs();
+            return format!("updated {age}s ago; r to refresh");
+        }
+        "reading...".into()
+    }
+}
+
+#[cfg(test)]
+mod panel_refresh_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn panel_reads_on_entry_and_again_45_seconds_after_completion() {
+        let start = Instant::now();
+        let mut panel = PanelRefresh::new();
+        let mut lines = vec!["reading...".into()];
+        let mut scroll = 0;
+        let (first_tx, first_rx) = mpsc::channel();
+        panel.tick(start, &mut lines, &mut scroll, || first_rx.into());
+        assert_eq!(lines, ["reading..."]);
+        assert!(panel.status(start).contains("reading"));
+        first_tx.send(Ok(vec!["first".into()])).unwrap();
+        panel.tick(
+            start + Duration::from_secs(1),
+            &mut lines,
+            &mut scroll,
+            || panic!("a completed read starts the cadence"),
+        );
+        assert_eq!(lines, ["first"]);
+        panel.tick(
+            start + Duration::from_secs(45),
+            &mut lines,
+            &mut scroll,
+            || panic!("only 44 seconds have passed since completion"),
+        );
+        let (second_tx, second_rx) = mpsc::channel();
+        panel.tick(
+            start + Duration::from_secs(46),
+            &mut lines,
+            &mut scroll,
+            || second_rx.into(),
+        );
+        assert_eq!(lines, ["first"], "old content stays visible during refresh");
+        second_tx.send(Ok(vec!["second".into()])).unwrap();
+        panel.tick(
+            start + Duration::from_secs(47),
+            &mut lines,
+            &mut scroll,
+            || panic!("read just completed"),
+        );
+        assert_eq!(lines, ["second"]);
+    }
+
+    #[test]
+    fn repeated_manual_requests_queue_only_one_followup_and_clamp_scroll() {
+        let start = Instant::now();
+        let mut panel = PanelRefresh::new();
+        let mut lines = vec!["reading...".into()];
+        let mut scroll = 0;
+        let (first_tx, first_rx) = mpsc::channel();
+        panel.tick(start, &mut lines, &mut scroll, || first_rx.into());
+        first_tx
+            .send(Ok((0..10).map(|i| format!("line {i}")).collect()))
+            .unwrap();
+        panel.tick(start, &mut lines, &mut scroll, || panic!("no extra read"));
+        scroll = 7;
+
+        panel.request();
+        let (second_tx, second_rx) = mpsc::channel();
+        panel.tick(start, &mut lines, &mut scroll, || second_rx.into());
+        panel.request();
+        panel.request();
+        panel.tick(start, &mut lines, &mut scroll, || {
+            panic!("read is still pending")
+        });
+        assert_eq!(scroll, 7);
+        assert_eq!(lines.len(), 10);
+        second_tx.send(Ok(vec!["short".into()])).unwrap();
+        let (third_tx, third_rx) = mpsc::channel();
+        panel.tick(start, &mut lines, &mut scroll, || third_rx.into());
+        assert_eq!(lines, ["short"]);
+        assert_eq!(scroll, 0);
+        assert!(panel.status(start).contains("refreshing"));
+        third_tx.send(Ok(vec!["done".into()])).unwrap();
+        panel.tick(start, &mut lines, &mut scroll, || {
+            panic!("requests coalesced")
+        });
+        assert_eq!(lines, ["done"]);
+    }
+
+    #[test]
+    fn abandoned_panel_cannot_apply_an_old_result_to_reentry() {
+        let now = Instant::now();
+        let mut old = PanelRefresh::new();
+        let (old_tx, old_rx) = mpsc::channel();
+        old.tick(now, &mut vec!["reading...".into()], &mut 0, || {
+            old_rx.into()
+        });
+        drop(old);
+        assert!(old_tx.send(Ok(vec!["old".into()])).is_err());
+
+        let mut fresh = PanelRefresh::new();
+        let mut lines = vec!["reading...".into()];
+        let (new_tx, new_rx) = mpsc::channel();
+        fresh.tick(now, &mut lines, &mut 0, || new_rx.into());
+        new_tx.send(Ok(vec!["new".into()])).unwrap();
+        fresh.tick(now, &mut lines, &mut 0, || panic!("new read completed"));
+        assert_eq!(lines, ["new"]);
+    }
+
+    #[test]
+    fn disconnected_worker_keeps_content_and_retries_on_a_bounded_cadence() {
+        let now = Instant::now();
+        let mut panel = PanelRefresh::new();
+        let mut lines = vec!["No reading yet.".into()];
+        let mut scroll = 0;
+        let (first_tx, first_rx) = mpsc::channel();
+        panel.tick(now, &mut lines, &mut scroll, || first_rx.into());
+        first_tx.send(Ok(vec!["last result".into()])).unwrap();
+        panel.tick(now, &mut lines, &mut scroll, || {
+            panic!("first read completed")
+        });
+        panel.request();
+        let (tx, rx) = mpsc::channel();
+        panel.tick(now, &mut lines, &mut scroll, || rx.into());
+        drop(tx);
+        panel.tick(now, &mut lines, &mut scroll, || panic!("no hot retry"));
+        assert_eq!(lines, ["last result"]);
+        assert!(panel.status(now).contains("failed"));
+        panel.tick(
+            now + Duration::from_secs(44),
+            &mut lines,
+            &mut scroll,
+            || panic!("retry must wait"),
+        );
+        let (_retry_tx, retry_rx) = mpsc::channel();
+        panel.tick(
+            now + Duration::from_secs(45),
+            &mut lines,
+            &mut scroll,
+            || retry_rx.into(),
+        );
+        assert!(panel
+            .status(now + Duration::from_secs(45))
+            .contains("refreshing"));
+    }
+
+    #[test]
+    fn failed_read_does_not_mark_old_content_fresh() {
+        let now = Instant::now();
+        let mut panel = PanelRefresh::new();
+        let mut lines = vec!["No reading yet.".into()];
+        let mut scroll = 0;
+        let (first_tx, first_rx) = mpsc::channel();
+        panel.tick(now, &mut lines, &mut scroll, || first_rx.into());
+        first_tx.send(Ok(vec!["old".into()])).unwrap();
+        panel.tick(now, &mut lines, &mut scroll, || {
+            panic!("first read completed")
+        });
+        panel.request();
+        let (tx, rx) = mpsc::channel();
+        panel.tick(now, &mut lines, &mut scroll, || rx.into());
+        tx.send(Err("offline".into())).unwrap();
+        panel.tick(now, &mut lines, &mut scroll, || panic!("failed read ended"));
+        assert_eq!(lines, ["old"]);
+        assert!(panel.status(now).contains("failed"));
+        assert!(!panel.status(now).contains("updated"));
+    }
+
+    #[test]
+    fn first_failed_read_replaces_the_waiting_placeholder_with_the_error() {
+        let now = Instant::now();
+        let mut panel = PanelRefresh::new();
+        let mut lines = vec!["No reading yet.".into()];
+        let mut scroll = 0;
+        let (tx, rx) = mpsc::channel();
+        panel.tick(now, &mut lines, &mut scroll, || rx.into());
+        tx.send(Err("quota endpoint unavailable".into())).unwrap();
+        panel.tick(now, &mut lines, &mut scroll, || panic!("failed read ended"));
+        assert_eq!(lines, ["quota endpoint unavailable"]);
+        assert!(panel.status(now).contains("failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_panel_reaps_its_owned_subprocess() {
+        let child = PanelChild::spawn_program("/bin/sh", &["-c", "sleep 30"], "quota").unwrap();
+        let pid = child.child.id() as i32;
+        drop(child);
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[test]
+    fn replaced_executable_keeps_the_restart_guidance() {
+        let text = panel_launch_error(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(
+            text,
+            "close this screen and reopen swapdex; its executable is unavailable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod disconnected_main_quota_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn row(ident: &str) -> Row {
+        Row {
+            name: "work".into(),
+            ident: ident.into(),
+            tools: "codex".into(),
+            active: true,
+            warn: None,
+            disabled: false,
+            needs_login: false,
+            stale: false,
+            is_slot: true,
+            also: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dropped_reader_keeps_cached_bars_and_waits_before_retry() {
+        let now = Instant::now();
+        let rows = vec![row("work@example.com")];
+        let refresh = RowRefresh::new(now, &rows);
+        let mut rows = rows;
+        let mut bars = Some(std::collections::HashMap::from([(
+            account_key("codex", "work"),
+            Usage {
+                five_h: Some(30.0),
+                ..Default::default()
+            },
+        )]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut in_flight = Some((refresh.identity_generation(), rx));
+        let mut fetched = None;
+        drop(tx);
+
+        poll_main_quota(
+            now,
+            &mut in_flight,
+            &refresh,
+            &mut rows,
+            &mut bars,
+            &mut fetched,
+        );
+
+        assert!(
+            in_flight.is_none(),
+            "a dead receiver must not hold the slot"
+        );
+        assert_eq!(fetched, Some(now), "retry uses the normal 45s cadence");
+        assert_eq!(
+            bars.as_ref().unwrap()[&account_key("codex", "work")].five_h,
+            Some(30.0)
+        );
+    }
+
+    #[test]
+    fn disconnected_reader_from_old_identity_does_not_delay_the_new_one() {
+        let now = Instant::now();
+        let mut rows = vec![row("old@example.com")];
+        let mut refresh = RowRefresh::new(now, &rows);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut in_flight = Some((refresh.identity_generation(), rx));
+        let mut selected = ListState::default().with_selected(Some(0));
+        let mut confirmation = None;
+        let mut bars = None;
+        let mut fetched = Some(now);
+        refresh.poll(
+            now + Duration::from_secs(1),
+            &mut rows,
+            &mut selected,
+            &mut confirmation,
+            &mut bars,
+            || vec![row("new@example.com")],
+        );
+        drop(tx);
+
+        poll_main_quota(
+            now + Duration::from_secs(1),
+            &mut in_flight,
+            &refresh,
+            &mut rows,
+            &mut bars,
+            &mut fetched,
+        );
+
+        assert!(in_flight.is_none());
+        assert_eq!(fetched, None, "new identity is due for an immediate read");
+    }
+}
 
 fn row_key(row: &Row) -> RowKey {
     row.key()
@@ -1377,6 +1923,40 @@ impl RowRefresh {
         *rows = fresh;
         self.local_identity = local_identity;
         true
+    }
+}
+
+/// A worker that exits without sending must release the main dashboard's read
+/// slot. Stamp that failure so the next attempt follows the normal cadence.
+fn poll_main_quota(
+    now: std::time::Instant,
+    in_flight: &mut Option<(u64, QuotaReceiver)>,
+    row_refresh: &RowRefresh,
+    rows: &mut [Row],
+    quota: &mut Option<std::collections::HashMap<AccountKey, Usage>>,
+    fetched: &mut Option<std::time::Instant>,
+) {
+    if let Some((started_generation, rx)) = in_flight.as_ref() {
+        if *started_generation != row_refresh.identity_generation() {
+            // A login changed while the old read was in flight. Release its
+            // receiver and let the new identity read immediately.
+            *in_flight = None;
+            *fetched = None;
+            return;
+        }
+        match rx.try_recv() {
+            Ok(got) => {
+                if row_refresh.apply_quota_reading(*started_generation, rows, quota, got) {
+                    *fetched = Some(now);
+                }
+                *in_flight = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *in_flight = None;
+                *fetched = Some(now);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
     }
 }
 
@@ -2277,7 +2857,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         help,
                     );
                 }
-                Screen::Usage { lines, scroll, .. } => {
+                Screen::Usage {
+                    lines,
+                    scroll,
+                    refresh,
+                } => {
                     let text: Vec<Line> = lines
                         .iter()
                         .map(|l| {
@@ -2297,16 +2881,25 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .block(list_block(" usage - tokens used (local, this machine) ")),
                         main,
                     );
-                    f.render_widget(Paragraph::new(""), foot);
+                    f.render_widget(
+                        Paragraph::new(format!("  {}", refresh.status(std::time::Instant::now())))
+                            .style(Style::default().fg(MUTED)),
+                        foot,
+                    );
                     f.render_widget(
                         Paragraph::new(key_hints(&[
                             ("\u{2191}\u{2193}", "scroll"),
+                            ("r", "refresh"),
                             ("esc", "back"),
                         ])),
                         help,
                     );
                 }
-                Screen::Quota { lines, scroll, .. } => {
+                Screen::Quota {
+                    lines,
+                    scroll,
+                    refresh,
+                } => {
                     let text: Vec<Line> = lines
                         .iter()
                         .map(|l| {
@@ -2332,10 +2925,15 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             .block(list_block(" quota - remaining (live from Anthropic) ")),
                         main,
                     );
-                    f.render_widget(Paragraph::new(""), foot);
+                    f.render_widget(
+                        Paragraph::new(format!("  {}", refresh.status(std::time::Instant::now())))
+                            .style(Style::default().fg(MUTED)),
+                        foot,
+                    );
                     f.render_widget(
                         Paragraph::new(key_hints(&[
                             ("\u{2191}\u{2193}", "scroll"),
+                            ("r", "refresh"),
                             ("esc", "back"),
                         ])),
                         help,
@@ -2355,23 +2953,22 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             };
             continue;
         }
-        if let Screen::Usage { pending: true, .. } = &screen {
-            let lines = ctx.usage();
-            screen = Screen::Usage {
+        match &mut screen {
+            Screen::Usage {
                 lines,
-                scroll: 0,
-                pending: false,
-            };
-            continue;
-        }
-        if let Screen::Quota { pending: true, .. } = &screen {
-            let lines = ctx.quota();
-            screen = Screen::Quota {
+                scroll,
+                refresh,
+            } => refresh.tick(std::time::Instant::now(), lines, scroll, || {
+                ctx.usage_async()
+            }),
+            Screen::Quota {
                 lines,
-                scroll: 0,
-                pending: false,
-            };
-            continue;
+                scroll,
+                refresh,
+            } => refresh.tick(std::time::Instant::now(), lines, scroll, || {
+                ctx.quota_async()
+            }),
+            _ => {}
         }
         // Fill the inline quota bars after the first frame (so the UI opens
         // instantly), then keep them current: a dashboard showing what was true
@@ -2386,22 +2983,14 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
             timing.mark("usage read started (off the loop)");
             fetch_marked = true;
         }
-        // Collect a finished reading without waiting for one.
-        if let Some((started_generation, rx)) = quota_rx.as_ref() {
-            if let Ok(got) = rx.try_recv() {
-                // The guarded apply also discards a response started for an old
-                // local identity generation after a login changed underneath it.
-                if row_refresh.apply_quota_reading(
-                    *started_generation,
-                    &mut rows,
-                    &mut quota_pct,
-                    got,
-                ) {
-                    quota_fetched = Some(std::time::Instant::now());
-                }
-                quota_rx = None;
-            }
-        }
+        poll_main_quota(
+            std::time::Instant::now(),
+            &mut quota_rx,
+            &row_refresh,
+            &mut rows,
+            &mut quota_pct,
+            &mut quota_fetched,
+        );
         let stale_quota = quota_fetched.is_none_or(|t: std::time::Instant| {
             t.elapsed() >= std::time::Duration::from_secs(QUOTA_REFRESH_SECS)
         });
@@ -2726,18 +3315,18 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                     }
                     KeyCode::Char('u') if !rows.is_empty() => {
                         screen = Screen::Usage {
-                            lines: vec!["computing usage...".into()],
+                            lines: vec!["No reading yet.".into()],
                             scroll: 0,
-                            pending: true,
+                            refresh: PanelRefresh::new(),
                         };
                     }
                     // Ungated like doctor's '?': quota also covers a live
                     // login that is not saved as any profile yet.
                     KeyCode::Char('%') => {
                         screen = Screen::Quota {
-                            lines: vec!["fetching remaining quota from Anthropic...".into()],
+                            lines: vec!["No reading yet.".into()],
                             scroll: 0,
-                            pending: true,
+                            refresh: PanelRefresh::new(),
                         };
                     }
                     _ => {}
@@ -2916,8 +3505,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
                 _ => {}
             },
-            Screen::Usage { lines, scroll, .. } => match key.code {
+            Screen::Usage {
+                lines,
+                scroll,
+                refresh,
+            } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => screen = Screen::Main,
+                KeyCode::Char('r') => refresh.request(),
                 KeyCode::Down | KeyCode::Char('j') => {
                     let max = (lines.len() as u16).saturating_sub(1);
                     *scroll = (*scroll + 1).min(max);
@@ -2925,8 +3519,13 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
                 _ => {}
             },
-            Screen::Quota { lines, scroll, .. } => match key.code {
+            Screen::Quota {
+                lines,
+                scroll,
+                refresh,
+            } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => screen = Screen::Main,
+                KeyCode::Char('r') => refresh.request(),
                 KeyCode::Down | KeyCode::Char('j') => {
                     let max = (lines.len() as u16).saturating_sub(1);
                     *scroll = (*scroll + 1).min(max);

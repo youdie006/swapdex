@@ -17,9 +17,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 
 
 def load_support():
@@ -58,6 +60,20 @@ def credential(account):
 def model_requests(server):
     return [row for row in server.snapshot()
             if row[0] == "POST" and row[1].split("?", 1)[0].endswith("/responses")]
+
+
+def write_fixture_png(path):
+    def chunk(kind, contents):
+        return (struct.pack(">I", len(contents)) + kind + contents
+                + struct.pack(">I", zlib.crc32(kind + contents)))
+
+    pixels = (b"\0" + b"\xff\xff\xff" * 8) * 8
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(pixels))
+        + chunk(b"IEND", b"")
+    )
 
 
 def verify(codex, swapdex, root):
@@ -130,32 +146,78 @@ def verify(codex, swapdex, root):
         shim = store / "bin/codex"
         assert shim.is_file(), "generated Codex shim missing"
 
-        def turn(profile):
-            output = support.run([
-                str(shim), "--strict-config", "exec", "--skip-git-repo-check",
-                "--json", "-C", str(workspace), *profile, "Return fixture-ok.",
-            ], env)
+        def turn(options, *, root_options=(), exec_command=(),
+                 prompt="Return fixture-ok.", stdin=None):
+            argv = [str(shim), "--strict-config", *root_options, "exec",
+                    "--skip-git-repo-check", "--json", "-C", str(workspace),
+                    *exec_command, *options, prompt]
+            if stdin is None:
+                output = support.run(argv, env)
+            else:
+                # Empty OPENAI_API_KEY matches the image helper's environment.
+                child = subprocess.Popen(
+                    argv, env={**env, "OPENAI_API_KEY": ""},
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, start_new_session=True,
+                )
+                try:
+                    output, stderr = child.communicate(stdin, timeout=45)
+                    assert child.returncode == 0, stderr.decode(errors="replace")[-2000:]
+                finally:
+                    support.stop(child)
             events = [json.loads(line) for line in output.splitlines()
                       if line.startswith(b"{")]
             assert any(event.get("type") == "turn.completed" for event in events), events
             assert any(event.get("item", {}).get("text") == "fixture-ok"
                        for event in events), events
 
-        for profile in (["-p", "worker"], ["-pworker"],
-                        ["--profile", "worker"], ["--profile=worker"]):
+        image = root / "fixture.png"
+        write_fixture_png(image)
+        managed_cases = [
+            ("exec -c", ["-c", "model_reasoning_effort=low"], [], [],
+             "Return fixture-ok.", None),
+            ("plain exec", [], [], [], "Return fixture-ok.", None),
+            ("exec --config two args", ["--config", "model_reasoning_effort=low"],
+             [], [], "Return fixture-ok.", None),
+            ("exec -c compact", ["-cmodel_reasoning_effort=low"], [], [],
+             "Return fixture-ok.", None),
+            ("exec --config=", ["--config=model_reasoning_effort=low"], [], [],
+             "Return fixture-ok.", None),
+            ("quoted config with spaces", ["-c", 'model_reasoning_effort = "low"'],
+             [], [], "Return fixture-ok.", None),
+            ("root-only -c", [], ["-c", "model_reasoning_effort=low"], [],
+             "Return fixture-ok.", None),
+            ("root and exec -c", ["-c", "model_reasoning_effort=low"],
+             ["-c", "model_reasoning_effort=medium"], [],
+             "Return fixture-ok.", None),
+            ("exec resume -c", ["-c", "model_reasoning_effort=low"], [],
+             ["resume", "--last"], "Return fixture-ok.", None),
+            ("prompt after --", ["--"], [], [], "-c Return fixture-ok.", None),
+            ("worker -p", ["-p", "worker"], [], [], "Return fixture-ok.", None),
+            ("worker -p compact", ["-pworker"], [], [], "Return fixture-ok.", None),
+            ("worker --profile", ["--profile", "worker"], [], [],
+             "Return fixture-ok.", None),
+            ("worker --profile=", ["--profile=worker"], [], [],
+             "Return fixture-ok.", None),
+            ("image and stdin", ["-c", "model_reasoning_effort=low", "-m",
+                                 "gpt-5.6-luna", "-i", str(image)], [], [],
+             "-", b"Return fixture-ok."),
+        ]
+        for name, options, root_options, exec_command, prompt, stdin in managed_cases:
             before = len(model_requests(upstream))
-            turn(profile)
+            turn(options, root_options=root_options, exec_command=exec_command,
+                 prompt=prompt, stdin=stdin)
             requests = model_requests(upstream)
-            assert len(requests) == before + 1, (profile, requests)
+            assert len(requests) == before + 1, (name, requests)
             _method, _path, upgrade, authorization, account = requests[-1]
             assert upgrade is None
             assert authorization == "Bearer " + credentials["selected"]["tokens"]["access_token"]
-            assert account == "fixture-account-selected", (profile, account)
+            assert account == "fixture-account-selected", (name, account)
             assert not model_requests(custom), "managed profile used the custom provider"
             assert not any(path.split("?", 1)[0].endswith(("/models", "/responses"))
                            for _method, path in direct.snapshot()), direct.snapshot()
             assert (home / "auth.json").read_bytes() == original_auth
-            print(f"PASS stock Codex {' '.join(profile)} uses selected account; launch auth unchanged",
+            print(f"PASS stock Codex {name} uses selected account; launch auth unchanged",
                   flush=True)
 
         managed_count = len(model_requests(upstream))
@@ -169,6 +231,15 @@ def verify(codex, swapdex, root):
         assert (store / "active-codex").read_text() == str(home)
         assert proxy.poll() is None
         print("PASS custom profile preserves its provider and API key", flush=True)
+
+        turn(["--config=model_provider=fixture"])
+        requests = model_requests(custom)
+        assert len(requests) == 2, requests
+        assert requests[-1][3] == "Bearer fixture-custom-key", requests
+        assert requests[-1][4] is None, requests
+        assert len(model_requests(upstream)) == managed_count
+        assert (home / "auth.json").read_bytes() == original_auth
+        print("PASS explicit provider config preserves its provider and API key", flush=True)
 
 
 def main():
