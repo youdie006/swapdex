@@ -4,7 +4,21 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.165.6
+
+- **Preserve selected-account routing when Codex jobs add configuration.**
+  Stock Codex could discard a proxy override placed before `exec` when a job
+  added its own `-c` option after the subcommand, sending the job through the
+  launch home's login. The launcher now places its managed address in the
+  same argument scope as the last caller configuration option, preserving
+  caller options and the selected account route. Explicit provider overrides
+  keep their requested route. This applies when a new native job starts.
+- **Refresh usage details without reopening the dashboard.** The Usage and
+  Quota panels previously fetched once and kept showing that snapshot, with
+  navigation blocked during the read. They now refresh in the background every
+  45 seconds, accept `r` for an immediate refresh, preserve the last reading
+  and scroll position, and show refresh status. A disconnected quota reader
+  no longer prevents future dashboard reads until restart.
 
 ## 0.165.5
 
