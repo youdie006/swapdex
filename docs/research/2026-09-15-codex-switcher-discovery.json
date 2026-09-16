@@ -1,0 +1,1830 @@
+{
+  "reviewed_on": "2026-09-15",
+  "scope": "Bounded GitHub discovery; candidates are not endorsements or claims of detailed review.",
+  "unique_candidates": 227,
+  "queries": {
+    "search-account-switcher": "codex account switcher; limit 60",
+    "search-multi-account": "codex multi account; limit 60",
+    "search-switch": "codex switch; limit 70; sort stars",
+    "search-proxy": "codex proxy; limit 60; sort stars",
+    "search-oauth-proxy": "codex oauth proxy; limit 40"
+  },
+  "candidates": [
+    {
+      "repository": "10/chatgpt-codex-proxy",
+      "url": "https://github.com/10/chatgpt-codex-proxy",
+      "description": "Anthropic/OpenAI-compatible API layer over the Codex API with multi-account routing.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "1080ssf/codex-navo",
+      "url": "https://github.com/1080ssf/codex-navo",
+      "description": "Codex Navo：开源 Windows Codex 多账号工作台，支持账号隔离与切换、额度/Token 监控、OpenAI 兼容 API 账号池故障切换、账号级代理、会话管理和悬浮窗。Open-source Codex multi-account manager for Windows.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "2909272751/codex-account-switcher",
+      "url": "https://github.com/2909272751/codex-account-switcher",
+      "description": "Windows GUI for safely switching encrypted Codex login profiles",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "502399493zjw-lgtm/dsh-codex-shared-pool",
+      "url": "https://github.com/502399493zjw-lgtm/dsh-codex-shared-pool",
+      "description": "Codex multi-account pools and team quota sharing for DeepSeek Harness",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "54xzh/codex-switch",
+      "url": "https://github.com/54xzh/codex-switch",
+      "description": "一个用于 Codex 的账号切换工具",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "6owen/codex-switch",
+      "url": "https://github.com/6owen/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "760985933/codex_switch",
+      "url": "https://github.com/760985933/codex_switch",
+      "description": "ChatGPT Codex ↔ DeepSeek LocalBridge is a lightweight local proxy service designed to provide a seamless migration path from OpenAI's Codex API to DeepSeek's API.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "9ycrooked/CodexSwitch",
+      "url": "https://github.com/9ycrooked/CodexSwitch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "AETSIRAX/codex-vercel-proxy",
+      "url": "https://github.com/AETSIRAX/codex-vercel-proxy",
+      "description": "A Codex proxy with credential pooling and token refresh, deployable on Vercel.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "agensfield/verso",
+      "url": "https://github.com/agensfield/verso",
+      "description": "A small, deliberate Codex account switcher. Alpha.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "AIDotNet/CodexSwitch",
+      "url": "https://github.com/AIDotNet/CodexSwitch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "AIDotNet/CodexSwitchUI",
+      "url": "https://github.com/AIDotNet/CodexSwitchUI",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "aierdiao/cc-switch-codex-multi-account",
+      "url": "https://github.com/aierdiao/cc-switch-codex-multi-account",
+      "description": "Windows PowerShell helper for generating isolated Codex auth files and switching multiple ChatGPT accounts with CC Switch.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "aipayim/codex-proxy",
+      "url": "https://github.com/aipayim/codex-proxy",
+      "description": "API proxy tool",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "aipmer/codex-switch",
+      "url": "https://github.com/aipmer/codex-switch",
+      "description": "macOS Codex 多供应商一键切换：OpenAI 官方 / DeepSeek / Kimi Code 秒切，历史会话跨供应商无缝续聊。One-click provider switching for Codex CLI with seamless cross-provider session resume.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Alexs7zzh/codex-auth",
+      "url": "https://github.com/Alexs7zzh/codex-auth",
+      "description": "Interactive local Codex account switcher",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "aliang2052/codex-switch",
+      "url": "https://github.com/aliang2052/codex-switch",
+      "description": "codex一键接入国产模型",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "AllenJvN/codex-account-switcher",
+      "url": "https://github.com/AllenJvN/codex-account-switcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "answerzx/ct-codex-bridge",
+      "url": "https://github.com/answerzx/ct-codex-bridge",
+      "description": "Standalone LAN web frontend for CT-managed Codex account switching",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "apieum/codex-proxy",
+      "url": "https://github.com/apieum/codex-proxy",
+      "description": "A sanitizing reverse proxy that makes OpenAI Codex CLI work reliably with Cerebras (and other non-OpenAI providers) over the Responses API.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "ApolloYou/codex-switch",
+      "url": "https://github.com/ApolloYou/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Aryan-Saini/codex-multi-account-optimizer",
+      "url": "https://github.com/Aryan-Saini/codex-multi-account-optimizer",
+      "description": "Multi-account manager + usage optimizer for the OpenAI Codex CLI — never waste a rate limit or an expiring reset credit",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "banbanLab/CodexProxyClaude",
+      "url": "https://github.com/banbanLab/CodexProxyClaude",
+      "description": "Codex CLI 与 Claude Code 的 Rust + React 代理网关，支持 OpenAI 账号池、用量计费和高缓存格式转换。A Rust and React gateway for Codex CLI and Claude Code with OpenAI account pooling, usage accounting, and high-cache   format bridging.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "baosen-h/codex-switch",
+      "url": "https://github.com/baosen-h/codex-switch",
+      "description": "Codex Switch manages AI providers, agents, chat, drawing, sessions, MCP, Skills, vision fallback, and web search on Windows.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "bilbilmyc/codex-switch",
+      "url": "https://github.com/bilbilmyc/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "BINGWU2003/codex-proxy",
+      "url": "https://github.com/BINGWU2003/codex-proxy",
+      "description": "Codex Responses 本地代理",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "bjesuiter/codex-switcher",
+      "url": "https://github.com/bjesuiter/codex-switcher",
+      "description": "Switch pi, codex and opencode auth between multiple openAI Plus and Pro accounts",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "bjfqdclf/CodexSwitch-MAC",
+      "url": "https://github.com/bjfqdclf/CodexSwitch-MAC",
+      "description": "一键切换codex账号的APP",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "boan-anbo/codex-switch",
+      "url": "https://github.com/boan-anbo/codex-switch",
+      "description": "Codex account switcher with isolated account homes",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "bourbaki-lab/codex-account-switcher",
+      "url": "https://github.com/bourbaki-lab/codex-account-switcher",
+      "description": "Apple Silicon macOS menu bar app for safely switching between user-owned ChatGPT/Codex accounts while preserving local sessions",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "BowTen/codex-account-switcher",
+      "url": "https://github.com/BowTen/codex-account-switcher",
+      "description": "用于管理多套本地 Codex auth.json 登录快照的命令行工具",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "bozliu/CodexAccountSwitcher",
+      "url": "https://github.com/bozliu/CodexAccountSwitcher",
+      "description": "Local Codex Mac App account switching helper built on codex-auth",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "braklouis/codex-account-switcher",
+      "url": "https://github.com/braklouis/codex-account-switcher",
+      "description": "Native macOS Codex account switcher and menu bar quota monitor",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "brightest66/Codex-Quota-Android-based-on-codex-proxy",
+      "url": "https://github.com/brightest66/Codex-Quota-Android-based-on-codex-proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "canxin121/codex-proxy",
+      "url": "https://github.com/canxin121/codex-proxy",
+      "description": "Load-balanced Codex proxy with multi-credential auth management and admin UI",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "cesarandreslopez/sidekick-agent-hub",
+      "url": "https://github.com/cesarandreslopez/sidekick-agent-hub",
+      "description": "See what your AI coding agent is doing. Multi-provider assistant & session monitor for VS Code and the terminal — inline completions, code transforms, and a full TUI dashboard tracking tokens, cost, and context across Claude Code, OpenCode, and Codex. Switch between multiple Claude Code and Codex accounts.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "cguru/Codex-Account-Switcher-Windows",
+      "url": "https://github.com/cguru/Codex-Account-Switcher-Windows",
+      "description": "Windows tray app for safely switching Codex accounts without losing local sessions",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "CH-ZHOU-0512/codex-proxy-guardian",
+      "url": "https://github.com/CH-ZHOU-0512/codex-proxy-guardian",
+      "description": "Codex 代理守护：验证并跟随 HTTP/HTTPS、SOCKS5 与 PAC/WPAD，自动适配更新，受控修复流式代理；支持 Windows 11、macOS 与 Linux。",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "ChanMQ4/codex-switch",
+      "url": "https://github.com/ChanMQ4/codex-switch",
+      "description": " 一键切换 Codex Provider 并自动同步所有会话。支持 Python 和 JavaScript，无需依赖，开箱即用",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Chisiki1/codex-account-switcher-windows",
+      "url": "https://github.com/Chisiki1/codex-account-switcher-windows",
+      "description": "Unofficial privacy-conscious Codex account switcher for Windows, built with WPF and .NET 8.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "codeVerine/switcheroo",
+      "url": "https://github.com/codeVerine/switcheroo",
+      "description": "Native macOS Codex account switcher menubar app. Easily switch between your codex accounts with single click",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "codomagia/CodexAccountSwitcher",
+      "url": "https://github.com/codomagia/CodexAccountSwitcher",
+      "description": "Windows utility for saving and quickly switching accounts in the ChatGPT Codex application (supports Microsoft Store and Portable versions).",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "coreline-ai/kakao_coreline_bot",
+      "url": "https://github.com/coreline-ai/kakao_coreline_bot",
+      "description": "Android 카카오톡 자동응답·LLM 호출·Codex 프록시·주식 요약 통합 봇 | Android KakaoTalk bot for auto-replies, LLM calls, Codex proxy, and stock summaries",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "cornellsh/codex-proxy",
+      "url": "https://github.com/cornellsh/codex-proxy",
+      "description": "OpenAI Responses API proxy.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "Cressev/codex-switch",
+      "url": "https://github.com/Cressev/codex-switch",
+      "description": "Codex CLI 多账号管理工具 - 一键切换/登录/查余额",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "DanChai22/codex-switch",
+      "url": "https://github.com/DanChai22/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Davi-ldc/claude-code-proxy",
+      "url": "https://github.com/Davi-ldc/claude-code-proxy",
+      "description": "claude-code-proxy fork with Codex multi-account rotation",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "dejavukong/codex-multi-account",
+      "url": "https://github.com/dejavukong/codex-multi-account",
+      "description": "Multiple ChatGPT accounts for the OpenAI Codex CLI & VS Code extension — one account per terminal session or VS Code instance, side by side",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "delhombre/codex-account-switcher",
+      "url": "https://github.com/delhombre/codex-account-switcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "dhhieu113pro/codex-multiple-accounts",
+      "url": "https://github.com/dhhieu113pro/codex-multiple-accounts",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "diegorodriguez-hellomatik/codex-multi-account-installer",
+      "url": "https://github.com/diegorodriguez-hellomatik/codex-multi-account-installer",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "doit9816/codex-account-switcher",
+      "url": "https://github.com/doit9816/codex-account-switcher",
+      "description": "Codex 多账号切换器是一个 Tauri v2 桌面工具，用来管理多个 Codex / ChatGPT 账号 profile。   codexaccountswitcher    codexswitcher            它可以导入当前 ~/.codex/auth.json，保存为本地加密 profile，探测额度，切换全局 Codex 授权文件，并把所有账号信息迁移到另一台电脑。CodexSwitcher ",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "Dondake-Ltd/vscode-codex-switcher",
+      "url": "https://github.com/Dondake-Ltd/vscode-codex-switcher",
+      "description": "A small and sexy extension for swapping Codex accounts as 'hot' as possible.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "dvcrn/codex-oauth-proxy",
+      "url": "https://github.com/dvcrn/codex-oauth-proxy",
+      "description": "Exposes Codex (ChatGPT Plus/Pro) through normal OpenAI APIs",
+      "searches": [
+        "search-oauth-proxy"
+      ]
+    },
+    {
+      "repository": "EchoTreee/codex-switch",
+      "url": "https://github.com/EchoTreee/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Echoxiawan/Codex-Switch",
+      "url": "https://github.com/Echoxiawan/Codex-Switch",
+      "description": "codex 官方gpt账号切换工具",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "edihasaj/codex-account-switcher",
+      "url": "https://github.com/edihasaj/codex-account-switcher",
+      "description": "Native macOS menu-bar switcher for two isolated Codex desktop accounts",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "erknvl/codex-plusplus-account-switcher",
+      "url": "https://github.com/erknvl/codex-plusplus-account-switcher",
+      "description": "Codex++ account switcher tweak",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "errhythm/ccswap",
+      "url": "https://github.com/errhythm/ccswap",
+      "description": "Multi-account and usage manager for Claude Code and OpenAI Codex - switch logins, track quota, auto-rotate before rate limits",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "FerryboatSeranade/codex-account-switcher",
+      "url": "https://github.com/FerryboatSeranade/codex-account-switcher",
+      "description": "Codex Account Switcher desktop app",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "FF-crazy/CodexProxy",
+      "url": "https://github.com/FF-crazy/CodexProxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "Finesssee/cdx-wrapper",
+      "url": "https://github.com/Finesssee/cdx-wrapper",
+      "description": "Personal Codex multi-account control plane wrapper",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "foryourhealth111-pixel/hermes-codex-proxy-cache-compat",
+      "url": "https://github.com/foryourhealth111-pixel/hermes-codex-proxy-cache-compat",
+      "description": "Standalone patch bundle for improving Hermes prompt-cache hits on custom /codex Responses gateways",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "FullToppingBunBo/codex-account-switcher",
+      "url": "https://github.com/FullToppingBunBo/codex-account-switcher",
+      "description": "Safely keep, switch, and isolate multiple local Codex authentication profiles",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "fusae/Codex-Switch",
+      "url": "https://github.com/fusae/Codex-Switch",
+      "description": "Save and switch between multiple Codex account login states locally.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "gaboe/oc-codex-multi-account",
+      "url": "https://github.com/gaboe/oc-codex-multi-account",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "GitBiao/codex-switcher",
+      "url": "https://github.com/GitBiao/codex-switcher",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Glour/openai-codex-oauth-proxy",
+      "url": "https://github.com/Glour/openai-codex-oauth-proxy",
+      "description": "A local OpenAI Responses API proxy backed by ChatGPT Codex OAuth.",
+      "searches": [
+        "search-oauth-proxy"
+      ]
+    },
+    {
+      "repository": "gstranded/codex-switch",
+      "url": "https://github.com/gstranded/codex-switch",
+      "description": "Codex provider switcher with automatic local history sync",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "gweid/codex-switch",
+      "url": "https://github.com/gweid/codex-switch",
+      "description": "codex 多中转站切换",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "h1n054ur/gpt-codex-proxy",
+      "url": "https://github.com/h1n054ur/gpt-codex-proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "hairbui76/cx-switch",
+      "url": "https://github.com/hairbui76/cx-switch",
+      "description": "Codex Multi-Account Switcher",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "hanzoskill/codex-account-switcher",
+      "url": "https://github.com/hanzoskill/codex-account-switcher",
+      "description": "Hanzo Bot skill: codex-account-switcher (by odrobnik)",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "heeeete/CodexSwitch",
+      "url": "https://github.com/heeeete/CodexSwitch",
+      "description": "여러 ChatGPT/Codex 계정을 메뉴바에서 확인하고 전환하는 비공식 macOS 앱",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Henry-Jessie/codex-switch",
+      "url": "https://github.com/Henry-Jessie/codex-switch",
+      "description": "Manage multiple OpenAI Codex CLI accounts — switch, check quota, validate and refresh tokens",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "hloolx/codex-proxy-switcher-win",
+      "url": "https://github.com/hloolx/codex-proxy-switcher-win",
+      "description": "Windows launcher for OpenAI Codex Desktop with native/VPN proxy startup modes.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "HoBeedzc/codex-switch",
+      "url": "https://github.com/HoBeedzc/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "HodlHook/CodexAccountSwitcher",
+      "url": "https://github.com/HodlHook/CodexAccountSwitcher",
+      "description": "Terminal UI for switching between multiple Codex ChatGPT accounts by saving and restoring local auth profiles. No passwords, no browser login loops after setup.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "hsjx945/codex-account-switcher",
+      "url": "https://github.com/hsjx945/codex-account-switcher",
+      "description": "Native macOS Codex account switcher · 原生 macOS Codex 多账号切换工具。Maintained macOS fork with bilingual docs, local usage tracking and safe account handoff.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "hyq1995/Codex-Bridge-Deepseek",
+      "url": "https://github.com/hyq1995/Codex-Bridge-Deepseek",
+      "description": "Codex proxy for DeepSeek & MiniMax - Responses API to Chat Completions translation with reasoning_content support",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "icebear0828/codex-proxy",
+      "url": "https://github.com/icebear0828/codex-proxy",
+      "description": "OpenAI-compatible proxy for ChatGPT Codex Responses API",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "IMC93Labs/CodexAccountSwitcher-Releases",
+      "url": "https://github.com/IMC93Labs/CodexAccountSwitcher-Releases",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "insightflo/chatgpt-codex-proxy",
+      "url": "https://github.com/insightflo/chatgpt-codex-proxy",
+      "description": "An Anthropic-compatible /v1/messages proxy that lets Claude Code use the ChatGPT Codex backend.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "irisxc4/codex-multi-account-router",
+      "url": "https://github.com/irisxc4/codex-multi-account-router",
+      "description": "Windows Codex multi-account router with official OAuth, quota-aware routing, safe thread continuation, and an installable Codex Skill.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "irons163/codex-pool-manager",
+      "url": "https://github.com/irons163/codex-pool-manager",
+      "description": "A macOS app for managing multiple Codex accounts, switching active auth quickly, and tracking usage in one dashboard.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "J1aDong/codexProxy",
+      "url": "https://github.com/J1aDong/codexProxy",
+      "description": "codexProxy供类似claude code调用",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "james-6-23/codexProxy-rs",
+      "url": "https://github.com/james-6-23/codexProxy-rs",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "jeck00119/claude-codex-switcher",
+      "url": "https://github.com/jeck00119/claude-codex-switcher",
+      "description": "Switch between multiple Claude Code & OpenAI Codex accounts instantly. Encrypted, cross-platform.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "jesse-merhi/cxa",
+      "url": "https://github.com/jesse-merhi/cxa",
+      "description": "Fast, crash-safe Codex account switching and quota bridge",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "JiafengtTang/codex-proxy-manager",
+      "url": "https://github.com/JiafengtTang/codex-proxy-manager",
+      "description": "Desktop manager for Codex SSH reverse proxy and remote control: multi-server tunnels, OpenAI/DeepSeek model switching, conversation backup",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "jieguangzhou/CodexSwitcher",
+      "url": "https://github.com/jieguangzhou/CodexSwitcher",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "JJLiebig/codex-account-switcher",
+      "url": "https://github.com/JJLiebig/codex-account-switcher",
+      "description": "Simple TUI/Tray app to switch codex accounts",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "joe-speedboat/ansible.openhands_codex_proxy",
+      "url": "https://github.com/joe-speedboat/ansible.openhands_codex_proxy",
+      "description": "Install OpenHands with codex Proxy in between",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "karem505/claudecodex",
+      "url": "https://github.com/karem505/claudecodex",
+      "description": "Use Claude Code's UI with OpenAI GPT-5.6 (Sol/Terra/Luna) as the engine — powered by your ChatGPT Plus/Pro subscription via a local Codex proxy. One-line install; plain claude stays untouched.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "ke4nec/CodexSwitch",
+      "url": "https://github.com/ke4nec/CodexSwitch",
+      "description": "Cross-platform desktop app for switching Codex accounts and OpenAI API profiles on Windows, macOS, and Linux.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "khanh21011999/codex-switch",
+      "url": "https://github.com/khanh21011999/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "korsun009/codex-account-switcher",
+      "url": "https://github.com/korsun009/codex-account-switcher",
+      "description": "Open-source Windows app to switch multiple OpenAI Codex accounts, view 5-hour and weekly limits, encrypt profiles with DPAPI, and control Codex or V2RayTun from Telegram.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "kuangre123/codex-switch",
+      "url": "https://github.com/kuangre123/codex-switch",
+      "description": "Codex Switch 是一个 macOS 工具，一键配置 Codex 的自定义 API，同时保留官方 OpenAI 登录。保存后 Codex 的模型选择器里只会出现你选的那个 provider 的模型。也支持 Claude Code 的官方 / 自定义 API 切换。Codex Switch is a lightweight helper for configuring multiple coding-agent API routes. For Codex, it keeps Official OpenAI and a custom API provider configured in parallel, registers the custom model in Codex's mod",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "kyoo-147/codex_proxy_for_all_models",
+      "url": "https://github.com/kyoo-147/codex_proxy_for_all_models",
+      "description": "Lightweight OpenAI-compatible proxy that lets Codex route Responses API traffic to NVIDIA Build, Ollama, LM Studio, vLLM, SGLang, OpenRouter, DeepSeek, and other chat/completions backends.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "Kyure-A/agent-shell-codex-switcher",
+      "url": "https://github.com/Kyure-A/agent-shell-codex-switcher",
+      "description": "Codex account switcher integrated with Agent Shell",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "Lampese/codex-switcher",
+      "url": "https://github.com/Lampese/codex-switcher",
+      "description": "A Desktop Application for Managing Multiple OpenAI Codex CLI Accounts",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "linlang781/CodexSwitcher",
+      "url": "https://github.com/linlang781/CodexSwitcher",
+      "description": "这是一款面向 Codex 的配置与会话管理工具（仅Windows）：可检测 codex/opencode路径与版本, 提供config.toml与opencode配置管理；支持多账号/中转站一键切换与接口可用性诊断；同时提供会话索引与详情查看、OR/AND关键词检索 （含深度搜索、进度与取消）、JSON/Markdown 导出与清理，并支持右键继续 Codex CLI 会话；还可同步展示 OpenAI 官网状态并按异常着色。",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "liumingshuo77-cmyk/codex-naiwa",
+      "url": "https://github.com/liumingshuo77-cmyk/codex-naiwa",
+      "description": "A minimal Windows Codex account switcher with an optional Naifrog desktop pet.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "liumingshuo77-cmyk/codex-proxy-vscode",
+      "url": "https://github.com/liumingshuo77-cmyk/codex-proxy-vscode",
+      "description": "VSCode Remote-SSH 扩展:让远程服务器通过本地 VPN 使用 OpenAI codex(自动端口转发/终端代理注入/连通测试,附零依赖本地代理)",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "liuzhao1225/codex-account-switcher",
+      "url": "https://github.com/liuzhao1225/codex-account-switcher",
+      "description": "Native Codex account switcher for macOS and Windows. Add accounts once, check usage, and confirm each switch. One release includes both downloads.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "ljdstechva/codex-account-switcher",
+      "url": "https://github.com/ljdstechva/codex-account-switcher",
+      "description": "Secure Windows CLI for switching between locally authorized Codex accounts.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "lonestill/codex-account-switcher",
+      "url": "https://github.com/lonestill/codex-account-switcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "lordydord/Codex-Account-Switcher",
+      "url": "https://github.com/lordydord/Codex-Account-Switcher",
+      "description": "Native macOS menu-bar companion for switching ChatGPT accounts, tracking Codex usage, reset credits, and verified automatic failover.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "Lucasmantou/codex-proxy",
+      "url": "https://github.com/Lucasmantou/codex-proxy",
+      "description": "🚀 Let Codex use any LLM - cost down 30-50x. Support DeepSeek, Zhipu GLM, and any OpenAI-compatible API.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "luckydonald/ai-usage",
+      "url": "https://github.com/luckydonald/ai-usage",
+      "description": "Periodically saves your AI client's quota (claude, codex, …; multi-account support) and displays them in a neat diagram to see your usage over time. Allows file based sync (i.e. `git`) to merge multiple computers etc.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "LudwigAJ/codex-proxy",
+      "url": "https://github.com/LudwigAJ/codex-proxy",
+      "description": "lightweight proxy server written in Rust that enables authentication with OpenAI OAuth to expose an endpoint for tools that use codex API",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "lvjiawei369/CodexSwitch",
+      "url": "https://github.com/lvjiawei369/CodexSwitch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "LYH105/CodexAccountSwitcher",
+      "url": "https://github.com/LYH105/CodexAccountSwitcher",
+      "description": "Windows WPF tool for managing and switching Codex account slots",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "maanimeisam/useclaudeproxy",
+      "url": "https://github.com/maanimeisam/useclaudeproxy",
+      "description": "Authenticates your provider (Hermes, OpenCode, or any custom OpenAI-compatible API) and runs CLIProxyAPI as a local Claude/OpenAI/Gemini/Codex proxy.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "madmax24-ubuntu/codex-proxy-llama.cpp",
+      "url": "https://github.com/madmax24-ubuntu/codex-proxy-llama.cpp",
+      "description": "Universal Codex Responses compatibility proxy for llama.cpp with native apply_patch and automatic setup",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "mahirozdin/Codex-Multi-Account-Manager",
+      "url": "https://github.com/mahirozdin/Codex-Multi-Account-Manager",
+      "description": "Multi-account switcher for Codex App + Codex CLI with a clean web UI: manage accounts, auto-import current auth.json, monitor 5h/weekly limit windows, and activate the right account in seconds.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "Mamikami/CodexTools",
+      "url": "https://github.com/Mamikami/CodexTools",
+      "description": "Codex Multi-Account Manager & Dashboard",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "Mark7766/codex-switch",
+      "url": "https://github.com/Mark7766/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Masenko1999/codex-account-switcher",
+      "url": "https://github.com/Masenko1999/codex-account-switcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "MaximilianMauroner/codex-acc-sw",
+      "url": "https://github.com/MaximilianMauroner/codex-acc-sw",
+      "description": "Codex Multi Account Switcher",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "mehdic/codex-proxy",
+      "url": "https://github.com/mehdic/codex-proxy",
+      "description": "OpenAI-compatible local proxy for Codex app-server / Codex CLI with Codex-owned auth",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "mickyyy68/codex-account-switcher",
+      "url": "https://github.com/mickyyy68/codex-account-switcher",
+      "description": "Easy way to switch Codex CLI accounts",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "midnight-roti/codex-account-switcher",
+      "url": "https://github.com/midnight-roti/codex-account-switcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "mikeangelocasono/codex-multi-account",
+      "url": "https://github.com/mikeangelocasono/codex-multi-account",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "mileson/CodexSwitcher",
+      "url": "https://github.com/mileson/CodexSwitcher",
+      "description": "Fast switching and quota inspection for multiple Codex accounts.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "minerva32/codex-multi-account-switch",
+      "url": "https://github.com/minerva32/codex-multi-account-switch",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "mingisrookie/codex-switch",
+      "url": "https://github.com/mingisrookie/codex-switch",
+      "description": "Windows 桌面工具：在 ChatGPT 官方账号与自有 API 间切换，管理本机会话、备份与诊断。",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "minikomi/chatgpt-codex-proxy",
+      "url": "https://github.com/minikomi/chatgpt-codex-proxy",
+      "description": "Proxy for codex backend to allow conversations API tools (EG. gptel)",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "minniexcode/codex-switch",
+      "url": "https://github.com/minniexcode/codex-switch",
+      "description": "codex-switch is a CLI-first, local-first, security-by-default, AI-friendly codex provider/profile switching tool.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Mint-green/codex-proxy",
+      "url": "https://github.com/Mint-green/codex-proxy",
+      "description": "Codex Proxy，OpenAI Responses API ↔ Chat Completions API 协议转换代理，支持任意兼容 OpenAI Chat API 的上游厂商（DeepSeek、MiniMax 等），附带流量可视化面板。",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "MohamedFuad16/Codex-Acc-Switcher",
+      "url": "https://github.com/MohamedFuad16/Codex-Acc-Switcher",
+      "description": "Codex account switching tool",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "MortalImmortality/CodexProxy",
+      "url": "https://github.com/MortalImmortality/CodexProxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "MrKGhasemi/codex-multi-account-shared-history",
+      "url": "https://github.com/MrKGhasemi/codex-multi-account-shared-history",
+      "description": "Use multiple ChatGPT accounts with Codex CLI on the same machine",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "MrWynn/codex-proxy-launcher",
+      "url": "https://github.com/MrWynn/codex-proxy-launcher",
+      "description": "带代理环境变量启动 Codex Desktop",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "mu-2025/codex-proxy-macos",
+      "url": "https://github.com/mu-2025/codex-proxy-macos",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "muyuzhao/codex-account-switcher",
+      "url": "https://github.com/muyuzhao/codex-account-switcher",
+      "description": "Local Codex desktop account switching utility",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "muzahidulislamhadi/codex-multi-account",
+      "url": "https://github.com/muzahidulislamhadi/codex-multi-account",
+      "description": "• A reversible multi-account profile wrapper for the Codex CLI. It keeps the official Codex binary untouched,   isolates auth/state/cache/logs per account, shares sessions safely, supports default and named profiles, and   restores original single-account behavior with a clean rollback script.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "mvasilyev/codex-proxy",
+      "url": "https://github.com/mvasilyev/codex-proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "n1s01/CodexSwitcher",
+      "url": "https://github.com/n1s01/CodexSwitcher",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "naveenshaji/codex-account-switcher-releases",
+      "url": "https://github.com/naveenshaji/codex-account-switcher-releases",
+      "description": "Public Sparkle appcast and release assets for Codex Account Switcher",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "nayuyyyu/nayuyyyu",
+      "url": "https://github.com/nayuyyyu/nayuyyyu",
+      "description": "OpenAI-compatible local API for ChatGPT Codex — multi-account proxy, FastAPI, web dashboard, Playwright automation (macOS). 本地 Codex API 管理器。",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "nerd-coder/sango-app",
+      "url": "https://github.com/nerd-coder/sango-app",
+      "description": "🪸 Usage tracker and codex account switcher",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "odrobnik/codex-account-switcher-skill",
+      "url": "https://github.com/odrobnik/codex-account-switcher-skill",
+      "description": "OpenClaw skill: Codex account switcher",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "Oleks-Y/cc-codex-oauth-proxy",
+      "url": "https://github.com/Oleks-Y/cc-codex-oauth-proxy",
+      "description": "",
+      "searches": [
+        "search-oauth-proxy"
+      ]
+    },
+    {
+      "repository": "OzlevyQ/codex-switchboard",
+      "url": "https://github.com/OzlevyQ/codex-switchboard",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "pengshengege/CodexAccountSwitcher",
+      "url": "https://github.com/pengshengege/CodexAccountSwitcher",
+      "description": "A native macOS app for securely switching Codex accounts and monitoring usage limits.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "pepsipu/cx",
+      "url": "https://github.com/pepsipu/cx",
+      "description": "Simple Codex multi-accounting wrapper",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "piperhex/codex-switch",
+      "url": "https://github.com/piperhex/codex-switch",
+      "description": "codex switch & Codex GUI & codex mobile & chatgpt codex & codex relay & cc switch & cockpit-tools & codex skin & codexplusplus & CSwitch",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "pynickle/codex-switcher",
+      "url": "https://github.com/pynickle/codex-switcher",
+      "description": "⚡cxs — Quickly switch Codex CLI providers from your terminal.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Rain-Of-Stars/Codex-Switch-Tauri2",
+      "url": "https://github.com/Rain-Of-Stars/Codex-Switch-Tauri2",
+      "description": "在 Windows 上管理多套 Codex账号或api配置，一键切换至 Windows 或 WSL 目标，切换前自动备份、随时可恢复，内置连接测试、模板编辑与 session 迁移。",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "redman3721/codex-proxy",
+      "url": "https://github.com/redman3721/codex-proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "rmqg/codex-multi-account",
+      "url": "https://github.com/rmqg/codex-multi-account",
+      "description": "Small account-switching wrappers for the OpenAI Codex CLI",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "rokartur/opencode-enhancer",
+      "url": "https://github.com/rokartur/opencode-enhancer",
+      "description": "OpenCode plugin with multi-auth and automatic Codex account switching and usage tracking",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "sambegui/claudecodex-podman",
+      "url": "https://github.com/sambegui/claudecodex-podman",
+      "description": "Rootless Podman harness for Claude Code via a local Codex OAuth proxy, with pinned dependencies and safe public defaults.",
+      "searches": [
+        "search-oauth-proxy"
+      ]
+    },
+    {
+      "repository": "ScWen7/CodexSwitch",
+      "url": "https://github.com/ScWen7/CodexSwitch",
+      "description": "A local-only Codex auth switcher that keeps sessions shared",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "senoldogann/codex-switcher",
+      "url": "https://github.com/senoldogann/codex-switcher",
+      "description": "A macOS menu bar app that manages multiple OpenAI Codex accounts and automatically switches between them when usage limits are reached — no manual login/logout needed.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "seungpyoson/second-codex",
+      "url": "https://github.com/seungpyoson/second-codex",
+      "description": "Second Codex account switch wrapper",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "seven332/codex-switch",
+      "url": "https://github.com/seven332/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "shayna-ilya/codex-proxy",
+      "url": "https://github.com/shayna-ilya/codex-proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "shixiansi/codex-switch",
+      "url": "https://github.com/shixiansi/codex-switch",
+      "description": "能够管理多个api,一键切换使用不同的api",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Sirfetch-d/codex-proxy",
+      "url": "https://github.com/Sirfetch-d/codex-proxy",
+      "description": "Launch macOS Codex app with Clash proxy - no TUN mode needed",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "skyfackr/codex-account-switcher",
+      "url": "https://github.com/skyfackr/codex-account-switcher",
+      "description": "A Python CLI for switching Codex accounts locally.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "Sls0n/codex-account-switcher",
+      "url": "https://github.com/Sls0n/codex-account-switcher",
+      "description": "CLI tool that lets you switch between multiple codex accounts without relogging",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "SoKeiKei/CODEx-SWITCH",
+      "url": "https://github.com/SoKeiKei/CODEx-SWITCH",
+      "description": "A lightweight, cross-platform CLI for managing and switching multiple Codex accounts.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "SoMa-vi/CodexAccountSwitcher",
+      "url": "https://github.com/SoMa-vi/CodexAccountSwitcher",
+      "description": "Lightweight manual account switcher for the Codex desktop app.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "soulforger0/cc-codex-proxy",
+      "url": "https://github.com/soulforger0/cc-codex-proxy",
+      "description": "Native macOS Claude Code proxy for ChatGPT Codex and DeepSeek",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "STEVENTAN100/codex-proxy",
+      "url": "https://github.com/STEVENTAN100/codex-proxy",
+      "description": "cc switch codex第三方反代，去除image工具",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "Sube-py/Codex-Switch-Plus",
+      "url": "https://github.com/Sube-py/Codex-Switch-Plus",
+      "description": "A desktop control panel for Codex local configuration and policy workflow.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "SuguruOoki/ccdirenv",
+      "url": "https://github.com/SuguruOoki/ccdirenv",
+      "description": "direnv-style automatic Claude Code & Codex account switching",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "swi-parth-ft/codex-switcher",
+      "url": "https://github.com/swi-parth-ft/codex-switcher",
+      "description": "macOS menu bar app for switching between isolated Codex profiles",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "swjybky/codexProxy",
+      "url": "https://github.com/swjybky/codexProxy",
+      "description": "专门用于codex的代理软件",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "sylearn/AIUsage",
+      "url": "https://github.com/sylearn/AIUsage",
+      "description": "One dashboard to manage all your AI subscriptions — track quotas, costs, accounts, Claude Code proxy, and Codex proxy in one place.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "taogezhizun/codex-accounts-mac",
+      "url": "https://github.com/taogezhizun/codex-accounts-mac",
+      "description": "Codex Switcher — a native macOS menu bar app for switching Codex accounts, checking remaining usage, and automatic usage refresh. Free and open source.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "Te3-j/Codex-Switch",
+      "url": "https://github.com/Te3-j/Codex-Switch",
+      "description": "Windows account switcher for the Codex desktop app.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "teal0range/codex-proxy-kit",
+      "url": "https://github.com/teal0range/codex-proxy-kit",
+      "description": "codex-proxy-kit",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "TheBeems/hermes-hindsight-codex-sidecar",
+      "url": "https://github.com/TheBeems/hermes-hindsight-codex-sidecar",
+      "description": "Standalone loopback Hindsight sidecar using Hermes Codex OAuth proxy",
+      "searches": [
+        "search-oauth-proxy"
+      ]
+    },
+    {
+      "repository": "TheHeroRabbit/CodexAccountSwitcher",
+      "url": "https://github.com/TheHeroRabbit/CodexAccountSwitcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "TheHubOfGit/Codex-Account-Switcher",
+      "url": "https://github.com/TheHubOfGit/Codex-Account-Switcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "theRizwan/llm7-codex-proxy",
+      "url": "https://github.com/theRizwan/llm7-codex-proxy",
+      "description": "Python proxy that lets the Codex app talk to LLM7 through an OpenAI-compatible local endpoint. Translates Responses API requests into chat completions, preserves tool definitions, and streams function-call argument events back to the client.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "thezillo/codex-proxy",
+      "url": "https://github.com/thezillo/codex-proxy",
+      "description": "OpenAI-compatible proxy for the Codex (ChatGPT subscription) Responses API",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "TinyTinyWood/CodexProxyLauncher",
+      "url": "https://github.com/TinyTinyWood/CodexProxyLauncher",
+      "description": "A small native Windows launcher for starting the Codex desktop app with proxy environment variables.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "toBeUrself/gpt-switch",
+      "url": "https://github.com/toBeUrself/gpt-switch",
+      "description": "A simple Codex account switcher",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "toustifer/codex-switch",
+      "url": "https://github.com/toustifer/codex-switch",
+      "description": "Instantly switch between ChatGPT accounts and API providers in Codex without losing your local session history.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "trsommer/codexAccountSwitcher",
+      "url": "https://github.com/trsommer/codexAccountSwitcher",
+      "description": "",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "tutouguai1933/codex-multi-account",
+      "url": "https://github.com/tutouguai1933/codex-multi-account",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "uk-hot/cx",
+      "url": "https://github.com/uk-hot/cx",
+      "description": "Codex multi-account provider sync CLI",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "unk/codex-switch",
+      "url": "https://github.com/unk/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "unkdevv/codex-switcher",
+      "url": "https://github.com/unkdevv/codex-switcher",
+      "description": "Switch between multiple OpenAI Codex accounts on Windows with one click, no re-login. WinUI 3 / .NET 10, encrypted DPAPI vault, clean-session OAuth login, and a built-in 2FA (TOTP) code generator.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "unluckyjori/Codex-Proxy-Server",
+      "url": "https://github.com/unluckyjori/Codex-Proxy-Server",
+      "description": "A proxy server that extracts the auth out of codex to a local server that can be accessed with a api.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "urays/codex-auth",
+      "url": "https://github.com/urays/codex-auth",
+      "description": "Lightweight & full‑featured Bash for Codex multi‑accounts.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "VallierDev/codex-switcher",
+      "url": "https://github.com/VallierDev/codex-switcher",
+      "description": "Codex CLI / Codex App 多账号桌面工具：账号管理、配额观察、本地代理、无损自动切号、中转站、Coding Plan 接入；限额时自动换号/切中转/接 GLM 或 MiMo 并重发。 Desktop switcher for Codex CLI/App accounts, relay endpoints, GLM/MiMo Coding Plan, and lossless proxy retries.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "VBenevides/codex-multi-account",
+      "url": "https://github.com/VBenevides/codex-multi-account",
+      "description": "VSCode extension for switching account and tracking usage per account and per project",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "vyctorbrzezowski/codex-switchboard",
+      "url": "https://github.com/vyctorbrzezowski/codex-switchboard",
+      "description": "Local-first macOS menu bar app for OpenAI Codex quota tracking, multi-account switching, and workspace usage visibility.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "wannanbigpig/codex-accounts-manager",
+      "url": "https://github.com/wannanbigpig/codex-accounts-manager",
+      "description": "用于在 VS Code 中管理多个 Codex 账号，切换 auth.json，跟踪配额用量，并查看 Codex 配额仪表盘的扩展。VS Code extension for managing multiple Codex accounts, switching auth.json, tracking quota usage, and monitoring a Codex quota dashboard.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "wen495033653/codex-switch",
+      "url": "https://github.com/wen495033653/codex-switch",
+      "description": "Desktop tool for managing and switching Codex accounts and API mode.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "wenjimods/Hermes-Codex-Multi-Account",
+      "url": "https://github.com/wenjimods/Hermes-Codex-Multi-Account",
+      "description": "Unofficial Hermes Desktop plugin for native Codex OAuth multi-account quota display and default-account selection.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "William-WANG02/remote-codex-proxy-guide",
+      "url": "https://github.com/William-WANG02/remote-codex-proxy-guide",
+      "description": "远程服务器在 Cursor / VSCode 中使用 Codex 配置指南",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "Winds-AI/codex-multi-account-setup",
+      "url": "https://github.com/Winds-AI/codex-multi-account-setup",
+      "description": "",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "windycn/WinCodexBar",
+      "url": "https://github.com/windycn/WinCodexBar",
+      "description": "Windows Codex 多账号额度、聚合路由、Token 活动与唤醒工具 / Windows tray workspace for Codex multi-account quota, aggregate routing, token activity, and keep-awake.",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "wishworldbetter/codex-switch",
+      "url": "https://github.com/wishworldbetter/codex-switch",
+      "description": "A local Macos toolbar to switch and manage Codex accounts",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "WoozyMasta/codex-switch",
+      "url": "https://github.com/WoozyMasta/codex-switch",
+      "description": "Codex Switch is a VS Code extension that manages multiple Codex accounts and lets you switch between them from the status bar",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "wowyuarm/codex-proxy",
+      "url": "https://github.com/wowyuarm/codex-proxy",
+      "description": "Local proxy that exposes ChatGPT Codex models as an OpenAI-compatible API, using your ChatGPT Plus/Pro subscription quota.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "wweggplant/codex-switch",
+      "url": "https://github.com/wweggplant/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "wxt2rr/codex-switcher",
+      "url": "https://github.com/wxt2rr/codex-switcher",
+      "description": "codex-switcher 是一个面向 Codex CLI 与 Codex App 的轻量账号管理、多开工具",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "xblanc33/CodexProxy",
+      "url": "https://github.com/xblanc33/CodexProxy",
+      "description": "A tiny Node/Express proxy that forwards OpenAI‑compatible API requests while writing rich NDJSON logs for easy analysis. It supports standard JSON and streaming (SSE) responses and is handy for tracing prompts, parameters, and tool/function calls.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "xeon-lloyd/codex-account-switcher",
+      "url": "https://github.com/xeon-lloyd/codex-account-switcher",
+      "description": "Codex Account Switcher - To use multiple codex accounts in Codex CLI and Codex app with one click",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "xiusmo/codex-accounts",
+      "url": "https://github.com/xiusmo/codex-accounts",
+      "description": "macOS menu bar Codex account switcher",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "xjoker/codex-switch",
+      "url": "https://github.com/xjoker/codex-switch",
+      "description": "Multi-account profile manager for OpenAI Codex CLI with usage dashboard and interactive TUI.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "XxxXTeam/codex-proxy",
+      "url": "https://github.com/XxxXTeam/codex-proxy",
+      "description": "Codex API 代理服务，提供 OpenAI / Claude 多协议兼容接口  用户交流群 : 1081291958",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "YOBAK2033/CodexSwitch",
+      "url": "https://github.com/YOBAK2033/CodexSwitch",
+      "description": "Unofficial local multi-account switcher and quota display for the Windows ChatGPT/Codex desktop app.",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "youdiansmallshuai/codex-accounts",
+      "url": "https://github.com/youdiansmallshuai/codex-accounts",
+      "description": "Codex multi-account switcher for terminal workflows",
+      "searches": [
+        "search-multi-account"
+      ]
+    },
+    {
+      "repository": "Yuch3nE/codex-switch",
+      "url": "https://github.com/Yuch3nE/codex-switch",
+      "description": "codex account switch",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "yukaige/codex-proxy-launcher",
+      "url": "https://github.com/yukaige/codex-proxy-launcher",
+      "description": "通过明确的 Chromium 代理参数启动 macOS Codex/ChatGPT 桌面客户端。",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "yukimaru77/codex-switch",
+      "url": "https://github.com/yukimaru77/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "yzs15/codex_proxy",
+      "url": "https://github.com/yzs15/codex_proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "zaharenok/codex-proxy",
+      "url": "https://github.com/zaharenok/codex-proxy",
+      "description": "",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "zendext/codex-oauth-proxy",
+      "url": "https://github.com/zendext/codex-oauth-proxy",
+      "description": "Local Codex OAuth-backed proxy for Codex CLI and Responses API clients, with token refresh, managed API keys, usage tracking, and Docker support.",
+      "searches": [
+        "search-oauth-proxy"
+      ]
+    },
+    {
+      "repository": "zeyuShawn/codex-proxy",
+      "url": "https://github.com/zeyuShawn/codex-proxy",
+      "description": "Streaming proxy: OpenAI Codex Responses API <-> Anthropic Messages API. Lets Codex CLI use MiMo via CCR.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "zhanghuan0628/CodexSwitcher",
+      "url": "https://github.com/zhanghuan0628/CodexSwitcher",
+      "description": "codex 账号管理app",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "zhenyangLab/Codex-Connectivity",
+      "url": "https://github.com/zhenyangLab/Codex-Connectivity",
+      "description": "Update-safe, process-scoped Windows Codex proxy skill that preserves task history, prevents reconnect loops, and stabilizes mobile Remote Control",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "zinzv/codex-switch",
+      "url": "https://github.com/zinzv/codex-switch",
+      "description": "codex account switch",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "ZiryaNoov/codex-proxy",
+      "url": "https://github.com/ZiryaNoov/codex-proxy",
+      "description": "🚀 Lightweight LLM gateway — use any AI provider (Z.AI, Groq, Ollama, Anthropic, Gemini...) with Codex CLI, Cursor, or any OpenAI-compatible tool. Smart routing, cost tracking, JWT auth, document pipeline.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "znary/codex-switcher",
+      "url": "https://github.com/znary/codex-switcher",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "zongmin-yu/codex-switch",
+      "url": "https://github.com/zongmin-yu/codex-switch",
+      "description": "",
+      "searches": [
+        "search-switch"
+      ]
+    },
+    {
+      "repository": "ZOONGG/codex-swap-account",
+      "url": "https://github.com/ZOONGG/codex-swap-account",
+      "description": "Windows Codex account switcher with an in-app overlay, tray controls, hotkeys, shared chats and safe auth.json rollback.",
+      "searches": [
+        "search-account-switcher"
+      ]
+    },
+    {
+      "repository": "zunyiqingfeng-code/claude-codex-proxy-stack",
+      "url": "https://github.com/zunyiqingfeng-code/claude-codex-proxy-stack",
+      "description": "Local proxy stack for connecting coding-agent CLIs to cheaper backends: protocol translation, tool calls, context, and Windows edge cases.",
+      "searches": [
+        "search-proxy"
+      ]
+    },
+    {
+      "repository": "zyycn/codex-proxy-rs",
+      "url": "https://github.com/zyycn/codex-proxy-rs",
+      "description": "基于 Rust 的自托管 Codex 多账号透明代理网关",
+      "searches": [
+        "search-proxy"
+      ]
+    }
+  ]
+}

@@ -47,8 +47,8 @@ contributions are the most useful right now.
 
 ## Non-negotiables
 
-- No HTTP client or any network dependency may enter the graph. CI enforces
-  this.
+- Keep the existing lightweight proxy transport (`ureq` with rustls and bundled
+  roots). CI rejects heavy async runtimes, HTTP frameworks and system-TLS bindings.
 - No command or MCP tool may print a credential, and none may switch accounts
   automatically. swapdex is a switcher, not a rotator.
 - Do not add an `--auto`/`--next`/`--when-rate-limited` flag or a token-export
@@ -77,6 +77,16 @@ crates.io; a successful GitHub release alone does not update those installers.
    executable found by `command -v swapdex`. Running proxies keep their old
    executable until restarted; verify their version markers after applying
    the update.
+8. Test the installed native executable, separately from the source build:
+   `python3 scripts/verify-installed-account-routing.py --swapdex /absolute/path/to/native/swapdex`.
+   This uses temporary fake accounts and loopback servers to verify generated
+   launcher behavior and next-request account switching over one connection.
+   It also accepts a POST at a fake provider and resets the connection before
+   responding, verifying that neither tool submits that accepted turn again.
+   Bodyless GET requests must still recover from the same connection failure.
+   Also run `scripts/verify-codex-session-resume.py` with the installed native
+   Swapdex and stock Codex paths to check native session listing/resume and
+   WebSocket-to-HTTP recovery. Both scripts clean up their test processes.
 
 A failed publication remains an incomplete release. Do not reuse an already
 published version or replace an old tag to repair a missing channel.

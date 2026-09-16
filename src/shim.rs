@@ -8,6 +8,10 @@ use crate::paths::Paths;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Private `proxy --ensure` outcome meaning that Rust verified an intentional
+/// or unmanaged direct route. Generated shims accept it only with empty stdout.
+pub(crate) const PROXY_PASSTHROUGH_EXIT_STATUS: i32 = 3;
+
 /// Where swapdex installs the shim: `<store_dir>/bin/claude`.
 pub fn shim_path(paths: &Paths) -> PathBuf {
     shim_path_for(paths, "claude-code")
@@ -38,6 +42,47 @@ fn sh_quote(p: &Path) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Validate the machine-readable result of `proxy --ensure` inside a generated
+/// POSIX shell shim. Numeric comparison happens only after digit and length
+/// checks, so arbitrarily long output cannot overflow a shell integer parser.
+fn proxy_result_script(tool: &str) -> String {
+    format!(
+        r#"sx_proxy_status=$?
+sx_use_proxy=no
+sx_proxy_bad=no
+if [ "$sx_proxy_status" -eq {passthrough} ] && [ -z "$port" ]; then
+    :
+elif [ "$sx_proxy_status" -ne 0 ]; then
+    sx_proxy_bad=yes
+else
+    case "$port" in
+        ''|*[!0-9]*) sx_proxy_bad=yes ;;
+        *)
+            sx_port=$port
+            while [ "${{sx_port#0}}" != "$sx_port" ]; do sx_port=${{sx_port#0}}; done
+            case "$sx_port" in
+                ''|??????*) sx_proxy_bad=yes ;;
+                *)
+                    if [ "$sx_port" -gt 65535 ]; then
+                        sx_proxy_bad=yes
+                    else
+                        port=$sx_port
+                        sx_use_proxy=yes
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+fi
+if [ "$sx_proxy_bad" = yes ]; then
+    printf '%s\n' 'swapdex: managed proxy startup failed; run `swapdex proxy --ensure --tool {tool}` for details.' >&2
+    exit 1
+fi"#,
+        passthrough = PROXY_PASSTHROUGH_EXIT_STATUS,
+        tool = tool,
+    )
+}
+
 /// The shim script body. The default-account pointer only fills in when nothing
 /// has already chosen a config dir: an explicit `CLAUDE_CONFIG_DIR` (what
 /// `swapdex run <account>` sets, or what a user exports by hand) is a decision
@@ -45,10 +90,10 @@ fn sh_quote(p: &Path) -> String {
 ///
 /// It also gets proxy mode for free: the shim asks `swapdex proxy --ensure`,
 /// which prints the port of a running proxy and starts one in the background if
-/// there is none. So mid-session account switching works without the user
-/// launching or exporting anything, and a proxy that cannot start is not an
-/// error - the shim just runs Claude directly.
+/// there is none. Managed startup must succeed with one valid port; only Rust's
+/// private, verified passthrough outcome may launch directly.
 pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String {
+    let proxy_result = proxy_result_script("claude-code").replace('\n', "\n\t");
     format!(
         "#!/bin/sh\n\
          # swapdex claude shim - launch claude in the default account's slot.\n\
@@ -58,15 +103,65 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
          # code exchange and answers with whichever account it already has - so a\n\
          # fresh slot looks signed in as somebody else, or the prompt takes no\n\
          # input at all.\n\
-         sx_login=no\n\
+         # Only documented top-level authentication commands bypass managed\n\
+         # routing. Prompt text and option values can contain words like login.\n\
+         sx_plain=no\n\
+         sx_options=yes\n\
+         sx_skip=\n\
+         sx_command=\n\
+         sx_auth_command=\n\
          for a in \"$@\"; do\n\
-         \tcase \"$a\" in login|/login|logout|/logout|setup-token) sx_login=yes ;; esac\n\
+         \tif [ -n \"$sx_skip\" ]; then\n\
+         \t\tsx_skip=\n\
+         \t\tcontinue\n\
+         \tfi\n\
+         \tif [ \"$sx_command\" = auth ] && [ -z \"$sx_auth_command\" ]; then\n\
+         \t\tsx_auth_command=other\n\
+         \t\tcase \"$a\" in login|logout|status|-h|--help) sx_auth_command=\"$a\" ;; esac\n\
+         \t\tcontinue\n\
+         \tfi\n\
+         \tif [ -n \"$sx_command\" ] && [ \"$sx_command\" != ambiguous ]; then continue; fi\n\
+         \tif [ \"$sx_options\" = no ]; then\n\
+         \t\tsx_command=prompt\n\
+         \t\tcontinue\n\
+         \tfi\n\
+         \tcase \"$a\" in\n\
+         \t\t--) sx_options=no; sx_command=prompt ;;\n\
+         \t\t-h|--help|-v|--version) sx_plain=yes ;;\n\
+         \t\t-p|--print|--print=*|-p?*) sx_command=prompt ;;\n\
+         \t\t-m|--model|--permission-mode|--settings) sx_skip=value ;;\n\
+         \t\t--setting-sources|--plugin-dir|--plugin-url|--cwd) sx_skip=value ;;\n\
+         \t\t--debug-file) sx_skip=value ;;\n\
+         \t\t-m?*|--model=*|--permission-mode=*|--settings=*) ;;\n\
+         \t\t--setting-sources=*|--plugin-dir=*|--plugin-url=*|--cwd=*) ;;\n\
+         \t\t--debug-file=*) ;;\n\
+         \t\t# Optional and variadic values are indistinguishable from a later\n\
+         \t\t# command token, so these forms cannot authorize direct auth.\n\
+         \t\t-d|--debug|--debug=*|-d?*|--mcp-config|--mcp-config=*) sx_command=ambiguous ;;\n\
+         \t\t--verbose) ;;\n\
+         \t\t-*) sx_command=unknown ;;\n\
+         \t\t*) if [ \"$sx_command\" != ambiguous ]; then sx_command=\"$a\"; fi ;;\n\
+         \tesac\n\
          done\n\
-         # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
-         # port); silence and a non-zero status mean \"run without one\".\n\
-         if [ \"$sx_login\" = no ]; then\n\
-         \tport=$({sx} proxy --ensure 2>/dev/null)\n\
-         \tif [ -n \"$port\" ]; then\n\
+         case \"$sx_command:$sx_auth_command\" in\n\
+         \tauth:login|auth:logout|auth:status|auth:-h|auth:--help|setup-token:) sx_plain=yes ;;\n\
+         esac\n\
+         # Match the documented opt-in value 1 for alternate providers. Empty,\n\
+         # 0, and false remain managed by swapdex.\n\
+         if [ -n \"$ANTHROPIC_BASE_URL\" ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_BEDROCK\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_MANTLE\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_VERTEX\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_FOUNDRY\" = 1 ] ||\n\
+         \t[ \"$CLAUDE_CODE_USE_ANTHROPIC_AWS\" = 1 ]; then\n\
+         \tsx_plain=yes\n\
+         fi\n\
+         # Ask swapdex for a live proxy (it starts one if needed and prints one\n\
+         # validated port). Any uncertain managed state stops before Claude.\n\
+         if [ \"$sx_plain\" = no ]; then\n\
+         \tport=$({sx} proxy --ensure --tool claude-code 2>/dev/null)\n\
+         \t{proxy_result}\n\
+         \tif [ \"$sx_use_proxy\" = yes ]; then\n\
          \t\tANTHROPIC_BASE_URL=\"http://127.0.0.1:$port\"\n\
          \t\texport ANTHROPIC_BASE_URL\n\
          \tfi\n\
@@ -82,6 +177,7 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_claude),
+        proxy_result = proxy_result,
     )
 }
 
@@ -90,68 +186,102 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
 /// Codex's own variable and pointer. It never mentions Claude's: one tool's shim
 /// moving the other tool's account is exactly what the per-tool split prevents.
 pub fn codex_shim_script(pointer: &Path, real_codex: &Path, swapdex: &Path) -> String {
-    // The provider name is the one identity Codex prints on /status, and with the
-    // proxy rewriting the bearer, the login inside CODEX_HOME is not the account
-    // being charged. Naming the payer there is the difference between a screen
-    // that says who pays and a screen that says nothing.
-    //
-    // The provider block deliberately carries no `env_key`: that omission is what
-    // makes Codex attach its OWN ChatGPT OAuth bearer and account-id, which is
-    // the pair the proxy rewrites. Naming a key instead would have it send an API
-    // key and there would be nothing to switch.
+    // Provider identity is persisted in Codex rollouts and filters its native
+    // picker. Route the built-in provider by URL instead of creating an
+    // ephemeral provider for each paying account.
+    let proxy_result = proxy_result_script("codex");
     format!(
-        "#!/bin/sh\n\
-         # swapdex codex shim - launch codex in the default account's slot.\n\
-         # Managed by swapdex; re-created by `swapdex shim`.\n\
-         # The provider overrides belong on a run that TALKS to the model. On\n\
-         # `resume` they emptied the session picker: Codex lists the sessions that\n\
-         # match the configured provider, and a conversation held long before\n\
-         # swapdex existed matches none. A sign-in is excluded for its own reason -\n\
-         # the OAuth exchange is between the browser and the real backend, and a\n\
-         # proxy in the middle answers with whichever account it already holds.\n\
-         # Start these empty. The branch below only ever SETS them, so a caller\n\
-         # who exported a variable of the same name would answer for it - and the\n\
-         # override this guard exists to withhold would go on anyway.\n\
-         sx_plain=no\n\
-         port=\n\
-         sx_who=\n\
-         for a in \"$@\"; do\n\
-         \tcase \"$a\" in login|/login|logout|/logout|resume|/resume|history|sessions) sx_plain=yes ;; esac\n\
-         done\n\
-         # Ask swapdex for a live proxy (it starts one if needed and prints the\n\
-         # port); silence means \"run without one\", exactly as before.\n\
-         if [ \"$sx_plain\" = no ]; then\n\
-         \tport=$({sx} proxy --ensure --tool codex 2>/dev/null)\n\
-         \t# Who pays. Codex prints the provider name on /status and nothing\n\
-         \t# else about identity, so the account goes in the one field it shows.\n\
-         \tsx_who=$({sx} serve --tool codex --quiet 2>/dev/null)\n\
-         fi\n\
-         if [ -n \"$port\" ]; then\n\
-         \tsx_id=swapdex\n\
-         \tsx_name=swapdex\n\
-         \tif [ -n \"$sx_who\" ]; then\n\
-         \t\tsx_acct=$(printf '%s' \"${{sx_who%% *}}\" | tr -c 'A-Za-z0-9_-' '-')\n\
-         \t\tif [ -n \"$sx_acct\" ]; then\n\
-         \t\t\tsx_id=\"swapdex-$sx_acct\"\n\
-         \t\tfi\n\
-         \t\tsx_name=\"swapdex: $sx_who\"\n\
-         \tfi\n\
-         \tset -- -c model_provider=\"$sx_id\" \\\n\
-         \t\t-c model_providers.\"$sx_id\".name=\"$sx_name\" \\\n\
-         \t\t-c model_providers.\"$sx_id\".base_url=\"http://127.0.0.1:$port/v1\" \\\n\
-         \t\t-c model_providers.\"$sx_id\".wire_api=responses \"$@\"\n\
-         fi\n\
-         if [ -z \"$CODEX_HOME\" ]; then\n\
-         \tdir=$(cat {ptr} 2>/dev/null)\n\
-         \tif [ -n \"$dir\" ]; then\n\
-         \t\tCODEX_HOME=\"$dir\"\n\
-         \t\texport CODEX_HOME\n\
-         \tfi\n\
-         fi\n\
-         exec {real} \"$@\"\n",
+        r#"#!/bin/sh
+# swapdex codex shim - launch codex in the default account's slot.
+# Managed by swapdex; re-created by `swapdex shim`.
+if [ -z "$CODEX_HOME" ]; then
+    dir=$(cat {ptr} 2>/dev/null)
+    if [ -n "$dir" ]; then
+        CODEX_HOME="$dir"
+        export CODEX_HOME
+    fi
+fi
+# Parse the command separately from option values and prompt text. In
+# particular, `exec login` is a model prompt, not an OAuth operation.
+sx_plain=no
+sx_skip=
+sx_command=
+sx_options=yes
+sx_arg_index=0
+sx_last_config=0
+port=
+sx_explicit_config() {{
+    sx_key=$(printf '%s' "${{1%%=*}}" | tr -d '[:space:]')
+    case "$sx_key" in model_provider|openai_base_url|model_providers.*) return 0 ;; esac
+    return 1
+}}
+for a in "$@"; do
+    sx_arg_index=$((sx_arg_index + 1))
+    if [ "$sx_skip" = config ]; then
+        if sx_explicit_config "$a"; then sx_plain=yes; fi
+        sx_skip=
+        continue
+    fi
+    if [ "$sx_skip" = value ]; then
+        sx_skip=
+        continue
+    fi
+    if [ "$sx_skip" = images ]; then
+        case "$a" in -*) sx_skip= ;; *) continue ;; esac
+    fi
+    [ "$sx_options" = yes ] || continue
+    case "$a" in
+        --) sx_options=no ;;
+        -c|--config) sx_last_config=$sx_arg_index; sx_skip=config ;;
+        --config=*) sx_last_config=$sx_arg_index; if sx_explicit_config "${{a#--config=}}"; then sx_plain=yes; fi ;;
+        -c?*) sx_last_config=$sx_arg_index; if sx_explicit_config "${{a#-c}}"; then sx_plain=yes; fi ;;
+        -p|--profile) sx_skip=value ;;
+        -p?*|--profile=*) ;;
+        --remote|--remote-auth-token-env|--local-provider) sx_plain=yes; sx_skip=value ;;
+        --remote=*|--remote-auth-token-env=*|--local-provider=*|--oss) sx_plain=yes ;;
+        -i|--image) sx_skip=images ;;
+        -C|--cd|-m|--model|-s|--sandbox|-a|--ask-for-approval|--add-dir|--enable|--disable) sx_skip=value ;;
+        -h|--help|-V|--version) sx_plain=yes ;;
+        -*) ;;
+        *)
+            if [ -z "$sx_command" ]; then
+                sx_command="$a"
+                case "$a" in login|logout|completion|mcp|mcp-server|debug|features|apply|help) sx_plain=yes ;; esac
+            fi
+            ;;
+    esac
+done
+if [ "$sx_plain" = no ]; then
+    if ! {sx} repair-codex-sessions --quiet; then
+        printf '%s\n' 'swapdex: session repair was incomplete; run swapdex repair-codex-sessions for details.' >&2
+    fi
+    port=$({sx} proxy --ensure --tool codex 2>/dev/null)
+    {proxy_result}
+    if [ "$sx_use_proxy" = yes ]; then
+        if [ "$sx_last_config" -eq 0 ]; then
+            set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+        else
+            # Codex can discard root -c flags when a subcommand has its own.
+            # Rebuild the argument list so the managed URL has the same scope
+            # as the caller's last real -c, without moving prompt text or --.
+            sx_arg_index=0
+            for sx_arg in "$@"; do
+                if [ "$sx_arg_index" -eq 0 ]; then set --; fi
+                sx_arg_index=$((sx_arg_index + 1))
+                if [ "$sx_arg_index" -eq "$sx_last_config" ]; then
+                    set -- "$@" -c openai_base_url="http://127.0.0.1:$port/v1"
+                fi
+                set -- "$@" "$sx_arg"
+            done
+        fi
+    fi
+fi
+exec {real} "$@"
+"#,
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_codex),
+        proxy_result = proxy_result,
     )
 }
 
@@ -207,9 +337,17 @@ fn is_our_shim(path: &Path) -> bool {
 /// LOOKS set up while `swapdex use` silently does nothing.
 pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
     let path = std::env::var_os("PATH")?;
+    let cwd = std::env::current_dir().ok();
     for dir in std::env::split_paths(&path) {
+        let dir = if dir.is_absolute() {
+            dir
+        } else if let Some(cwd) = &cwd {
+            cwd.join(dir)
+        } else {
+            continue;
+        };
         let cand = dir.join("claude");
-        if cand.is_file() {
+        if is_executable_file(&cand) {
             let ours = is_our_shim(&cand);
             return Some((cand, ours));
         }
@@ -227,16 +365,48 @@ fn find_real_claude(shim_dir: &Path) -> Option<PathBuf> {
 /// The real `bin` on PATH, skipping our own shim dir and any shim we wrote.
 fn find_real(shim_dir: &Path, bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    let cwd = std::env::current_dir().ok();
     for dir in std::env::split_paths(&path) {
+        // PATH entries are resolved by the shell relative to the cwd at lookup
+        // time. A generated shim runs later from arbitrary project folders, so
+        // persist that resolution now. Do not canonicalize it: package managers
+        // deliberately put a stable symlink in PATH in front of versioned files.
+        let dir = if dir.is_absolute() {
+            dir
+        } else if let Some(cwd) = &cwd {
+            cwd.join(dir)
+        } else {
+            continue;
+        };
         if dir == shim_dir {
             continue;
         }
         let cand = dir.join(bin);
-        if cand.is_file() && !is_our_shim(&cand) {
+        if is_executable_file(&cand) && !is_our_shim(&cand) {
             return Some(cand);
         }
     }
     None
+}
+
+/// Match executable lookup rather than mere directory contents. A regular file
+/// without an execute bit does not win PATH and must not be baked into a shim.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Does this profile already put the shim dir on PATH?
@@ -266,6 +436,25 @@ pub enum ShimReach {
 /// Decide between those three from facts the caller has already gathered.
 /// Pure, so the interesting case can be tested without a shell to run in.
 pub fn shim_reach(active: bool, profile_text: Option<&str>, shim_dir: &Path) -> ShimReach {
+    shim_reach_at_home(active, profile_text, shim_dir, dirs::home_dir().as_deref())
+}
+
+/// The same decision using the home supplied by the caller's resolved Paths.
+pub fn shim_reach_for(
+    paths: &Paths,
+    active: bool,
+    profile_text: Option<&str>,
+    shim_dir: &Path,
+) -> ShimReach {
+    shim_reach_at_home(active, profile_text, shim_dir, Some(paths.home()))
+}
+
+fn shim_reach_at_home(
+    active: bool,
+    profile_text: Option<&str>,
+    shim_dir: &Path,
+    home: Option<&Path>,
+) -> ShimReach {
     if active {
         return ShimReach::Active;
     }
@@ -274,21 +463,29 @@ pub fn shim_reach(active: bool, profile_text: Option<&str>, shim_dir: &Path) -> 
     // real finding here - and on a machine where swapdex was ever installed,
     // that marker is always present.
     match profile_text {
-        Some(t) if profile_already_adds(t, shim_dir) => ShimReach::ConfiguredElsewhere,
+        Some(t) if profile_already_adds_at_home(t, shim_dir, home) => {
+            ShimReach::ConfiguredElsewhere
+        }
         _ => ShimReach::Missing,
     }
 }
 
 /// The shell profile's text, if there is one to read.
 pub fn shell_profile_text() -> Option<(PathBuf, String)> {
-    let p = shell_profile()?;
+    let paths = Paths::resolve().ok()?;
+    shell_profile_text_for(&paths)
+}
+
+/// The shell profile's text under a specific resolved home.
+pub fn shell_profile_text_for(paths: &Paths) -> Option<(PathBuf, String)> {
+    let p = shell_profile_at(paths.home())?;
     let t = std::fs::read_to_string(&p).ok()?;
     Some((p, t))
 }
 
-fn profile_already_adds(profile_text: &str, shim_dir: &Path) -> bool {
+fn profile_already_adds_at_home(profile_text: &str, shim_dir: &Path, home: Option<&Path>) -> bool {
     let full = shim_dir.to_string_lossy().to_string();
-    let home = dirs::home_dir().map(|h| h.to_string_lossy().to_string());
+    let home = home.map(|h| h.to_string_lossy().to_string());
     // The same dir with the home prefix written the other two ways.
     let alts: Vec<String> = home
         .iter()
@@ -316,8 +513,7 @@ const PROFILE_MARKER: &str = "# added by swapdex (claude shim)";
 /// The shell profile to teach: the one belonging to $SHELL, since that is the
 /// shell the user actually gets. Returns `None` for a shell we should not guess at
 /// (fish and friends keep PATH somewhere else entirely).
-fn shell_profile() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+fn shell_profile_at(home: &Path) -> Option<PathBuf> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let name = shell.rsplit('/').next().unwrap_or("");
     match name {
@@ -378,15 +574,24 @@ fn read_profile_for_edit(profile: &Path) -> Result<String> {
 /// never reaches it, and `swapdex use` appears to work while changing nothing.
 /// Idempotent - a profile that already carries the marker is left alone.
 pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
+    let paths = Paths::resolve().context("resolve paths for shell profile")?;
+    ensure_on_path_for(&paths, shim_dir)
+}
+
+/// Put the shim on PATH using the home selected by `paths`, including a rooted
+/// library call that has no matching process-wide HOME or SWAPDEX_ROOT.
+pub fn ensure_on_path_for(paths: &Paths, shim_dir: &Path) -> Result<PathSetup> {
     if already_on_path(shim_dir) {
         return Ok(PathSetup::AlreadyThere);
     }
-    let Some(profile) = shell_profile() else {
+    let Some(profile) = shell_profile_at(paths.home()) else {
         return Ok(PathSetup::Manual);
     };
     let existing = read_profile_for_edit(&profile)?;
     let line = path_line(shim_dir);
-    if existing.contains(PROFILE_MARKER) || profile_already_adds(&existing, shim_dir) {
+    if existing.contains(PROFILE_MARKER)
+        || profile_already_adds_at_home(&existing, shim_dir, Some(paths.home()))
+    {
         // Written before but not active yet: the user has not started a new shell.
         return Ok(PathSetup::Added(profile));
     }
@@ -570,8 +775,13 @@ pub enum PathVerdict {
 /// the proxy was never used, and `swapdex serve` silently did nothing. The
 /// install said everything was fine, which is why nobody suspected the PATH.
 pub fn path_verdict(shim_dir: &std::path::Path, entries: &[&str]) -> PathVerdict {
+    path_verdict_for(shim_dir, entries, "claude")
+}
+
+/// Report whether the shim for one concrete executable wins `PATH`.
+pub fn path_verdict_for(shim_dir: &std::path::Path, entries: &[&str], binary: &str) -> PathVerdict {
     path_verdict_with(shim_dir, entries, &|d| {
-        std::path::Path::new(d).join("claude").exists()
+        is_executable_file(&std::path::Path::new(d).join(binary))
     })
 }
 
@@ -602,13 +812,20 @@ pub fn path_verdict_with(
 /// Install (or refresh) the shim. Returns (shim_path, shim_dir) so the caller
 /// can print PATH guidance.
 pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
+    install_claude(paths)?.context("could not find the real `claude` on PATH - install it first")
+}
+
+/// Install the Claude shim when Claude is available. A machine that only uses
+/// another supported client is valid, so absence is reported to the caller.
+pub fn install_claude(paths: &Paths) -> Result<Option<(PathBuf, PathBuf)>> {
     let shim = shim_path(paths);
     let shim_dir = shim
         .parent()
         .map(|p| p.to_path_buf())
         .context("shim path has no parent")?;
-    let real = find_real_claude(&shim_dir)
-        .context("could not find the real `claude` on PATH - install it first")?;
+    let Some(real) = find_real_claude(&shim_dir) else {
+        return Ok(None);
+    };
     let pointer = paths.store_dir().join("active-claude");
     // The shim calls back into THIS binary, by absolute path: whatever swapdex
     // installed the shim is the one that will start its proxy, even if PATH
@@ -617,7 +834,7 @@ pub fn install(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(&shim_dir).context("create shim dir")?;
     std::fs::write(&shim, shim_script(&pointer, &real, &me)).context("write shim")?;
     make_executable(&shim)?;
-    Ok((shim, shim_dir))
+    Ok(Some((shim, shim_dir)))
 }
 
 /// Install the `codex` shim beside Claude's. Returns the path, or `None` when
@@ -713,7 +930,8 @@ mod tests {
     // profile ended up with three copies.
     #[test]
     fn an_existing_path_line_is_recognised_however_it_is_spelled() {
-        let home = dirs::home_dir().expect("a home dir");
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
         let shim_dir = home.join("Library/Application Support/swapdex/bin");
         let full = shim_dir.display().to_string();
         for spelling in [
@@ -722,22 +940,32 @@ mod tests {
             "export PATH=\"~/Library/Application Support/swapdex/bin:$PATH\"".to_string(),
         ] {
             assert!(
-                profile_already_adds(&format!("# something\n{spelling}\n"), &shim_dir),
+                profile_already_adds_at_home(
+                    &format!("# something\n{spelling}\n"),
+                    &shim_dir,
+                    Some(home),
+                ),
                 "not recognised: {spelling}"
             );
         }
         // A profile that does NOT add it is left alone, and a commented-out line
         // is not an active entry.
-        assert!(!profile_already_adds(
+        assert!(!profile_already_adds_at_home(
             "export PATH=\"/usr/local/bin:$PATH\"\n",
-            &shim_dir
+            &shim_dir,
+            Some(home),
         ));
-        assert!(!profile_already_adds(
+        assert!(!profile_already_adds_at_home(
             &format!("# export PATH=\"{full}:$PATH\"\n"),
-            &shim_dir
+            &shim_dir,
+            Some(home),
         ));
         // A line merely MENTIONING the dir without touching PATH is not one.
-        assert!(!profile_already_adds(&format!("echo {full}\n"), &shim_dir));
+        assert!(!profile_already_adds_at_home(
+            &format!("echo {full}\n"),
+            &shim_dir,
+            Some(home),
+        ));
     }
 
     // Signing in must reach the vendor directly: the OAuth exchange is between
@@ -753,15 +981,17 @@ mod tests {
         );
         // The proxy is asked for only when this is not a sign-in.
         assert!(
-            s.contains("sx_login=no"),
+            s.contains("sx_plain=no"),
             "it decides whether this is a sign-in: {s}"
         );
-        for verb in ["login", "/login", "logout", "setup-token"] {
-            assert!(s.contains(verb), "recognised: {verb}");
+        for command in ["auth:login", "auth:logout", "auth:status", "setup-token:"] {
+            assert!(s.contains(command), "recognised: {command}");
         }
         // And the base-url export sits INSIDE that condition, not before it.
-        let guard = s.find("if [ \"$sx_login\" = no ]").expect("the guard");
-        let export = s.find("ANTHROPIC_BASE_URL").expect("the export");
+        let guard = s.find("if [ \"$sx_plain\" = no ]").expect("the guard");
+        let export = s
+            .find("ANTHROPIC_BASE_URL=\"http://")
+            .expect("the proxy export");
         assert!(
             guard < export,
             "the proxy address is only set when not signing in"
@@ -779,55 +1009,187 @@ mod tests {
             s.contains("proxy --ensure --tool codex"),
             "asks swapdex for a live codex proxy: {s}"
         );
-        // The provider ID is built at run time from the paying account, because
-        // Codex renders the ID on `/status` and never the `name` - so the keys
-        // hanging off it are `$sx_id`, not a literal. What matters here is the
-        // address and the protocol, which do not vary with the account.
         assert!(
-            s.contains("model_provider=\"$sx_id\""),
-            "selects the provider"
+            s.contains("openai_base_url=\"http://127.0.0.1:$port/v1\""),
+            "routes the built-in provider without changing session identity: {s}"
         );
+        assert!(!s.contains("set -- -c model_provider="));
+        // A validated port is the only result that adds the proxy override.
         assert!(
-            s.contains(".base_url=\"http://127.0.0.1:$port/v1\""),
-            "points it at the proxy: {s}"
-        );
-        assert!(
-            s.contains(".wire_api=responses"),
-            "the protocol codex speaks"
-        );
-        assert!(
-            !s.contains("env_key"),
-            "declaring an api key would stop codex attaching its own OAuth"
-        );
-        // Without a proxy, codex runs exactly as it would have.
-        assert!(
-            s.contains("if [ -n \"$port\" ]"),
+            s.contains("if [ \"$sx_use_proxy\" = yes ]"),
             "the overrides are conditional: {s}"
         );
     }
 
-    // Codex lists the sessions matching its configured provider, so the provider
-    // overrides emptied the resume picker - a machine with 158 conversations for
-    // the current directory showed "No sessions yet", which reads as the history
-    // being gone.
+    #[cfg(unix)]
     #[test]
-    fn the_codex_shim_leaves_reading_commands_alone() {
+    fn codex_proxy_override_shares_the_last_real_config_scope() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        let pointer = root.path().join("active-codex");
+        let real = root.path().join("real codex");
+        let swapdex = root.path().join("fake swapdex");
+        let shim = root.path().join("codex shim");
+        std::fs::write(&pointer, root.path().join("codex-home").to_str().unwrap()).unwrap();
+        std::fs::write(&real, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+        std::fs::write(
+            &swapdex,
+            "#!/bin/sh\ncase \"$1\" in proxy) printf 8788 ;; esac\n",
+        )
+        .unwrap();
+        std::fs::write(&shim, codex_shim_script(&pointer, &real, &swapdex)).unwrap();
+        for path in [&real, &swapdex] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base = "openai_base_url=http://127.0.0.1:8788/v1";
+        for (input, expected) in [
+            (vec!["exec", "prompt"], vec!["-c", base, "exec", "prompt"]),
+            (
+                vec!["exec", "-c", "model_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "--config", "model_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "--config",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["-c", "model_reasoning_effort=low", "exec", "prompt"],
+                vec![
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "exec",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["-c", "model=first", "exec", "-c", "model=second", "prompt"],
+                vec![
+                    "-c",
+                    "model=first",
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    "model=second",
+                    "prompt",
+                ],
+            ),
+            (
+                vec![
+                    "exec",
+                    "resume",
+                    "--last",
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+                vec![
+                    "exec",
+                    "resume",
+                    "--last",
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "-c", "model_reasoning_effort = \"low\"", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort = \"low\"",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "-cmodel_reasoning_effort=low", "prompt"],
+                vec!["exec", "-c", base, "-cmodel_reasoning_effort=low", "prompt"],
+            ),
+            (
+                vec!["exec", "--config=model_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "--config=model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "-C", "-c", "-c", "model=second", "--", "-c"],
+                vec![
+                    "exec",
+                    "-C",
+                    "-c",
+                    "-c",
+                    base,
+                    "-c",
+                    "model=second",
+                    "--",
+                    "-c",
+                ],
+            ),
+            (
+                vec!["exec", "--", "-c", "prompt"],
+                vec!["-c", base, "exec", "--", "-c", "prompt"],
+            ),
+            (
+                vec!["exec", "-c", "model_provider=fixture", "prompt"],
+                vec!["exec", "-c", "model_provider=fixture", "prompt"],
+            ),
+        ] {
+            let output = Command::new("sh")
+                .arg(&shim)
+                .args(&input)
+                .env("CODEX_HOME", root.path().join("codex-home"))
+                .env("SWAPDEX_ROOT", root.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{input:?}: {:?}", output.stderr);
+            let mut parts: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
+            assert_eq!(parts.pop(), Some(&b""[..]), "missing final NUL");
+            let actual: Vec<_> = parts
+                .into_iter()
+                .map(|bytes| String::from_utf8(bytes.to_vec()).unwrap())
+                .collect();
+            assert_eq!(actual, expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn the_codex_shim_repairs_the_resolved_home_before_routing() {
         let s = codex_shim_script(
             Path::new("/store/active-codex"),
             Path::new("/usr/bin/codex"),
             Path::new("/bin/swapdex"),
         );
-        for verb in ["resume", "history", "sessions"] {
-            assert!(s.contains(verb), "recognised as a plain run: {verb}");
-        }
-        // Those runs ask for no proxy, so no provider is set on them.
-        let guard = s.find("if [ \"$sx_plain\" = no ]").expect("the guard");
-        let ask = s.find("proxy --ensure").expect("the ask");
-        assert!(guard < ask, "the proxy is only asked for on a talking run");
-        // The home still comes from the pointer, whatever the command is: that is
-        // what decides which conversations exist at all.
-        let home = s.find("CODEX_HOME=").expect("home");
-        assert!(home > guard, "the home is set outside the guard: {s}");
+        let home = s.find("CODEX_HOME=").unwrap();
+        let repair = s.find("repair-codex-sessions --quiet").unwrap();
+        let proxy = s.find("proxy --ensure").unwrap();
+        assert!(home < repair && repair < proxy);
     }
 
     #[test]
@@ -892,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn script_gets_its_proxy_from_swapdex_and_tolerates_none() {
+    fn script_gets_its_proxy_from_swapdex_and_checks_the_result() {
         let s = shim_script(
             Path::new("/store/active-claude"),
             Path::new("/usr/bin/claude"),
@@ -911,8 +1273,10 @@ mod tests {
             "loopback only, port from swapdex"
         );
         assert!(
-            s.contains("2>/dev/null") && s.contains("if [ -n \"$port\" ]"),
-            "no proxy is not an error - claude still runs: {s}"
+            s.contains("2>/dev/null")
+                && s.contains("sx_proxy_status=$?")
+                && s.contains("if [ \"$sx_use_proxy\" = yes ]"),
+            "the proxy status and validated port decide whether Claude is routed: {s}"
         );
     }
 

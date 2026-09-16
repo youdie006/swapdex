@@ -33,6 +33,15 @@ enum ServiceCmd {
 
 #[derive(clap::Subcommand)]
 enum Cmd {
+    /// Repair provider metadata written by older Swapdex Codex shims
+    RepairCodexSessions {
+        /// Report eligible sessions without changing files or databases
+        #[arg(long)]
+        dry_run: bool,
+        /// Suppress the success summary and routine active-session deferrals
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Save the current live login as a named profile
     Add {
         /// Profile name (omit on a terminal to get a suggestion)
@@ -384,6 +393,36 @@ fn main() {
         return;
     }
     let result = match cmd {
+        Cmd::RepairCodexSessions { dry_run, quiet } => {
+            let summary = swapdex::codex_sessions::repair_codex_sessions(
+                &paths,
+                swapdex::codex_sessions::RepairOptions { dry_run: *dry_run },
+            );
+            for issue in &summary.issues {
+                if issue.is_error() || issue.is_warning() || !quiet {
+                    eprintln!("swapdex: {issue}");
+                }
+            }
+            if !quiet {
+                if *dry_run {
+                    println!(
+                        "Codex sessions: {} eligible, {} skipped, {} warning(s), {} error(s)",
+                        summary.eligible, summary.skipped, summary.warnings, summary.errors
+                    );
+                } else {
+                    println!(
+                        "Codex sessions: {} repaired, {} index row(s), {} skipped, {} deferred, {} warning(s), {} error(s)",
+                        summary.repaired,
+                        summary.index_rows_repaired,
+                        summary.skipped,
+                        summary.deferred,
+                        summary.warnings,
+                        summary.errors
+                    );
+                }
+            }
+            Ok(if summary.errors == 0 { 0 } else { 1 })
+        }
         Cmd::Add { name, tool, update } => commands::add(&paths, name.as_deref(), *tool, *update),
         Cmd::Use {
             name,
@@ -488,7 +527,12 @@ fn main() {
         Err(e) => {
             // Redact home paths from any error before it reaches a terminal/log.
             eprintln!("swapdex: {}", swapdex::util::redact_path(&format!("{e:#}")));
-            std::process::exit(1);
+            let code = if e.downcast_ref::<swapdex::store::LockError>().is_some() {
+                4
+            } else {
+                1
+            };
+            std::process::exit(code);
         }
     }
 }

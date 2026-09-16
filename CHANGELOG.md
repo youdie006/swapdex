@@ -6,6 +6,375 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Update CI Python setup to actions/setup-python 7 (#26).** Both continuous
+  integration and the dependency review workflow use the maintained action,
+  including its manifest-fetch retries and corrected warning annotations.
+  Python 3.12 remains pinned; the removed `pip-install` input is not used.
+- **Update platform-directory lookup to dirs 7 (#25).** Builds use the current
+  directory helper while preserving the existing account and session store
+  locations on Linux, WSL and macOS. The upstream Windows preference-directory
+  change does not affect Swapdex, which uses only home and data directories.
+
+## 0.165.6
+
+- **Preserve selected-account routing when Codex jobs add configuration.**
+  Stock Codex could discard a proxy override placed before `exec` when a job
+  added its own `-c` option after the subcommand, sending the job through the
+  launch home's login. The launcher now places its managed address in the
+  same argument scope as the last caller configuration option, preserving
+  caller options and the selected account route. Explicit provider overrides
+  keep their requested route. This applies when a new native job starts.
+- **Refresh usage details without reopening the dashboard.** The Usage and
+  Quota panels previously fetched once and kept showing that snapshot, with
+  navigation blocked during the read. They now refresh in the background every
+  45 seconds, accept `r` for an immediate refresh, preserve the last reading
+  and scroll position, and show refresh status. A disconnected quota reader
+  no longer prevents future dashboard reads until restart.
+
+## 0.165.5
+
+- **Apply the selected Codex account to profile-based jobs.** Launches such as
+  `codex exec -p worker` previously bypassed the managed proxy solely because
+  they selected a profile, silently charging the launch home's login. All
+  `-p`/`--profile` forms now receive the same built-in OpenAI routing as ordinary
+  sessions. The profile, original arguments, credentials, and session home are
+  preserved. Named custom providers and explicit command-line provider
+  overrides retain their own routes. The fix applies to new launches;
+  already-running direct jobs keep their original connection until they end.
+
+## 0.165.4
+
+- **Keep a disconnected client from terminating every proxy session.** The
+  command-line SIGPIPE policy also applied to proxy processes, so a broken
+  connection could kill the shared Claude/Codex proxy and trigger repeated
+  service restarts. Proxy startup now ignores SIGPIPE before starting its
+  workers, allowing the failed write to follow normal connection error handling.
+  Ordinary command output piped to a short reader still ends quietly.
+
+## 0.165.3
+
+- **Keep a started response streaming past five minutes.** The locked ureq
+  client inherited the response-header timeout during body reads, interrupting
+  active Claude/Codex streams with `timeout: receive response`. Require ureq
+  3.4.2 and verify that a body continues beyond the header deadline. Connection
+  and response-header waits stay bounded; streaming bodies have no total timer.
+- **Deliver available streaming responses immediately.** Claude and Codex SSE
+  headers, small heartbeats and completion events no longer wait for an 8 KiB
+  response buffer or upstream EOF. The HTTP/1 listener flushes each available
+  fragment, preserves healthy connection reuse and closes a failed stream
+  without reporting a successful HTTP completion. Response headers used only
+  by the upstream connection are removed, and HEAD/bodyless responses do not
+  drain an upstream body. Accepted model requests are not replayed.
+- **Keep quota inspection read-only for credentials (#22).** `quota` and
+  `quota --json` no longer renew expired Claude slot tokens, including slots
+  backed by same-name saved profiles. They report expiry without an OAuth
+  exchange, a credential write or a usage request with the expired token.
+  Valid credentials and a verified current native login for the same account
+  still support usage reads; explicit refresh and proxy renewal remain separate.
+
+## 0.165.2
+
+- **Use only the selected account's authentication for managed requests.**
+  Claude and Codex forwarding now remove client `x-api-key` headers before
+  adding the managed OAuth credential, including duplicate and mixed-case
+  headers. A stale client key can no longer override the selected bearer,
+  produce a misleading login rejection or sideline a healthy managed account.
+  Explicit passthrough and native authentication exchanges preserve the
+  client's original authentication headers.
+
+## 0.165.1
+
+- **Honor fractional usage thresholds.** `threshold 0.5%` now stores half a
+  percent instead of 50%, retains precise display, and rejects repeated `%`
+  suffixes. Saved and explicit proxy thresholds below 5% are honored instead
+  of silently raised; invalid explicit fractions fail before a listener starts.
+  The Roomiest strategy retains its existing 10 percentage point movement margin.
+- **Keep allowed Claude accounts available when extra usage is disabled.** A
+  rejected overage window no longer marks an allowed plan as exhausted or
+  appears among exhausted plan windows. Real plan rejection still triggers
+  failover; a bare throttle retains its bounded retry behavior.
+- **Use the renewed credential for the first quota read.** Expired Claude slots
+  renew before the final credential read, including slots with a same-name saved
+  profile. The old token no longer earns a spurious rejection immediately after
+  successful renewal. Native ownership, renewal failures and account replacement
+  during the exchange remain explicit without sending an unsafe credential.
+- **Preserve concurrent usage observations.** Per-tool cache locks serialize
+  read/modify/write operations so endpoint reads and served-response notes no
+  longer erase another account or independent reset/rejection fields. A usage
+  reading that omits a reset retains the still-future reset learned from traffic;
+  reading ages and successful-token recovery keep their existing meanings.
+- **Preserve settings when the store lock is unavailable.** Prolonged contention
+  and lock I/O failures now return exit 4 without writing unlocked settings.
+  Rename and removal warn if their completed registry operation could not update
+  rotation preferences, instead of silently losing that follow-up.
+- **Keep Homebrew services launchable after an upgrade.** Service installation
+  uses the stable formula `opt` executable only when it resolves to the current
+  binary. Removing the previous Cellar version then leaves the installed service
+  launchable; unrelated PATH entries and opt links are ignored.
+- **Explain why automatic rotation has no candidate.** A paused account, missing
+  usage reading or insufficient headroom no longer becomes evidence that every
+  account refused or passed its threshold. Actual all-account refusals retain
+  their distinct explanation, including when a configured fallback model is used.
+
+## 0.165.0
+
+- **Set up the native client a new user actually has.** Codex-only machines
+  can now install their shim and complete onboarding without Claude installed.
+  Claude and Codex are detected independently, each gets its own PATH check,
+  and missing optional clients are skipped. With neither client installed, the
+  command fails with an installation remedy. Onboarding offers available
+  missing shims and can add Codex later without rewriting an existing Claude
+  shim; cancellation and non-interactive input remain non-mutating for shims.
+- **Keep a working installation when an upgrade fails.** The shell installer
+  now requires a valid SHA-256 response and a working checksum tool, verifies
+  the candidate's executable version before atomic replacement, cleans staged
+  files, and rejects directory targets. Empty checksums, failed downloads and
+  unusable binaries no longer report a successful install. Custom-directory
+  PATH hints preserve literal spaces, quotes and dollar signs, and the piped
+  environment-variable example now configures the installer shell.
+- **Guide first-time Claude and Codex users through a complete managed launch.**
+  The quickstart now covers native sign-in per slot, shim activation, launch
+  defaults and next-request serving selection. Existing-login preservation,
+  direct-session resumption, saved snapshots and network activity are stated
+  explicitly. Setup no longer promises immediate switching for a session that
+  has never used the proxy, Codex serving hints retain their tool selector, and
+  rejected quota credentials are no longer labeled as conclusively expired.
+- **Verify the published first-use journey on Linux and macOS.** A new binary
+  verifier exercises fresh and already signed-in homes with Claude only,
+  Codex only and both clients, including proxy autostart, the first request,
+  next-turn payer changes, cross-tool isolation and unchanged native logins.
+  Home aliases such as macOS `/var` and `/private/var` are compared by their
+  resolved location, and every platform exercises an aliased home.
+  It uses fake native sign-ins and a loopback provider; real login UI and
+  billing-ledger verification remain outside these fixtures.
+
+## 0.164.1
+
+- **Retry bodyless requests when macOS reports a peer disconnect.** The same
+  closed upstream connection can surface as `io: Peer disconnected` instead
+  of a connection reset. GET/HEAD and other bodyless retries now recognize it;
+  accepted model POSTs still return the transport failure without replay.
+  The installed-binary verifier checks both POST suppression and GET recovery.
+  This completes the audit below and supersedes the 0.164.0 prerelease candidate.
+
+- **Preserve the latest explicit account choice during automatic failover.**
+  A late failure from an older in-flight request can no longer overwrite a
+  newer serving choice. Automatic routing updates are tied to the request's
+  original choice generation.
+- **Keep configured Codex failover within Codex accounts.** The preemptive
+  rejected/spent-account path now reads the Codex registry and Codex token
+  expiry, instead of selecting a Claude slot and failing before forwarding.
+  Copies of one Codex login no longer count as different fallback accounts;
+  distinct workspace members with complete identities remain independent.
+- **Avoid replaying model requests after an ambiguous transport failure.**
+  A reset, broken pipe or lost response after an accepted POST now surfaces the
+  failure instead of resubmitting the body. Both retry layers apply the same
+  rule; safe connection-setup retries and explicit rejected-login recovery
+  remain available. The installed-binary verifier checks accepted POST counts
+  through a local provider that resets its connection before responding.
+- **Keep distinct Codex workspace members separate during renewal.** Complete
+  login identities now include both the JWT subject and workspace ID in
+  coordinated and manual renewal. One member's successful refresh no longer
+  suppresses another member's independent login. Older opaque identities retain
+  their existing conservative grouping, and copies of the same rotating token
+  share exclusion even when one copy lacks a readable JWT subject.
+  A replacement credential cannot inherit a previous generation's renewal
+  success; coordinator generations cover the complete credential blob.
+- **Do not substitute an old profile's usage for an unreadable Claude slot.**
+  A same-name slot now supplies its own identity and credential, including when
+  it is the selected launch account. Missing slot credentials report their
+  read error instead of using a saved or default-home login from another account.
+  An unrelated native login remains visible in its own usage row.
+- **Keep quota reset times even before a usage reading arrives.** Reset-only
+  traffic entries now survive cache reads until their windows actually expire.
+- **Launch native CLIs correctly from any project directory.** Generated shims
+  anchor relative PATH entries at installation and skip non-executable files.
+  Stable package-manager symlinks remain intact so native upgrades still apply.
+- **Keep rooted launcher setup and diagnostics inside their supplied home.**
+  Shell profile reads/writes and installed-service checks now use resolved
+  `Paths`, including direct library callers without a root environment override.
+- **Keep `/swap NAME` focused on the serving account.** Both generated Claude
+  and Codex instructions now use `serve`, matching the interactive chooser and
+  preserving the launch home of new sessions.
+- **Encode service executable paths for each supervisor.** Linux units handle
+  spaces and literal percent specifiers; macOS plists encode XML metacharacters
+  in executable/log paths. Service diagnostics decode the stored executable
+  before checking whether it still exists.
+- **Find an account's older conversations before limiting the resume menu.**
+  Native session lookup applies account attribution before its result limit,
+  so another account's newer conversations cannot hide matching sessions.
+  Directory symlink cycles and aliases are scanned once while shared session
+  roots remain supported.
+- **Stop timed-out session index commands.** A slow `sessionwiki` lookup now
+  terminates its child process group and reaps the direct child instead of
+  leaving a detached thread and command running after the five-second timeout.
+
+## 0.164.0
+
+- **Preserve the latest explicit account choice during automatic failover.**
+  A late failure from an older in-flight request can no longer overwrite a
+  newer serving choice. Automatic routing updates are tied to the request's
+  original choice generation.
+- **Keep configured Codex failover within Codex accounts.** The preemptive
+  rejected/spent-account path now reads the Codex registry and Codex token
+  expiry, instead of selecting a Claude slot and failing before forwarding.
+  Copies of one Codex login no longer count as different fallback accounts;
+  distinct workspace members with complete identities remain independent.
+- **Avoid replaying model requests after an ambiguous transport failure.**
+  A reset, broken pipe or lost response after an accepted POST now surfaces the
+  failure instead of resubmitting the body. Both retry layers apply the same
+  rule; safe connection-setup retries and explicit rejected-login recovery
+  remain available. The installed-binary verifier checks accepted POST counts
+  through a local provider that resets its connection before responding.
+- **Keep distinct Codex workspace members separate during renewal.** Complete
+  login identities now include both the JWT subject and workspace ID in
+  coordinated and manual renewal. One member's successful refresh no longer
+  suppresses another member's independent login. Older opaque identities retain
+  their existing conservative grouping, and copies of the same rotating token
+  share exclusion even when one copy lacks a readable JWT subject.
+  A replacement credential cannot inherit a previous generation's renewal
+  success; coordinator generations cover the complete credential blob.
+- **Do not substitute an old profile's usage for an unreadable Claude slot.**
+  A same-name slot now supplies its own identity and credential, including when
+  it is the selected launch account. Missing slot credentials report their
+  read error instead of using a saved or default-home login from another account.
+  An unrelated native login remains visible in its own usage row.
+- **Keep quota reset times even before a usage reading arrives.** Reset-only
+  traffic entries now survive cache reads until their windows actually expire.
+- **Launch native CLIs correctly from any project directory.** Generated shims
+  anchor relative PATH entries at installation and skip non-executable files.
+  Stable package-manager symlinks remain intact so native upgrades still apply.
+- **Keep rooted launcher setup and diagnostics inside their supplied home.**
+  Shell profile reads/writes and installed-service checks now use resolved
+  `Paths`, including direct library callers without a root environment override.
+- **Keep `/swap NAME` focused on the serving account.** Both generated Claude
+  and Codex instructions now use `serve`, matching the interactive chooser and
+  preserving the launch home of new sessions.
+- **Encode service executable paths for each supervisor.** Linux units handle
+  spaces and literal percent specifiers; macOS plists encode XML metacharacters
+  in executable/log paths. Service diagnostics decode the stored executable
+  before checking whether it still exists.
+- **Find an account's older conversations before limiting the resume menu.**
+  Native session lookup applies account attribution before its result limit,
+  so another account's newer conversations cannot hide matching sessions.
+  Directory symlink cycles and aliases are scanned once while shared session
+  roots remain supported.
+- **Stop timed-out session index commands.** A slow `sessionwiki` lookup now
+  terminates its child process group and reaps the direct child instead of
+  leaving a detached thread and command running after the five-second timeout.
+
+## 0.163.0
+
+- **Keep Claude re-login snapshots within the selected account.** Captures
+  from a slot now read its own identity metadata together with its credential.
+  Custom `CLAUDE_CONFIG_DIR` logins use that directory's identity file, including
+  an explicitly selected default config directory. An unavailable slot Keychain
+  item cannot substitute the default login or a stale credential file.
+- **Keep managed Claude login and launch in their own secure-storage slot.**
+  An inherited `CLAUDE_SECURESTORAGE_CONFIG_DIR` could redirect a slot's child
+  process to another account's Keychain item. Managed children now clear that
+  override while ordinary live callers retain their explicit configuration.
+  Named-slot launches reach the native tool directly, so a new slot can sign
+  in even when the managed proxy is unavailable. If only the wrapper remains
+  installed, the launch reports the missing native tool instead of re-entering
+  that wrapper; existing account selections stay unchanged.
+- **Keep rooted Claude operations away from the machine Keychain.** Library
+  callers using a sandbox root now keep capture, apply and interrupted-apply
+  recovery file-only, even without a `SWAPDEX_ROOT` environment variable.
+- **Stop managed Claude and Codex launches when the proxy cannot start.**
+  A failed startup previously executed the native client with its own login,
+  which could charge a different account from the selected payer. Launchers
+  now require a successful startup and a valid local port. Known unmanaged
+  and explicit passthrough states retain direct access; invalid or unreadable
+  selection state cannot authorize that fallback.
+- **Keep Claude prompt text on the selected account.** Words such as `login`
+  in a print prompt or option value no longer disable proxy routing. The
+  launcher recognizes actual `auth login`, `auth logout`, `auth status` and
+  `setup-token` commands separately from conversation text. Optional debug
+  filters and multiple MCP config values cannot authorize an auth bypass.
+- **Release account-operation locks when the operation ends.** A child process
+  could briefly retain an inherited lock descriptor after a completed switch,
+  making the next selection fail as busy. Store, credential and registry guards
+  now explicitly release their lock while still excluding concurrent writers.
+- **Verify routing with the installed executable.** The optional
+  `scripts/verify-installed-account-routing.py` check exercises generated
+  launchers, direct named runs and Claude/Codex A-to-B-to-A payer changes over
+  a persistent connection, using synthetic accounts and local servers. It
+  resolves macOS temporary-directory aliases before checking account homes.
+
+## 0.162.0
+
+- **Restore Codex session search and resume after account switching.** The
+  launcher now keeps Codex's built-in `openai` provider and routes it through
+  `openai_base_url`. Account names no longer become persistent provider IDs
+  that hide earlier conversations. `resume`, `fork` and new turns use the same
+  route; login/logout and explicit provider/profile/remote choices retain their
+  own configuration.
+- **Repair legacy Swapdex session providers without replacing conversations.**
+  `repair-codex-sessions` also runs automatically from the Codex shim. It keeps
+  a private recovery journal, patches only the old provider metadata in place,
+  and updates compatible existing search indexes across known Codex homes.
+  Conversation bytes, IDs and paginated history remain intact. Busy sessions
+  are deferred; unsupported compressed files and repair failures are reported.
+  `--dry-run` previews the repair without writes.
+- **Use Codex's HTTP fallback immediately.** The local proxy answers Responses
+  WebSocket probes with HTTP 426 before selecting an account or contacting the
+  upstream, allowing the built-in provider to use the existing HTTP transport.
+- **Parse Codex commands separately from prompt text.** A prompt such as
+  `codex exec login` no longer disables proxy routing. Option values, explicit
+  backends and the `--` separator retain their intended meaning. The paying
+  account remains available through `swapdex serve --tool codex --quiet`. If the
+  proxy cannot start, the launcher now announces its existing direct-login
+  fallback.
+
+## 0.161.0
+
+- **Use the selected account's current native login when its saved slot is
+  stale.** Health, quota and proxy requests now resolve a usable access token
+  from an actual running Claude or Codex process after verifying its stable
+  account identity. A valid native login no longer appears expired merely
+  because a saved copy is older. Native refresh tokens are never copied or
+  exchanged by this resolver; ambiguous or mismatched sources remain excluded.
+- **Distinguish native renewal ownership from a blocked renewal.** Verified
+  usable native logins no longer display `renewal deferred`. JSON listings expose
+  their renewal owner, and manual/background output does not claim an OAuth
+  exchange when the native app manages renewal. Actual expiry and recorded
+  rejection remain visible. An inaccessible Claude Keychain is reported as
+  unavailable instead of being inferred to be an expired login.
+- **Concurrent renewals share a result.** Participating Swapdex callers now
+  serialize through an OS file lock held across credential reads, exchange and
+  persistence. Followers wait for the result, and generation checks prevent a
+  late success or rejection from overwriting a replacement login. Cached success
+  is bound to the operation's input and persisted output generations.
+  Cross-process freshness uses the coordinator's clock, so an older timestamp
+  captured by a waiting request or scheduled sweep cannot hide a completed renewal.
+- **An unavailable selected login does not silently use the client's other
+  account.** Managed proxy requests now return an actionable error when no
+  selected credential can serve them. Explicit passthrough and configured
+  account failover retain their existing controls.
+- **Recover the same selected account before failover on HTTP 401.** The proxy
+  rereads a native-owned access snapshot or waits for coordinated managed renewal,
+  and retries only with a changed usable bearer. Recovery is bounded per account
+  and request, before any response body is streamed.
+- **Manual renewal keeps provider identities separate.** A Claude account ID
+  can no longer suppress a Codex renewal with the same text, and unrelated
+  Claude metadata in a Codex directory does not determine its renewal identity.
+- **Read macOS native login paths containing spaces correctly.** Native process
+  discovery uses NUL-delimited kernel data and distinguishes Claude's default
+  identity/Keychain locations from custom config directories.
+- **Use one authoritative Claude credential source on macOS.** The slot's exact
+  Keychain item now supplies its bearer, expiry, plan and renewal writeback.
+  A leftover file cannot override it or substitute for a locked/missing item.
+  Linux and isolated test roots retain file-backed credentials.
+- **Account labels describe the slot whose health is displayed.** A same-name
+  saved profile could supply another account's email while `ls` displayed the
+  slot's health. Listings now prefer the slot identity and include conflicting
+  profile/slot identities in JSON warnings, without changing account selection.
+- Expand the [source comparison](docs/research/2026-09-15-codex-switcher-survey.md)
+  with a reproducible index of 227 discovered Codex switching/proxy candidates,
+  pinned implementation references, operational reports, and the limits of
+  file-based switching for existing sessions.
+
 ## 0.160.0
 
 - **An early curl failure cannot terminate the picker or renewal command.**

@@ -172,11 +172,24 @@ fn codex_head(p: &Path) -> (String, Option<PathBuf>) {
 }
 
 fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut visited = std::collections::HashSet::new();
+    walk_jsonl_once(dir, out, &mut visited);
+}
+
+fn walk_jsonl_once(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) {
+    let identity = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !visited.insert(identity) {
+        return;
+    }
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                walk_jsonl(&p, out);
+                walk_jsonl_once(&p, out, visited);
             } else if p.extension().is_some_and(|x| x == "jsonl") {
                 out.push(p);
             }
@@ -192,6 +205,21 @@ pub fn recent(paths: &Paths, n: usize) -> Vec<NativeSession> {
 /// Filter the provider before bounding the files we parse. Newer sessions from
 /// another tool must not push this tool's conversations out of its own menu.
 pub(crate) fn recent_for_tool(paths: &Paths, n: usize, tool: Option<&str>) -> Vec<NativeSession> {
+    recent_for_tool_matching(paths, n, tool, |_, _| true)
+}
+
+/// Filter on provider and session time before applying the result limit. The
+/// predicate can join file mtimes to the account timeline without parsing the
+/// transcript of every excluded session.
+pub(crate) fn recent_for_tool_matching(
+    paths: &Paths,
+    n: usize,
+    tool: Option<&str>,
+    mut matches: impl FnMut(&str, i64) -> bool,
+) -> Vec<NativeSession> {
+    if n == 0 {
+        return Vec::new();
+    }
     let mut files: Vec<(i64, &'static str, PathBuf)> = Vec::new();
     let mut claude = Vec::new();
     if tool.is_none_or(|t| t == "claude-code") {
@@ -212,7 +240,6 @@ pub(crate) fn recent_for_tool(paths: &Paths, n: usize, tool: Option<&str>) -> Ve
         files.push((mtime_secs(&p), "codex", p));
     }
     files.sort_by_key(|(t, _, _)| std::cmp::Reverse(*t));
-    files.truncate(n.max(16)); // parse only what the menu could ever need
     let mut out = Vec::new();
     for (started, tool, path) in files {
         let stem = match path.file_stem() {
@@ -237,6 +264,9 @@ pub(crate) fn recent_for_tool(paths: &Paths, n: usize, tool: Option<&str>) -> Ve
                 tail.to_string()
             }
         };
+        if !matches(tool, started) {
+            continue;
+        }
         let (title, cwd) = match tool {
             "claude-code" => claude_head(&path),
             _ => codex_head(&path),
@@ -282,6 +312,46 @@ pub fn exec_resume(s: &NativeSession) -> anyhow::Error {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn directory_symlink_cycles_and_aliases_are_scanned_once() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let sessions = root.path().join("sessions");
+        let real = sessions.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("one.jsonl"), b"{}\n").unwrap();
+        symlink(&real, sessions.join("alias")).unwrap();
+        symlink(&real, real.join("cycle")).unwrap();
+
+        let mut files = Vec::new();
+        walk_jsonl(&sessions, &mut files);
+        assert_eq!(files.len(), 1, "one physical transcript is scanned once");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_sessions_root_is_still_discovered() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let store = root.path().join("external-codex-sessions");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(root.path().join(".codex")).unwrap();
+        symlink(&store, paths.codex_sessions()).unwrap();
+        std::fs::write(
+            store.join("rollout-00000000-0000-4000-8000-000000000077.jsonl"),
+            br#"{"payload":{"type":"user_message","message":"linked root"}}"#,
+        )
+        .unwrap();
+
+        let sessions = recent_for_tool(&paths, 1, Some("codex"));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "linked root");
+    }
+
     #[test]
     fn provider_selection_precedes_the_recent_file_limit() {
         let root = tempfile::tempdir().unwrap();
@@ -316,6 +386,41 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].tool, "codex");
         assert_eq!(sessions[0].title, "older Codex");
+    }
+
+    #[test]
+    fn account_match_precedes_the_recent_file_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let codex = paths.codex_sessions();
+        std::fs::create_dir_all(&codex).unwrap();
+        for i in 0..20 {
+            let file = codex.join(format!("rollout-00000000-0000-4000-8000-{i:012}.jsonl"));
+            std::fs::write(
+                &file,
+                br#"{"payload":{"type":"user_message","message":"newer other account"}}"#,
+            )
+            .unwrap();
+            std::fs::File::open(file)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(200 + i))
+                .unwrap();
+        }
+        let target = codex.join("rollout-00000000-0000-4000-8000-999999999999.jsonl");
+        std::fs::write(
+            &target,
+            br#"{"payload":{"type":"user_message","message":"older target account"}}"#,
+        )
+        .unwrap();
+        std::fs::File::open(target)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100))
+            .unwrap();
+
+        let sessions =
+            recent_for_tool_matching(&paths, 1, Some("codex"), |_, started| started == 100);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "older target account");
     }
 
     #[test]

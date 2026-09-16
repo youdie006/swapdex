@@ -4,10 +4,25 @@
 
 use std::path::{Path, PathBuf};
 
+fn resolve_claude_dir(home: &Path, configured: Option<std::ffi::OsString>) -> (PathBuf, bool) {
+    let configured = configured.filter(|value| !value.is_empty());
+    let explicit = configured.is_some();
+    let dir = configured
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
+    (dir, explicit)
+}
+
 #[derive(Clone)]
 pub struct Paths {
-    home: PathBuf,       // for ~/.claude.json (sibling of ~/.claude)
+    home: PathBuf,       // for implicit ~/.claude.json (sibling of ~/.claude)
     claude_dir: PathBuf, // ~/.claude or $CLAUDE_CONFIG_DIR
+    /// A nonempty CLAUDE_CONFIG_DIR was supplied, so Claude keeps identity
+    /// metadata inside that directory instead of at the home sibling.
+    claude_config_explicit: bool,
+    /// This instance was deliberately pointed at a managed Claude slot. Its
+    /// credential source is authoritative and must never fall back to live state.
+    claude_slot_context: bool,
     codex_dir: PathBuf,  // ~/.codex or $CODEX_HOME
     gemini_dir: PathBuf, // ~/.gemini
     data: PathBuf,       // ~/.local/share/swapdex
@@ -26,6 +41,8 @@ impl Paths {
         Paths {
             home: root.to_path_buf(),
             claude_dir: root.join(".claude"),
+            claude_config_explicit: false,
+            claude_slot_context: false,
             codex_dir: root.join(".codex"),
             gemini_dir: root.join(".gemini"),
             data: root.join(".local/share/swapdex"),
@@ -61,7 +78,11 @@ impl Paths {
     pub fn try_with_tool_dir(&self, tool: &str, dir: &Path) -> Option<Paths> {
         let mut p = self.clone();
         match tool {
-            "claude-code" => p.claude_dir = dir.to_path_buf(),
+            "claude-code" => {
+                p.claude_dir = dir.to_path_buf();
+                p.claude_config_explicit = true;
+                p.claude_slot_context = true;
+            }
             "codex" => p.codex_dir = dir.to_path_buf(),
             "gemini" | "antigravity" => p.gemini_dir = dir.to_path_buf(),
             _ => return None,
@@ -81,9 +102,8 @@ impl Paths {
             return Ok(Paths::rooted(Path::new(&root)));
         }
         let home = dirs::home_dir().context("cannot determine home dir")?;
-        let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".claude"));
+        let (claude_dir, claude_config_explicit) =
+            resolve_claude_dir(&home, std::env::var_os("CLAUDE_CONFIG_DIR"));
         let codex_dir = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
@@ -94,6 +114,8 @@ impl Paths {
         Ok(Paths {
             home,
             claude_dir,
+            claude_config_explicit,
+            claude_slot_context: false,
             codex_dir,
             gemini_dir,
             data,
@@ -105,7 +127,14 @@ impl Paths {
         self.claude_dir.join(".credentials.json")
     }
     pub fn claude_config_json(&self) -> PathBuf {
-        self.home.join(".claude.json")
+        if self.claude_config_explicit {
+            self.claude_dir.join(".claude.json")
+        } else {
+            self.home.join(".claude.json")
+        }
+    }
+    pub(crate) fn claude_slot_context(&self) -> bool {
+        self.claude_slot_context
     }
     /// The home these paths hang off - the temp root under a test root, the
     /// real one otherwise. Anything that needs a path in the user's home must
@@ -202,6 +231,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_claude_layout_tracks_whether_a_nonempty_override_was_explicit() {
+        let home = Path::new("/Users/example");
+        let default = home.join(".claude");
+        let custom = home.join(".claude-work");
+
+        assert_eq!(resolve_claude_dir(home, None), (default.clone(), false));
+        assert_eq!(
+            resolve_claude_dir(home, Some(std::ffi::OsString::new())),
+            (default.clone(), false),
+            "an empty override keeps the implicit layout"
+        );
+        assert_eq!(
+            resolve_claude_dir(home, Some(custom.clone().into_os_string())),
+            (custom, true)
+        );
+        assert_eq!(
+            resolve_claude_dir(home, Some(default.clone().into_os_string())),
+            (default, true),
+            "path equality cannot erase explicit default context"
+        );
+    }
+
+    #[test]
     fn rooted_redirects_every_path_under_the_temp_root() {
         let dir = tempfile::tempdir().unwrap();
         let p = Paths::rooted(dir.path());
@@ -261,6 +313,11 @@ mod pointed_at_slot_tests {
         let slot = std::path::Path::new("/tmp/swapdex-pointed/slotdir");
         let at = base.with_tool_dir("claude-code", slot);
         assert_eq!(at.claude_dir(), slot, "claude reads the slot");
+        assert_eq!(
+            at.claude_config_json(),
+            slot.join(".claude.json"),
+            "Claude identity metadata follows the pointed-at slot"
+        );
         assert_eq!(
             at.codex_dir(),
             base.codex_dir(),

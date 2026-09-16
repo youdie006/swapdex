@@ -6,6 +6,124 @@ use serde_json::Value;
 
 pub struct Claude;
 
+#[cfg(test)]
+mod native_login_tests {
+    use super::*;
+
+    #[test]
+    fn native_default_and_custom_processes_choose_their_actual_keychain_service() {
+        assert_eq!(native_service_for_key(None), KEYCHAIN_PREFIX);
+        assert_eq!(
+            native_service_for_key(Some("/Users/me/Library/Application Support/Claude Work")),
+            "Claude Code-credentials-77ae3295"
+        );
+    }
+
+    #[test]
+    fn a_native_keychain_blob_is_one_coherent_source() {
+        let stale_file = br#"{"claudeAiOauth":{"accessToken":"OLD","expiresAt":1}}"#;
+        let fresh_keychain =
+            br#"{"claudeAiOauth":{"accessToken":"NEW","expiresAt":9999999999999}}"#;
+        assert_eq!(
+            choose_native_blob(
+                true,
+                Some(stale_file.to_vec()),
+                Some(fresh_keychain.to_vec())
+            ),
+            Some(fresh_keychain.to_vec()),
+            "token and expiry both come from the authoritative Keychain blob"
+        );
+        assert_eq!(
+            choose_native_blob(true, Some(stale_file.to_vec()), None),
+            None,
+            "an unreadable Keychain must not fall back to a stale file"
+        );
+        assert_eq!(
+            choose_native_blob(
+                false,
+                Some(stale_file.to_vec()),
+                Some(fresh_keychain.to_vec())
+            ),
+            Some(stale_file.to_vec()),
+            "file-backed platforms read their actual native file"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slot_credential_selection_tests {
+    use super::*;
+
+    const STALE_FILE: &[u8] = br#"{"claudeAiOauth":{"accessToken":"OLD"}}"#;
+    const FRESH_KEYCHAIN: &[u8] = br#"{"claudeAiOauth":{"accessToken":"NEW"}}"#;
+
+    #[test]
+    fn a_ready_keychain_selects_its_complete_generation() {
+        let selected =
+            choose_slot_credential(Some(STALE_FILE.to_vec()), Ok(FRESH_KEYCHAIN.to_vec()))
+                .expect("Keychain credential");
+        assert_eq!(selected.bytes(), FRESH_KEYCHAIN);
+        assert_eq!(selected.source(), SlotCredentialSource::Keychain);
+    }
+
+    #[test]
+    fn a_locked_or_missing_keychain_never_falls_back_to_a_stale_file() {
+        for unavailable in [KeychainReadError::Locked, KeychainReadError::Missing] {
+            assert!(matches!(
+                choose_slot_credential(Some(STALE_FILE.to_vec()), Err(unavailable)),
+                Err(error) if error == unavailable
+            ));
+        }
+    }
+
+    #[test]
+    fn a_file_is_selected_only_when_keychain_is_not_applicable() {
+        let selected = choose_slot_credential(
+            Some(STALE_FILE.to_vec()),
+            Err(KeychainReadError::NotApplicable),
+        )
+        .expect("file credential");
+        assert_eq!(selected.bytes(), STALE_FILE);
+        assert_eq!(selected.source(), SlotCredentialSource::File);
+    }
+}
+
+#[cfg(test)]
+mod capture_credential_selection_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn an_unavailable_explicit_slot_never_falls_back_to_a_live_login() {
+        let live_alternative = br#"{"claudeAiOauth":{"accessToken":"DEFAULT"}}"#.to_vec();
+        for unavailable in [KeychainReadError::Locked, KeychainReadError::Missing] {
+            let live_reads = Cell::new(0);
+            let selected = choose_capture_credential(
+                true,
+                || Err(unavailable),
+                || {
+                    live_reads.set(live_reads.get() + 1);
+                    Some(live_alternative.clone())
+                },
+            );
+            assert!(matches!(selected, Err(error) if error == unavailable));
+            assert_eq!(live_reads.get(), 0, "default source was still queried");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_live_capture_keeps_its_environment_selected_source() {
+        let live = br#"{"claudeAiOauth":{"accessToken":"LIVE"}}"#.to_vec();
+        let selected = choose_capture_credential(
+            false,
+            || panic!("an ordinary live capture must not query a slot source"),
+            || Some(live.clone()),
+        )
+        .unwrap();
+        assert_eq!(selected, Some(live));
+    }
+}
+
 /// Absolute path to `security`: Claude Code creates its Keychain item by
 /// shelling out to `/usr/bin/security`, so the item's ACL trusts THAT binary.
 /// Using the same absolute path means swapdex is the same trusted app - no
@@ -27,8 +145,19 @@ const KEYCHAIN_PREFIX: &str = "Claude Code-credentials";
 ///   `SWAPDEX_ROOT=/tmp/x swapdex use fake` test on a Mac would write the fake
 ///   token into the REAL Keychain item and clobber the user's actual login.
 ///   Under SWAPDEX_ROOT, Claude handling is file-only, like Linux.
+///
+/// Paths created directly with `Paths::rooted` need the separate path-aware
+/// policy below because they do not require the process environment to agree.
 fn keychain_enabled() -> bool {
     cfg!(target_os = "macos") && !cfg!(test) && std::env::var_os("SWAPDEX_ROOT").is_none()
+}
+
+fn keychain_policy(platform_keychain_enabled: bool, sandboxed: bool) -> bool {
+    platform_keychain_enabled && !sandboxed
+}
+
+fn keychain_enabled_for_paths(paths: &Paths) -> bool {
+    keychain_policy(keychain_enabled(), paths.sandboxed())
 }
 
 /// The Keychain `acct` attribute Claude Code uses: `$USER`, else the OS
@@ -57,6 +186,49 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The exact service a native Claude process derives from its environment.
+/// `None` is the default bare service; an explicit secure-storage/config key
+/// is hashed. The process accessor already applies secure-storage precedence.
+pub(crate) fn native_service_for_key(key: Option<&str>) -> String {
+    match key {
+        None => KEYCHAIN_PREFIX.to_string(),
+        Some(key) => format!("{KEYCHAIN_PREFIX}-{}", &sha256_hex(key.as_bytes())[..8]),
+    }
+}
+
+fn choose_native_blob(
+    keychain_in_play: bool,
+    file: Option<Vec<u8>>,
+    keychain: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if keychain_in_play {
+        keychain
+    } else {
+        file
+    }
+}
+
+/// Read the one credential blob an actual native Claude process uses.
+///
+/// macOS native sessions use their exact environment-derived Keychain item.
+/// A leftover credential file is never mixed with that item or used as a
+/// fallback when the Keychain cannot be read. File-backed platforms, unit
+/// tests and rooted sandboxes read only the regular credential file.
+pub(crate) fn native_credentials(
+    paths: &Paths,
+    dir: &std::path::Path,
+    key: Option<&str>,
+) -> Option<Vec<u8>> {
+    let keychain_in_play = keychain_enabled() && !paths.sandboxed();
+    let file = (!keychain_in_play)
+        .then(|| crate::atomic::read_regular(&dir.join(".credentials.json")).ok())
+        .flatten();
+    let keychain = keychain_in_play
+        .then(|| keychain_read_service_detail(&native_service_for_key(key)).ok())
+        .flatten();
+    choose_native_blob(keychain_in_play, file, keychain)
 }
 
 /// The service name computed from the env, exactly the way Claude Code derives
@@ -269,6 +441,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// does not have - `errSecInteractionNotAllowed`, exit 36). Reporting that as
 /// "no login" would send the user to re-sign-in an account that is already
 /// signed in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeychainReadError {
     /// Not a Keychain environment at all (non-macOS, tests, SWAPDEX_ROOT).
     NotApplicable,
@@ -276,6 +449,79 @@ pub(crate) enum KeychainReadError {
     Locked,
     /// No such item, or it is empty.
     Missing,
+}
+
+/// The store Claude Code actually reads for one slot in this environment.
+/// Carrying it beside the bytes keeps a later renewal write in the same store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SlotCredentialSource {
+    File,
+    Keychain,
+}
+
+/// One complete credential generation and the store that supplied it.
+///
+/// The bytes deliberately have no `Debug` implementation: test failures and
+/// error reports must not print tokens.
+#[derive(Eq, PartialEq)]
+pub(crate) struct SlotCredential {
+    bytes: Vec<u8>,
+    source: SlotCredentialSource,
+}
+
+impl SlotCredential {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn source(&self) -> SlotCredentialSource {
+        self.source
+    }
+}
+
+/// Select the credential used by capture from injected slot/live outcomes.
+/// Kept pure so macOS fallback policy can be verified without touching a real
+/// Keychain from tests on another platform.
+fn choose_capture_credential<SlotRead, LiveRead>(
+    strict_slot: bool,
+    slot: SlotRead,
+    live: LiveRead,
+) -> std::result::Result<Option<Vec<u8>>, KeychainReadError>
+where
+    SlotRead: FnOnce() -> std::result::Result<SlotCredential, KeychainReadError>,
+    LiveRead: FnOnce() -> Option<Vec<u8>>,
+{
+    if strict_slot {
+        slot().map(|credential| Some(credential.bytes))
+    } else {
+        Ok(live())
+    }
+}
+
+/// Pick one whole credential generation from injected store outcomes.
+///
+/// A usable Keychain is authoritative on production macOS. Locked and missing
+/// are terminal there: a leftover file is not a fallback. `NotApplicable` is
+/// the file-backed contract for Linux, unit tests, and rooted sandboxes.
+pub(crate) fn choose_slot_credential(
+    file: Option<Vec<u8>>,
+    keychain: std::result::Result<Vec<u8>, KeychainReadError>,
+) -> std::result::Result<SlotCredential, KeychainReadError> {
+    let selected = match keychain {
+        Ok(bytes) => (bytes, SlotCredentialSource::Keychain),
+        Err(KeychainReadError::NotApplicable) => (
+            file.ok_or(KeychainReadError::Missing)?,
+            SlotCredentialSource::File,
+        ),
+        Err(error) => return Err(error),
+    };
+    if selected.0.is_empty() {
+        return Err(KeychainReadError::Missing);
+    }
+    Ok(SlotCredential {
+        bytes: selected.0,
+        source: selected.1,
+    })
 }
 
 /// Write a credential to the Keychain item belonging to `dir` - the same item
@@ -309,12 +555,30 @@ pub(crate) fn slot_keychain_read_detail(
     if !keychain_enabled() {
         return Err(KeychainReadError::NotApplicable);
     }
-    let service = slot_service(dir);
+    keychain_read_service_detail(&slot_service(dir))
+}
+
+/// Read exactly the credential generation Claude Code uses for this slot.
+/// The file is not even inspected when Keychain is applicable, so a stale copy
+/// cannot supply a token, deadline, plan, or refresh token by accident.
+pub(crate) fn slot_credential(
+    dir: &std::path::Path,
+) -> std::result::Result<SlotCredential, KeychainReadError> {
+    match slot_keychain_read_detail(dir) {
+        Err(KeychainReadError::NotApplicable) => choose_slot_credential(
+            crate::atomic::read_regular(&dir.join(".credentials.json")).ok(),
+            Err(KeychainReadError::NotApplicable),
+        ),
+        keychain => choose_slot_credential(None, keychain),
+    }
+}
+
+fn keychain_read_service_detail(service: &str) -> std::result::Result<Vec<u8>, KeychainReadError> {
     let out = std::process::Command::new(SECURITY)
         .args([
             "find-generic-password",
             "-s",
-            &service,
+            service,
             "-a",
             &keychain_account_name(),
             "-w",
@@ -678,15 +942,17 @@ pub(crate) fn recover_interrupted_apply(paths: &Paths) {
         }
     }
 
-    // macOS Keychain -> prior (or delete the item apply created). Off macOS the
-    // service is None and this is skipped.
-    if let Some(service) = &wal.kc_service {
-        match &wal.kc_prior_hex {
-            Some(hex) => match from_hex(hex) {
-                Some(b) => ok &= keychain_write_service(service, &b).is_ok(),
-                None => ok = false,
-            },
-            None => keychain_delete_service(service),
+    // macOS Keychain -> prior (or delete the item apply created). Off macOS and
+    // for rooted paths this is skipped, even if a replayed journal names one.
+    if keychain_enabled_for_paths(paths) {
+        if let Some(service) = &wal.kc_service {
+            match &wal.kc_prior_hex {
+                Some(hex) => match from_hex(hex) {
+                    Some(b) => ok &= keychain_write_service(service, &b).is_ok(),
+                    None => ok = false,
+                },
+                None => keychain_delete_service(service),
+            }
         }
     }
 
@@ -695,8 +961,7 @@ pub(crate) fn recover_interrupted_apply(paths: &Paths) {
     }
 }
 
-/// The Claude token JSON from wherever it lives: the file when present,
-/// otherwise the macOS Keychain.
+/// The live Claude token JSON from the environment-selected source.
 fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
     // On macOS the Keychain is AUTHORITATIVE: Claude reads its token there and
     // silently refreshes it (rotating the refresh token) without rewriting the
@@ -705,15 +970,10 @@ fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
     // would then persist that stale token into the profile, losing the live
     // login. So prefer the Keychain when it is in play; the file is only the
     // fallback (a Keychain locked/absent, or an install that still uses it).
-    if keychain_enabled() {
-        // The item belongs to the DIRECTORY, and the service name used to be
-        // computed from the environment instead - so a capture pointed at one
-        // account's slot redirected the file lookup and went on reading the
-        // default item. A fresh sign-in was then followed by a capture that
-        // stored the account's OLD token: right account, wrong vintage, and the
-        // stale marker survived the one action meant to clear it.
-        let by_dir = slot_keychain_read_detail(paths.claude_dir()).ok();
-        return by_dir.or_else(keychain_read).or_else(|| {
+    if keychain_enabled_for_paths(paths) {
+        // keychain_read follows CLAUDE_SECURESTORAGE_CONFIG_DIR precedence, then
+        // CLAUDE_CONFIG_DIR. That is the source a live caller intentionally chose.
+        return keychain_read().or_else(|| {
             let f = paths.claude_credentials();
             f.exists()
                 .then(|| crate::atomic::read_regular(&f).ok())
@@ -721,11 +981,46 @@ fn cred_read(paths: &Paths) -> Option<Vec<u8>> {
         });
     }
     let f = paths.claude_credentials();
-    if f.exists() {
-        crate::atomic::read_regular(&f).ok()
-    } else {
-        keychain_read()
+    f.exists()
+        .then(|| crate::atomic::read_regular(&f).ok())
+        .flatten()
+}
+
+/// Capture/identity reads of a managed slot are authoritative. A missing or
+/// locked slot Keychain item cannot borrow the shell's default login or a stale
+/// credential file. Ordinary live reads keep following the caller's environment.
+fn capture_credential(paths: &Paths) -> Result<Option<Vec<u8>>> {
+    let selected = choose_capture_credential(
+        paths.claude_slot_context(),
+        || capture_slot_credential(paths),
+        || cred_read(paths),
+    );
+    selected.map_err(|error| match error {
+        KeychainReadError::Locked => anyhow::anyhow!(
+            "the selected Claude slot credential is unavailable because its Keychain is locked"
+        ),
+        KeychainReadError::Missing => {
+            anyhow::anyhow!("the selected Claude slot has no readable credential")
+        }
+        KeychainReadError::NotApplicable => {
+            anyhow::anyhow!("the selected Claude slot credential is unavailable")
+        }
+    })
+}
+
+/// Rooted paths are hermetic even in an integration-test build on macOS, where
+/// cfg(test) is false for the library. Read their local file directly instead
+/// of consulting the machine-global Keychain.
+fn capture_slot_credential(
+    paths: &Paths,
+) -> std::result::Result<SlotCredential, KeychainReadError> {
+    if paths.sandboxed() {
+        return choose_slot_credential(
+            crate::atomic::read_regular(&paths.claude_credentials()).ok(),
+            Err(KeychainReadError::NotApplicable),
+        );
     }
+    slot_credential(paths.claude_dir())
 }
 
 /// The LIVE Claude credential JSON (file or Keychain) - the active account's
@@ -758,7 +1053,7 @@ impl AuthTool for Claude {
         // Heal a crashed apply before reading, so we never capture a mixed
         // (A-token + B-identity) live state into a profile.
         recover_interrupted_apply(paths);
-        let Some(cred_bytes) = cred_read(paths) else {
+        let Some(cred_bytes) = capture_credential(paths)? else {
             bail!("not logged in to Claude Code");
         };
         serde_json::from_slice::<Value>(&cred_bytes)
@@ -769,9 +1064,8 @@ impl AuthTool for Claude {
         let cfg_path = paths.claude_config_json();
         let cfg: Value = if cfg_path.exists() {
             serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?).context(
-                "your LIVE ~/.claude.json is corrupt (not the profile snapshot) - \
-                     repair or remove that file, then retry; removing loses local \
-                     settings like project trust",
+                "the selected Claude identity metadata is corrupt - repair or remove \
+                 it, then retry; removing loses local settings like project trust",
             )?
         } else {
             Value::Null
@@ -809,9 +1103,8 @@ impl AuthTool for Claude {
         let cfg_path = paths.claude_config_json();
         let mut cfg: Value = if cfg_path.exists() {
             serde_json::from_slice(&crate::atomic::read_regular(&cfg_path)?).context(
-                "your LIVE ~/.claude.json is corrupt (not the profile snapshot) - \
-                     repair or remove that file, then retry; removing loses local \
-                     settings like project trust",
+                "the selected Claude identity metadata is corrupt - repair or remove \
+                 it, then retry; removing loses local settings like project trust",
             )?
         } else {
             Value::Object(Default::default())
@@ -831,10 +1124,10 @@ impl AuthTool for Claude {
         // file's oauthAccount. Snapshot the previous state of each so any
         // failure rolls ALL of them back - the login is never half-swapped.
         let cred_path = paths.claude_credentials();
-        // keychain_enabled, not bare cfg!(macos): under SWAPDEX_ROOT the
-        // Keychain must stay untouched (file-only, like Linux), or a sandboxed
-        // test switch would overwrite the REAL login token.
-        let macos = keychain_enabled();
+        // The path-aware policy, not bare cfg!(macos): rooted Paths can be
+        // constructed without SWAPDEX_ROOT, and their file-only apply must not
+        // read or overwrite the REAL login token.
+        let macos = keychain_enabled_for_paths(paths);
         let prev_file = if cred_path.exists() {
             crate::atomic::read_regular(&cred_path).ok()
         } else {
@@ -929,7 +1222,7 @@ impl AuthTool for Claude {
     fn identity(&self, paths: &Paths) -> Result<Option<Account>> {
         // The token comes from the file or the macOS Keychain; the identity
         // (email/uuid) is always in .claude.json.
-        let Some(cred_bytes) = cred_read(paths) else {
+        let Some(cred_bytes) = capture_credential(paths)? else {
             return Ok(None);
         };
         let creds: Value = serde_json::from_slice(&cred_bytes)
@@ -1196,6 +1489,12 @@ mod tests {
             KcRead::Present(b"tok".to_vec())
         );
         assert_eq!(classify_kc_read(true, Some(0), vec![]), KcRead::Absent);
+    }
+
+    #[test]
+    fn rooted_paths_disable_machine_keychain_operations() {
+        assert!(!keychain_policy(true, true));
+        assert!(keychain_policy(true, false));
     }
 
     // C1: if the .claude.json write fails after credentials are written, the

@@ -1,20 +1,19 @@
-//! `swapdex quota` - the ONE network path in swapdex.
+//! Claude quota parsing and swapdex's token-safe curl transport.
 //!
-//! Reads each Claude account's REMAINING quota from Anthropic's official OAuth
-//! usage endpoint, using that account's own access token. The call is:
-//! read-only, spends zero message quota (documented by Anthropic), and runs
-//! ONLY when the user invokes `quota`. Every other swapdex command is 100%
-//! local - this file is the single, opt-in exception, kept isolated on purpose.
+//! `swapdex quota` reads each Claude account's remaining quota from Anthropic's
+//! official OAuth usage endpoint with that account's own access token. Codex
+//! quota reads use the same curl transport through [`run_curl_cfg`]. Explicit
+//! refresh and proxy renewal use that transport separately.
 //!
 //! The request shells out to `curl` with its config on STDIN (never argv), so
 //! the token stays off `ps` - the same discipline the Keychain writer uses -
-//! and swapdex's dependency graph keeps no HTTP client (still CI-asserted).
+//! while quota reads and renewal exchanges share one hardened process boundary.
 //!
-//! No token refresh, no proxying, no client impersonation: swapdex sends an
-//! honest `User-Agent: swapdex` and only ever READS. An account whose saved
-//! access token has expired simply reports "expired" - switch to it (which lets
-//! the official CLI refresh) to see its numbers. That is the deliberate line
-//! between this and a rotator/proxy like teamclaude or claude-swap.
+//! Quota requests are read-only and submit no model message. They never invoke
+//! OAuth renewal or update a saved credential. Expired credentials are reported
+//! without a usage request; a running native Claude owner may supply the current
+//! token for the same account. This module never chooses an account, refreshes a
+//! credential, or proxies a model request itself.
 
 use serde_json::Value;
 

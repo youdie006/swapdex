@@ -1,4 +1,5 @@
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +27,7 @@ struct ControlledUpstream {
     url: String,
     server: Arc<tiny_http::Server>,
     thread: Option<std::thread::JoinHandle<()>>,
+    workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 /// A spawned proxy that is killed and waited even if an assertion unwinds.
@@ -42,6 +44,18 @@ impl ReapedChild {
             child.wait().unwrap();
         }
     }
+
+    fn stop_with_stdout(mut self) -> String {
+        let Some(mut child) = self.0.take() else {
+            return String::new();
+        };
+        let mut stdout = child.stdout.take().unwrap();
+        child.kill().ok();
+        child.wait().unwrap();
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
+        output
+    }
 }
 
 impl Drop for ReapedChild {
@@ -51,6 +65,37 @@ impl Drop for ReapedChild {
             child.wait().ok();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_native_cli(
+    root: &std::path::Path,
+    comm: &str,
+    env: &[(&str, &std::path::Path)],
+) -> ReapedChild {
+    let binary = root.join(comm);
+    std::os::unix::fs::symlink("/bin/sleep", &binary).unwrap();
+    let mut command = Command::new(&binary);
+    command.arg("120").env_clear();
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    let child = ReapedChild::new(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        != comm
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake native {comm} process did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child
 }
 
 impl ControlledUpstream {
@@ -67,6 +112,38 @@ impl ControlledUpstream {
             url: format!("http://127.0.0.1:{port}"),
             server,
             thread: Some(thread),
+            workers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// A controllable upstream whose requests may complete out of order.
+    fn start_concurrent(respond: impl Fn(tiny_http::Request) + Send + Sync + 'static) -> Self {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let port = server.server_addr().to_ip().unwrap().port();
+        let serving = Arc::clone(&server);
+        let respond = Arc::new(respond);
+        let workers = Arc::new(Mutex::new(Vec::new()));
+        let spawned = Arc::clone(&workers);
+        let thread = std::thread::spawn(move || {
+            for request in serving.incoming_requests() {
+                let respond = Arc::clone(&respond);
+                spawned
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::spawn(move || respond(request)));
+            }
+        });
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            server,
+            thread: Some(thread),
+            workers,
+        }
+    }
+
+    fn join_workers(&self) {
+        for worker in self.workers.lock().unwrap().drain(..) {
+            worker.join().unwrap();
         }
     }
 
@@ -77,6 +154,7 @@ impl ControlledUpstream {
     fn close(mut self) {
         self.server.unblock();
         self.thread.take().unwrap().join().unwrap();
+        self.join_workers();
     }
 }
 
@@ -86,7 +164,141 @@ impl Drop for ControlledUpstream {
             self.server.unblock();
             thread.join().unwrap();
         }
+        self.join_workers();
     }
+}
+
+/// A raw loopback upstream that fully reads each request, resets the first TCP
+/// connection, then answers later requests. This distinguishes an ambiguous
+/// post-send failure from a connect failure without involving a real API.
+type RawRequest = (String, Vec<u8>);
+
+struct ResetAfterReadUpstream {
+    url: String,
+    seen: Arc<Mutex<Vec<RawRequest>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ResetAfterReadUpstream {
+    fn start() -> Self {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                // macOS inherits the listener's nonblocking mode on accept.
+                // Wait for the body before simulating a post-send reset.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let Some((method, body)) = read_http_request(&mut stream) else {
+                    continue;
+                };
+                let first = {
+                    let mut seen = sink.lock().unwrap();
+                    seen.push((method, body));
+                    seen.len() == 1
+                };
+                if first {
+                    use std::os::fd::AsRawFd;
+                    let linger = libc::linger {
+                        l_onoff: 1,
+                        l_linger: 0,
+                    };
+                    unsafe {
+                        libc::setsockopt(
+                            stream.as_raw_fd(),
+                            libc::SOL_SOCKET,
+                            libc::SO_LINGER,
+                            (&linger as *const libc::linger).cast(),
+                            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                        );
+                    }
+                    drop(stream);
+                    continue;
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                    )
+                    .ok();
+            }
+        });
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            seen,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn seen(&self) -> Vec<RawRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn close(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+impl Drop for ResetAfterReadUpstream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
+        }
+    }
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> Option<(String, Vec<u8>)> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if let Some(at) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&bytes[..head_end]);
+    let method = head.split_whitespace().next()?.to_string();
+    let content_length = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    while bytes.len() - head_end < content_length {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Some((method, bytes[head_end..head_end + content_length].to_vec()))
 }
 
 /// A fake upstream API: records the Authorization header and the body's account
@@ -285,12 +497,27 @@ fn start_proxy(
     upstream: &str,
     extra: &[&str],
 ) -> (std::process::Child, u16) {
+    start_proxy_with_env(root, upstream, extra, &[])
+}
+
+fn start_proxy_with_env(
+    root: &std::path::Path,
+    upstream: &str,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> (std::process::Child, u16) {
     let mut args = vec!["proxy", "--port", "0"];
     args.extend_from_slice(extra);
     let mut child = Command::new(bin())
         .args(&args)
         .env("SWAPDEX_ROOT", root)
         .env("SWAPDEX_UPSTREAM", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        // Individual fixtures replace this with their fake usage endpoint.
+        // Streaming/routing tests must not wait on external provider usage.
+        .env("SWAPDEX_CURL", "/bin/false")
+        .envs(env.iter().copied())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1033,6 +1260,7 @@ fn a_threshold_steps_off_before_the_account_refuses() {
         .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .env("SWAPDEX_CURL", &curl)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -1065,12 +1293,327 @@ fn a_threshold_steps_off_before_the_account_refuses() {
     );
 }
 
+fn assert_subpercent_threshold_routes(pinned: bool, consume_first: bool) {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "nearly", "aaaa1111", "AT-NEARLY", true);
+    seed_slot(root.path(), "fresh", "bbbb2222", "AT-FRESH", false);
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    swapdex::settings::save(
+        &paths,
+        &swapdex::settings::Settings {
+            proxy_threshold: (!pinned).then_some(0.005),
+            proxy_strategy: Some(
+                if consume_first {
+                    "consume-first"
+                } else {
+                    "roomiest"
+                }
+                .into(),
+            ),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let curl = fake_curl(root.path(), "AT-NEARLY");
+    let script = std::fs::read_to_string(&curl)
+        .unwrap()
+        .replace("99.0", "1.0")
+        .replace("4.0", "0.1");
+    std::fs::write(&curl, script).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.to_string());
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{\"ok\":true}"))
+            .unwrap();
+    });
+    let extra: &[&str] = if pinned {
+        &["--auto", "--threshold", "0.005"]
+    } else {
+        &["--auto"]
+    };
+    let curl_value = curl.to_string_lossy().into_owned();
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        extra,
+        &[("SWAPDEX_CURL", &curl_value)],
+    );
+    let proxy = ReapedChild::new(child);
+    post_through(port, "{\"turn\":1}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    let expected = if consume_first {
+        "Bearer AT-FRESH"
+    } else {
+        "Bearer AT-NEARLY"
+    };
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Some(expected.to_string())],
+        "0.5% threshold, pinned={pinned}, consume_first={consume_first}: {output}"
+    );
+    assert!(
+        output.contains("at 0.5% used"),
+        "threshold display differs: {output}"
+    );
+    if !consume_first {
+        assert!(
+            !output.contains("every account is refusing turns"),
+            "a 10-point movement margin is not a provider refusal: {output}"
+        );
+        assert!(
+            output.contains("no eligible alternative account"),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn a_saved_subpercent_threshold_rotates_at_the_configured_value() {
+    assert_subpercent_threshold_routes(false, true);
+}
+
+#[test]
+fn a_pinned_subpercent_threshold_rotates_at_the_configured_value() {
+    assert_subpercent_threshold_routes(true, true);
+}
+
+#[test]
+fn a_threshold_movement_margin_does_not_claim_healthy_accounts_are_refusing() {
+    assert_subpercent_threshold_routes(false, false);
+}
+
+/// A missing reading must not disappear from the evidence for "every account".
+#[test]
+fn a_threshold_corner_keeps_unmeasured_alternatives_in_its_diagnosis() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "nearly", "aaaa1111", "AT-NEARLY", true);
+    seed_slot(root.path(), "full", "bbbb2222", "AT-FULL", false);
+    seed_slot(root.path(), "unknown", "cccc3333", "AT-UNKNOWN", false);
+    let curl = fake_curl(root.path(), "AT-UNKNOWN");
+    let script = std::fs::read_to_string(&curl)
+        .unwrap()
+        .replace("99.0", "null")
+        .replace("4.0", "99.0");
+    std::fs::write(&curl, script).unwrap();
+    let upstream = ControlledUpstream::start(|request| {
+        request
+            .respond(tiny_http::Response::from_string("{}"))
+            .unwrap();
+    });
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--threshold", "0.98"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(child);
+    post_through(port, "{}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    assert!(
+        !output.contains("every account is past the threshold"),
+        "{output}"
+    );
+    assert!(
+        output.contains("no eligible alternative account"),
+        "{output}"
+    );
+}
+
+/// One refusal cannot establish what a disabled alternative would have done.
+#[test]
+fn a_refusal_corner_does_not_count_a_disabled_account_as_refusing() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
+    seed_slot(root.path(), "disabled", "bbbb2222", "AT-DISABLED", false);
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    swapdex::settings::save(
+        &paths,
+        &swapdex::settings::Settings {
+            disabled: vec!["disabled".into()],
+            fallback_model: Some("claude-sonnet-5".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let curl = fake_curl(root.path(), "UNUSED");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.to_string())
+            .unwrap();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(403))
+            .unwrap();
+    });
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(child);
+    for _ in 0..2 {
+        post_through(port, r#"{"model":"claude-opus-5","messages":[]}"#);
+    }
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer AT-ONE", "Bearer AT-ONE"]
+    );
+    assert!(
+        !output.contains("every account is refusing turns"),
+        "{output}"
+    );
+    assert!(
+        output.contains("no eligible alternative account"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_proxy_thresholds_fail_before_a_listener_is_started() {
+    for value in ["0", "-0.1", "1.01", "NaN", "inf", "-inf"] {
+        let root = tempfile::tempdir().unwrap();
+        let child = Command::new(bin())
+            .args(["proxy", "--port", "0", &format!("--threshold={value}")])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = ReapedChild::new(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.0.as_mut().unwrap().try_wait().unwrap() {
+                assert_eq!(status.code(), Some(2), "invalid threshold {value}");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "proxy accepted invalid threshold {value} and kept running"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!root.path().join(".local/share/swapdex/proxy").exists());
+    }
+}
+
+/// A quota read happens outside the choice lock and may take long enough for a
+/// human to turn managed serving off. The old request must stop rather than
+/// repeatedly reselecting the now-inapplicable account or forwarding its token.
+#[test]
+fn serving_off_during_a_blocked_preemptive_choice_exits_without_forwarding() {
+    struct ReleaseOnDrop(std::path::PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            std::fs::write(&self.0, b"release").ok();
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "a", "aaaa1111", "AT-A", true);
+    let started = root.path().join("measurement-started");
+    let release = root.path().join("measurement-release");
+    let _release_on_drop = ReleaseOnDrop(release.clone());
+    let curl = root.path().join("blocking-curl");
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n: > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nprintf '{{\"five_hour\":{{\"utilization\":99.0}}}}\\n200'\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let forwarded = Arc::new(AtomicBool::new(false));
+    let saw_forward = Arc::clone(&forwarded);
+    let upstream = ControlledUpstream::start(move |request| {
+        saw_forward.store(true, Ordering::SeqCst);
+        request
+            .respond(tiny_http::Response::from_string("{\"ok\":true}"))
+            .ok();
+    });
+    let curl_value = curl.to_string_lossy().into_owned();
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--threshold", "0.98"],
+        &[("SWAPDEX_CURL", curl_value.as_str())],
+    );
+    let proxy = ReapedChild::new(proxy);
+    let request = std::thread::spawn(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut response = agent
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .header("authorization", "Bearer CLIENT-TOKEN")
+            .header("content-type", "application/json")
+            .send(b"{\"turn\":1}".as_slice())
+            .expect("proxy answered");
+        let status = response.status().as_u16();
+        let mut body = String::new();
+        response
+            .body_mut()
+            .as_reader()
+            .read_to_string(&mut body)
+            .unwrap();
+        (status, body)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !started.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !started.exists() {
+        std::fs::write(&release, b"release").ok();
+        let _ = request.join();
+        proxy.stop();
+        upstream.close();
+        panic!("the quota fixture never blocked account selection");
+    }
+
+    swapdex::slots::Slots::open(&swapdex::paths::Paths::rooted(root.path()))
+        .unwrap()
+        .set_serving_off()
+        .unwrap();
+    std::fs::write(&release, b"release").unwrap();
+    let (status, response_body) = request.join().unwrap();
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+
+    assert_eq!(status, 502, "{output}");
+    assert!(!forwarded.load(Ordering::SeqCst), "{output}");
+    assert!(
+        response_body.contains("serving changed to passthrough"),
+        "{response_body}"
+    );
+}
+
 /// When swapdex has no usable login to offer, it must get out of the way: the
 /// turn goes upstream with the CLIENT's own Authorization, which is what Claude
 /// would have sent with no proxy at all. Being unable to help is not a reason to
 /// break the tool.
 #[test]
-fn an_unusable_account_falls_back_to_the_clients_own_login() {
+fn an_unusable_selected_account_does_not_send_the_clients_other_login() {
     let root = tempfile::tempdir().unwrap();
     // A slot in the registry whose credential is unreadable - and a second one
     // that IS readable, because a proxy able to read nothing at all now refuses
@@ -1104,14 +1647,10 @@ fn an_unusable_account_falls_back_to_the_clients_own_login() {
     child.kill().ok();
     child.wait().ok();
 
+    assert!(body.contains("swapdex_proxy_error"), "{body}");
     assert!(
-        body.contains("\"ok\":true"),
-        "the turn still went through: {body}"
-    );
-    assert_eq!(
-        auths(&sink),
-        vec!["Bearer CLIENT-TOKEN".to_string()],
-        "the client's own login was forwarded, not a failure"
+        auths(&sink).is_empty(),
+        "no credential was authorized to serve"
     );
 }
 
@@ -1127,7 +1666,7 @@ fn an_expired_slot_token_never_reaches_upstream() {
     // Signed in once, long ago: readable, and long past its expiry.
     std::fs::write(
         slot.join(".credentials.json"),
-        br#"{"claudeAiOauth":{"accessToken":"AT-STALE","refreshToken":"R","expiresAt":1}}"#,
+        br#"{"claudeAiOauth":{"accessToken":"AT-STALE","expiresAt":1}}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1151,23 +1690,132 @@ fn an_expired_slot_token_never_reaches_upstream() {
     child.kill().ok();
     child.wait().ok();
 
-    assert!(
-        body.contains("\"ok\":true"),
-        "the turn went through: {body}"
-    );
+    assert!(body.contains("swapdex_proxy_error"), "{body}");
     let seen = auths(&sink);
     assert!(
         !seen.iter().any(|a| a.contains("AT-STALE")),
         "the lapsed token was never sent: {seen:?}"
     );
-    assert_eq!(seen, vec!["Bearer CLIENT-TOKEN".to_string()]);
+    assert!(
+        seen.is_empty(),
+        "no implicit client-account fallback: {seen:?}"
+    );
 }
 
-/// Even when every account swapdex manages refuses, the user must still be able
-/// to work: the turn falls back to the login the client sent, which is what Claude
-/// would have used with no proxy at all.
+#[cfg(target_os = "linux")]
 #[test]
-fn a_turn_still_goes_through_when_every_account_is_refused() {
+fn a_stale_claude_slot_uses_its_verified_native_login_without_copying_or_refreshing() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "selected", "selected-slot", "OLD-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/selected-slot");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    // The default CLI's identity lives beside .claude, not inside it.
+    let old = br#"{"claudeAiOauth":{"accessToken":"OLD-ACCESS","refreshToken":"OLD-REFRESH","expiresAt":1}}"#;
+    let live = br#"{"claudeAiOauth":{"accessToken":"NATIVE-ACCESS","refreshToken":"NATIVE-REFRESH","expiresAt":9999999999999}}"#;
+    std::fs::write(slot.join(".credentials.json"), old).unwrap();
+    std::fs::write(native.join(".credentials.json"), live).unwrap();
+
+    let fake_cli = root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &fake_cli).unwrap();
+    let cli = Command::new(&fake_cli)
+        .arg("120")
+        .env("HOME", root.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .spawn()
+        .unwrap();
+    let pid = cli.id();
+    let _cli = ReapedChild::new(cli);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        != "claude"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake native process did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&calls);
+    let upstream = ControlledUpstream::start(move |rq| {
+        let auth = rq
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("authorization"))
+            .map(|h| h.value.as_str().to_owned())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        rq.respond(tiny_http::Response::from_string("{\"ok\":true}"))
+            .unwrap();
+    });
+    let curl = root.path().join("curl-no-oauth");
+    std::fs::write(
+        &curl,
+        r#"#!/bin/sh
+config=$(cat)
+case "$config" in
+  *'/oauth/token'*) printf x >> "$SWAPDEX_ROOT/oauth-calls" ;;
+esac
+printf '%s\n' '{}' '400'
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(proxy);
+    assert!(post_through(port, "{}").contains("\"ok\":true"));
+    assert_eq!(*calls.lock().unwrap(), vec!["Bearer NATIVE-ACCESS"]);
+    assert_eq!(std::fs::read(slot.join(".credentials.json")).unwrap(), old);
+    assert_eq!(
+        std::fs::read(native.join(".credentials.json")).unwrap(),
+        live
+    );
+    assert!(!root.path().join("oauth-calls").exists());
+
+    let list = Command::new(bin())
+        .args(["ls", "--json"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "selected")
+        .unwrap();
+    assert!(
+        !row["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expired"),
+        "{row}"
+    );
+    assert_eq!(row["renewal_owner"]["claude-code"], "native");
+    proxy.stop();
+    upstream.close();
+}
+
+/// Exhausting the managed accounts must surface failure without silently billing
+/// the unrelated login the client supplied.
+#[test]
+fn all_accounts_refused_does_not_authorize_the_clients_own_login() {
     let root = tempfile::tempdir().unwrap();
     seed_slot(root.path(), "one", "aaaa1111", "AT-ONE", true);
     let sink = Arc::new(Mutex::new(Vec::new()));
@@ -1209,13 +1857,10 @@ fn a_turn_still_goes_through_when_every_account_is_refused() {
     child.kill().ok();
     child.wait().ok();
 
+    assert!(!body.contains("\"ok\":true"), "{body}");
     assert!(
-        body.contains("\"ok\":true"),
-        "the user can still work: {body}"
-    );
-    assert!(
-        auths(&sink).contains(&"Bearer CLIENT-TOKEN".to_string()),
-        "it fell back to the client's own login: {:?}",
+        !auths(&sink).contains(&"Bearer CLIENT-TOKEN".to_string()),
+        "unselected client login was sent: {:?}",
         auths(&sink)
     );
 }
@@ -1247,6 +1892,7 @@ fn a_preemptive_move_does_not_flap_between_two_full_accounts() {
         .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .env("SWAPDEX_CURL", &curl)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -1345,6 +1991,8 @@ fn ensure_replaces_a_proxy_from_an_older_build() {
         .args(["proxy", "--ensure"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .output()
         .unwrap();
     let printed: u16 = String::from_utf8_lossy(&out.stdout)
@@ -1466,6 +2114,7 @@ fn a_running_codex_session_follows_a_pointer_change() {
         .args(["proxy", "--port", "0", "--tool", "codex"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM_CODEX", &upstream)
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1592,6 +2241,9 @@ fn start_codex_proxy(
         .args(&args)
         .env("SWAPDEX_ROOT", root)
         .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1630,6 +2282,670 @@ fn post_codex_turn(port: u16) -> (u16, String) {
         .read_to_string(&mut out)
         .unwrap();
     (status, out)
+}
+
+fn seed_signal_test_account(root: &std::path::Path, tool: &str) {
+    if tool == "codex" {
+        seed_codex_slot(root, "work", "codex-work", "AT-WORK", "acct-work", true);
+    } else {
+        seed_slot(root, "work", "claude-work", "AT-WORK", true);
+    }
+}
+
+fn start_signal_test_proxy(
+    root: &std::path::Path,
+    tool: &str,
+    upstream: &str,
+) -> (ReapedChild, u16) {
+    let mut command = Command::new(bin());
+    command
+        .args(["proxy", "--port", "0"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
+        // Keep stdout open without relying on a blocking read for readiness.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if tool == "codex" {
+        command
+            .args(["--tool", "codex"])
+            .env("SWAPDEX_UPSTREAM_CODEX", upstream);
+    } else {
+        command.env("SWAPDEX_UPSTREAM", upstream);
+    }
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    let mut proxy = ReapedChild::new(child);
+    let paths = swapdex::paths::Paths::rooted(root);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if let Some(status) = proxy.0.as_mut().unwrap().try_wait().unwrap() {
+            panic!("{tool} proxy exited during startup: {status}");
+        }
+        if let Some((marker_pid, port, build)) = swapdex::proxy::running_proxy_for(&paths, tool) {
+            assert_eq!(marker_pid, pid as i32, "proxy marker named another process");
+            assert!(!build.is_empty(), "proxy marker omitted its build identity");
+            return (proxy, port);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{tool} proxy did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn post_signal_test_turn(tool: &str, port: u16) -> u16 {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .build()
+        .into();
+    let (path, body) = if tool == "codex" {
+        ("/v1/responses", r#"{"input":[]}"#)
+    } else {
+        ("/v1/messages", r#"{"turn":1}"#)
+    };
+    let mut request = agent
+        .post(format!("http://127.0.0.1:{port}{path}"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .header("content-type", "application/json");
+    if tool == "codex" {
+        request = request.header("chatgpt-account-id", "acct-client");
+    }
+    let mut response = request
+        .send(body.as_bytes())
+        .expect("proxy answered within the test deadline");
+    let status = response.status().as_u16();
+    let mut response_body = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut response_body)
+        .expect("proxy response completed within the test deadline");
+    status
+}
+
+fn assert_proxy_stays_running(
+    proxy: &mut ReapedChild,
+    duration: std::time::Duration,
+    context: &str,
+) {
+    let deadline = std::time::Instant::now() + duration;
+    loop {
+        let status = proxy.0.as_mut().unwrap().try_wait().unwrap();
+        assert!(
+            status.is_none(),
+            "proxy exited {context}: {}",
+            status.unwrap()
+        );
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn executable_proxy_ignores_sigpipe_and_keeps_serving(tool: &str) {
+    let root = tempfile::tempdir().unwrap();
+    seed_signal_test_account(root.path(), tool);
+    let upstream = ControlledUpstream::start(|mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        request
+            .respond(tiny_http::Response::from_string(r#"{"ok":true}"#))
+            .ok();
+    });
+    let (mut proxy, port) = start_signal_test_proxy(root.path(), tool, upstream.url());
+    let pid = proxy.0.as_ref().unwrap().id();
+
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGPIPE) };
+    assert_eq!(sent, 0, "could not send SIGPIPE to the {tool} proxy");
+    assert_proxy_stays_running(
+        &mut proxy,
+        std::time::Duration::from_millis(500),
+        "after SIGPIPE",
+    );
+    assert_eq!(
+        post_signal_test_turn(tool, port),
+        200,
+        "the same {tool} proxy did not answer after SIGPIPE"
+    );
+    assert_eq!(proxy.0.as_ref().unwrap().id(), pid);
+
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn executable_claude_proxy_ignores_sigpipe_and_keeps_serving() {
+    executable_proxy_ignores_sigpipe_and_keeps_serving("claude-code");
+}
+
+#[test]
+fn executable_codex_proxy_ignores_sigpipe_and_keeps_serving() {
+    executable_proxy_ignores_sigpipe_and_keeps_serving("codex");
+}
+
+fn open_turn_for_disconnect(port: u16, tool: &str) -> std::net::TcpStream {
+    let (path, body, identity) = if tool == "codex" {
+        (
+            "/v1/responses",
+            r#"{"input":[]}"#,
+            "Authorization: Bearer CLIENT-TOKEN\r\nChatGPT-Account-ID: acct-client\r\n",
+        )
+    } else {
+        (
+            "/v1/messages",
+            r#"{"turn":1}"#,
+            "Authorization: Bearer CLIENT-TOKEN\r\n",
+        )
+    };
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{identity}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut client =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3)).unwrap();
+    client
+        .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client
+}
+
+fn reset_client_connection(client: std::net::TcpStream) {
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    let set = unsafe {
+        libc::setsockopt(
+            client.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&linger as *const libc::linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "could not configure a reset-on-close client");
+    drop(client);
+}
+
+fn executable_proxy_survives_a_disconnected_client(tool: &str) {
+    let root = tempfile::tempdir().unwrap();
+    seed_signal_test_account(root.path(), tool);
+    let (received_tx, received_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (responded_tx, responded_rx) = std::sync::mpsc::channel();
+    let mut first = true;
+    let upstream = ControlledUpstream::start(move |mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        let was_first = std::mem::replace(&mut first, false);
+        let released = if was_first {
+            received_tx.send(()).is_ok()
+                && release_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .is_ok()
+        } else {
+            true
+        };
+        let answered = released
+            && request
+                .respond(tiny_http::Response::from_string(r#"{"ok":true}"#))
+                .is_ok();
+        if was_first {
+            responded_tx.send(answered).ok();
+        }
+    });
+    let (mut proxy, port) = start_signal_test_proxy(root.path(), tool, upstream.url());
+    let pid = proxy.0.as_ref().unwrap().id();
+
+    let client = open_turn_for_disconnect(port, tool);
+    received_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("the upstream did not receive the abandoned turn");
+    reset_client_connection(client);
+    release_tx.send(()).unwrap();
+    assert!(
+        responded_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("the upstream did not finish the abandoned turn"),
+        "the upstream could not answer the abandoned turn"
+    );
+    assert_proxy_stays_running(
+        &mut proxy,
+        std::time::Duration::from_millis(500),
+        "after a client disconnected before its response",
+    );
+    assert_eq!(
+        post_signal_test_turn(tool, port),
+        200,
+        "the same {tool} proxy did not answer after a client disconnected"
+    );
+    assert_eq!(proxy.0.as_ref().unwrap().id(), pid);
+
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn executable_claude_proxy_survives_a_disconnected_client() {
+    executable_proxy_survives_a_disconnected_client("claude-code");
+}
+
+#[test]
+fn executable_codex_proxy_survives_a_disconnected_client() {
+    executable_proxy_survives_a_disconnected_client("codex");
+}
+
+fn select_serving(root: &std::path::Path, tool: &str, name: &str) {
+    let paths = swapdex::paths::Paths::rooted(root);
+    swapdex::slots::Slots::open_for(&paths, tool)
+        .unwrap()
+        .set_serving(name)
+        .unwrap();
+}
+
+/// A Codex proxy must never search Claude's registry when its selected account
+/// is already benched. That produces neither a valid fallback nor a useful
+/// error; it attempts to load a Claude home as a Codex login.
+#[test]
+fn codex_preemptive_fallback_stays_in_the_codex_registry() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(
+        root.path(),
+        "claude-only",
+        "claude-only-id",
+        "AT-CLAUDE",
+        true,
+    );
+    seed_codex_slot(root.path(), "a", "codex-a-id", "AT-A", "acct-a", true);
+    seed_codex_slot(root.path(), "b", "codex-b-id", "AT-B", "acct-b", false);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(Arc::clone(&seen), "AT-A", 401);
+    let (proxy, port) = start_codex_proxy(root.path(), &upstream, &["--auto"]);
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 200, "A refused, then B served");
+    select_serving(root.path(), "codex", "a");
+    assert_eq!(
+        post_codex_turn(port).0,
+        200,
+        "a known-benched Codex selection should fall back within Codex"
+    );
+
+    proxy.stop();
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .all(|(auth, account)| auth != "Bearer AT-CLAUDE" && account.starts_with("acct-")),
+        "Codex fallback crossed into a Claude slot: {seen:?}"
+    );
+    assert_eq!(
+        seen,
+        vec![
+            ("Bearer AT-A".into(), "acct-a".into()),
+            ("Bearer AT-B".into(), "acct-b".into()),
+            ("Bearer AT-B".into(), "acct-b".into()),
+        ]
+    );
+}
+
+fn set_codex_id_token(root: &std::path::Path, id: &str, id_token: Option<String>) {
+    let auth = root
+        .join(".local/share/swapdex/slots")
+        .join(id)
+        .join("auth.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&auth).unwrap()).unwrap();
+    let tokens = value["tokens"].as_object_mut().unwrap();
+    match id_token {
+        Some(token) => {
+            tokens.insert("id_token".into(), token.into());
+        }
+        None => {
+            tokens.remove("id_token");
+        }
+    }
+    std::fs::write(auth, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+fn controlled_codex_upstream_refusing(
+    sink: Arc<Mutex<Vec<(String, String)>>>,
+    refuse_token: &str,
+) -> ControlledUpstream {
+    let refuse_token = refuse_token.to_string();
+    ControlledUpstream::start(move |mut request| {
+        let header = |name: &'static str| {
+            request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv(name))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default()
+        };
+        let auth = header("authorization");
+        let account = header("chatgpt-account-id");
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        sink.lock().unwrap().push((auth.clone(), account));
+        let refused = auth == format!("Bearer {refuse_token}");
+        request
+            .respond(
+                tiny_http::Response::from_string(if refused {
+                    "{\"error\":\"spent\"}"
+                } else {
+                    "{\"ok\":true}"
+                })
+                .with_status_code(if refused { 429 } else { 200 }),
+            )
+            .ok();
+    })
+}
+
+#[test]
+fn codex_failover_skips_a_twin_subject_and_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "a", "id-a", "AT-A", "workspace", true);
+    seed_codex_slot(
+        root.path(),
+        "a-twin",
+        "id-a-twin",
+        "AT-TWIN",
+        "workspace",
+        false,
+    );
+    seed_codex_slot(root.path(), "c", "id-c", "AT-C", "workspace-c", false);
+    let subject = codex_id_token("subject-a");
+    set_codex_id_token(root.path(), "id-a", Some(subject.clone()));
+    set_codex_id_token(root.path(), "id-a-twin", Some(subject));
+    set_codex_id_token(root.path(), "id-c", Some(codex_id_token("subject-c")));
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = controlled_codex_upstream_refusing(Arc::clone(&seen), "AT-A");
+    let (proxy, port) = start_codex_proxy(root.path(), upstream.url(), &["--auto"]);
+    let proxy = ReapedChild::new(proxy);
+    assert_eq!(post_codex_turn(port).0, 200);
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("Bearer AT-A".into(), "workspace".into()),
+            ("Bearer AT-C".into(), "workspace-c".into()),
+        ],
+        "the refused payer's twin must not receive the same turn"
+    );
+}
+
+#[test]
+fn codex_failover_keeps_distinct_subjects_in_one_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "a", "id-a", "AT-A", "workspace", true);
+    seed_codex_slot(root.path(), "b", "id-b", "AT-B", "workspace", false);
+    set_codex_id_token(root.path(), "id-a", Some(codex_id_token("subject-a")));
+    set_codex_id_token(root.path(), "id-b", Some(codex_id_token("subject-b")));
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = controlled_codex_upstream_refusing(Arc::clone(&seen), "AT-A");
+    let (proxy, port) = start_codex_proxy(root.path(), upstream.url(), &["--auto"]);
+    let proxy = ReapedChild::new(proxy);
+    assert_eq!(post_codex_turn(port).0, 200);
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("Bearer AT-A".into(), "workspace".into()),
+            ("Bearer AT-B".into(), "workspace".into()),
+        ],
+        "workspace membership alone must not merge distinct users"
+    );
+}
+
+#[test]
+fn codex_failover_uses_workspace_for_opaque_id_tokens() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "a", "id-a", "AT-A", "workspace", true);
+    seed_codex_slot(
+        root.path(),
+        "a-twin",
+        "id-a-twin",
+        "AT-TWIN",
+        "workspace",
+        false,
+    );
+    seed_codex_slot(root.path(), "c", "id-c", "AT-C", "workspace-c", false);
+    set_codex_id_token(root.path(), "id-a", Some("not-a-jwt".into()));
+    set_codex_id_token(root.path(), "id-a-twin", None);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = controlled_codex_upstream_refusing(Arc::clone(&seen), "AT-A");
+    let (proxy, port) = start_codex_proxy(root.path(), upstream.url(), &["--auto"]);
+    let proxy = ReapedChild::new(proxy);
+    assert_eq!(post_codex_turn(port).0, 200);
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("Bearer AT-A".into(), "workspace".into()),
+            ("Bearer AT-C".into(), "workspace-c".into()),
+        ],
+        "opaque credentials keep the workspace fallback instead of retrying a twin"
+    );
+}
+
+/// A refusal from an older in-flight request must not install a rotation after
+/// a newer explicit serving choice, whether or not another turn has observed it.
+/// The late request receives its own refusal; the selected account serves every
+/// subsequent turn. Exercise both protocols and both auto policies.
+#[test]
+fn late_inflight_refusal_cannot_override_a_newer_human_selection() {
+    for tool in ["claude-code", "codex"] {
+        for auto in [false, true] {
+            for choice_observed_by_request in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                if tool == "codex" {
+                    for (name, id, token, account, default) in [
+                        ("a", "codex-a", "AT-A", "acct-a", true),
+                        ("b", "codex-b", "AT-B", "acct-b", false),
+                        ("c", "codex-c", "AT-C", "acct-c", false),
+                    ] {
+                        seed_codex_slot(root.path(), name, id, token, account, default);
+                    }
+                } else {
+                    for (name, id, token, default) in [
+                        ("a", "claude-a", "AT-A", true),
+                        ("b", "claude-b", "AT-B", false),
+                        ("c", "claude-c", "AT-C", false),
+                    ] {
+                        seed_slot(root.path(), name, id, token, default);
+                    }
+                }
+
+                let seen = Arc::new(Mutex::new(Vec::new()));
+                let sink = Arc::clone(&seen);
+                let first_a = Arc::new(AtomicBool::new(true));
+                let reject_a = Arc::clone(&first_a);
+                let started = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+                let started_by_upstream = Arc::clone(&started);
+                let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+                let release_upstream = Arc::clone(&release);
+                let upstream = ControlledUpstream::start_concurrent(move |mut request| {
+                    let auth = request
+                        .headers()
+                        .iter()
+                        .find(|header| header.field.equiv("authorization"))
+                        .map(|header| header.value.as_str().to_string())
+                        .unwrap_or_default();
+                    let mut body = Vec::new();
+                    request.as_reader().read_to_end(&mut body).ok();
+                    sink.lock().unwrap().push(auth.clone());
+                    let late = auth == "Bearer AT-A" && reject_a.swap(false, Ordering::SeqCst);
+                    if late {
+                        let (ready, wake) = &*started_by_upstream;
+                        *ready.lock().unwrap() = true;
+                        wake.notify_all();
+                        let (go, wake) = &*release_upstream;
+                        let guard = go.lock().unwrap();
+                        let _ = wake
+                            .wait_timeout_while(guard, std::time::Duration::from_secs(5), |go| !*go)
+                            .unwrap();
+                    }
+                    let status: u16 = if late { 401 } else { 200 };
+                    request
+                        .respond(
+                            tiny_http::Response::from_string(if late {
+                                "{\"error\":\"rejected A\"}"
+                            } else {
+                                "{\"ok\":true}"
+                            })
+                            .with_status_code(status),
+                        )
+                        .ok();
+                });
+                let extra = if auto {
+                    vec!["--auto"]
+                } else {
+                    vec!["--no-auto"]
+                };
+                let (proxy, port) = if tool == "codex" {
+                    start_codex_proxy(root.path(), upstream.url(), &extra)
+                } else {
+                    start_proxy_with_env(
+                        root.path(),
+                        upstream.url(),
+                        &extra,
+                        &[("SWAPDEX_CURL", "/bin/false")],
+                    )
+                };
+                let proxy = ReapedChild::new(proxy);
+
+                let request_one = std::thread::spawn(move || {
+                    if tool == "codex" {
+                        post_codex_turn(port).0
+                    } else {
+                        post_through_status(port, "{\"turn\":1}")
+                    }
+                });
+                let (ready, wake) = &*started;
+                let guard = ready.lock().unwrap();
+                let (guard, timeout) = wake
+                    .wait_timeout_while(guard, std::time::Duration::from_secs(5), |ready| !*ready)
+                    .unwrap();
+                assert!(*guard && !timeout.timed_out(), "A never reached upstream");
+                drop(guard);
+
+                select_serving(root.path(), tool, "c");
+                if choice_observed_by_request {
+                    let second = if tool == "codex" {
+                        post_codex_turn(port).0
+                    } else {
+                        post_through_status(port, "{\"turn\":2}")
+                    };
+                    assert_eq!(second, 200, "new human choice C should serve immediately");
+                }
+                let (go, wake) = &*release;
+                *go.lock().unwrap() = true;
+                wake.notify_all();
+                let first = request_one.join().unwrap();
+                let third = if tool == "codex" {
+                    post_codex_turn(port).0
+                } else {
+                    post_through_status(port, "{\"turn\":3}")
+                };
+                let output = proxy.stop_with_stdout();
+                upstream.close();
+                let seen = seen.lock().unwrap().clone();
+                assert_eq!(
+                    first, 401,
+                    "tool={tool} auto={auto} preobserved={choice_observed_by_request}: late A did not keep its own result; seen={seen:?}\n{output}"
+                );
+                assert_eq!(
+                    third, 200,
+                    "tool={tool} auto={auto} preobserved={choice_observed_by_request}: {output}"
+                );
+                let mut expected = vec!["Bearer AT-A".to_string()];
+                if choice_observed_by_request {
+                    expected.push("Bearer AT-C".to_string());
+                }
+                expected.push("Bearer AT-C".to_string());
+                assert_eq!(
+                    seen,
+                    expected,
+                    "tool={tool} auto={auto} preobserved={choice_observed_by_request}: a late refusal displaced C"
+                );
+            }
+        }
+    }
+}
+
+/// Once an upstream has fully accepted a body, a TCP reset does not reveal
+/// whether the operation ran. Replaying that POST can duplicate a paid turn.
+#[test]
+fn accepted_post_is_not_replayed_after_an_ambiguous_transport_failure() {
+    for tool in ["claude-code", "codex"] {
+        let root = tempfile::tempdir().unwrap();
+        if tool == "codex" {
+            seed_codex_slot(root.path(), "a", "codex-a", "AT-A", "acct-a", true);
+        } else {
+            seed_slot(root.path(), "a", "claude-a", "AT-A", true);
+        }
+        let upstream = ResetAfterReadUpstream::start();
+        let (proxy, port) = if tool == "codex" {
+            start_codex_proxy(root.path(), upstream.url(), &[])
+        } else {
+            start_proxy(root.path(), upstream.url(), &[])
+        };
+        let proxy = ReapedChild::new(proxy);
+        let status = if tool == "codex" {
+            post_codex_turn(port).0
+        } else {
+            post_through_status(port, "{\"turn\":1}")
+        };
+        assert_eq!(status, 502, "an ambiguous {tool} result must surface");
+        proxy.stop();
+        let seen = upstream.seen();
+        upstream.close();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the accepted {tool} POST was replayed: {seen:?}"
+        );
+        assert_eq!(seen[0].0, "POST");
+        assert!(!seen[0].1.is_empty());
+    }
+}
+
+#[test]
+fn bodyless_get_still_retries_after_a_transport_reset() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "a", "claude-a", "AT-A", true);
+    let upstream = ResetAfterReadUpstream::start();
+    let (proxy, port) = start_proxy(root.path(), upstream.url(), &[]);
+    let proxy = ReapedChild::new(proxy);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let response = agent
+        .get(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .call()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    proxy.stop();
+    let seen = upstream.seen();
+    upstream.close();
+    assert_eq!(seen.len(), 2, "the safe GET retry was removed: {seen:?}");
+    assert!(seen
+        .iter()
+        .all(|(method, body)| method == "GET" && body.is_empty()));
 }
 
 /// Codex carries account identity in a header instead of Claude's body field.
@@ -2043,156 +3359,103 @@ fn serve_moves_who_pays_for_codex_without_moving_its_transcripts() {
     );
 }
 
-/// Codex renders `model_providers.<id>.name` on its /status screen. With the
-/// proxy in the middle, the auth.json inside CODEX_HOME is NOT the account that
-/// pays for the turn - the proxy replaces its bearer on the way out. So the one
-/// place Codex shows an identity shows the wrong one, and the account actually
-/// being charged appears nowhere on the screen. The provider name is the only
-/// field we control that Codex prints, so the paying account goes there.
-mod codex_status_names_the_payer {
-    use std::path::Path;
+/// Environment variables must not override the shim's routing decision.
+mod codex_routing_ignores_inherited_shell_state {
+    use std::sync::{Mutex, MutexGuard};
     use swapdex::shim::codex_shim_script;
 
-    /// Run the generated shim with stubs standing in for swapdex and codex, and
-    /// return the argument line codex was handed.
-    fn args_codex_receives(serving: &str, port: &str) -> String {
-        let tmp = std::env::temp_dir().join(format!(
-            "sx-shim-{}-{}",
-            std::process::id(),
-            serving.len() * 7 + port.len()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let sx = tmp.join("swapdex");
-        // The stub answers both questions the shim asks: the proxy port, and
-        // who is serving. An empty answer is how "nobody" arrives.
-        std::fs::write(
-            &sx,
-            format!(
-                "#!/bin/sh\nfor a in \"$@\"; do\n\tcase \"$a\" in\n\t--ensure) echo '{port}'; exit 0 ;;\n\tserve) shift; printf '%s' '{serving}'; exit 0 ;;\n\tesac\ndone\nexit 0\n"
-            ),
-        )
-        .unwrap();
-        let codex = tmp.join("codex");
-        std::fs::write(&codex, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-        let shim = tmp.join("shim");
-        std::fs::write(&shim, codex_shim_script(&tmp.join("ptr"), &codex, &sx)).unwrap();
-        for f in [&sx, &codex, &shim] {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let out = std::process::Command::new("sh")
-            .arg(&shim)
-            .arg("hello")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
-        String::from_utf8_lossy(&out.stdout).into_owned()
+    static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_exec_lock() -> MutexGuard<'static, ()> {
+        FIXTURE_EXEC_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    #[test]
-    fn the_provider_name_carries_the_account_that_pays() {
-        let got = args_codex_receives("work", "8788");
-        // The ID, not the name. Codex renders the provider IDENTIFIER on
-        // `/status` and never the `name` field - verified against v0.154.0,
-        // which printed `Model provider: swapdex` while the name it was handed
-        // read "swapdex: work (...)". This assertion used to check the name, so
-        // it passed for releases while the account was visible nowhere: it
-        // tested what swapdex WRITES instead of what Codex SHOWS.
-        assert!(
-            got.lines().any(|l| l == "model_provider=swapdex-work"),
-            "the /status provider does not name the payer, got:\n{got}"
-        );
+    #[derive(Debug, Eq, PartialEq)]
+    struct Launch {
+        home: String,
+        args: Vec<String>,
     }
 
-    #[test]
-    fn with_nobody_serving_the_name_claims_no_account() {
-        let got = args_codex_receives("", "8788");
-        assert!(
-            got.lines()
-                .any(|l| l == "model_providers.swapdex.name=swapdex"),
-            "a bare name when no account directs turns, got:\n{got}"
-        );
-        assert!(
-            !got.contains("name=swapdex: "),
-            "and never a dangling label, got:\n{got}"
-        );
-    }
-
-    /// A reading command takes no provider override at all, so it must also not
-    /// pay the cost of asking who serves.
-    #[test]
-    fn a_reading_command_asks_nothing() {
-        let s = codex_shim_script(
-            Path::new("/store/active-codex"),
-            Path::new("/usr/bin/codex"),
-            Path::new("/usr/bin/swapdex"),
-        );
-        let guard = s.find("sx_plain=no").unwrap();
-        let ask = s.find("serve --tool codex").expect("asks who serves");
-        let name = s.find(".name=").expect("hands codex the provider name");
-        assert!(guard < ask && ask < name, "asked inside the talking branch");
-    }
-}
-
-/// A reading command has to reach the real backend. `resume` lists only the
-/// conversations that match the configured provider, so an override empties the
-/// picker; `login` runs an OAuth exchange that a proxy answers with whichever
-/// account it already holds. The shim guards both by skipping the override - but
-/// it decides from `port`, which the guarded branch only ever SETS. A caller who
-/// exports a variable of that name has already filled it in, and the guard waves
-/// the override straight through. The claude shim reads `port` inside the branch
-/// that sets it and is unaffected.
-mod a_reading_command_keeps_the_real_backend {
-    use swapdex::shim::codex_shim_script;
-
-    /// Run the generated shim with stubs and return the argument line the tool
-    /// was handed. `env` is prepended to the command as `name=value` pairs, so
-    /// it arrives the way a caller's exported variable would.
-    fn args_tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> String {
-        let tmp = std::env::temp_dir().join(format!("sx-guard-{}-{nonce}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let sx = tmp.join("swapdex");
+    /// Run the generated shim with stubs and return exactly what the real tool
+    /// receives. `env` arrives the way a caller's exported variables would.
+    fn tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> Launch {
+        let _exec_guard = fixture_exec_lock();
+        let prefix = format!("sx-guard-{nonce}-");
+        let tmp = tempfile::Builder::new().prefix(&prefix).tempdir().unwrap();
+        let root = tmp.path();
+        let pointer = root.join("ptr");
+        let pointed_home = root.join("pointed-home");
+        std::fs::write(&pointer, pointed_home.to_string_lossy().as_bytes()).unwrap();
+        let sx = root.join("swapdex");
         std::fs::write(
             &sx,
             "#!/bin/sh\nfor a in \"$@\"; do\n\tcase \"$a\" in\n\t--ensure) echo 8788; exit 0 ;;\n\tserve) shift; printf '%s' work; exit 0 ;;\n\tesac\ndone\nexit 0\n",
         )
         .unwrap();
-        let tool = tmp.join("tool");
-        std::fs::write(&tool, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-        let shim = tmp.join("shim");
-        std::fs::write(&shim, codex_shim_script(&tmp.join("ptr"), &tool, &sx)).unwrap();
+        let tool = root.join("tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nprintf 'home=%s\\n' \"$CODEX_HOME\"\nfor a in \"$@\"; do printf 'arg=%s\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        let shim = root.join("shim");
+        std::fs::write(&shim, codex_shim_script(&pointer, &tool, &sx)).unwrap();
         for f in [&sx, &tool, &shim] {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut cmd = std::process::Command::new("sh");
         cmd.arg(&shim).args(args);
+        cmd.env_remove("CODEX_HOME");
         for (k, v) in env {
             cmd.env(k, v);
         }
         let out = cmd.output().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        assert!(
+            out.status.success(),
+            "shim failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let mut lines = stdout.lines();
+        let home = lines
+            .next()
+            .and_then(|line| line.strip_prefix("home="))
+            .expect("tool reported CODEX_HOME")
+            .to_owned();
+        let args = lines
+            .map(|line| {
+                line.strip_prefix("arg=")
+                    .expect("tool reported one argument per line")
+                    .to_owned()
+            })
+            .collect();
+        Launch { home, args }
+    }
+
+    fn managed_args(original: &[&str]) -> Vec<String> {
+        ["-c", "openai_base_url=http://127.0.0.1:8788/v1"]
+            .into_iter()
+            .chain(original.iter().copied())
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]
-    fn an_inherited_port_does_not_reopen_the_override_on_resume() {
-        let got = args_tool_receives("resume", &[("port", "3000")], &["resume"]);
-        assert!(
-            !got.contains("model_provider"),
-            "resume must carry no provider override, got:\n{got}"
-        );
-        assert_eq!(got.trim_end(), "resume", "and nothing else, got:\n{got}");
+    fn resume_uses_the_reported_proxy_without_changing_provider() {
+        let got = tool_receives("resume", &[("port", "3000")], &["resume"]);
+        assert!(!got.args.iter().any(|arg| arg.contains("model_provider")));
+        assert_eq!(got.args, managed_args(&["resume"]));
     }
 
     #[test]
     fn an_inherited_port_does_not_reopen_the_override_on_login() {
-        let got = args_tool_receives("login", &[("port", "3000")], &["login"]);
+        let got = tool_receives("login", &[("port", "3000")], &["login"]);
         assert!(
-            !got.contains("model_provider"),
-            "a sign-in must reach the real backend, got:\n{got}"
+            !got.args.iter().any(|arg| arg.contains("model_provider")),
+            "a sign-in must reach the real backend, got: {got:?}"
         );
     }
 
@@ -2200,15 +3463,66 @@ mod a_reading_command_keeps_the_real_backend {
     /// override, so the fix cannot be "never apply it".
     #[test]
     fn a_talking_turn_still_gets_the_override() {
-        let got = args_tool_receives("talk", &[("port", "3000")], &["hello"]);
-        // The provider id carries the payer now, so the key it hangs the base
-        // URL on carries it too. What this pins is the ADDRESS: the turn must
-        // go to the port swapdex reported, whatever the provider is called.
+        let got = tool_receives("talk", &[("port", "3000")], &["hello"]);
         assert!(
-            got.lines()
-                .any(|l| l.ends_with(".base_url=http://127.0.0.1:8788/v1")),
-            "a turn routes through the proxy swapdex reported, got:\n{got}"
+            got.args
+                .iter()
+                .any(|arg| arg == "openai_base_url=http://127.0.0.1:8788/v1"),
+            "a turn routes through the proxy swapdex reported, got: {got:?}"
         );
+    }
+
+    #[test]
+    fn profile_forms_stay_managed_and_preserve_arguments_and_home() {
+        for (nonce, profile) in [
+            ("profile-short", vec!["-p", "worker"]),
+            ("profile-long", vec!["--profile", "worker"]),
+            ("profile-short-attached", vec!["-pworker"]),
+            ("profile-long-attached", vec!["--profile=worker"]),
+        ] {
+            let mut original = vec!["--strict-config", "exec"];
+            original.extend(profile);
+            original.extend(["resume", "thread-42"]);
+            let got = tool_receives(nonce, &[("CODEX_HOME", "/keep/codex-home")], &original);
+            assert_eq!(got.home, "/keep/codex-home", "profile form: {original:?}");
+            assert_eq!(
+                got.args,
+                managed_args(&original),
+                "profile form: {original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_profile_value_named_login_is_not_an_auth_command() {
+        let original = ["-p", "login", "exec", "hello"];
+        let got = tool_receives("profile-named-login", &[], &original);
+        assert_eq!(got.args, managed_args(&original));
+    }
+
+    #[test]
+    fn explicit_provider_config_with_a_profile_still_bypasses_routing() {
+        let original = [
+            "--profile=worker",
+            "exec",
+            "-c",
+            "model_provider=company",
+            "hello",
+        ];
+        let got = tool_receives("profile-explicit-provider", &[], &original);
+        assert_eq!(got.args, original.map(str::to_owned));
+    }
+
+    #[test]
+    fn auth_commands_with_a_profile_still_bypass_routing() {
+        for (nonce, command) in [
+            ("profile-auth-login", "login"),
+            ("profile-auth-logout", "logout"),
+        ] {
+            let original = ["--profile=worker", command];
+            let got = tool_receives(nonce, &[], &original);
+            assert_eq!(got.args, original.map(str::to_owned));
+        }
     }
 }
 
@@ -3094,6 +4408,7 @@ fn a_proxy_with_nothing_to_serve_with_refuses_to_start() {
         .args(["proxy", "--port", "0"])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:9")
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -3216,6 +4531,7 @@ fn a_second_proxy_for_the_same_tool_takes_the_port_rather_than_failing() {
         .args(["proxy", "--port", &port.to_string()])
         .env("SWAPDEX_ROOT", root.path())
         .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -3310,6 +4626,18 @@ fn hold_seconds_actually_delays_a_spent_turn() {
 
 const CODEX_JWT_LAPSED: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjEwMDAwMDAwMDB9.sig";
 const CODEX_JWT_LIVE: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.sig";
+const CODEX_JWT_LIVE_NEW: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDI0NDQ4MDB9.new";
+const CODEX_JWT_LIVE_B: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDI0NDQ4MDB9.account-b";
+const CODEX_JWT_LIVE_B_NEW: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxNDI0NDQ4MDB9.account-b-renewed";
+
+fn codex_id_token(subject: &str) -> String {
+    use base64::Engine;
+    let payload = serde_json::to_vec(&serde_json::json!({ "sub": subject })).unwrap();
+    format!(
+        "eyJhbGciOiJub25lIn0.{}.sig",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    )
+}
 
 /// A fake curl standing in for the OAuth token endpoint.
 fn fake_oauth_curl(root: &std::path::Path, answer: &str, status: u16) -> std::path::PathBuf {
@@ -3317,7 +4645,13 @@ fn fake_oauth_curl(root: &std::path::Path, answer: &str, status: u16) -> std::pa
     let p = root.join("fake-oauth-curl");
     std::fs::write(
         &p,
-        format!("#!/bin/sh\ncat > /dev/null\nprintf '{answer}\\n{status}'\n"),
+        format!(
+            "#!/bin/sh\nconfig=$(cat)\n\
+             case \"$config\" in\n\
+               *'/oauth/token'*) if [ -n \"$FAKE_OAUTH_COUNT\" ]; then printf x >> \"$FAKE_OAUTH_COUNT\"; fi ;;\n\
+             esac\n\
+             printf '{answer}\\n{status}'\n"
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3333,6 +4667,8 @@ fn start_codex_proxy_env(
         .args(["proxy", "--port", "0", "--tool", "codex"])
         .env("SWAPDEX_ROOT", root)
         .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
         .envs(envs.iter().copied())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -3350,6 +4686,631 @@ fn start_codex_proxy_env(
     let port =
         parse_port(&line).unwrap_or_else(|| panic!("codex proxy did not announce a port: {line}"));
     (child, port)
+}
+
+#[test]
+fn claude_401_renews_the_same_account_before_returning_success() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"AT-NEW","refresh_token":"R2","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == "Bearer AT-NEW" { 200 } else { 401 };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--account", "work"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer AT-OLD".to_string(), "Bearer AT-NEW".to_string()],
+        "the refused turn is retried on the same selected account"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn claude_repeated_401_is_bounded_to_one_same_account_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"AT-NEW","refresh_token":"R2","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 401);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer AT-OLD".to_string(), "Bearer AT-NEW".to_string()],
+        "the replacement's 401 is returned without a recovery loop"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn claude_401_does_not_refresh_after_the_selected_identity_is_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "account-a", "id-work", "AT-OLD", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let identity_path = slot.join(".claude.json");
+    let identity_a = br#"{"oauthAccount":{"accountUuid":"account-a","organizationUuid":"org-a"}}"#;
+    let identity_b = br#"{"oauthAccount":{"accountUuid":"account-b","organizationUuid":"org-b"}}"#;
+    std::fs::write(&identity_path, identity_a).unwrap();
+    let original_credential = std::fs::read(slot.join(".credentials.json")).unwrap();
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"AT-NEW","refresh_token":"RT-NEW","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replace_path = identity_path.clone();
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == "Bearer AT-OLD" {
+            std::fs::write(&replace_path, identity_b).unwrap();
+            401
+        } else {
+            200
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto", "--account", "account-a"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let status = post_through_status(port, "{}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+
+    assert_eq!(status, 401, "replacement account B must not carry A's turn");
+    assert_eq!(*seen.lock().unwrap(), vec!["Bearer AT-OLD".to_string()]);
+    assert!(
+        !count.exists(),
+        "account B's selected chain must not be spent"
+    );
+    assert_eq!(
+        std::fs::read(slot.join(".credentials.json")).unwrap(),
+        original_credential
+    );
+    assert_eq!(std::fs::read(&identity_path).unwrap(), identity_b);
+    assert!(
+        !output.contains("account-a: renewed its login after upstream rejected it"),
+        "account A must not be credited with an exchange after B replaced it: {output}"
+    );
+}
+
+#[test]
+fn codex_401_renews_the_same_account_before_returning_success() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_NEW}","refresh_token":"RT2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let header = |name: &'static str| {
+            request
+                .headers()
+                .iter()
+                .find(|candidate| candidate.field.equiv(name))
+                .map(|candidate| candidate.value.as_str().to_string())
+                .unwrap_or_default()
+        };
+        let auth = header("authorization");
+        sink.lock()
+            .unwrap()
+            .push((auth.clone(), header("chatgpt-account-id")));
+        let status = if auth == format!("Bearer {CODEX_JWT_LIVE_NEW}") {
+            200
+        } else {
+            401
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (format!("Bearer {CODEX_JWT_LIVE}"), "acct-work".into()),
+            (format!("Bearer {CODEX_JWT_LIVE_NEW}"), "acct-work".into()),
+        ],
+        "the bearer changes while the selected account-id stays coherent"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn codex_repeated_401_is_bounded_to_one_same_account_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_NEW}","refresh_token":"RT2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 401);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            format!("Bearer {CODEX_JWT_LIVE}"),
+            format!("Bearer {CODEX_JWT_LIVE_NEW}"),
+        ],
+        "the replacement's 401 is returned without a recovery loop"
+    );
+    assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn codex_401_does_not_refresh_a_replacement_subject_in_the_same_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "account-a",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "workspace-shared",
+        true,
+    );
+    let auth_path = root
+        .path()
+        .join(".local/share/swapdex/slots/id-work/auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": CODEX_JWT_LIVE,
+                "refresh_token": "RT-A",
+                "id_token": codex_id_token("subject-a"),
+                "account_id": "workspace-shared"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let replacement = serde_json::to_vec_pretty(&serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": CODEX_JWT_LIVE_B,
+            // Keep the fingerprint inputs equal to account A. The optional
+            // ID-token subject must be the field that rejects this replacement.
+            "refresh_token": "RT-A",
+            "id_token": codex_id_token("subject-b"),
+            "account_id": "workspace-shared"
+        }
+    }))
+    .unwrap();
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_B_NEW}","refresh_token":"RT-B2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replace_path = auth_path.clone();
+    let replacement_for_upstream = replacement.clone();
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == format!("Bearer {CODEX_JWT_LIVE}") {
+            std::fs::write(&replace_path, &replacement_for_upstream).unwrap();
+            401
+        } else {
+            200
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let status = post_codex_turn(port).0;
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+
+    assert_eq!(status, 401, "replacement account B must not carry A's turn");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![format!("Bearer {CODEX_JWT_LIVE}")]
+    );
+    assert!(
+        !count.exists(),
+        "account B's refresh token must not be spent"
+    );
+    assert_eq!(std::fs::read(&auth_path).unwrap(), replacement);
+    assert!(
+        !output.contains("account-a: renewed its login after upstream rejected it"),
+        "account A must not be credited with renewing account B: {output}"
+    );
+}
+
+#[test]
+fn codex_401_retries_a_same_account_replacement_without_oauth() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "workspace-a",
+        true,
+    );
+    let auth_path = root
+        .path()
+        .join(".local/share/swapdex/slots/id-work/auth.json");
+    let auth = |access_token: &str| {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": access_token,
+                "refresh_token": "RT-A",
+                "id_token": codex_id_token("subject-a"),
+                "account_id": "workspace-a"
+            }
+        }))
+        .unwrap()
+    };
+    std::fs::write(&auth_path, auth(CODEX_JWT_LIVE)).unwrap();
+    let replacement = auth(CODEX_JWT_LIVE_B);
+    let curl = fake_oauth_curl(
+        root.path(),
+        &format!(r#"{{"access_token":"{CODEX_JWT_LIVE_B_NEW}","refresh_token":"RT-A2"}}"#),
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replace_path = auth_path.clone();
+    let replacement_for_upstream = replacement.clone();
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == format!("Bearer {CODEX_JWT_LIVE}") {
+            std::fs::write(&replace_path, &replacement_for_upstream).unwrap();
+            401
+        } else if auth == format!("Bearer {CODEX_JWT_LIVE_B}") {
+            200
+        } else {
+            401
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_codex_turn(port).0, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            format!("Bearer {CODEX_JWT_LIVE}"),
+            format!("Bearer {CODEX_JWT_LIVE_B}"),
+        ]
+    );
+    assert!(!count.exists(), "a replacement bearer needs no OAuth call");
+    assert_eq!(std::fs::read(&auth_path).unwrap(), replacement);
+    proxy.stop();
+    upstream.close();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unchanged_native_bearer_401_never_spends_its_refresh_token() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "SLOT-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    std::fs::write(
+        native.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"NATIVE-SAME","refreshToken":"NATIVE-RT","expiresAt":9999999999999}}"#,
+    )
+    .unwrap();
+    let _native = spawn_native_cli(root.path(), "claude", &[("HOME", root.path())]);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"MUST-NOT-BE-USED","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth);
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 401);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["Bearer NATIVE-SAME".to_string()]
+    );
+    assert!(
+        !count.exists(),
+        "native ownership must spend zero OAuth calls"
+    );
+    proxy.stop();
+    upstream.close();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_native_replacement_after_401_retries_without_oauth() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "SLOT-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    std::fs::write(
+        native.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"NATIVE-OLD","refreshToken":"NATIVE-RT","expiresAt":9999999999999}}"#,
+    )
+    .unwrap();
+    let _native = spawn_native_cli(root.path(), "claude", &[("HOME", root.path())]);
+    let curl = fake_oauth_curl(
+        root.path(),
+        r#"{"access_token":"MUST-NOT-BE-USED","expires_in":3600}"#,
+        200,
+    );
+    let count = root.path().join("oauth-count");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let replacement = native.join(".credentials.json");
+    let upstream = ControlledUpstream::start(move |request| {
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_default();
+        sink.lock().unwrap().push(auth.clone());
+        let status = if auth == "Bearer NATIVE-OLD" {
+            std::fs::write(
+                &replacement,
+                br#"{"claudeAiOauth":{"accessToken":"NATIVE-NEW","refreshToken":"NATIVE-RT2","expiresAt":9999999999999}}"#,
+            )
+            .unwrap();
+            401
+        } else {
+            200
+        };
+        request
+            .respond(
+                tiny_http::Response::from_string("{}")
+                    .with_status_code(tiny_http::StatusCode(status)),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    assert_eq!(post_through_status(port, "{}"), 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "Bearer NATIVE-OLD".to_string(),
+            "Bearer NATIVE-NEW".to_string()
+        ]
+    );
+    assert!(
+        !count.exists(),
+        "native replacement must spend zero OAuth calls"
+    );
+    proxy.stop();
+    upstream.close();
 }
 
 /// The serving path asked only "is a login there".
@@ -3405,7 +5366,7 @@ fn a_lapsed_codex_slot_renews_itself_before_serving_a_turn() {
 /// serving a turn with a token known to be dead earns a 401 and names this
 /// account as having paid for it.
 #[test]
-fn a_codex_slot_that_cannot_be_renewed_passes_your_own_login_through() {
+fn a_codex_slot_that_cannot_be_renewed_does_not_send_another_login() {
     let root = tempfile::tempdir().unwrap();
     seed_codex_slot(
         root.path(),
@@ -3430,18 +5391,12 @@ fn a_codex_slot_that_cannot_be_renewed_passes_your_own_login_through() {
     let (status, _) = post_codex_turn(port);
     proxy.kill().ok();
     proxy.wait().ok();
-    assert_eq!(status, 200);
+    assert_eq!(status, 502);
 
     let seen = sink.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1, "{seen:?}");
-    assert_eq!(
-        seen[0].0, "Bearer CLIENT-TOKEN",
-        "the client's own login carried the turn: {seen:?}"
-    );
-    assert_ne!(
-        seen[0].0,
-        format!("Bearer {CODEX_JWT_LAPSED}"),
-        "a token known to be dead is never sent: {seen:?}"
+    assert!(
+        seen.is_empty(),
+        "no implicit client-account fallback: {seen:?}"
     );
 }
 
@@ -3533,4 +5488,458 @@ fn a_codex_proxy_starts_when_one_account_is_readable() {
     proxy.kill().ok();
     proxy.wait().ok();
     assert_eq!(status, 200, "the readable account served the turn");
+}
+
+/// Managed requests use one selected credential; passthrough and native auth
+/// exchanges preserve the client's authentication, including duplicate keys.
+fn assert_api_key_boundary(tool: &str, passthrough: bool, auth_exchange: bool) {
+    let root = tempfile::tempdir().unwrap();
+    if tool == "codex" {
+        seed_codex_slot(
+            root.path(),
+            "selected",
+            "abc12345",
+            "AT-SELECTED",
+            "acct-selected",
+            true,
+        );
+    } else {
+        seed_slot(root.path(), "selected", "abc12345", "AT-SELECTED", true);
+    }
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    if passthrough {
+        swapdex::slots::Slots::open_for(&paths, tool)
+            .unwrap()
+            .set_serving_off()
+            .unwrap();
+    }
+    let preserve = passthrough || auth_exchange;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let upstream = ControlledUpstream::start(move |request| {
+        let keys: Vec<_> = request
+            .headers()
+            .iter()
+            .filter(|header| header.field.equiv("x-api-key"))
+            .map(|header| header.value.to_string())
+            .collect();
+        let auth = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("authorization"))
+            .map(|header| header.value.to_string());
+        let status = if !preserve && !keys.is_empty() {
+            401
+        } else {
+            200
+        };
+        sink.lock().unwrap().push((keys, auth));
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(status))
+            .unwrap();
+    });
+    let curl = fake_curl(root.path(), "unused");
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--tool", tool],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_UPSTREAM_CODEX", upstream.url()),
+        ],
+    );
+    let proxy = ReapedChild::new(child);
+    let path = if auth_exchange {
+        "/v1/oauth/token"
+    } else if tool == "codex" {
+        "/v1/responses"
+    } else {
+        "/v1/messages"
+    };
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut statuses = Vec::new();
+    for spelling in ["x-api-key", "X-API-Key"] {
+        let mut response = agent
+            .post(format!("http://127.0.0.1:{port}{path}"))
+            .header("authorization", "Bearer CLIENT-TOKEN")
+            .header(spelling, "CLIENT-KEY-ONE")
+            .header(spelling, "CLIENT-KEY-TWO")
+            .header("content-type", "application/json")
+            .send(b"{}".as_slice())
+            .unwrap();
+        statuses.push(response.status().as_u16());
+        response.body_mut().read_to_string().unwrap();
+    }
+    proxy.stop();
+    upstream.close();
+    assert_eq!(
+        statuses,
+        vec![200, 200],
+        "{tool}: foreign keys must not reject the managed account"
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "one provider request per client request");
+    for (keys, auth) in seen.iter() {
+        if preserve {
+            assert_eq!(keys, &["CLIENT-KEY-ONE", "CLIENT-KEY-TWO"]);
+            assert_eq!(auth.as_deref(), Some("Bearer CLIENT-TOKEN"));
+        } else {
+            assert!(keys.is_empty(), "client API keys survived managed routing");
+            assert_eq!(auth.as_deref(), Some("Bearer AT-SELECTED"));
+        }
+    }
+}
+
+#[test]
+fn managed_claude_removes_client_api_key_headers() {
+    assert_api_key_boundary("claude-code", false, false);
+}
+
+#[test]
+fn managed_codex_removes_client_api_key_headers() {
+    assert_api_key_boundary("codex", false, false);
+}
+
+#[test]
+fn claude_passthrough_preserves_client_api_key_headers() {
+    assert_api_key_boundary("claude-code", true, false);
+}
+
+#[test]
+fn codex_passthrough_preserves_client_api_key_headers() {
+    assert_api_key_boundary("codex", true, false);
+}
+
+#[test]
+fn claude_auth_exchange_preserves_client_api_key_headers() {
+    assert_api_key_boundary("claude-code", false, true);
+}
+
+#[test]
+fn codex_auth_exchange_preserves_client_api_key_headers() {
+    assert_api_key_boundary("codex", false, true);
+}
+
+mod streaming_delivery {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const PING: &[u8] = b"event: ping\ndata: {}\n\n";
+    const STOP: &[u8] = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    fn start_stream_proxy(
+        root: &std::path::Path,
+        upstream: &str,
+        tool: &str,
+    ) -> (std::process::Child, u16) {
+        start_proxy_with_env(
+            root,
+            upstream,
+            &["--tool", tool],
+            &[
+                ("SWAPDEX_CURL", "/bin/false"),
+                ("SWAPDEX_UPSTREAM_CODEX", upstream),
+            ],
+        )
+    }
+
+    fn received_body(wire: &[u8]) -> Vec<u8> {
+        let Some(start) = wire.windows(4).position(|part| part == b"\r\n\r\n") else {
+            return Vec::new();
+        };
+        let mut chunks = &wire[start + 4..];
+        let mut body = Vec::new();
+        while let Some(end) = chunks.windows(2).position(|part| part == b"\r\n") {
+            let Ok(size) = usize::from_str_radix(std::str::from_utf8(&chunks[..end]).unwrap(), 16)
+            else {
+                break;
+            };
+            chunks = &chunks[end + 2..];
+            if size == 0 || chunks.len() < size + 2 {
+                break;
+            }
+            body.extend_from_slice(&chunks[..size]);
+            assert_eq!(&chunks[size..size + 2], b"\r\n");
+            chunks = &chunks[size + 2..];
+        }
+        body
+    }
+
+    fn receive_until(
+        client: &mut TcpStream,
+        wire: &mut Vec<u8>,
+        ready: impl Fn(&[u8]) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !ready(wire) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            let mut buffer = [0; 4096];
+            match client.read(&mut buffer) {
+                Ok(0) => return false,
+                Ok(count) => wire.extend_from_slice(&buffer[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("stream read failed: {error}"),
+            }
+        }
+        true
+    }
+
+    fn assert_unbuffered_sse(tool: &str) {
+        let root = tempfile::tempdir().unwrap();
+        let (advance, next) = mpsc::channel();
+        let (announced, sent) = mpsc::channel();
+        let upstream = ControlledUpstream::start(move |mut request| {
+            let mut body = Vec::new();
+            request.as_reader().read_to_end(&mut body).unwrap();
+            let mut writer = request.into_writer();
+            writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\nX-Relay-Test: preserved\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+            writer.flush().unwrap();
+            announced.send(()).unwrap();
+            for event in [PING, STOP] {
+                next.recv_timeout(Duration::from_secs(5)).unwrap();
+                write!(writer, "{:x}\r\n", event.len()).unwrap();
+                writer.write_all(event).unwrap();
+                writer.write_all(b"\r\n").unwrap();
+                writer.flush().unwrap();
+                announced.send(()).unwrap();
+            }
+            next.recv_timeout(Duration::from_secs(5)).unwrap();
+            writer.write_all(b"0\r\n\r\n").unwrap();
+            writer.flush().unwrap();
+        });
+        let (child, port) = if tool == "codex" {
+            seed_codex_slot(root.path(), "a", "slot-a", "AT-A", "ACCT-A", true);
+            start_stream_proxy(root.path(), upstream.url(), "codex")
+        } else {
+            seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+            start_stream_proxy(root.path(), upstream.url(), "claude-code")
+        };
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        sent.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut wire = Vec::new();
+        let headers_early = receive_until(&mut client, &mut wire, |wire| {
+            wire.windows(4).any(|part| part == b"\r\n\r\n")
+        });
+        advance.send(()).unwrap();
+        sent.recv_timeout(Duration::from_secs(3)).unwrap();
+        let ping_early = receive_until(&mut client, &mut wire, |wire| received_body(wire) == PING);
+        advance.send(()).unwrap();
+        sent.recv_timeout(Duration::from_secs(3)).unwrap();
+        let expected = [PING, STOP].concat();
+        let stop_early = receive_until(&mut client, &mut wire, |wire| {
+            received_body(wire) == expected
+        });
+        advance.send(()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.read_to_end(&mut wire).unwrap();
+        proxy.stop();
+        upstream.close();
+        assert!(String::from_utf8_lossy(&wire).starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(String::from_utf8_lossy(&wire)
+            .to_ascii_lowercase()
+            .contains("x-relay-test: preserved\r\n"));
+        assert_eq!(
+            received_body(&wire),
+            expected,
+            "SSE bytes changed in transit"
+        );
+        assert!(wire.ends_with(b"0\r\n\r\n"));
+        assert!(headers_early && ping_early && stop_early,
+            "{tool} withheld SSE while upstream remained open: headers={headers_early}, ping={ping_early}, completion={stop_early}");
+    }
+
+    #[test]
+    fn claude_sse_is_delivered_while_upstream_remains_open() {
+        assert_unbuffered_sse("claude");
+    }
+
+    #[test]
+    fn codex_sse_is_delivered_while_upstream_remains_open() {
+        assert_unbuffered_sse("codex");
+    }
+
+    #[test]
+    fn sse_and_json_responses_can_share_a_keep_alive_connection() {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+        let mut count = 0;
+        let upstream = ControlledUpstream::start(move |mut request| {
+            request.as_reader().read_to_end(&mut Vec::new()).unwrap();
+            count += 1;
+            let (body, content_type) = if count == 1 {
+                (PING.to_vec(), "text/event-stream")
+            } else {
+                (b"{\"ok\":true}".to_vec(), "application/json")
+            };
+            request
+                .respond(tiny_http::Response::from_data(body).with_header(
+                    tiny_http::Header::from_bytes("content-type", content_type).unwrap(),
+                ))
+                .unwrap();
+        });
+        let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        client
+            .write_all(
+                b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .unwrap();
+        let mut first = Vec::new();
+        let complete = receive_until(&mut client, &mut first, |wire| wire.ends_with(b"0\r\n\r\n"));
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        let mut second = Vec::new();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.read_to_end(&mut second).unwrap();
+        proxy.stop();
+        upstream.close();
+        assert!(complete, "first SSE response did not finish");
+        assert_eq!(received_body(&first), PING);
+        assert_eq!(received_body(&second), b"{\"ok\":true}");
+        assert!(String::from_utf8_lossy(&second).starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+
+    #[test]
+    fn head_and_bodyless_sse_responses_never_forward_a_body() {
+        for (method, status) in [("HEAD", 200), ("GET", 204), ("GET", 205), ("GET", 304)] {
+            let root = tempfile::tempdir().unwrap();
+            seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+            let upstream = ControlledUpstream::start(move |request| {
+                request
+                    .respond(
+                        tiny_http::Response::empty(tiny_http::StatusCode(status)).with_header(
+                            tiny_http::Header::from_bytes("content-type", "text/event-stream")
+                                .unwrap(),
+                        ),
+                    )
+                    .unwrap();
+            });
+            let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+            let proxy = ReapedChild::new(child);
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(
+                client,
+                "{method} /v1/messages HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            client.read_to_end(&mut wire).unwrap();
+            proxy.stop();
+            upstream.close();
+            let text = String::from_utf8(wire).unwrap();
+            assert!(text.starts_with(&format!("HTTP/1.1 {status} ")));
+            assert!(
+                text.split_once("\r\n\r\n").unwrap().1.is_empty(),
+                "{method} {status} sent a body"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_upstream_sse_does_not_report_a_complete_http_body() {
+        assert_invalid_upstream_closes(false);
+    }
+
+    #[test]
+    fn invalid_upstream_sse_closes_a_keep_alive_connection() {
+        assert_invalid_upstream_closes(true);
+    }
+
+    fn assert_invalid_upstream_closes(keep_alive: bool) {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+        let upstream = ControlledUpstream::start(move |mut request| {
+            request.as_reader().read_to_end(&mut Vec::new()).unwrap();
+            let mut writer = request.into_writer();
+            writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            write!(writer, "{:x}\r\n", PING.len()).unwrap();
+            writer.write_all(PING).unwrap();
+            writer.write_all(b"\r\nnot-hex\r\n").unwrap();
+            writer.flush().unwrap();
+        });
+        let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let connection = if keep_alive { "keep-alive" } else { "close" };
+        write!(client, "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: {connection}\r\n\r\n{{}}").unwrap();
+        let mut wire = Vec::new();
+        let closed = client.read_to_end(&mut wire).is_ok();
+        client.shutdown(std::net::Shutdown::Both).ok();
+        proxy.stop();
+        upstream.close();
+        assert!(closed, "failed SSE left the downstream connection open");
+        assert!(String::from_utf8_lossy(&wire).starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(
+            !wire.ends_with(b"0\r\n\r\n"),
+            "upstream failure was turned into successful EOF"
+        );
+    }
+
+    #[test]
+    fn upstream_connection_headers_are_removed_from_sse() {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "a", "slot-a", "AT-A", true);
+        let upstream = ControlledUpstream::start(move |mut request| {
+            request.as_reader().read_to_end(&mut Vec::new()).unwrap();
+            let mut writer = request.into_writer();
+            writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive, X-Private-Hop\r\nX-Private-Hop: hidden\r\nKeep-Alive: timeout=100\r\nTE: trailers\r\nTrailer: X-Trailer\r\nUpgrade: h2c\r\nProxy-Authenticate: Basic realm=upstream\r\nX-End-To-End: preserved\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n").unwrap();
+            writer.flush().unwrap();
+        });
+        let (child, port) = start_stream_proxy(root.path(), upstream.url(), "claude-code");
+        let proxy = ReapedChild::new(child);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        let mut wire = String::new();
+        client.read_to_string(&mut wire).unwrap();
+        proxy.stop();
+        upstream.close();
+        let headers = wire.split_once("\r\n\r\n").unwrap().0.to_ascii_lowercase();
+        assert!(headers.contains("x-end-to-end: preserved\r\n"));
+        for name in [
+            "x-private-hop",
+            "keep-alive",
+            "te",
+            "trailer",
+            "upgrade",
+            "proxy-authenticate",
+        ] {
+            assert!(
+                !headers.contains(&format!("\r\n{name}:")),
+                "forwarded connection header {name}"
+            );
+        }
+    }
 }

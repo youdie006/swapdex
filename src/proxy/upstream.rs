@@ -186,9 +186,39 @@ pub fn worth_retrying(err: &str) -> bool {
         || e.contains("broken pipe")
         || e.contains("no route to host")
         || e.contains("unexpected end of file")
+        || e.contains("peer disconnected")
         || e.contains("connection reset")
         || e.contains("connection refused")
         || e.contains("timeout")
+}
+
+fn bodyless_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "DELETE" | "OPTIONS"
+    )
+}
+
+/// Whether retrying this request can be shown not to duplicate a body the
+/// upstream may already have accepted.
+///
+/// Bodyless methods are safe after any transient transport failure. A request
+/// carrying a body is retried only when the failure proves the connection was
+/// never established. Reset, broken-pipe and EOF errors are ambiguous: the
+/// server may have acted on the complete request before the response was lost.
+pub fn can_retry_request(method: &str, err: &str) -> bool {
+    if !worth_retrying(err) {
+        return false;
+    }
+    if bodyless_method(method) {
+        return true;
+    }
+    let e = err.to_ascii_lowercase();
+    e.contains("lookup address")
+        || e.contains("no route to host")
+        || e.contains("connection refused")
+        || (e.contains("timeout")
+            && (e.contains("connect") || e.contains("resolve") || e.contains("lookup")))
 }
 
 pub fn forward(
@@ -208,7 +238,7 @@ pub fn forward(
             Ok(u) => return Ok(u),
             Err(e) => {
                 let text = format!("{e:#}");
-                if attempt + 1 >= TRIES || !worth_retrying(&text) {
+                if attempt + 1 >= TRIES || !can_retry_request(method, &text) {
                     return Err(e);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250u64 << attempt));
@@ -227,10 +257,7 @@ fn forward_once(
 ) -> Result<Upstream> {
     // ureq types its builder by whether a body is allowed, so bodyless and
     // body-carrying methods cannot share one variable.
-    let bodyless = matches!(
-        method.to_ascii_uppercase().as_str(),
-        "GET" | "HEAD" | "DELETE" | "OPTIONS"
-    );
+    let bodyless = bodyless_method(method);
     if bodyless {
         let mut rb = match method.to_ascii_uppercase().as_str() {
             "HEAD" => agent.head(url),
@@ -364,17 +391,83 @@ mod transient_retry_tests {
         assert!(worth_retrying("io: Broken pipe (os error 32)"));
         assert!(worth_retrying("io: No route to host"));
         assert!(worth_retrying("io: unexpected end of file"));
+        assert!(worth_retrying("io: Peer disconnected"));
         assert!(worth_retrying("timeout: global"));
         // A refusal from the server is an answer, not a blip - it must reach the
         // caller so the account logic can act on it.
         assert!(!worth_retrying("http status 401"));
         assert!(!worth_retrying("certificate verification failed"));
     }
+
+    #[test]
+    fn body_retries_require_proof_that_nothing_reached_upstream() {
+        for ambiguous in [
+            "io: Broken pipe (os error 32)",
+            "io: unexpected end of file",
+            "io: Connection reset by peer",
+            "io: Peer disconnected",
+            "timeout: global",
+        ] {
+            assert!(can_retry_request("GET", ambiguous), "{ambiguous}");
+            assert!(!can_retry_request("POST", ambiguous), "{ambiguous}");
+        }
+        for before_send in [
+            "failed to lookup address information",
+            "tcp connect error: Connection refused",
+            "tcp connect error: No route to host",
+            "connect timeout",
+        ] {
+            assert!(can_retry_request("POST", before_send), "{before_send}");
+        }
+        assert!(!can_retry_request(
+            "POST",
+            "certificate verification failed"
+        ));
+        assert!(!can_retry_request("GET", "http status 401"));
+    }
 }
 
 #[cfg(test)]
 mod wait_tests {
     use super::*;
+
+    #[test]
+    fn a_started_response_can_stream_beyond_the_header_timeout() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nA")
+                .unwrap();
+            socket.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            socket.write_all(b"B").ok();
+        });
+        let agent = agent_with(Duration::from_secs(1), Duration::from_millis(150));
+        let mut response =
+            forward(&agent, "GET", &format!("http://{address}/stream"), &[], &[]).unwrap();
+        let mut body = Vec::new();
+        let read = response.reader.read_to_end(&mut body);
+        server.join().unwrap();
+        assert_eq!(response.status, 200);
+        assert!(
+            read.is_ok(),
+            "header timeout cut a started response short: {read:?}"
+        );
+        assert_eq!(body, b"AB");
+    }
 
     /// Every wait that could hang forever is bounded; the body is not.
     ///

@@ -197,18 +197,17 @@ pub fn corner_after(still_full: Option<bool>, held: Option<Corner>) -> Option<Co
 
 /// Why there is nowhere left to send this turn.
 ///
-/// Two different situations reach the same dead end, and they are not the same
-/// news. One is "every account has spent its window"; the other is "every
-/// account said no to this turn", which happens with windows barely touched -
-/// an organisation's overage budget can stop three accounts sitting at 98%
-/// left. Reporting the second as the first put a sentence about the threshold
-/// directly under three lines showing there was quota to spare.
+/// Account measurements and actual request refusals provide different evidence.
+/// A selection filter can also decline a move because an account is paused or
+/// offers too little extra headroom, without any provider having refused it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Corner {
     /// Every account measured at or past the configured threshold.
     PastThreshold,
     /// Every account refused this very turn, whatever their windows say.
     AllRefused,
+    /// No automatic alternative qualified; this does not establish a refusal.
+    NoEligibleAlternative,
 }
 
 impl Corner {
@@ -216,6 +215,7 @@ impl Corner {
         match self {
             Self::PastThreshold => "every account is past the threshold",
             Self::AllRefused => "every account is refusing turns",
+            Self::NoEligibleAlternative => "no eligible alternative account",
         }
     }
 }
@@ -225,18 +225,18 @@ impl Corner {
 /// The rotation filter rejects an account for six different reasons - disabled,
 /// sidelined by a refusal, out of quota, past the threshold, no readable token,
 /// or not far enough below to be worth the move - and every one of them used to
-/// be reported as "past the threshold". An account sitting at 97% left and
-/// refusing is not near its limit, and saying it is sends the reader to the
-/// quota page when the block is somewhere else entirely.
+/// be reported as "past the threshold", then as "refusing turns". Measurements
+/// alone cannot establish a refusal: a paused or marginally roomier account
+/// may be perfectly healthy.
 ///
 /// `over` is one entry per OTHER account: whether it is above the threshold.
-/// Accounts that could not be measured are absent - an unmeasured account is
-/// not evidence of anything.
-pub fn why_no_move(over: &[bool]) -> Corner {
-    if !over.is_empty() && over.iter().all(|b| *b) {
+/// Missing measurements remain `None`; they cannot establish that all accounts
+/// are above the line.
+pub fn why_no_move(over: &[Option<bool>]) -> Corner {
+    if !over.is_empty() && over.iter().all(|b| *b == Some(true)) {
         Corner::PastThreshold
     } else {
-        Corner::AllRefused
+        Corner::NoEligibleAlternative
     }
 }
 
@@ -346,7 +346,7 @@ pub fn refusal_survives(
     // A credential written AFTER the refusal is a different credential; the
     // refusal is not about it. Written before, and the refusal is about this
     // one and stands.
-    !replaced.is_some_and(|at| at > bad)
+    replaced.is_none_or(|at| at <= bad)
 }
 
 pub fn currently_refusing(
@@ -1525,22 +1525,34 @@ mod why_no_move_tests {
 
     #[test]
     fn accounts_that_all_sit_above_the_line_are_past_the_threshold() {
-        assert_eq!(why_no_move(&[true, true]), Corner::PastThreshold);
+        assert_eq!(
+            why_no_move(&[Some(true), Some(true)]),
+            Corner::PastThreshold
+        );
     }
 
-    /// The case that misled a real reader: two accounts spent, one at 97% left
-    /// and refusing. Blaming the threshold sends them to the quota page, where
-    /// nothing is wrong.
+    /// Room below the threshold does not say why the account was excluded.
     #[test]
     fn one_account_with_room_means_something_else_is_blocking() {
-        assert_eq!(why_no_move(&[true, false]), Corner::AllRefused);
-        assert_eq!(why_no_move(&[false]), Corner::AllRefused);
+        assert_eq!(
+            why_no_move(&[Some(true), Some(false)]),
+            Corner::NoEligibleAlternative
+        );
+        assert_eq!(why_no_move(&[Some(false)]), Corner::NoEligibleAlternative);
+    }
+
+    #[test]
+    fn a_missing_measurement_prevents_an_all_accounts_claim() {
+        assert_eq!(
+            why_no_move(&[Some(true), None, Some(true)]),
+            Corner::NoEligibleAlternative
+        );
     }
 
     /// Nothing measured is not evidence that everything is spent.
     #[test]
     fn no_measurements_at_all_does_not_claim_the_threshold() {
-        assert_eq!(why_no_move(&[]), Corner::AllRefused);
+        assert_eq!(why_no_move(&[]), Corner::NoEligibleAlternative);
     }
 }
 

@@ -18,14 +18,9 @@ pub fn slot_token(dir: &Path) -> Option<Secret> {
 /// secret from the login keychain), so telling the user to sign in again would
 /// send them to fix something that is not broken.
 pub fn slot_token_detail(dir: &Path) -> Result<Secret, TokenUnavailable> {
-    if let Ok(bytes) = std::fs::read(dir.join(".credentials.json")) {
-        if let Some(t) = access_token(&bytes) {
-            return Ok(t);
-        }
-    }
     use crate::adapters::claude::KeychainReadError as K;
-    match crate::adapters::claude::slot_keychain_read_detail(dir) {
-        Ok(bytes) => access_token(&bytes).ok_or(TokenUnavailable::NoLogin),
+    match crate::adapters::claude::slot_credential(dir) {
+        Ok(credential) => access_token(credential.bytes()).ok_or(TokenUnavailable::NoLogin),
         Err(K::Locked) => Err(TokenUnavailable::KeychainLocked),
         Err(K::Missing | K::NotApplicable) => Err(TokenUnavailable::NoLogin),
     }
@@ -107,78 +102,16 @@ mod unavailable_tests {
 /// A minute of slack: a token about to lapse mid-flight is already useless.
 const SLACK_MS: i64 = 60_000;
 
-/// The verdict, given what each store says the expiry is.
-///
-/// Two stores can both hold a credential, and they disagree: on macOS
-/// `.credentials.json` is a LEFTOVER - Claude Code keeps the real one in the
-/// Keychain - so reading the file first reported a slot signed in minutes ago
-/// as expired on the strength of a file three days old. The owner logged in,
-/// `ls` still said `(expired)`, and nothing they did could change it.
-///
-/// Whichever blob expires LATER is the one that would actually authenticate, so
-/// that is the one the verdict follows. Neither speaking means nothing is
-/// known, and nothing is claimed.
-pub fn expired_from(from_file: Option<i64>, from_keychain: Option<i64>, now_ms: i64) -> bool {
-    match from_file.into_iter().chain(from_keychain).max() {
-        Some(exp) => exp - now_ms <= SLACK_MS,
-        None => false,
-    }
-}
-
-/// What the Keychain was able to tell us.
-#[derive(Debug, PartialEq)]
-pub enum KeychainSay {
-    /// It holds a credential expiring at this instant.
-    Expiry(i64),
-    /// It genuinely holds no credential for this slot.
-    Absent,
-    /// It could not be read here - locked, or a non-interactive shell. This is
-    /// a fact about the environment, not about the account.
-    Unreadable,
-}
-
-/// The verdict, accounting for a Keychain that may not be readable at all.
-///
-/// When the Keychain is locked there is no reading to compare against, and the
-/// leftover file is all that is left. Calling that "expired" reports an
-/// environment limitation as an account state - which is how a slot signed in
-/// minutes earlier kept its `(expired)` marker no matter what its owner did.
-pub fn expired_when(from_file: Option<i64>, keychain: KeychainSay, now_ms: i64) -> bool {
-    match keychain {
-        KeychainSay::Expiry(e) => expired_from(from_file, Some(e), now_ms),
-        KeychainSay::Absent => expired_from(from_file, None, now_ms),
-        // Unreadable: the file cannot settle it alone, because on this platform
-        // the file is the leftover and the Keychain is where the truth lives.
-        // Only a file that is still VALID can say anything, and it says "fine".
-        KeychainSay::Unreadable => false,
-    }
+fn credential_expired(blob: &[u8], now_ms: i64) -> bool {
+    serde_json::from_slice::<serde_json::Value>(blob)
+        .ok()
+        .and_then(|value| value["claudeAiOauth"]["expiresAt"].as_i64())
+        .is_some_and(|expires_at| expires_at - now_ms <= SLACK_MS)
 }
 
 pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
-    let expiry_of = |b: Vec<u8>| -> Option<i64> {
-        serde_json::from_slice::<serde_json::Value>(&b)
-            .ok()?
-            .get("claudeAiOauth")?
-            .get("expiresAt")?
-            .as_i64()
-    };
-    // Ask BOTH stores. Asking the file first and the Keychain only when the
-    // file was absent let a leftover outvote the credential in use.
-    let from_file = std::fs::read(dir.join(".credentials.json"))
-        .ok()
-        .and_then(expiry_of);
-    // Distinguish "no entry" from "cannot read it here": a locked Keychain is a
-    // fact about the shell, not about the account, and treating it as absent let
-    // a leftover file condemn a credential that was working.
-    let keychain = match crate::adapters::claude::slot_keychain_read_detail(dir) {
-        Ok(b) => match expiry_of(b) {
-            Some(e) => KeychainSay::Expiry(e),
-            None => KeychainSay::Absent,
-        },
-        Err(crate::adapters::claude::KeychainReadError::Locked) => KeychainSay::Unreadable,
-        Err(_) => KeychainSay::Absent,
-    };
-    expired_when(from_file, keychain, now_ms)
+    crate::adapters::claude::slot_credential(dir)
+        .is_ok_and(|credential| credential_expired(credential.bytes(), now_ms))
 }
 
 /// This slot's own account UUID, from its `.claude.json` `oauthAccount` - the
@@ -258,8 +191,7 @@ pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
         return None;
     }
     let blob = slot_token_blob(dir)?;
-    let cred: serde_json::Value = serde_json::from_slice(&blob).ok()?;
-    let sub = cred["claudeAiOauth"]["subscriptionType"].as_str()?;
+    let sub = credential_subscription_type(&blob)?;
     // Worth pointing at, NOT proof. This used to read "the name and the login
     // belong to different accounts", which the data cannot support: a person in
     // an organisation may hold a personal Max or Pro plan, and that is an
@@ -267,7 +199,7 @@ pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
     // scopes - no account identifier at all - so nothing here can tell one
     // account from two. What it CAN do is say what it sees and name the one
     // check that settles it.
-    if matches!(sub, "max" | "pro") {
+    if matches!(sub.as_str(), "max" | "pro") {
         return Some(format!(
             "recorded as {email} ({org}), and its credential is a '{sub}' plan. \
              That is normal if you hold a personal plan alongside the \
@@ -281,12 +213,16 @@ pub fn identity_contradicts_login(dir: &Path) -> Option<String> {
 
 /// The credential blob for this slot, wherever it lives.
 fn slot_token_blob(dir: &Path) -> Option<Vec<u8>> {
-    if let Ok(b) = std::fs::read(dir.join(".credentials.json")) {
-        if !b.is_empty() {
-            return Some(b);
-        }
-    }
-    crate::adapters::claude::slot_keychain_read_detail(dir).ok()
+    crate::adapters::claude::slot_credential(dir)
+        .ok()
+        .map(|credential| credential.bytes().to_vec())
+}
+
+fn credential_subscription_type(blob: &[u8]) -> Option<String> {
+    let credential: serde_json::Value = serde_json::from_slice(blob).ok()?;
+    credential["claudeAiOauth"]["subscriptionType"]
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Pull `claudeAiOauth.accessToken` out of a Claude credential blob.
@@ -542,55 +478,22 @@ mod any_tool_email_tests {
 mod stale_file_vs_keychain_tests {
     use super::*;
 
-    /// A leftover file must not outvote a live credential.
-    ///
-    /// `slot_token_expired` read `.credentials.json` first and consulted the
-    /// Keychain only when that file was ABSENT. On macOS the file is a
-    /// leftover, since Claude Code keeps the real credential in the Keychain,
-    /// so a slot signed in minutes ago was reported expired on the strength of
-    /// a file three days old. The owner logged in, `ls` still said
-    /// `(expired)`, and nothing they could do would change it.
-    ///
-    /// Whichever blob expires LATER is the one that would actually
-    /// authenticate, so that is the one the verdict follows.
     #[test]
-    fn the_later_expiry_wins_between_file_and_keychain() {
-        // now = 1000. File lapsed long ago, keychain is good for another hour.
-        assert!(!expired_from(Some(0), Some(3_600_000), 1000));
-        // The reverse: a fresh file and a stale keychain entry.
-        assert!(!expired_from(Some(3_600_000), Some(0), 1000));
-        // Both lapsed: expired, which is the whole point of the check.
-        assert!(expired_from(Some(0), Some(0), 1000));
-        // Only one source says anything: it decides.
-        assert!(expired_from(Some(0), None, 1000));
-        assert!(!expired_from(None, Some(3_600_000), 1000));
-        // Neither: nothing is known, so nothing is claimed.
-        assert!(!expired_from(None, None, 1000));
-        // The minute of slack still applies to whichever wins.
-        assert!(expired_from(None, Some(1_030_000), 1_000_000));
-    }
+    fn bearer_expiry_and_plan_are_views_of_the_selected_keychain_blob() {
+        let stale_file =
+            br#"{"claudeAiOauth":{"accessToken":"OLD","expiresAt":1,"subscriptionType":"team"}}"#;
+        let fresh_keychain = br#"{"claudeAiOauth":{"accessToken":"NEW","expiresAt":9999999999999,"subscriptionType":"max"}}"#;
+        let selected = crate::adapters::claude::choose_slot_credential(
+            Some(stale_file.to_vec()),
+            Ok(fresh_keychain.to_vec()),
+        )
+        .expect("selected credential");
 
-    /// A Keychain we cannot read is not a verdict about the account.
-    ///
-    /// When the Keychain is LOCKED - a non-interactive shell, an ssh session -
-    /// there is no reading to compare against, and the leftover file is all
-    /// that is left. Calling that "expired" reports an environment limitation
-    /// as an account state, which is how a slot signed in minutes earlier kept
-    /// its `(expired)` marker no matter what its owner did.
-    #[test]
-    fn a_locked_keychain_is_not_an_expiry_verdict() {
-        // File says lapsed, keychain unreadable: unknown, so nothing claimed.
-        assert!(!expired_when(Some(0), KeychainSay::Unreadable, 1000));
-        // File says lapsed, keychain genuinely has no entry: the file is all
-        // there is and it is the truth here.
-        assert!(expired_when(Some(0), KeychainSay::Absent, 1000));
-        // Keychain readable and later: fresh, as before.
-        assert!(!expired_when(Some(0), KeychainSay::Expiry(3_600_000), 1000));
-        // Unreadable keychain and a fresh file: still fine.
-        assert!(!expired_when(
-            Some(3_600_000),
-            KeychainSay::Unreadable,
-            1000
-        ));
+        assert_eq!(access_token(selected.bytes()).unwrap().expose(), b"NEW");
+        assert!(!credential_expired(selected.bytes(), 1_800_000_000_000));
+        assert_eq!(
+            credential_subscription_type(selected.bytes()).as_deref(),
+            Some("max")
+        );
     }
 }

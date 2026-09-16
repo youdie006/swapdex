@@ -14,7 +14,7 @@ fn fake_claude(root: &Path) -> std::path::PathBuf {
     let f = dir.join("claude");
     std::fs::write(
         &f,
-        "#!/bin/sh\necho \"CFG=$CLAUDE_CONFIG_DIR\"\necho \"ARGS=$*\"\n",
+        "#!/bin/sh\necho \"CFG=$CLAUDE_CONFIG_DIR\"\necho \"SECURE=${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}\"\necho \"ARGS=$*\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -43,6 +43,31 @@ fn run_launches_claude_in_the_accounts_slot() {
         o.lines()
             .any(|l| l.starts_with("CFG=") && l.contains(slots.to_str().unwrap())),
         "claude launched with the slot as CLAUDE_CONFIG_DIR: {o}"
+    );
+}
+
+#[test]
+fn managed_claude_run_clears_a_conflicting_secure_storage_override() {
+    let root = tempfile::tempdir().unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let conflicting = root.path().join("different-claude-login");
+    let out = Command::new(bin())
+        .args(["run", "work"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("PATH", &path)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &conflicting)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "SECURE=unset"),
+        "managed Claude must use the selected slot's config: {stdout}"
     );
 }
 
@@ -148,6 +173,10 @@ fn shim_makes_plain_claude_follow_use() {
         used.contains("default claude account -> work"),
         "use repoints: {used}"
     );
+    // This fixture deliberately has no login, so direct passthrough is the only
+    // authorized route. A failed managed proxy start must no longer launch the
+    // native client implicitly.
+    run_in(root.path(), &["serve", "--off"], &path);
     // Install the shim (finds the fake claude on PATH as the real one).
     let installed = run_in(root.path(), &["shim"], &path);
     assert!(
@@ -685,7 +714,7 @@ fn doctor_detects_shim_bypassed_and_active() {
     );
 
     // Nothing configuring it anywhere IS a real finding, with the PATH fix.
-    let profile = root.path().join("home/.bashrc");
+    let profile = root.path().join(".bashrc");
     if profile.exists() {
         std::fs::write(&profile, "").unwrap();
     }
@@ -1034,6 +1063,8 @@ fn shim_puts_itself_on_path_via_the_shell_profile() {
     );
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(root.path().join(".zshrc"), "ROOT_SENTINEL\n").unwrap();
+    std::fs::write(home.join(".zshrc"), "HOME_SENTINEL\n").unwrap();
     let run_shim = || {
         String::from_utf8_lossy(
             &Command::new(bin())
@@ -1054,15 +1085,22 @@ fn shim_puts_itself_on_path_via_the_shell_profile() {
         out.contains("added it to"),
         "it says what it changed: {out}"
     );
-    let zshrc = std::fs::read_to_string(home.join(".zshrc")).expect("profile written");
+    let zshrc = std::fs::read_to_string(root.path().join(".zshrc")).expect("profile written");
     assert!(
-        zshrc.contains("swapdex") && zshrc.contains("export PATH="),
+        zshrc.contains("ROOT_SENTINEL")
+            && zshrc.contains("swapdex")
+            && zshrc.contains("export PATH="),
         "the line is there: {zshrc}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+        "HOME_SENTINEL\n",
+        "the ambient HOME profile is outside the supplied Paths and stays untouched"
     );
 
     // Running it again must not stack a second copy.
     run_shim();
-    let again = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+    let again = std::fs::read_to_string(root.path().join(".zshrc")).unwrap();
     assert_eq!(
         again.matches("export PATH=").count(),
         1,
@@ -1089,6 +1127,224 @@ fn shim_puts_itself_on_path_via_the_shell_profile() {
     assert!(
         !home.join(".config").exists(),
         "nothing was written for a shell we do not handle"
+    );
+}
+
+/// PATH entries may be relative to the shell that installs the shim. The shim
+/// runs later from arbitrary project directories, so the persisted client path
+/// must be anchored at installation time while leaving a stable symlink intact.
+#[test]
+fn shim_anchors_relative_stable_client_paths_to_the_install_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let install = root.path().join("install");
+    let stable = install.join("bin");
+    let versioned = install.join("versions/v1");
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir_all(&stable).unwrap();
+    std::fs::create_dir_all(&versioned).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for (name, marker) in [("claude", "RELATIVE_CLAUDE"), ("codex", "RELATIVE_CODEX")] {
+        let native = versioned.join(name);
+        std::fs::write(&native, format!("#!/bin/sh\nprintf '{marker}\\n'\n")).unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&native, stable.join(name)).unwrap();
+    }
+
+    let installed = Command::new(bin())
+        .arg("shim")
+        .current_dir(&install)
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .env("SHELL", "/usr/bin/fish")
+        .env("PATH", "bin:/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        installed.status.success(),
+        "shim install failed: {}{}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let shim_dir = root.path().join(".local/share/swapdex/bin");
+    for (name, marker) in [("claude", "RELATIVE_CLAUDE"), ("codex", "RELATIVE_CODEX")] {
+        let body = std::fs::read_to_string(shim_dir.join(name)).unwrap();
+        let exec_line = body
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("exec '") && line.ends_with("' \"$@\""))
+            .unwrap_or_else(|| panic!("no native exec in generated {name} shim: {body}"));
+        let embedded = std::path::PathBuf::from(
+            exec_line
+                .strip_prefix("exec '")
+                .unwrap()
+                .strip_suffix("' \"$@\"")
+                .unwrap(),
+        );
+        assert!(
+            embedded.is_absolute(),
+            "the generated {name} shim persisted a relative client: {embedded:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&embedded)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the generated {name} shim froze a versioned target: {embedded:?}"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&embedded).unwrap(),
+            std::fs::canonicalize(versioned.join(name)).unwrap(),
+            "the stable {name} symlink resolves to the native client"
+        );
+        let out = Command::new(shim_dir.join(name))
+            .arg("--help")
+            .current_dir(&elsewhere)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("HOME", root.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains(marker),
+            "the {name} shim did not reach its native client from another cwd: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn shim_skips_a_non_executable_path_shadow() {
+    let root = tempfile::tempdir().unwrap();
+    let shadow = root.path().join("shadow");
+    let native = root.path().join("native");
+    std::fs::create_dir_all(&shadow).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(shadow.join("claude"), "not executable\n").unwrap();
+    std::fs::set_permissions(
+        shadow.join("claude"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    std::fs::write(
+        native.join("claude"),
+        "#!/bin/sh\nprintf 'EXECUTABLE_CLAUDE\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        native.join("claude"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", shadow.display(), native.display());
+
+    let installed = Command::new(bin())
+        .arg("shim")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .env("SHELL", "/usr/bin/fish")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+    let out = Command::new(root.path().join(".local/share/swapdex/bin/claude"))
+        .arg("--help")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("EXECUTABLE_CLAUDE"),
+        "the non-executable shadow was persisted: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn shim_service_detection_uses_the_supplied_home() {
+    let root = tempfile::tempdir().unwrap();
+    let ambient_home = root.path().join("ambient-home");
+    let supplied_home = root.path().join("supplied-home");
+    std::fs::create_dir_all(&ambient_home).unwrap();
+    std::fs::create_dir_all(&supplied_home).unwrap();
+    let bin_dir = fake_claude(root.path());
+    let path = format!("{}:/usr/bin:/bin", bin_dir.display());
+    let unit = |home: &Path| {
+        if cfg!(target_os = "macos") {
+            swapdex::service::launchd_path(home, "claude-code")
+        } else {
+            swapdex::service::systemd_path(home, "claude-code")
+        }
+    };
+
+    let decoy = unit(&ambient_home);
+    std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+    std::fs::write(&decoy, "decoy service\n").unwrap();
+    let run = || {
+        Command::new(bin())
+            .arg("shim")
+            .env("SWAPDEX_ROOT", &supplied_home)
+            .env("HOME", &ambient_home)
+            .env("SHELL", "/usr/bin/fish")
+            .env("PATH", &path)
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success());
+    assert!(
+        !supplied_home.join(".claude/settings.json").exists(),
+        "an unrelated ambient-home service must not authorize a proxy pin"
+    );
+
+    std::fs::remove_file(decoy).unwrap();
+    let supplied_unit = unit(&supplied_home);
+    std::fs::create_dir_all(supplied_unit.parent().unwrap()).unwrap();
+    std::fs::write(supplied_unit, "synthetic service\n").unwrap();
+    assert!(run().status.success());
+    let settings = std::fs::read_to_string(supplied_home.join(".claude/settings.json"))
+        .expect("the supplied service authorizes the synthetic root's proxy pin");
+    assert!(settings.contains("127.0.0.1:8787"), "{settings}");
+}
+
+#[test]
+fn doctor_reads_the_shell_profile_from_the_supplied_home() {
+    let root = tempfile::tempdir().unwrap();
+    let ambient_home = root.path().join("ambient-home");
+    std::fs::create_dir_all(&ambient_home).unwrap();
+    let bin_dir = fake_claude(root.path());
+    let native_path = format!("{}:/usr/bin:/bin", bin_dir.display());
+    run_in(root.path(), &["run", "work", "--no-launch"], &native_path);
+    run_in(root.path(), &["use", "work"], &native_path);
+    let shim_dir = root.path().join(".local/share/swapdex/bin");
+    let profile_line = format!("export PATH=\"{}:$PATH\"\n", shim_dir.display());
+    std::fs::write(root.path().join(".bashrc"), &profile_line).unwrap();
+    std::fs::write(ambient_home.join(".bashrc"), "AMBIENT_SENTINEL\n").unwrap();
+    let installed = Command::new(bin())
+        .arg("shim")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", &ambient_home)
+        .env("SHELL", "/bin/bash")
+        .env("PATH", &native_path)
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+    std::fs::write(ambient_home.join(".bashrc"), "AMBIENT_SENTINEL\n").unwrap();
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", &ambient_home)
+        .env("SHELL", "/bin/bash")
+        .env("PATH", &native_path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("shim set up in") && stdout.contains("not on THIS shell's PATH"),
+        "doctor ignored the supplied home profile: {stdout}"
     );
 }
 
@@ -1153,6 +1409,83 @@ fn slash_installs_a_claude_code_command() {
     assert_eq!(std::fs::read_to_string(&f).unwrap(), body);
 }
 
+/// `/swap <name>` is invoked mid-conversation, so its generated instruction
+/// must move the payer pointer and leave the launch-home pointer where it was.
+#[test]
+fn slash_explicit_argument_executes_a_payer_only_switch() {
+    for (tool, short, instruction) in [
+        ("claude-code", "claude", ".claude/commands/swap.md"),
+        ("codex", "codex", ".codex/skills/swap/SKILL.md"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = "/usr/bin:/bin";
+        for name in ["a", "b"] {
+            run_in(
+                root.path(),
+                &["run", name, "--tool", tool, "--no-launch"],
+                path,
+            );
+            let dir = slot_dir(root.path(), name, tool);
+            if tool == "codex" {
+                std::fs::write(
+                    dir.join("auth.json"),
+                    format!(
+                        "{{\"tokens\":{{\"access_token\":\"{name}\",\"account_id\":\"{name}\"}}}}"
+                    ),
+                )
+                .unwrap();
+            } else {
+                std::fs::write(
+                    dir.join(".credentials.json"),
+                    format!(
+                        "{{\"claudeAiOauth\":{{\"accessToken\":\"{name}\",\"expiresAt\":32503680000000}}}}"
+                    ),
+                )
+                .unwrap();
+            }
+        }
+        run_in(root.path(), &["use", "a", "--tool", tool], path);
+        let store = root.path().join(".local/share/swapdex");
+        let active = store.join(format!("active-{short}"));
+        let active_before = std::fs::read(&active).expect("launch-home pointer");
+
+        run_in(root.path(), &["slash"], path);
+        let body = std::fs::read_to_string(root.path().join(instruction)).unwrap();
+        let generated = body
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("no executable command in {instruction}: {body}"));
+        let command_dir = root.path().join("command-bin");
+        std::fs::create_dir_all(&command_dir).unwrap();
+        std::os::unix::fs::symlink(bin(), command_dir.join("swapdex")).unwrap();
+        let generated_path = format!("{}:/usr/bin:/bin", command_dir.display());
+        let out = Command::new("/bin/sh")
+            .args(["-c", generated])
+            .env("ARGUMENTS", "b")
+            .env("SWAPDEX_ROOT", root.path())
+            .env("HOME", root.path())
+            .env("PATH", generated_path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "generated {tool} instruction failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&active).unwrap(),
+            active_before,
+            "generated {tool} instruction moved the launch home"
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.join(format!("serving-{short}"))).unwrap(),
+            slot_dir(root.path(), "b", tool).display().to_string(),
+            "generated {tool} instruction did not select b as payer"
+        );
+    }
+}
+
 /// The threshold is a setting, not just a flag: the proxy the shim starts takes
 /// no flags, and that is the one doing the work day to day.
 #[test]
@@ -1183,6 +1516,130 @@ fn threshold_setting_accepts_both_notations_and_off() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+#[test]
+fn threshold_percentages_keep_their_literal_value_after_reloading() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    for (input, expected, displayed) in [
+        ("0.5%", 0.005, "0.5%"),
+        ("1%", 0.01, "1%"),
+        ("0.01%", 0.0001, "0.01%"),
+        ("0.29%", 0.0029, "0.29%"),
+        (" 0.25% ", 0.0025, "0.25%"),
+        ("29%", 0.29, "29%"),
+        ("99.9%", 0.999, "99.9%"),
+        ("100%", 1.0, "100%"),
+        ("0.5", 0.5, "50%"),
+        ("1", 1.0, "100%"),
+        ("95", 0.95, "95%"),
+        ("1e-8%", 1e-10, "0.00000001%"),
+        ("1e-13%", 1e-15, "1e-13%"),
+    ] {
+        let output = Command::new(bin())
+            .args(["threshold", input])
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{input}: {output:?}");
+        let settings = swapdex::settings::load(&paths);
+        let stored = settings.proxy_threshold.expect("stored threshold");
+        assert!(
+            (stored - expected).abs() < expected * 1e-12,
+            "{input}: stored {stored}, expected {expected}"
+        );
+        assert_eq!(
+            settings.threshold(),
+            Some(stored),
+            "{input}: silently clamped"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("at {displayed} used")),
+            "{input}: {stdout}"
+        );
+        let reread = Command::new(bin())
+            .arg("threshold")
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert!(reread.status.success());
+        let stdout = String::from_utf8_lossy(&reread.stdout);
+        assert!(
+            stdout.contains(&format!("at {displayed} used")),
+            "{input}: {stdout}"
+        );
+        let used_percent = stored * 100.0;
+        assert!(swapdex::proxy::pick::over_threshold(
+            Some(used_percent),
+            None,
+            stored
+        ));
+        assert!(!swapdex::proxy::pick::over_threshold(
+            Some(used_percent / 2.0),
+            None,
+            stored
+        ));
+    }
+}
+
+#[test]
+fn threshold_invalid_values_leave_the_previous_setting_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    swapdex::settings::save(
+        &paths,
+        &swapdex::settings::Settings {
+            proxy_threshold: Some(0.82),
+            proxy_auto: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let settings = paths.store_dir().join("settings.json");
+    let before = std::fs::read(&settings).unwrap();
+    for input in [
+        "50%%", "1%%", "50%junk", "%", "NaN", "inf", "0", "-0.5", "100.1%", "101",
+    ] {
+        let output = Command::new(bin())
+            .args(["threshold", "--", input])
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "accepted {input}: {output:?}"
+        );
+        assert_eq!(
+            std::fs::read(&settings).unwrap(),
+            before,
+            "changed settings for {input}"
+        );
+    }
+}
+
+#[test]
+fn threshold_runtime_preserves_small_values_and_ignores_invalid_stored_values() {
+    for threshold in [0.005, 0.01, 0.049, 0.05, 0.9, 1.0] {
+        let settings = swapdex::settings::Settings {
+            proxy_threshold: Some(threshold),
+            ..Default::default()
+        };
+        assert_eq!(settings.threshold(), Some(threshold));
+    }
+    for threshold in [0.0, -0.1, 1.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let settings = swapdex::settings::Settings {
+            proxy_threshold: Some(threshold),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.threshold(),
+            None,
+            "invalid stored threshold: {threshold}"
+        );
+    }
+}
+
 /// A stand-in `codex` that reports the home it was launched with.
 fn fake_codex(root: &Path) -> std::path::PathBuf {
     let dir = root.join("fakebin");
@@ -1195,6 +1652,134 @@ fn fake_codex(root: &Path) -> std::path::PathBuf {
     .unwrap();
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
     dir
+}
+
+fn slot_dir(root: &Path, name: &str, tool: &str) -> std::path::PathBuf {
+    let store = root.join(".local/share/swapdex");
+    let recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(store.join("slots.json")).unwrap()).unwrap();
+    recs.iter()
+        .find(|record| record["name"] == name && record["tool"] == tool)
+        .and_then(|record| record["config_dir"].as_str())
+        .map(std::path::PathBuf::from)
+        .expect("slot record")
+}
+
+// `swapdex run` is itself the direct, per-account launch path. Once the shims
+// win PATH, looking the tool up by its bare name loops this launch back through
+// managed proxy startup. A brand-new account has no credential for that proxy,
+// so the native login client is never reached.
+#[test]
+fn run_steps_over_installed_shims_for_fresh_accounts() {
+    for (tool_flag, tool, short, home_line) in [
+        (None, "claude-code", "claude", "CFG="),
+        (Some("codex"), "codex", "codex", "HOME_DIR="),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let bin_dir = fake_claude(root.path());
+        fake_codex(root.path());
+        let native_path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut existing_args = vec!["run", "existing", "--no-launch"];
+        if let Some(tool_flag) = tool_flag {
+            existing_args.extend(["--tool", tool_flag]);
+        }
+        run_in(root.path(), &existing_args, &native_path);
+        let existing_dir = slot_dir(root.path(), "existing", tool);
+        if tool == "codex" {
+            std::fs::write(
+                existing_dir.join("auth.json"),
+                br#"{"tokens":{"access_token":"existing","account_id":"existing"}}"#,
+            )
+            .unwrap();
+        } else {
+            std::fs::write(
+                existing_dir.join(".credentials.json"),
+                br#"{"claudeAiOauth":{"accessToken":"existing","expiresAt":32503680000000}}"#,
+            )
+            .unwrap();
+        }
+        let mut use_args = vec!["use", "existing"];
+        let mut serve_args = vec!["serve", "existing"];
+        if let Some(tool_flag) = tool_flag {
+            use_args.extend(["--tool", tool_flag]);
+            serve_args.extend(["--tool", tool_flag]);
+        }
+        run_in(root.path(), &use_args, &native_path);
+        run_in(root.path(), &serve_args, &native_path);
+        let store = root.path().join(".local/share/swapdex");
+        let active = store.join(format!("active-{short}"));
+        let serving = store.join(format!("serving-{short}"));
+        let active_before = std::fs::read(&active).expect("active pointer");
+        let serving_before = std::fs::read(&serving).expect("serving pointer");
+
+        let installed = run_in(root.path(), &["shim"], &native_path);
+        assert!(
+            installed.contains("installed the claude shim"),
+            "{installed}"
+        );
+
+        let shim_dir = root.path().join(".local/share/swapdex/bin");
+        let shim_first_path = format!("{}:{native_path}", shim_dir.display());
+        let mut args = vec!["run", "fresh"];
+        if let Some(tool_flag) = tool_flag {
+            args.extend(["--tool", tool_flag]);
+        }
+        let home = root.path().join("home");
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", shim_first_path)
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.lines().any(|line| line.starts_with(home_line)),
+            "managed {tool} run did not reach the native tool: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert_eq!(std::fs::read(&active).unwrap(), active_before);
+        assert_eq!(std::fs::read(&serving).unwrap(), serving_before);
+    }
+}
+
+#[test]
+fn run_reports_when_an_installed_shim_has_no_native_tool_behind_it() {
+    for (tool_flag, binary) in [(None, "claude"), (Some("codex"), "codex")] {
+        let root = tempfile::tempdir().unwrap();
+        let bin_dir = fake_claude(root.path());
+        fake_codex(root.path());
+        let native_path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        run_in(root.path(), &["shim"], &native_path);
+        std::fs::remove_file(bin_dir.join(binary)).unwrap();
+
+        let shim_dir = root.path().join(".local/share/swapdex/bin");
+        let mut args = vec!["run", "fresh"];
+        if let Some(tool_flag) = tool_flag {
+            args.extend(["--tool", tool_flag]);
+        }
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", &shim_dir)
+            .env("HOME", root.path().join("home"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "shim-only PATH must fail");
+        assert!(
+            stderr.contains(&format!("real `{binary}` executable")) && stderr.contains("not found"),
+            "missing-native diagnostic for {binary}: {stderr}"
+        );
+    }
 }
 
 // `run` is how an account gets its login in the first place: it makes the slot

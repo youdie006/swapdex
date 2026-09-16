@@ -8,7 +8,8 @@ const PREFIX: &str = "anthropic-ratelimit-unified-";
 
 #[derive(Debug, Default, Clone)]
 pub struct Quota {
-    /// Any window reported `rejected` - this account is spent.
+    /// Any included-plan window reported `rejected` - this account is spent.
+    /// Rejected paid overage only means that optional extra usage is disabled.
     pub rejected: bool,
     /// Every `*-status` header seen, for display and diagnosis.
     pub statuses: Vec<(String, String)>,
@@ -17,6 +18,10 @@ pub struct Quota {
     /// Each window's own reset, by window name (`5h`, `7d`, ...). The soonest is
     /// what the rotation needs; the bar needs to know WHICH window it belongs to.
     pub resets: Vec<(String, i64)>,
+}
+
+fn rejected_plan_status(name: &str, value: &str) -> bool {
+    name != "overage-status" && value.trim().eq_ignore_ascii_case("rejected")
 }
 
 /// How long a refusal holds an account out when the response named no reset.
@@ -51,13 +56,14 @@ impl Quota {
             .map(|(_, at)| *at)
     }
 
-    /// Which windows reported `rejected` (e.g. `5h-status`, `7d-status`). Named in
-    /// the log so "SPENT" on a successful response is explainable rather than
-    /// mysterious.
+    /// Which included-plan windows reported `rejected` (e.g. `5h-status`,
+    /// `7d-status`). Named in the log so "SPENT" on a successful response is
+    /// explainable rather than mysterious. Paid overage is telemetry, not plan
+    /// exhaustion: rejecting it can simply mean the user disabled extra usage.
     pub fn rejected_windows(&self) -> Vec<&str> {
         self.statuses
             .iter()
-            .filter(|(_, v)| v.trim().eq_ignore_ascii_case("rejected"))
+            .filter(|(k, v)| rejected_plan_status(k, v))
             .map(|(k, _)| k.as_str())
             .collect()
     }
@@ -76,7 +82,7 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Quota> {
         };
         seen = true;
         if rest == "status" || rest.ends_with("-status") {
-            if value.trim().eq_ignore_ascii_case("rejected") {
+            if rejected_plan_status(rest, value) {
                 q.rejected = true;
             }
             q.statuses.push((rest.to_string(), value.clone()));
