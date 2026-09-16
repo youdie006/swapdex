@@ -6,6 +6,47 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Update platform-directory lookup to dirs 7 (#25).** Builds use the current
+  directory helper while preserving the existing account and session store
+  locations on Linux, WSL and macOS. The upstream Windows preference-directory
+  change does not affect Swapdex, which uses only home and data directories.
+
+## 0.165.6
+
+- **Preserve selected-account routing when Codex jobs add configuration.**
+  Stock Codex could discard a proxy override placed before `exec` when a job
+  added its own `-c` option after the subcommand, sending the job through the
+  launch home's login. The launcher now places its managed address in the
+  same argument scope as the last caller configuration option, preserving
+  caller options and the selected account route. Explicit provider overrides
+  keep their requested route. This applies when a new native job starts.
+- **Refresh usage details without reopening the dashboard.** The Usage and
+  Quota panels previously fetched once and kept showing that snapshot, with
+  navigation blocked during the read. They now refresh in the background every
+  45 seconds, accept `r` for an immediate refresh, preserve the last reading
+  and scroll position, and show refresh status. A disconnected quota reader
+  no longer prevents future dashboard reads until restart.
+
+## 0.165.5
+
+- **Apply the selected Codex account to profile-based jobs.** Launches such as
+  `codex exec -p worker` previously bypassed the managed proxy solely because
+  they selected a profile, silently charging the launch home's login. All
+  `-p`/`--profile` forms now receive the same built-in OpenAI routing as ordinary
+  sessions. The profile, original arguments, credentials, and session home are
+  preserved. Named custom providers and explicit command-line provider
+  overrides retain their own routes. The fix applies to new launches;
+  already-running direct jobs keep their original connection until they end.
+
+## 0.165.4
+
+- **Keep a disconnected client from terminating every proxy session.** The
+  command-line SIGPIPE policy also applied to proxy processes, so a broken
+  connection could kill the shared Claude/Codex proxy and trigger repeated
+  service restarts. Proxy startup now ignores SIGPIPE before starting its
+  workers, allowing the failed write to follow normal connection error handling.
+  Ordinary command output piped to a short reader still ends quietly.
+
 ## 0.165.3
 
 - **Keep a started response streaming past five minutes.** The locked ureq

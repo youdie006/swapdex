@@ -4368,6 +4368,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 Err(e) => vec![format!("quota failed: {e}")],
             }
         }
+        fn usage_async(&mut self) -> crate::tui::PanelReceiver {
+            crate::tui::PanelReceiver::command("usage")
+        }
+        fn quota_async(&mut self) -> crate::tui::PanelReceiver {
+            crate::tui::PanelReceiver::command("quota")
+        }
         fn cached_quota(&mut self) -> Vec<(crate::tui::AccountKey, crate::tui::Usage)> {
             // Every tool's cache, not just Claude's: a remembered reading that
             // nobody reads back leaves the row empty until the network answers.

@@ -1,4 +1,5 @@
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2283,6 +2284,264 @@ fn post_codex_turn(port: u16) -> (u16, String) {
     (status, out)
 }
 
+fn seed_signal_test_account(root: &std::path::Path, tool: &str) {
+    if tool == "codex" {
+        seed_codex_slot(root, "work", "codex-work", "AT-WORK", "acct-work", true);
+    } else {
+        seed_slot(root, "work", "claude-work", "AT-WORK", true);
+    }
+}
+
+fn start_signal_test_proxy(
+    root: &std::path::Path,
+    tool: &str,
+    upstream: &str,
+) -> (ReapedChild, u16) {
+    let mut command = Command::new(bin());
+    command
+        .args(["proxy", "--port", "0"])
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
+        // Keep stdout open without relying on a blocking read for readiness.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if tool == "codex" {
+        command
+            .args(["--tool", "codex"])
+            .env("SWAPDEX_UPSTREAM_CODEX", upstream);
+    } else {
+        command.env("SWAPDEX_UPSTREAM", upstream);
+    }
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    let mut proxy = ReapedChild::new(child);
+    let paths = swapdex::paths::Paths::rooted(root);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if let Some(status) = proxy.0.as_mut().unwrap().try_wait().unwrap() {
+            panic!("{tool} proxy exited during startup: {status}");
+        }
+        if let Some((marker_pid, port, build)) = swapdex::proxy::running_proxy_for(&paths, tool) {
+            assert_eq!(marker_pid, pid as i32, "proxy marker named another process");
+            assert!(!build.is_empty(), "proxy marker omitted its build identity");
+            return (proxy, port);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{tool} proxy did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn post_signal_test_turn(tool: &str, port: u16) -> u16 {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .build()
+        .into();
+    let (path, body) = if tool == "codex" {
+        ("/v1/responses", r#"{"input":[]}"#)
+    } else {
+        ("/v1/messages", r#"{"turn":1}"#)
+    };
+    let mut request = agent
+        .post(format!("http://127.0.0.1:{port}{path}"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .header("content-type", "application/json");
+    if tool == "codex" {
+        request = request.header("chatgpt-account-id", "acct-client");
+    }
+    let mut response = request
+        .send(body.as_bytes())
+        .expect("proxy answered within the test deadline");
+    let status = response.status().as_u16();
+    let mut response_body = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut response_body)
+        .expect("proxy response completed within the test deadline");
+    status
+}
+
+fn assert_proxy_stays_running(
+    proxy: &mut ReapedChild,
+    duration: std::time::Duration,
+    context: &str,
+) {
+    let deadline = std::time::Instant::now() + duration;
+    loop {
+        let status = proxy.0.as_mut().unwrap().try_wait().unwrap();
+        assert!(
+            status.is_none(),
+            "proxy exited {context}: {}",
+            status.unwrap()
+        );
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn executable_proxy_ignores_sigpipe_and_keeps_serving(tool: &str) {
+    let root = tempfile::tempdir().unwrap();
+    seed_signal_test_account(root.path(), tool);
+    let upstream = ControlledUpstream::start(|mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        request
+            .respond(tiny_http::Response::from_string(r#"{"ok":true}"#))
+            .ok();
+    });
+    let (mut proxy, port) = start_signal_test_proxy(root.path(), tool, upstream.url());
+    let pid = proxy.0.as_ref().unwrap().id();
+
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGPIPE) };
+    assert_eq!(sent, 0, "could not send SIGPIPE to the {tool} proxy");
+    assert_proxy_stays_running(
+        &mut proxy,
+        std::time::Duration::from_millis(500),
+        "after SIGPIPE",
+    );
+    assert_eq!(
+        post_signal_test_turn(tool, port),
+        200,
+        "the same {tool} proxy did not answer after SIGPIPE"
+    );
+    assert_eq!(proxy.0.as_ref().unwrap().id(), pid);
+
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn executable_claude_proxy_ignores_sigpipe_and_keeps_serving() {
+    executable_proxy_ignores_sigpipe_and_keeps_serving("claude-code");
+}
+
+#[test]
+fn executable_codex_proxy_ignores_sigpipe_and_keeps_serving() {
+    executable_proxy_ignores_sigpipe_and_keeps_serving("codex");
+}
+
+fn open_turn_for_disconnect(port: u16, tool: &str) -> std::net::TcpStream {
+    let (path, body, identity) = if tool == "codex" {
+        (
+            "/v1/responses",
+            r#"{"input":[]}"#,
+            "Authorization: Bearer CLIENT-TOKEN\r\nChatGPT-Account-ID: acct-client\r\n",
+        )
+    } else {
+        (
+            "/v1/messages",
+            r#"{"turn":1}"#,
+            "Authorization: Bearer CLIENT-TOKEN\r\n",
+        )
+    };
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{identity}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut client =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3)).unwrap();
+    client
+        .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client
+}
+
+fn reset_client_connection(client: std::net::TcpStream) {
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    let set = unsafe {
+        libc::setsockopt(
+            client.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&linger as *const libc::linger).cast(),
+            std::mem::size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "could not configure a reset-on-close client");
+    drop(client);
+}
+
+fn executable_proxy_survives_a_disconnected_client(tool: &str) {
+    let root = tempfile::tempdir().unwrap();
+    seed_signal_test_account(root.path(), tool);
+    let (received_tx, received_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (responded_tx, responded_rx) = std::sync::mpsc::channel();
+    let mut first = true;
+    let upstream = ControlledUpstream::start(move |mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        let was_first = std::mem::replace(&mut first, false);
+        let released = if was_first {
+            received_tx.send(()).is_ok()
+                && release_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .is_ok()
+        } else {
+            true
+        };
+        let answered = released
+            && request
+                .respond(tiny_http::Response::from_string(r#"{"ok":true}"#))
+                .is_ok();
+        if was_first {
+            responded_tx.send(answered).ok();
+        }
+    });
+    let (mut proxy, port) = start_signal_test_proxy(root.path(), tool, upstream.url());
+    let pid = proxy.0.as_ref().unwrap().id();
+
+    let client = open_turn_for_disconnect(port, tool);
+    received_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("the upstream did not receive the abandoned turn");
+    reset_client_connection(client);
+    release_tx.send(()).unwrap();
+    assert!(
+        responded_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("the upstream did not finish the abandoned turn"),
+        "the upstream could not answer the abandoned turn"
+    );
+    assert_proxy_stays_running(
+        &mut proxy,
+        std::time::Duration::from_millis(500),
+        "after a client disconnected before its response",
+    );
+    assert_eq!(
+        post_signal_test_turn(tool, port),
+        200,
+        "the same {tool} proxy did not answer after a client disconnected"
+    );
+    assert_eq!(proxy.0.as_ref().unwrap().id(), pid);
+
+    proxy.stop();
+    upstream.close();
+}
+
+#[test]
+fn executable_claude_proxy_survives_a_disconnected_client() {
+    executable_proxy_survives_a_disconnected_client("claude-code");
+}
+
+#[test]
+fn executable_codex_proxy_survives_a_disconnected_client() {
+    executable_proxy_survives_a_disconnected_client("codex");
+}
+
 fn select_serving(root: &std::path::Path, tool: &str, name: &str) {
     let paths = swapdex::paths::Paths::rooted(root);
     swapdex::slots::Slots::open_for(&paths, tool)
@@ -3102,53 +3361,101 @@ fn serve_moves_who_pays_for_codex_without_moving_its_transcripts() {
 
 /// Environment variables must not override the shim's routing decision.
 mod codex_routing_ignores_inherited_shell_state {
+    use std::sync::{Mutex, MutexGuard};
     use swapdex::shim::codex_shim_script;
 
-    /// Run the generated shim with stubs and return the argument line the tool
-    /// was handed. `env` is prepended to the command as `name=value` pairs, so
-    /// it arrives the way a caller's exported variable would.
-    fn args_tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> String {
-        let tmp = std::env::temp_dir().join(format!("sx-guard-{}-{nonce}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let sx = tmp.join("swapdex");
+    static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_exec_lock() -> MutexGuard<'static, ()> {
+        FIXTURE_EXEC_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Launch {
+        home: String,
+        args: Vec<String>,
+    }
+
+    /// Run the generated shim with stubs and return exactly what the real tool
+    /// receives. `env` arrives the way a caller's exported variables would.
+    fn tool_receives(nonce: &str, env: &[(&str, &str)], args: &[&str]) -> Launch {
+        let _exec_guard = fixture_exec_lock();
+        let prefix = format!("sx-guard-{nonce}-");
+        let tmp = tempfile::Builder::new().prefix(&prefix).tempdir().unwrap();
+        let root = tmp.path();
+        let pointer = root.join("ptr");
+        let pointed_home = root.join("pointed-home");
+        std::fs::write(&pointer, pointed_home.to_string_lossy().as_bytes()).unwrap();
+        let sx = root.join("swapdex");
         std::fs::write(
             &sx,
             "#!/bin/sh\nfor a in \"$@\"; do\n\tcase \"$a\" in\n\t--ensure) echo 8788; exit 0 ;;\n\tserve) shift; printf '%s' work; exit 0 ;;\n\tesac\ndone\nexit 0\n",
         )
         .unwrap();
-        let tool = tmp.join("tool");
-        std::fs::write(&tool, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-        let shim = tmp.join("shim");
-        std::fs::write(&shim, codex_shim_script(&tmp.join("ptr"), &tool, &sx)).unwrap();
+        let tool = root.join("tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nprintf 'home=%s\\n' \"$CODEX_HOME\"\nfor a in \"$@\"; do printf 'arg=%s\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        let shim = root.join("shim");
+        std::fs::write(&shim, codex_shim_script(&pointer, &tool, &sx)).unwrap();
         for f in [&sx, &tool, &shim] {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut cmd = std::process::Command::new("sh");
         cmd.arg(&shim).args(args);
+        cmd.env_remove("CODEX_HOME");
         for (k, v) in env {
             cmd.env(k, v);
         }
         let out = cmd.output().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        assert!(
+            out.status.success(),
+            "shim failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let mut lines = stdout.lines();
+        let home = lines
+            .next()
+            .and_then(|line| line.strip_prefix("home="))
+            .expect("tool reported CODEX_HOME")
+            .to_owned();
+        let args = lines
+            .map(|line| {
+                line.strip_prefix("arg=")
+                    .expect("tool reported one argument per line")
+                    .to_owned()
+            })
+            .collect();
+        Launch { home, args }
+    }
+
+    fn managed_args(original: &[&str]) -> Vec<String> {
+        ["-c", "openai_base_url=http://127.0.0.1:8788/v1"]
+            .into_iter()
+            .chain(original.iter().copied())
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]
     fn resume_uses_the_reported_proxy_without_changing_provider() {
-        let got = args_tool_receives("resume", &[("port", "3000")], &["resume"]);
-        assert!(!got.contains("model_provider"));
-        assert!(got.contains("openai_base_url=http://127.0.0.1:8788/v1"));
-        assert_eq!(got.lines().last(), Some("resume"));
+        let got = tool_receives("resume", &[("port", "3000")], &["resume"]);
+        assert!(!got.args.iter().any(|arg| arg.contains("model_provider")));
+        assert_eq!(got.args, managed_args(&["resume"]));
     }
 
     #[test]
     fn an_inherited_port_does_not_reopen_the_override_on_login() {
-        let got = args_tool_receives("login", &[("port", "3000")], &["login"]);
+        let got = tool_receives("login", &[("port", "3000")], &["login"]);
         assert!(
-            !got.contains("model_provider"),
-            "a sign-in must reach the real backend, got:\n{got}"
+            !got.args.iter().any(|arg| arg.contains("model_provider")),
+            "a sign-in must reach the real backend, got: {got:?}"
         );
     }
 
@@ -3156,12 +3463,66 @@ mod codex_routing_ignores_inherited_shell_state {
     /// override, so the fix cannot be "never apply it".
     #[test]
     fn a_talking_turn_still_gets_the_override() {
-        let got = args_tool_receives("talk", &[("port", "3000")], &["hello"]);
+        let got = tool_receives("talk", &[("port", "3000")], &["hello"]);
         assert!(
-            got.lines()
-                .any(|l| l == "openai_base_url=http://127.0.0.1:8788/v1"),
-            "a turn routes through the proxy swapdex reported, got:\n{got}"
+            got.args
+                .iter()
+                .any(|arg| arg == "openai_base_url=http://127.0.0.1:8788/v1"),
+            "a turn routes through the proxy swapdex reported, got: {got:?}"
         );
+    }
+
+    #[test]
+    fn profile_forms_stay_managed_and_preserve_arguments_and_home() {
+        for (nonce, profile) in [
+            ("profile-short", vec!["-p", "worker"]),
+            ("profile-long", vec!["--profile", "worker"]),
+            ("profile-short-attached", vec!["-pworker"]),
+            ("profile-long-attached", vec!["--profile=worker"]),
+        ] {
+            let mut original = vec!["--strict-config", "exec"];
+            original.extend(profile);
+            original.extend(["resume", "thread-42"]);
+            let got = tool_receives(nonce, &[("CODEX_HOME", "/keep/codex-home")], &original);
+            assert_eq!(got.home, "/keep/codex-home", "profile form: {original:?}");
+            assert_eq!(
+                got.args,
+                managed_args(&original),
+                "profile form: {original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_profile_value_named_login_is_not_an_auth_command() {
+        let original = ["-p", "login", "exec", "hello"];
+        let got = tool_receives("profile-named-login", &[], &original);
+        assert_eq!(got.args, managed_args(&original));
+    }
+
+    #[test]
+    fn explicit_provider_config_with_a_profile_still_bypasses_routing() {
+        let original = [
+            "--profile=worker",
+            "exec",
+            "-c",
+            "model_provider=company",
+            "hello",
+        ];
+        let got = tool_receives("profile-explicit-provider", &[], &original);
+        assert_eq!(got.args, original.map(str::to_owned));
+    }
+
+    #[test]
+    fn auth_commands_with_a_profile_still_bypass_routing() {
+        for (nonce, command) in [
+            ("profile-auth-login", "login"),
+            ("profile-auth-logout", "logout"),
+        ] {
+            let original = ["--profile=worker", command];
+            let got = tool_receives(nonce, &[], &original);
+            assert_eq!(got.args, original.map(str::to_owned));
+        }
     }
 }
 

@@ -1215,6 +1215,13 @@ fn ctrl_c_cleanup<F: Fn() + Send + Sync + 'static>(f: F) -> Result<()> {
 }
 
 pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
+    // `main` restores Unix's default SIGPIPE behavior so ordinary commands end
+    // quietly when piped to a short reader. A proxy serves many connections in
+    // one process, so a disconnected socket must surface as an I/O error instead
+    // of terminating every session.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     crate::atomic::ensure_not_root()?;
     // Explicit passthrough is usable without any managed account at all. Read
     // it independently of slots.json so a missing/corrupt registry cannot turn

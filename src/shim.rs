@@ -207,6 +207,8 @@ sx_plain=no
 sx_skip=
 sx_command=
 sx_options=yes
+sx_arg_index=0
+sx_last_config=0
 port=
 sx_explicit_config() {{
     sx_key=$(printf '%s' "${{1%%=*}}" | tr -d '[:space:]')
@@ -214,6 +216,7 @@ sx_explicit_config() {{
     return 1
 }}
 for a in "$@"; do
+    sx_arg_index=$((sx_arg_index + 1))
     if [ "$sx_skip" = config ]; then
         if sx_explicit_config "$a"; then sx_plain=yes; fi
         sx_skip=
@@ -229,11 +232,13 @@ for a in "$@"; do
     [ "$sx_options" = yes ] || continue
     case "$a" in
         --) sx_options=no ;;
-        -c|--config) sx_skip=config ;;
-        --config=*) if sx_explicit_config "${{a#--config=}}"; then sx_plain=yes; fi ;;
-        -c?*) if sx_explicit_config "${{a#-c}}"; then sx_plain=yes; fi ;;
-        -p|--profile|--remote|--remote-auth-token-env|--local-provider) sx_plain=yes; sx_skip=value ;;
-        -p?*|--profile=*|--remote=*|--remote-auth-token-env=*|--local-provider=*|--oss) sx_plain=yes ;;
+        -c|--config) sx_last_config=$sx_arg_index; sx_skip=config ;;
+        --config=*) sx_last_config=$sx_arg_index; if sx_explicit_config "${{a#--config=}}"; then sx_plain=yes; fi ;;
+        -c?*) sx_last_config=$sx_arg_index; if sx_explicit_config "${{a#-c}}"; then sx_plain=yes; fi ;;
+        -p|--profile) sx_skip=value ;;
+        -p?*|--profile=*) ;;
+        --remote|--remote-auth-token-env|--local-provider) sx_plain=yes; sx_skip=value ;;
+        --remote=*|--remote-auth-token-env=*|--local-provider=*|--oss) sx_plain=yes ;;
         -i|--image) sx_skip=images ;;
         -C|--cd|-m|--model|-s|--sandbox|-a|--ask-for-approval|--add-dir|--enable|--disable) sx_skip=value ;;
         -h|--help|-V|--version) sx_plain=yes ;;
@@ -253,7 +258,22 @@ if [ "$sx_plain" = no ]; then
     port=$({sx} proxy --ensure --tool codex 2>/dev/null)
     {proxy_result}
     if [ "$sx_use_proxy" = yes ]; then
-        set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+        if [ "$sx_last_config" -eq 0 ]; then
+            set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+        else
+            # Codex can discard root -c flags when a subcommand has its own.
+            # Rebuild the argument list so the managed URL has the same scope
+            # as the caller's last real -c, without moving prompt text or --.
+            sx_arg_index=0
+            for sx_arg in "$@"; do
+                if [ "$sx_arg_index" -eq 0 ]; then set --; fi
+                sx_arg_index=$((sx_arg_index + 1))
+                if [ "$sx_arg_index" -eq "$sx_last_config" ]; then
+                    set -- "$@" -c openai_base_url="http://127.0.0.1:$port/v1"
+                fi
+                set -- "$@" "$sx_arg"
+            done
+        fi
     fi
 fi
 exec {real} "$@"
@@ -999,6 +1019,164 @@ mod tests {
             s.contains("if [ \"$sx_use_proxy\" = yes ]"),
             "the overrides are conditional: {s}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_proxy_override_shares_the_last_real_config_scope() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        let pointer = root.path().join("active-codex");
+        let real = root.path().join("real codex");
+        let swapdex = root.path().join("fake swapdex");
+        let shim = root.path().join("codex shim");
+        std::fs::write(&pointer, root.path().join("codex-home").to_str().unwrap()).unwrap();
+        std::fs::write(&real, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+        std::fs::write(
+            &swapdex,
+            "#!/bin/sh\ncase \"$1\" in proxy) printf 8788 ;; esac\n",
+        )
+        .unwrap();
+        std::fs::write(&shim, codex_shim_script(&pointer, &real, &swapdex)).unwrap();
+        for path in [&real, &swapdex] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base = "openai_base_url=http://127.0.0.1:8788/v1";
+        for (input, expected) in [
+            (vec!["exec", "prompt"], vec!["-c", base, "exec", "prompt"]),
+            (
+                vec!["exec", "-c", "model_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "--config", "model_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "--config",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["-c", "model_reasoning_effort=low", "exec", "prompt"],
+                vec![
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "exec",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["-c", "model=first", "exec", "-c", "model=second", "prompt"],
+                vec![
+                    "-c",
+                    "model=first",
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    "model=second",
+                    "prompt",
+                ],
+            ),
+            (
+                vec![
+                    "exec",
+                    "resume",
+                    "--last",
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+                vec![
+                    "exec",
+                    "resume",
+                    "--last",
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "-c", "model_reasoning_effort = \"low\"", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    "model_reasoning_effort = \"low\"",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "-cmodel_reasoning_effort=low", "prompt"],
+                vec!["exec", "-c", base, "-cmodel_reasoning_effort=low", "prompt"],
+            ),
+            (
+                vec!["exec", "--config=model_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "--config=model_reasoning_effort=low",
+                    "prompt",
+                ],
+            ),
+            (
+                vec!["exec", "-C", "-c", "-c", "model=second", "--", "-c"],
+                vec![
+                    "exec",
+                    "-C",
+                    "-c",
+                    "-c",
+                    base,
+                    "-c",
+                    "model=second",
+                    "--",
+                    "-c",
+                ],
+            ),
+            (
+                vec!["exec", "--", "-c", "prompt"],
+                vec!["-c", base, "exec", "--", "-c", "prompt"],
+            ),
+            (
+                vec!["exec", "-c", "model_provider=fixture", "prompt"],
+                vec!["exec", "-c", "model_provider=fixture", "prompt"],
+            ),
+        ] {
+            let output = Command::new("sh")
+                .arg(&shim)
+                .args(&input)
+                .env("CODEX_HOME", root.path().join("codex-home"))
+                .env("SWAPDEX_ROOT", root.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{input:?}: {:?}", output.stderr);
+            let mut parts: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
+            assert_eq!(parts.pop(), Some(&b""[..]), "missing final NUL");
+            let actual: Vec<_> = parts
+                .into_iter()
+                .map(|bytes| String::from_utf8(bytes.to_vec()).unwrap())
+                .collect();
+            assert_eq!(actual, expected, "{input:?}");
+        }
     }
 
     #[test]

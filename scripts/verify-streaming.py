@@ -14,7 +14,9 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import socket
+import struct
 import tempfile
 import threading
 import time
@@ -77,11 +79,13 @@ class ControlledServer(http.server.ThreadingHTTPServer):
         self.abort = threading.Event()
         self.announced = {
             stage: threading.Event()
-            for stage in ("headers", "ping", "completion", "malformed", "end")
+            for stage in (
+                "request", "headers", "ping", "completion", "malformed", "end"
+            )
         }
         self.released = {
             stage: threading.Event()
-            for stage in ("headers", "ping", "completion", "malformed")
+            for stage in ("request", "headers", "ping", "completion", "malformed")
         }
         self.lock = threading.Lock()
         self.records = []
@@ -145,6 +149,20 @@ class ControlledHandler(http.server.BaseHTTPRequestHandler):
         try:
             body = read_request_body(self)
             self.server.record(self.path, body)
+            if self.server.mode == "disconnect":
+                if not self.server.gate("request"):
+                    return
+                response = b'{"ok":true}'
+                self.wfile.write(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    + f"Content-Length: {len(response)}\r\n".encode("ascii")
+                    + b"Connection: close\r\n\r\n"
+                    + response
+                )
+                self.wfile.flush()
+                self.server.announced["end"].set()
+                return
             connection = (b"close" if self.server.mode in ("stream", "hold")
                           else b"keep-alive")
             self.wfile.write(
@@ -393,6 +411,73 @@ def cleanup_case(client, proxy, server, thread):
     require(not failures, "case cleanup failed: " + "; ".join(failures))
 
 
+def require_process_running(process, duration, description):
+    deadline = time.monotonic() + duration
+    while True:
+        require(process.poll() is None,
+                f"proxy exited {description} with status {process.returncode}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(SOCKET_POLL, remaining))
+
+
+def reset_client(client):
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    client.close()
+
+
+def verify_disconnect_and_sigpipe(swapdex, root, env, tool):
+    server, thread = start_server("disconnect", COMPLETIONS[tool])
+    proxy = None
+    client = None
+    try:
+        proxy, port, marker = routing.start_proxy(swapdex, root, env, tool, server)
+        pid = proxy.pid
+        client, path, request_body = open_request(port, tool, persistent=False)
+        wait_for_stage(server, "request")
+        reset_client(client)
+        client = None
+        server.released["request"].set()
+        wait_for_stage(server, "end")
+
+        require_process_running(proxy, 0.5, "after a client disconnected")
+        os.kill(pid, signal.SIGPIPE)
+        require_process_running(proxy, 0.5, "after SIGPIPE")
+
+        client, next_path, next_body = open_request(port, tool, persistent=False)
+        wire = bytearray()
+        receive_close(client, wire, "finish the post-SIGPIPE response")
+        status, _headers, _encoded = split_response(wire)
+        body, complete = decode_body(wire)
+        require(status == 200,
+                f"{tool} post-SIGPIPE request returned {status}, expected 200")
+        require(complete,
+                f"{tool} post-SIGPIPE request omitted the final response chunk")
+        require(body == b'{"ok":true}',
+                f"{tool} post-SIGPIPE request changed the response body")
+        require(proxy.pid == pid and proxy.poll() is None,
+                f"{tool} proxy did not keep serving in the same process")
+        require(routing.marker_for(root, tool).read_bytes() == marker,
+                f"{tool} proxy marker changed after the disconnect")
+        records, errors, _sent_body, _heartbeat_count = server.snapshot()
+        require(not errors, f"{tool} disconnect fixture failed: {'; '.join(errors)}")
+        require(records == [
+            (expected_upstream_path(tool, path), request_body),
+            (expected_upstream_path(tool, next_path), next_body),
+        ], f"{tool} disconnect fixture changed or repeated an upstream request")
+        return {
+            "client_reset_before_response": True,
+            "sigpipe_ignored": True,
+            "same_process_next_request": True,
+            "upstream_requests": len(records),
+        }
+    finally:
+        cleanup_case(client, proxy, server, thread)
+        require(not routing.marker_for(root, tool).exists(),
+                f"{tool} proxy marker remained after disconnect cleanup")
+
+
 def verify_stream(swapdex, root, env, tool):
     expected = PING + COMPLETIONS[tool]
     server, thread = start_server("stream", COMPLETIONS[tool])
@@ -609,6 +694,8 @@ def verify(swapdex, hold_seconds):
             tools[tool] = {
                 "stream": verify_stream(swapdex, root, env, tool),
                 "malformed": verify_malformed(swapdex, root, env, tool),
+                "disconnect": verify_disconnect_and_sigpipe(
+                    swapdex, root, env, tool),
             }
         result = {"status": "pass", "version": version, "tools": tools}
         if hold_seconds:
