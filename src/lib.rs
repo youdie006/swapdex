@@ -1,6 +1,8 @@
 pub mod adapters;
 pub mod atomic;
 pub mod banner;
+pub(crate) mod claude_authority;
+pub(crate) mod claude_refresh_lock;
 pub mod codex_limits;
 pub mod codex_sessions;
 pub mod codex_usage;

@@ -566,7 +566,7 @@ fn pick_slot(
             let expired = if opts.tool == "codex" {
                 codex::slot_token_expired(&chosen.config_dir, now_secs())
             } else {
-                creds::slot_token_expired(&chosen.config_dir, now_ms())
+                creds::slot_token_expired_for(paths, &chosen.config_dir, now_ms())
             };
             let known_spent = sh
             .quota
@@ -972,7 +972,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // with nothing signed in - whose remedies are opposites.
         let reading = crate::live_login::resolve(paths, &r.config_dir, "claude-code", now_ms())
             .map(|login| Ok(login.access_token))
-            .unwrap_or_else(|| creds::slot_token_detail(&r.config_dir));
+            .unwrap_or_else(|| creds::slot_token_detail_for(paths, &r.config_dir));
         let tok = match reading {
             Ok(t) => t,
             Err(why) => {
@@ -1178,7 +1178,7 @@ fn usable_under_threshold(
                 .is_some_and(|m| {
                     pick::over_threshold_with(m.five_h, m.seven_d, threshold, m.credits)
                 })
-            && creds::slot_token(&r.config_dir).is_some()
+            && creds::slot_token_for(paths, &r.config_dir).is_some()
             // Under consume-first the point IS to move to a smaller window, so
             // the margin would forbid the very move the strategy asks for.
             && (cfg.strategy() == pick::Strategy::ConsumeFirst
@@ -1240,22 +1240,29 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         // only, which meant it could not be asked about Codex at all - so the
         // refusal this note describes had no Codex half, and a Codex proxy with
         // nothing readable did exactly what it warns about.
-        let reads: Vec<_> = crate::slots::Slots::open_for(paths, &opts.tool)
-            .map(|s| {
-                s.list()
-                    .into_iter()
-                    .map(|r| {
-                        if opts.tool == "codex" {
-                            codex::slot_auth(&r.config_dir)
-                                .map(|_| ())
-                                .ok_or(creds::TokenUnavailable::NoLogin)
-                        } else {
-                            creds::slot_token_detail(&r.config_dir).map(|_| ())
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut reads = Vec::new();
+        if let Ok(slots) = crate::slots::Slots::open_for(paths, &opts.tool) {
+            for record in slots.list() {
+                // A managed launch can immediately follow readiness. A pending
+                // association must stop startup, not authorize the copied store.
+                // Empty/unreadable slots retain the account-aware diagnosis below.
+                if opts.tool == "claude-code"
+                    && crate::adapters::claude::slot_credential(&record.config_dir).is_ok()
+                {
+                    crate::claude_authority::reconcile_live(paths, &record.config_dir)
+                        .with_context(|| {
+                            format!("cannot reconcile Claude login for '{}'; retry after the current login operation finishes", record.name)
+                        })?;
+                }
+                reads.push(if opts.tool == "codex" {
+                    codex::slot_auth(&record.config_dir)
+                        .map(|_| ())
+                        .ok_or(creds::TokenUnavailable::NoLogin)
+                } else {
+                    creds::slot_token_detail_for(paths, &record.config_dir).map(|_| ())
+                });
+            }
+        }
         if let Some(why) = creds::startup_refusal(&reads) {
             return Err(anyhow!("{why}"));
         }
@@ -1570,7 +1577,7 @@ pub fn has_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
             .try_with_tool_dir(tool, dir)
             .and_then(|at| crate::adapters::by_name(tool).map(|a| a.present(&at)))
             .unwrap_or(false),
-        _ => login_present(creds::slot_token_detail(dir)),
+        _ => login_present(creds::slot_token_detail_for(paths, dir)),
     }
 }
 
@@ -1592,7 +1599,7 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
     }
     // A lapsed Claude token is renewable, so try before ruling the account out:
     // the accounts idle long enough to lapse are the ones with quota left.
-    if tool != "codex" && creds::slot_token_expired(dir, now_ms()) {
+    if tool != "codex" && creds::slot_token_expired_for(paths, dir, now_ms()) {
         let _ = crate::refresh::refresh_slot(paths, dir, now_ms());
     }
     match tool {
@@ -1612,7 +1619,10 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
         }
         // Same per-tool question as has_login.
         "gemini" | "antigravity" => has_login(paths, tool, dir),
-        _ => creds::slot_token(dir).is_some() && !creds::slot_token_expired(dir, now_ms()),
+        _ => {
+            creds::slot_token_for(paths, dir).is_some()
+                && !creds::slot_token_expired_for(paths, dir, now_ms())
+        }
     }
 }
 
@@ -1707,13 +1717,14 @@ fn codex_recovery_credential(dir: &std::path::Path) -> Option<(codex::Auth, Code
 /// elsewhere it keeps the regular file generation. A changing identity is not
 /// safe to send as either account.
 fn claude_recovery_credential(
+    paths: &Paths,
     dir: &std::path::Path,
 ) -> std::result::Result<(crate::secret::Secret, ClaudeRecoveryBinding), creds::TokenUnavailable> {
     use crate::adapters::claude::KeychainReadError as K;
 
     let identity_path = dir.join(".claude.json");
     let identity_before = std::fs::read(&identity_path).ok();
-    let credential = match crate::adapters::claude::slot_credential(dir) {
+    let credential = match crate::claude_authority::credential(paths, dir) {
         Ok(credential) => credential,
         Err(K::Locked) => return Err(creds::TokenUnavailable::KeychainLocked),
         Err(K::Missing | K::NotApplicable) => return Err(creds::TokenUnavailable::NoLogin),
@@ -1789,10 +1800,10 @@ fn usable_bearer(
             Some(auth.token)
         }
         "claude-code" => {
-            if creds::slot_token_expired(dir, now) {
+            if creds::slot_token_expired_for(paths, dir, now) {
                 return None;
             }
-            let (token, current) = claude_recovery_credential(dir).ok()?;
+            let (token, current) = claude_recovery_credential(paths, dir).ok()?;
             if !claude_binding?
                 .same_account(current.account_uuid.as_deref(), current.identity.as_ref())
             {
@@ -1806,10 +1817,10 @@ fn usable_bearer(
 
 /// Try one same-account recovery after inference rejects a bearer.
 ///
-/// Native authority gets first refusal: a changed usable native bearer can be
-/// retried, while an unchanged one proves that swapdex must not spend its
-/// refresh token. With no verified native owner, the regular coordinated
-/// refresh path remains responsible for all holder and generation guards.
+/// A changed usable native bearer can be retried directly. An unchanged Claude
+/// bearer may renew only when its exact source generation was also the selected
+/// renewal authority. The refresh operation still verifies the native lock
+/// protocol, identity, and generation; unrelated native copies never opt in.
 fn recover_rejected_bearer(
     paths: &Paths,
     tool: &str,
@@ -1835,7 +1846,15 @@ fn recover_rejected_bearer(
                 return None;
             }
         }
-        return (native.access_token.expose() != rejected).then_some(native.access_token);
+        if native.access_token.expose() != rejected {
+            return Some(native.access_token);
+        }
+        if tool != "claude-code"
+            || !native.claude_renewal_authority
+            || claude_binding?.credential_fingerprint.is_none()
+        {
+            return None;
+        }
     }
 
     // Another participating process may already have replaced the rejected
@@ -2088,7 +2107,7 @@ fn forward_turn(
         // unavailable selected login surfaces an error before forwarding.
         if !is_codex
             && native_login.is_none()
-            && creds::slot_token_expired(&slot.config_dir, now_ms())
+            && creds::slot_token_expired_for(paths, &slot.config_dir, now_ms())
         {
             match crate::refresh::refresh_slot(paths, &slot.config_dir, now_ms()) {
                 Ok(crate::refresh::RefreshOutcome::Renewed) => {
@@ -2113,7 +2132,7 @@ fn forward_turn(
         }
         if !is_codex
             && native_login.is_none()
-            && creds::slot_token_expired(&slot.config_dir, now_ms())
+            && creds::slot_token_expired_for(paths, &slot.config_dir, now_ms())
         {
             return Err(anyhow!(
                 "selected account '{}' has no usable Claude access token: {}",
@@ -2370,19 +2389,22 @@ fn forward_turn(
             None => match native_login.take() {
                 Some(login) => {
                     let account_uuid = login.provider_account_id;
+                    let credential_fingerprint = login
+                        .claude_renewal_authority
+                        .then_some(login.claude_credential_fingerprint)
+                        .flatten();
                     Ok((
                         login.access_token,
                         ClaudeRecoveryBinding {
                             account_uuid,
                             identity: Some(login.identity),
-                            // A native bearer did not come from the selected slot's
-                            // credential generation. If its owner vanishes after a
-                            // 401, no stored refresh token is proven to have served it.
-                            credential_fingerprint: None,
+                            // Only a proven renewal authority may spend the exact
+                            // generation that supplied this rejected bearer.
+                            credential_fingerprint,
                         },
                     ))
                 }
-                None => claude_recovery_credential(&slot.config_dir),
+                None => claude_recovery_credential(paths, &slot.config_dir),
             },
         };
         let (token, recovery_binding) = match credential {

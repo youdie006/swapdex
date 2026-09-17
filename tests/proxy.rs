@@ -5174,6 +5174,187 @@ fn codex_401_retries_a_same_account_replacement_without_oauth() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn claude_startup_refuses_an_unresolved_association_and_recovers_after_unlock() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    let credentials = std::fs::read(slot.join(".credentials.json")).unwrap();
+    std::fs::write(native.join(".credentials.json"), &credentials).unwrap();
+    let _holder = spawn_native_cli(
+        root.path(),
+        "claude",
+        &[
+            ("HOME", root.path()),
+            (
+                "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS",
+                std::path::Path::new("1"),
+            ),
+        ],
+    );
+    let held = slot.join(".oauth_refresh.lock");
+    std::fs::create_dir(&held).unwrap();
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:9")
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let exited = (0..40).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    if !exited {
+        child.kill().ok();
+        child.wait().ok();
+        panic!("startup announced readiness while the copied login remained unbound");
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot reconcile Claude login"));
+    assert!(!store.join("proxy").exists());
+    assert!(!slot.join(".swapdex-claude-authority.json").exists());
+    assert_eq!(
+        std::fs::read(slot.join(".credentials.json")).unwrap(),
+        credentials
+    );
+    assert_eq!(
+        std::fs::read(native.join(".credentials.json")).unwrap(),
+        credentials
+    );
+    std::fs::remove_dir(held).unwrap();
+    let (proxy, _) = start_proxy_with_env(root.path(), "http://127.0.0.1:9", &[], &[]);
+    let proxy = ReapedChild::new(proxy);
+    assert!(slot.join(".swapdex-claude-authority.json").exists());
+    proxy.stop();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_bound_claude_authority_recovers_401_with_and_without_its_native_holder() {
+    for holder_alive in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+        let slot = root.path().join(".local/share/swapdex/slots/id-work");
+        let native = root.path().join(".claude");
+        std::fs::create_dir_all(&native).unwrap();
+        let identity =
+            br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+        std::fs::write(slot.join(".claude.json"), identity).unwrap();
+        std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+        let old_copy = std::fs::read(slot.join(".credentials.json")).unwrap();
+        std::fs::write(native.join(".credentials.json"), &old_copy).unwrap();
+        let holder = spawn_native_cli(
+            root.path(),
+            "claude",
+            &[
+                ("HOME", root.path()),
+                (
+                    "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS",
+                    std::path::Path::new("1"),
+                ),
+            ],
+        );
+        if !holder_alive {
+            let paths = swapdex::paths::Paths::rooted(root.path());
+            let (_, failed) = swapdex::refresh::keep_alive_sweep(
+                &paths,
+                &[("work".into(), slot.clone())],
+                1_800_000_000_000,
+            );
+            assert!(failed.is_empty(), "{failed:?}");
+            assert!(slot.join(".swapdex-claude-authority.json").is_file());
+        }
+        let _holder = if holder_alive {
+            Some(holder)
+        } else {
+            holder.stop();
+            None
+        };
+        let native_locks = holder_alive.then(|| {
+            let custom = native.join(".oauth_refresh.lock");
+            let legacy = root.path().join(".claude.lock");
+            std::fs::create_dir(&custom).unwrap();
+            std::fs::create_dir(&legacy).unwrap();
+            (custom, legacy)
+        });
+        let curl = fake_oauth_curl(
+            root.path(),
+            r#"{"access_token":"AT-NEW","refresh_token":"RT-NEW","expires_in":3600}"#,
+            200,
+        );
+        let count = root.path().join("oauth-count");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let upstream = ControlledUpstream::start(move |request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            let status = if auth == "Bearer AT-NEW" { 200 } else { 401 };
+            sink.lock().unwrap().push(auth);
+            request
+                .respond(tiny_http::Response::from_string("{}").with_status_code(status))
+                .unwrap();
+        });
+        let (proxy, port) = start_proxy_with_env(
+            root.path(),
+            upstream.url(),
+            &["--account", "work"],
+            &[
+                ("SWAPDEX_CURL", curl.to_str().unwrap()),
+                ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+                ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+            ],
+        );
+        let proxy = ReapedChild::new(proxy);
+        assert!(
+            slot.join(".swapdex-claude-authority.json").is_file(),
+            "startup must reconcile before the first request or next native launch"
+        );
+        if let Some((custom, legacy)) = native_locks {
+            assert!(
+                custom.is_dir() && legacy.is_dir(),
+                "association touched native locks"
+            );
+            std::fs::remove_dir(custom).unwrap();
+            std::fs::remove_dir(legacy).unwrap();
+        }
+        assert_eq!(
+            post_through_status(port, "{}"),
+            200,
+            "holder alive: {holder_alive}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Bearer AT-OLD", "Bearer AT-NEW"]
+        );
+        assert_eq!(std::fs::read(&count).unwrap(), b"x");
+        assert_eq!(
+            std::fs::read(slot.join(".credentials.json")).unwrap(),
+            old_copy
+        );
+        let renewed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(native.join(".credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(renewed["claudeAiOauth"]["refreshToken"], "RT-NEW");
+        proxy.stop();
+        upstream.close();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn an_unchanged_native_bearer_401_never_spends_its_refresh_token() {
     let root = tempfile::tempdir().unwrap();
     seed_slot(root.path(), "work", "id-work", "SLOT-ACCESS", true);

@@ -173,12 +173,56 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
          \t\texport CLAUDE_CONFIG_DIR\n\
          \tfi\n\
          fi\n\
+         if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then\n\
+         \texec {sx} claude-launch --native {real} -- \"$@\"\n\
+         fi\n\
          exec {real} \"$@\"\n",
         sx = sh_quote(swapdex),
         ptr = sh_quote(pointer),
         real = sh_quote(real_claude),
         proxy_result = proxy_result,
     )
+}
+
+/// Recognize native auth commands after their documented leading options.
+/// Keep the same conservative boundary as the generated shell launcher: an
+/// option value or prompt mentioning `auth login` never selects this route.
+pub(crate) fn claude_authentication_command(args: &[String]) -> bool {
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        match arg {
+            "auth" => {
+                return matches!(
+                    args.next(),
+                    Some("login" | "logout" | "status" | "-h" | "--help")
+                )
+            }
+            "setup-token" => return true,
+            "--verbose" | "-h" | "--help" | "-v" | "--version" => {}
+            "-m" | "--model" | "--permission-mode" | "--settings" | "--setting-sources"
+            | "--plugin-dir" | "--plugin-url" | "--cwd" | "--debug-file" => {
+                if args.next().is_none() {
+                    return false;
+                }
+            }
+            value
+                if (value.starts_with("-m") && value.len() > 2)
+                    || [
+                        "--model=",
+                        "--permission-mode=",
+                        "--settings=",
+                        "--setting-sources=",
+                        "--plugin-dir=",
+                        "--plugin-url=",
+                        "--cwd=",
+                        "--debug-file=",
+                    ]
+                    .iter()
+                    .any(|prefix| value.starts_with(prefix)) => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The `codex` shim. Same shape as Claude's - fill the tool's home from the

@@ -231,6 +231,33 @@ pub(crate) fn native_credentials(
     choose_native_blob(keychain_in_play, file, keychain)
 }
 
+/// Read one explicitly selected native store, retaining Keychain failures.
+/// Unlike a slot accessor this also represents the bare default Keychain item.
+pub(crate) fn native_credential_detail(
+    paths: &Paths,
+    dir: &std::path::Path,
+    key: Option<&str>,
+) -> std::result::Result<SlotCredential, KeychainReadError> {
+    if keychain_enabled_for_paths(paths) {
+        choose_slot_credential(
+            None,
+            keychain_read_service_detail(&native_service_for_key(key)),
+        )
+    } else {
+        choose_slot_credential(
+            crate::atomic::read_regular(&dir.join(".credentials.json")).ok(),
+            Err(KeychainReadError::NotApplicable),
+        )
+    }
+}
+
+pub(crate) fn native_keychain_write(key: Option<&str>, value: &[u8]) -> Result<()> {
+    if !keychain_enabled() {
+        anyhow::bail!("no Keychain in this environment");
+    }
+    keychain_write_service(&native_service_for_key(key), value)
+}
+
 /// The service name computed from the env, exactly the way Claude Code derives
 /// it: "Claude Code-credentials" plus, when CLAUDE_SECURESTORAGE_CONFIG_DIR /
 /// CLAUDE_CONFIG_DIR is set, "-" + first 8 hex of sha256(that dir). `None`
@@ -522,16 +549,6 @@ pub(crate) fn choose_slot_credential(
         bytes: selected.0,
         source: selected.1,
     })
-}
-
-/// Write a credential to the Keychain item belonging to `dir` - the same item
-/// `slot_keychain_read_detail` reads, derived the same way, so a renewal lands
-/// where the tool will look for it rather than beside it.
-pub fn slot_keychain_write(dir: &std::path::Path, value: &[u8]) -> Result<()> {
-    if !keychain_enabled() {
-        anyhow::bail!("no Keychain in this environment");
-    }
-    keychain_write_service(&slot_service(dir), value)
 }
 
 /// The Keychain service belonging to `dir`, by Claude Code's own rule.
@@ -1014,13 +1031,7 @@ fn capture_credential(paths: &Paths) -> Result<Option<Vec<u8>>> {
 fn capture_slot_credential(
     paths: &Paths,
 ) -> std::result::Result<SlotCredential, KeychainReadError> {
-    if paths.sandboxed() {
-        return choose_slot_credential(
-            crate::atomic::read_regular(&paths.claude_credentials()).ok(),
-            Err(KeychainReadError::NotApplicable),
-        );
-    }
-    slot_credential(paths.claude_dir())
+    crate::claude_authority::credential(paths, paths.claude_dir())
 }
 
 /// The LIVE Claude credential JSON (file or Keychain) - the active account's

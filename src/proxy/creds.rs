@@ -12,6 +12,22 @@ pub fn slot_token(dir: &Path) -> Option<Secret> {
     slot_token_detail(dir).ok()
 }
 
+pub fn slot_token_for(paths: &crate::paths::Paths, dir: &Path) -> Option<Secret> {
+    slot_token_detail_for(paths, dir).ok()
+}
+
+pub fn slot_token_detail_for(
+    paths: &crate::paths::Paths,
+    dir: &Path,
+) -> Result<Secret, TokenUnavailable> {
+    use crate::adapters::claude::KeychainReadError as K;
+    match crate::claude_authority::credential(paths, dir) {
+        Ok(credential) => access_token(credential.bytes()).ok_or(TokenUnavailable::NoLogin),
+        Err(K::Locked) => Err(TokenUnavailable::KeychainLocked),
+        Err(K::Missing | K::NotApplicable) => Err(TokenUnavailable::NoLogin),
+    }
+}
+
 /// Why a slot's token could not be read, phrased as the thing the user should do.
 /// A LOCKED Keychain is the case worth separating: the account is signed in and
 /// the environment is what is wrong (a non-interactive ssh session cannot read a
@@ -111,6 +127,11 @@ fn credential_expired(blob: &[u8], now_ms: i64) -> bool {
 
 pub fn slot_token_expired(dir: &Path, now_ms: i64) -> bool {
     crate::adapters::claude::slot_credential(dir)
+        .is_ok_and(|credential| credential_expired(credential.bytes(), now_ms))
+}
+
+pub fn slot_token_expired_for(paths: &crate::paths::Paths, dir: &Path, now_ms: i64) -> bool {
+    crate::claude_authority::credential(paths, dir)
         .is_ok_and(|credential| credential_expired(credential.bytes(), now_ms))
 }
 
