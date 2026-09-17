@@ -200,7 +200,7 @@ fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
         std::fs::create_dir(&custom_lock).unwrap();
         std::fs::create_dir(&legacy_lock).unwrap();
         let marker = root.path().join("native-executed");
-        let launch = |authentication: bool| {
+        let launch = |authentication: bool, config: Option<&Path>| {
             let mut command = if direct_run {
                 let mut command = Command::new(env!("CARGO_BIN_EXE_swapdex"));
                 command.args(["run", "shared"]);
@@ -216,18 +216,22 @@ fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
                 }
                 command
             };
+            if let Some(config) = config {
+                command.env("CLAUDE_CONFIG_DIR", config);
+            } else {
+                command.env_remove("CLAUDE_CONFIG_DIR");
+            }
             command
                 .env("HOME", root.path())
                 .env("SWAPDEX_ROOT", root.path())
                 .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
                 .env("NATIVE_EXEC_MARKER", &marker)
-                .env_remove("CLAUDE_CONFIG_DIR")
                 .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
                 .env_remove("ANTHROPIC_BASE_URL")
                 .output()
                 .unwrap()
         };
-        let blocked = launch(false);
+        let blocked = launch(false, None);
         assert!(
             !blocked.status.success(),
             "{} launch ran under the slot refresh lock",
@@ -239,10 +243,22 @@ fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
         );
         assert!(!slot.join(".swapdex-claude-authority.json").exists());
         assert!(custom_lock.is_dir() && legacy_lock.is_dir());
+        if !direct_run {
+            let alias = root.path().join("managed-alias");
+            std::os::unix::fs::symlink(&slot, &alias).unwrap();
+            for alias in [&alias, &slot.join("../shared")] {
+                let blocked = launch(false, Some(alias));
+                assert!(
+                    !blocked.status.success(),
+                    "managed alias bypassed association"
+                );
+                assert!(!marker.exists(), "native executed through a managed alias");
+            }
+        }
 
         std::fs::remove_dir(&custom_lock).unwrap();
         std::fs::remove_dir(&legacy_lock).unwrap();
-        let launched = launch(false);
+        let launched = launch(false, None);
         assert!(
             launched.status.success(),
             "{}",
@@ -271,7 +287,7 @@ fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
         // rediscover its designated source, then launch authentication there.
         std::fs::remove_file(slot.join(".swapdex-claude-authority.json")).unwrap();
         std::fs::remove_file(&marker).unwrap();
-        let auth = launch(true);
+        let auth = launch(true, None);
         assert!(
             auth.status.success(),
             "{}",

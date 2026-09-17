@@ -6449,8 +6449,27 @@ fn prepare_claude_launch(
         true
     } else {
         let slots = crate::slots::Slots::open_for(paths, "claude-code")?;
-        slots.default_dir().as_deref() == Some(dir)
-            || slots.list().iter().any(|slot| slot.config_dir == dir)
+        let mut directories: Vec<_> = slots
+            .list()
+            .into_iter()
+            .map(|slot| slot.config_dir)
+            .collect();
+        directories.extend(slots.default_dir());
+        if directories.iter().any(|registered| registered == dir) {
+            true
+        } else {
+            if let Ok(actual) = std::fs::canonicalize(dir) {
+                if directories.iter().any(|registered| {
+                    std::fs::canonicalize(registered).is_ok_and(|registered| registered == actual)
+                }) {
+                    // Claude hashes the raw config path for its Keychain key.
+                    // Neither treating this alias as independent nor silently
+                    // rewriting it can safely select that authentication store.
+                    bail!("Claude config aliases a managed account; use its registered config directory or `swapdex run <account>`");
+                }
+            }
+            false
+        }
     };
     if !bound && !registered {
         return Ok(None); // caller-chosen, unregistered CLAUDE_CONFIG_DIR

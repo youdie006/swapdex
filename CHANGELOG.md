@@ -16,7 +16,9 @@ All notable changes to swapdex are documented here. This project follows
   generation, Swapdex records that store as their credential authority before
   proxy startup is announced, including while native refresh locks are held,
   and rechecks it on scheduled sweeps. Startup and managed launches stop if
-  source association is still blocked, instead of using the copied login. The
+  source association is still blocked. Aliases of managed directories receive
+  instructions to use the registered account, preserving the native Keychain
+  service selected by its path. The
   binding survives process exit; proxy requests, quota reads and new managed
   launches continue using it. Native launches keep their session configuration
   while sharing authentication. Changed identities and independent logins are

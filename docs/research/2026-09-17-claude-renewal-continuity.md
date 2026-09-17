@@ -81,6 +81,9 @@ has a usable deadline.
   readable unbound slots and propagate association failures. Fresh empty slots
   retain native first-use login, and unrelated custom config directories retain
   their existing routing.
+  Symlink and `..` aliases of a registered unbound slot cannot bypass this
+  guard. They must use the registered directory or named run, because silently
+  normalizing a config path would change its macOS Keychain service selection.
 - Proxy serving, quota reads, strict slot capture, renewal, and managed
   launches follow that descriptor. Ordinary launches keep their session config;
   explicit native authentication updates the designated login source. Logout
@@ -134,6 +137,9 @@ Release-candidate source checks at version 0.165.8:
   suite, clippy,
   formatting/diff checks, first-use foreground and installed-routing fixtures
   passed again.
+- Managed-directory alias regression failed before canonical directory
+  detection, then the 14 launcher and 45 named-run tests passed with the fix;
+  clippy, formatting, diff and narrow read-only review passed as well.
 
 The stock-client fixture uses a fake curl OAuth exchange, loopback SSE model
 responses and blocked external HTTPS. Every successful run records the same
