@@ -1850,6 +1850,16 @@ pub(crate) fn codex_renewal_deferred(paths: &Paths, dir: &Path, now_secs: i64) -
     })
 }
 
+/// A Claude slot whose access is due for renewal but whose credential is held
+/// by a native session. Inspect the same authoritative file or Keychain item
+/// as the renewal path, then reuse its account-aware ownership guard. This
+/// check only explains why renewal stood down; it never starts an exchange.
+pub(crate) fn claude_renewal_deferred(paths: &Paths, dir: &Path, now_ms: i64) -> bool {
+    read_credential(dir).is_ok_and(|credential| {
+        wants_keep_alive(credential.bytes(), now_ms) && slot_in_use(paths, dir, "claude-code")
+    })
+}
+
 /// The Codex half of the keep-alive sweep.
 ///
 /// The sweep was written because an idle account's refresh token goes stale, and

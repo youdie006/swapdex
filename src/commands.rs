@@ -3815,6 +3815,46 @@ fn launch_letter(ans: &str) -> Option<&'static str> {
     }
 }
 
+/// Retain the last successful Claude figures when the latest provider read
+/// could only report a failure. The failure reason still belongs to this row.
+fn merge_cached_claude_usage(
+    claude: &mut Vec<(String, crate::tui::Usage)>,
+    cached: crate::quota_cache::Cache,
+) {
+    for (name, e) in cached {
+        if let Some((_, u)) = claude
+            .iter_mut()
+            .find(|(n, u)| *n == name && u.five_h.is_none() && u.seven_d.is_none())
+        {
+            u.five_h = e.five_h;
+            u.five_h_reset = e.five_h_reset;
+            u.seven_d = e.seven_d;
+            u.seven_d_reset = e.seven_d_reset;
+            u.observed_at = Some(e.at);
+            // The newer read failed. Keep its cause beside the old figures,
+            // and preserve the extra-usage state recorded with those figures.
+            u.on_credits = e.on_credits;
+            continue;
+        }
+        if claude.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        claude.push((
+            name,
+            crate::tui::Usage {
+                five_h: e.five_h,
+                five_h_reset: e.five_h_reset,
+                seven_d: e.seven_d,
+                seven_d_reset: e.seven_d_reset,
+                observed_at: Some(e.at),
+                note: None,
+                on_credits: e.on_credits,
+                ident: None,
+            },
+        ));
+    }
+}
+
 /// The persistent full-screen ui: one alternate-screen session, everything
 /// inside it. Switch/restore run this same binary as a subprocess (output
 /// condensed into the status line - no second switching implementation);
@@ -3922,45 +3962,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         // blanking it looks exactly like a broken one. The reading is recorded
         // by `quota` itself, where it is taken; a run that got nothing has
         // nothing to record and must not overwrite what it failed to refresh.
-        for (name, e) in crate::quota_cache::load(paths) {
-            // An account read THIS refresh keeps its live numbers. One that
-            // only carries a reason - busy, expired - takes the remembered
-            // numbers instead: an old figure beats an empty track, as long as
-            // it is shown with its age.
-            if let Some((_, u)) = claude
-                .iter_mut()
-                .find(|(n, u)| *n == name && u.five_h.is_none() && u.seven_d.is_none())
-            {
-                u.five_h = e.five_h;
-                u.five_h_reset = e.five_h_reset;
-                u.seven_d = e.seven_d;
-                u.seven_d_reset = e.seven_d_reset;
-                u.observed_at = Some(e.at);
-                // The age now carries the caveat. Keeping "endpoint busy"
-                // beside numbers that are right there reads as a complaint
-                // about figures the user can already see.
-                u.note = None;
-                continue;
-            }
-            if claude.iter().any(|(n, _)| *n == name) {
-                continue;
-            }
-            claude.push((
-                name,
-                crate::tui::Usage {
-                    five_h: e.five_h,
-                    five_h_reset: e.five_h_reset,
-                    seven_d: e.seven_d,
-                    seven_d_reset: e.seven_d_reset,
-                    // Shown with its age, so a remembered number is never
-                    // mistaken for a live one.
-                    observed_at: Some(e.at),
-                    note: None,
-                    on_credits: e.on_credits,
-                    ident: None,
-                },
-            ));
-        }
+        merge_cached_claude_usage(&mut claude, crate::quota_cache::load(paths));
         // Codex usage comes from two places, and a row takes whichever answers.
         //
         // The account itself answers per CREDENTIAL and names itself. That is
@@ -9395,11 +9397,19 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             // endpoint busier for the accounts that CAN answer.
             Some(_) if r.expired => results.push((
                 i,
-                Fetch::Offline(
-                    "saved token expired - snapshots go stale as refresh tokens rotate; \
-                     `swapdex run <name>` gives this account a slot that stays fresh"
+                Fetch::Offline(match slot_dir_named(paths, &r.name) {
+                    Some(dir) if crate::refresh::claude_renewal_deferred(paths, &dir, now_ms()) => {
+                        "login expired · renewal deferred to native session - \
+                         wait for the owning Claude session to refresh this login or exit"
+                            .into()
+                    }
+                    Some(_) => "slot access expired - renewal has not completed; \
+                        retry after background refresh or sign in to this slot"
                         .into(),
-                ),
+                    None => "saved token expired - snapshots go stale as refresh tokens rotate; \
+                        `swapdex run <name>` gives this account a slot that stays fresh"
+                        .into(),
+                }),
             )),
             // An unusable token is a PER-ACCOUNT problem (corrupt snapshot),
             // not a transport failure - it must never masquerade as "the
@@ -10226,6 +10236,81 @@ mod tests {
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
+    }
+
+    #[test]
+    fn cached_claude_numbers_keep_the_failed_refresh_reason_and_original_time() {
+        use crate::quota_cache::Entry;
+        use crate::tui::Usage;
+
+        let mut readings = vec![
+            (
+                "expired".to_string(),
+                Usage {
+                    note: Some("login expired".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "throttled".to_string(),
+                Usage {
+                    note: Some("endpoint busy".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "offline".to_string(),
+                Usage {
+                    note: Some("network offline".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "current".to_string(),
+                Usage {
+                    five_h: Some(12.0),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let cached = ["expired", "throttled", "offline", "current"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    Entry {
+                        five_h: Some(93.0),
+                        at: 123,
+                        on_credits: name == "throttled",
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        super::merge_cached_claude_usage(&mut readings, cached);
+
+        for (name, reason) in [
+            ("expired", "login expired"),
+            ("throttled", "endpoint busy"),
+            ("offline", "network offline"),
+        ] {
+            let u = &readings.iter().find(|(n, _)| n == name).unwrap().1;
+            assert_eq!(u.five_h, Some(93.0), "{name}");
+            assert_eq!(u.observed_at, Some(123), "{name}");
+            assert_eq!(u.note.as_deref(), Some(reason), "{name}");
+        }
+        assert!(
+            readings
+                .iter()
+                .find(|(n, _)| n == "throttled")
+                .unwrap()
+                .1
+                .on_credits
+        );
+        let current = &readings.iter().find(|(n, _)| n == "current").unwrap().1;
+        assert_eq!(current.five_h, Some(12.0));
+        assert_eq!(current.observed_at, None);
+        assert_eq!(current.note, None);
     }
 
     #[test]
