@@ -29,7 +29,7 @@ The source independently explains the result: three waits of 400, 900 and
 quota command and managed proxy. The picker starts periodic quota subprocesses,
 so a purely process-local backoff would not survive normal operation.
 
-## Intended correction
+## Implemented correction
 
 Follow the [design](../superpowers/specs/2026-09-17-usage-endpoint-backoff-design.md)
 and [implementation plan](../superpowers/plans/2026-09-17-usage-endpoint-backoff.md).
@@ -39,8 +39,50 @@ and existing authentication/account-routing semantics intact.
 
 The base source at `0befa438d0650dd0e24f9d05de4ac6657ffbc1ce` passed
 `cargo test --locked --lib quota`: 39 passed, zero failures.
-Implementation, regression, publication and installed-runtime results will be
-recorded with the completed change and its version-specific release/PR.
+The original sequential and concurrent process regressions failed with eight
+calls instead of one. Both pass with the shared deadline. A separate regression
+also caught a curl status of zero incorrectly clearing previous throttle
+history; zero now retains history as a transport failure.
+
+The isolated picker check is reproducible with
+`python3 -B scripts/verify-usage-backoff.py --swapdex /absolute/native/binary`.
+It requires tmux and creates its own private terminal server. The published
+0.165.8 binary failed because the first throttled lookup made four requests.
+The 0.165.9 candidate passed:
+
+| Scenario | Result |
+|---|---|
+| Initial 429 with `Retry-After: 0` | One request and a 60-second deadline |
+| Two further concurrent quota processes | Zero additional requests |
+| Deferred usage reads | Credential and cached observation bytes unchanged |
+| Fixture deadline elapsed; next response 200 | Same picker process automatically recovered |
+| Successful response | Fresh usage timestamp; throttle history cleared |
+
+The fixture adjusts only its synthetic deadline to avoid a real minute-long
+wait, then waits for the picker's normal automatic refresh. It sends zero real
+network, OAuth or model requests. First-use setup, account routing and streamed
+responses also passed against the candidate.
+
+Local full verification on 0.165.9 passed: 1,292 Rust tests, zero failures and
+two existing ignored tests; Clippy with warnings denied; format and diff
+checks; seven npm tests; 22 dependency-gate Python tests; bounded runtime/TLS
+dependency checks; and `cargo audit`. The PTY result above is independent of
+the unit and command-process regressions.
+
+Publication channel integrity, release commit, installed hashes and actual
+running-service checks are recorded in the version-specific
+[v0.165.9 release](https://github.com/youdie006/swapdex/releases/tag/v0.165.9)
+after publication. A source update alone does not establish installation.
+
+## An already-open picker
+
+On M3 the older renderer remained mapped to its previous executable inode,
+but an observed automatic quota child mapped to the current installed native
+binary. Updating that binary can therefore apply the request fix to this open
+picker even while its renderer still uses the older wording. Terminal control
+through the SSH-launched cmux client was denied by cmux's origin restriction;
+no alternate injection route was used. This observation does not establish
+that every old launcher on every platform resolves children the same way.
 
 ## Limits of the evidence
 

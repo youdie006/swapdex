@@ -16,6 +16,10 @@
 //! credential, or proxies a model request itself.
 
 use serde_json::Value;
+use std::time::SystemTime;
+
+use crate::paths::Paths;
+use crate::quota_backoff::Response;
 
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";
@@ -83,6 +87,8 @@ pub enum Fetch {
     Unexpected(u32, String),
     /// curl could not run or the network was unreachable.
     Offline(String),
+    /// The local usage lookup deadline could not be read or safely updated.
+    Coordination(String),
     /// 429: the usage endpoint itself is rate-limited. Reading several accounts
     /// in a row trips this, and it says nothing about the account's own quota -
     /// so it must not be shown as "no data" next to accounts that answered.
@@ -105,6 +111,7 @@ impl Fetch {
             Self::Throttled => Some("usage endpoint throttled"),
             Self::Unauthorized => Some("token rejected"),
             Self::Offline(_) => Some("could not reach the endpoint"),
+            Self::Coordination(_) => Some("usage lookup coordination unavailable"),
             Self::Unexpected(_, _) => Some("unexpected reply"),
         }
     }
@@ -286,21 +293,25 @@ pub fn token_usable(token: &str) -> bool {
     !token.is_empty() && !token.contains(['"', '\n', '\r', '\\'])
 }
 
-/// The live, opt-in network call. curl reads its config (including the bearer
-/// token) from stdin so the token never appears in argv.
-/// Read an account's usage, retrying once when the ENDPOINT (not the account) is
-/// rate-limited. Asking for several accounts in a row trips that regularly, and a
-/// single short pause is enough to get an answer rather than a blank.
-pub fn fetch_with_retry(token: &str) -> Fetch {
-    // Back off rather than give up: the endpoint throttles a burst of accounts,
-    // and a blank reading is indistinguishable from an account with nothing left.
-    for wait_ms in [400u64, 900, 1800] {
-        match fetch(token) {
-            Fetch::Throttled => std::thread::sleep(std::time::Duration::from_millis(wait_ms)),
-            other => return other,
-        }
+/// One usage request per permitted deadline. Quota subprocesses and the proxy
+/// pass the same store, so an endpoint 429 is honored across process restarts.
+pub fn fetch_with_retry(paths: &Paths, token: &str) -> Fetch {
+    if !token_usable(token) {
+        return Fetch::Offline("no usable access token for this account".into());
     }
-    fetch(token)
+    match crate::quota_backoff::coordinate(paths, token, || match fetch_response(token) {
+        Ok((body, 0, _)) => Response::Transport(classify(0, body)),
+        Ok((body, status, headers)) => Response::Http {
+            retry_after: retry_after_secs(&headers, SystemTime::now()),
+            value: classify(status, body),
+            status,
+        },
+        Err(failure) => Response::Transport(failure),
+    }) {
+        Ok(Some(value)) => value,
+        Ok(None) => Fetch::Throttled,
+        Err(error) => Fetch::Coordination(error),
+    }
 }
 
 /// Space out reads of several accounts. The throttling is per burst, so a small
@@ -324,25 +335,46 @@ pub fn pace_ms() -> u64 {
 ///
 /// Serially this cost the pacing gap plus a full round trip PER ACCOUNT, which
 /// on four accounts was most of six seconds. The requests overlap now, staggered
-/// by the same small gap so they do not arrive as one burst, and each still backs
-/// off on its own if the endpoint objects.
-pub fn fetch_many(tokens: Vec<(usize, String)>) -> Vec<(usize, Fetch)> {
+/// by the same small gap so they do not arrive as one burst; each token has its
+/// own persisted deadline if the endpoint objects.
+pub fn fetch_many(paths: &Paths, tokens: Vec<(usize, String)>) -> Vec<(usize, Fetch)> {
     let mut handles = Vec::with_capacity(tokens.len());
     for (n, (idx, token)) in tokens.into_iter().enumerate() {
+        let paths = paths.clone();
         handles.push(std::thread::spawn(move || {
             // Stagger the starts rather than the finishes: arriving together is
             // what the endpoint objects to, not being in flight together.
             std::thread::sleep(std::time::Duration::from_millis(PACE_MS * n as u64));
-            (idx, fetch_with_retry(&token))
+            (idx, fetch_with_retry(&paths, &token))
         }));
     }
     handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
+/// The uncoordinated request is retained for library callers that explicitly
+/// need one raw lookup. All Swapdex quota/proxy paths use `fetch_with_retry`.
 pub fn fetch(token: &str) -> Fetch {
-    if !token_usable(token) {
-        return Fetch::Offline("no usable access token for this account".into());
+    match fetch_response(token) {
+        Ok((body, status, _)) => classify(status, body),
+        Err(failure) => failure,
     }
+}
+
+fn fetch_response(token: &str) -> Result<(String, u32, String), Fetch> {
+    if !token_usable(token) {
+        return Err(Fetch::Offline(
+            "no usable access token for this account".into(),
+        ));
+    }
+    // NamedTempFile is 0600 and removed on drop. The path is never derived
+    // from the credential; only the quota-specific curl config sees it.
+    let headers = tempfile::NamedTempFile::new()
+        .map_err(|error| Fetch::Coordination(format!("capture usage headers: {error}")))?;
+    let header_path = headers
+        .path()
+        .to_str()
+        .filter(|path| !path.contains(['"', '\\', '\n', '\r']))
+        .ok_or_else(|| Fetch::Coordination("unsafe usage header path".into()))?;
     let cfg = format!(
         "url = \"{USAGE_URL}\"\n\
          header = \"Authorization: Bearer {token}\"\n\
@@ -353,12 +385,52 @@ pub fn fetch(token: &str) -> Fetch {
          show-error\n\
          connect-timeout = 6\n\
          max-time = 15\n\
+         dump-header = \"{header_path}\"\n\
          write-out = \"\\n%{{http_code}}\"\n"
     );
     match run_curl(&cfg) {
-        Ok((body, code)) => classify(code, body),
-        Err(e) => Fetch::Offline(e),
+        Ok((body, code)) => {
+            // A received HTTP status remains authoritative even when curl did
+            // not leave a readable header capture. In that case a 429 uses our
+            // local fallback and any other status still clears old history.
+            let bytes = std::fs::read(headers.path()).unwrap_or_default();
+            Ok((body, code, String::from_utf8_lossy(&bytes).into_owned()))
+        }
+        Err(error) => Err(Fetch::Offline(error)),
     }
+}
+
+/// Curl may record interim or proxy header blocks. Only the final HTTP block
+/// can tell us when this usage response asks to be retried.
+fn retry_after_secs(headers: &str, completed_at: SystemTime) -> Option<u64> {
+    const MAX_DELAY: u64 = 24 * 60 * 60;
+    let mut in_block = false;
+    let mut value = None;
+    for line in headers.lines().map(|line| line.trim_end_matches('\r')) {
+        if line
+            .get(..5)
+            .is_some_and(|head| head.eq_ignore_ascii_case("HTTP/"))
+        {
+            in_block = true;
+            value = None;
+            continue;
+        }
+        if in_block {
+            if let Some((name, text)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("Retry-After") {
+                    value = Some(text.trim());
+                }
+            }
+        }
+    }
+    let value = value?;
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value.parse::<u64>().unwrap_or(u64::MAX);
+        return (seconds > 0).then_some(seconds.min(MAX_DELAY));
+    }
+    let date = httpdate::parse_http_date(value).ok()?;
+    let seconds = date.duration_since(completed_at).ok()?.as_secs();
+    (seconds > 0).then_some(seconds.min(MAX_DELAY))
 }
 
 /// The curl binary: the system one when it exists (macOS/most Linux ship
@@ -578,6 +650,39 @@ mod tests {
             Fetch::Unexpected(500, _)
         ));
         assert!(matches!(classify(0, String::new()), Fetch::Offline(_)));
+    }
+
+    #[test]
+    fn retry_after_reads_only_final_header_block_case_insensitively() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let blocks = "HTTP/1.1 100 Continue\r\nRetry-After: 9000\r\n\r\n\
+                      HTTP/2 429\r\nrEtRy-AfTeR: 120\r\n\r\n";
+        assert_eq!(retry_after_secs(blocks, now), Some(120));
+        assert_eq!(
+            retry_after_secs(
+                "HTTP/1.1 301 Redirect\r\nRetry-After: 120\r\n\r\nHTTP/2 429\r\n\r\n",
+                now
+            ),
+            None,
+            "an earlier response must not control the final one"
+        );
+    }
+
+    #[test]
+    fn retry_after_dates_and_hostile_values_are_bounded() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let date = httpdate::fmt_http_date(now + std::time::Duration::from_secs(180));
+        let past = httpdate::fmt_http_date(now - std::time::Duration::from_secs(1));
+        let header = |value: &str| format!("HTTP/2 429\r\nRetry-After: {value}\r\n\r\n");
+        assert_eq!(retry_after_secs(&header(&date), now), Some(180));
+        assert_eq!(retry_after_secs(&header(&past), now), None);
+        assert_eq!(retry_after_secs(&header("0"), now), None);
+        assert_eq!(retry_after_secs(&header("-5"), now), None);
+        assert_eq!(retry_after_secs(&header("tomorrow"), now), None);
+        assert_eq!(
+            retry_after_secs(&header("9999999999999999999999999"), now),
+            Some(86_400)
+        );
     }
 
     // The endpoint reports `utilization` as a PERCENTAGE. Reading it as a 0..1

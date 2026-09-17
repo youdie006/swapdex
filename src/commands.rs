@@ -3927,6 +3927,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 let note = match acc.get("status").and_then(|s| s.as_str()) {
                     Some("ok") | None => None,
                     Some("throttled") => Some("usage lookup limited - retrying".to_string()),
+                    Some("unavailable") => acc
+                        .get("detail")
+                        .and_then(|detail| detail.as_str())
+                        .map(|detail| format!("usage lookup coordination unavailable: {detail}")),
                     Some("expired") => Some("login expired".to_string()),
                     Some("offline") => acc
                         .get("detail")
@@ -9559,7 +9563,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         }
     }
     if !to_fetch.is_empty() {
-        let got = q::fetch_many(to_fetch);
+        let got = q::fetch_many(paths, to_fetch);
         // If NOTHING reached the endpoint, this is the machine being offline
         // rather than a per-account problem, and saying so once beats saying it
         // per account.
@@ -9669,6 +9673,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 );
             }
             Fetch::Offline(msg) => println!("  {msg}"),
+            Fetch::Coordination(msg) => {
+                println!("  usage lookup coordination unavailable - {msg}")
+            }
             Fetch::Throttled => println!("  {}", throttled_note()),
         }
         println!();
@@ -10186,6 +10193,10 @@ fn quota_json(label: &str, email: Option<&str>, active: bool, f: &crate::quota::
         }
         Fetch::Offline(msg) => {
             m.insert("status".into(), Value::String("offline".into()));
+            m.insert("detail".into(), Value::String(msg.clone()));
+        }
+        Fetch::Coordination(msg) => {
+            m.insert("status".into(), Value::String("unavailable".into()));
             m.insert("detail".into(), Value::String(msg.clone()));
         }
     }

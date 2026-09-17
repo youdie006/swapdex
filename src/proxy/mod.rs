@@ -989,7 +989,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
             continue;
         }
         crate::quota::pace_between_accounts();
-        let fetched = crate::quota::fetch_with_retry(&token);
+        let fetched = crate::quota::fetch_with_retry(paths, &token);
         // Count the account as read only when a reading actually LANDED. This
         // was inserted before the fetch, so a failed round wrote the previous
         // value back stamped with the current time - the one thing the
