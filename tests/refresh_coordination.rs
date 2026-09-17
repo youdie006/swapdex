@@ -8,7 +8,9 @@ use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use swapdex::paths::Paths;
-use swapdex::refresh::{refresh_codex_slot, refresh_slot, RefreshError, RefreshOutcome};
+use swapdex::refresh::{
+    keep_alive_sweep, refresh_codex_slot, refresh_slot, RefreshError, RefreshOutcome,
+};
 
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -228,6 +230,38 @@ printf '%s\n200' '{"access_token":"NEW-AT","expires_in":3600}'
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
+}
+
+fn make_rotating_curl(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = root.join("rotating-curl");
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+cat >/dev/null
+printf x >> "$SWAPDEX_TEST_REFRESH_COUNT"
+turn=$(wc -c < "$SWAPDEX_TEST_REFRESH_COUNT" | tr -d ' ')
+printf '{"access_token":"NEW-AT-%s","refresh_token":"NEW-RT-%s","expires_in":3600}\n200' "$turn" "$turn"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn claude_file(dir: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).unwrap()).unwrap()
+}
+
+fn expire_claude_file(dir: &Path) {
+    let mut value = claude_file(dir);
+    value["claudeAiOauth"]["expiresAt"] = (now_ms() - 1).into();
+    std::fs::write(
+        dir.join(".credentials.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
 }
 
 fn fixture_env(root: &Path, curl: &Path) -> EnvGuard {
@@ -713,7 +747,7 @@ fn an_in_use_preflight_does_not_poison_the_next_attempt() {
     let _env = fixture_env(root.path(), &curl);
     let paths = Paths::rooted(root.path());
 
-    let process_path = root.path().join("claude");
+    let process_path = root.path().join("inherited-child");
     std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
     let mut held = ReapedChild(
         Command::new(&process_path)
@@ -736,6 +770,191 @@ fn an_in_use_preflight_does_not_poison_the_next_attempt() {
         "an attempt that never exchanged poisoned the gate: {after_exit:?}"
     );
     assert_eq!(calls(root.path()), 1);
+}
+
+#[test]
+fn one_native_claude_session_survives_two_same_store_refreshes() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "same-store-native");
+    let curl = make_rotating_curl(root.path());
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+
+    let process_path = root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    let held = ReapedChild(
+        Command::new(&process_path)
+            .arg("30")
+            .env("HOME", root.path())
+            .env("CLAUDE_CONFIG_DIR", &slot)
+            .env("SWAPDEX_TEST_NATIVE_REFRESH_LOCKS", "1")
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(Path::new(&format!("/proc/{}/environ", held.0.id())));
+
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Ok(RefreshOutcome::Renewed)
+    );
+    assert_eq!(
+        claude_file(&slot)["claudeAiOauth"]["refreshToken"],
+        "NEW-RT-1"
+    );
+    expire_claude_file(&slot);
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Ok(RefreshOutcome::Renewed)
+    );
+    assert_eq!(
+        claude_file(&slot)["claudeAiOauth"]["refreshToken"],
+        "NEW-RT-2"
+    );
+    assert_eq!(calls(root.path()), 2);
+    assert!(Path::new(&format!("/proc/{}", held.0.id())).exists());
+}
+
+#[test]
+fn unproved_native_version_still_defers_same_store_refresh() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "unproved-native-version");
+    let curl = make_curl(root.path(), false, 200);
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+
+    let process_path = root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    let held = ReapedChild(
+        Command::new(&process_path)
+            .arg("30")
+            .env("HOME", root.path())
+            .env("CLAUDE_CONFIG_DIR", &slot)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(Path::new(&format!("/proc/{}/environ", held.0.id())));
+
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Err(RefreshError::InUse)
+    );
+    assert_eq!(calls(root.path()), 0);
+}
+
+#[test]
+fn native_refresh_lock_blocks_oauth_until_it_is_released() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "native-lock-held");
+    let curl = make_curl(root.path(), false, 200);
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+    let native_lock = slot.join(".oauth_refresh.lock");
+    std::fs::create_dir(&native_lock).unwrap();
+
+    let worker_slot = slot.clone();
+    let refresh = std::thread::spawn(move || refresh_slot(&paths, &worker_slot, now_ms()));
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(calls(root.path()), 0, "OAuth bypassed Claude's native lock");
+    std::fs::remove_dir(&native_lock).unwrap();
+    assert_eq!(refresh.join().unwrap(), Ok(RefreshOutcome::Renewed));
+    assert_eq!(calls(root.path()), 1);
+}
+
+#[test]
+fn changed_credential_under_native_lock_is_never_exchanged() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "changed-under-lock");
+    let curl = make_curl(root.path(), false, 200);
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+    let native_lock = slot.join(".oauth_refresh.lock");
+    std::fs::create_dir(&native_lock).unwrap();
+
+    let worker_slot = slot.clone();
+    let refresh = std::thread::spawn(move || refresh_slot(&paths, &worker_slot, now_ms()));
+    std::thread::sleep(Duration::from_millis(150));
+    let replacement = br#"{"claudeAiOauth":{"accessToken":"LOGIN-AT","refreshToken":"LOGIN-RT","expiresAt":9999999999999}}"#;
+    std::fs::write(slot.join(".credentials.json"), replacement).unwrap();
+    std::fs::remove_dir(&native_lock).unwrap();
+
+    assert!(matches!(
+        refresh.join().unwrap(),
+        Err(RefreshError::AlreadyRefreshing)
+    ));
+    assert_eq!(calls(root.path()), 0);
+    assert_eq!(
+        std::fs::read(slot.join(".credentials.json")).unwrap(),
+        replacement
+    );
+}
+
+#[test]
+fn default_native_authority_survives_holder_exit_without_using_stale_slot() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "default-source-bound");
+    let native = root.path().join(".claude");
+    std::fs::create_dir(&native).unwrap();
+    std::fs::copy(
+        slot.join(".credentials.json"),
+        native.join(".credentials.json"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(".claude.json"),
+        std::fs::read(slot.join(".claude.json")).unwrap(),
+    )
+    .unwrap();
+    let curl = make_rotating_curl(root.path());
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+
+    let process_path = root.path().join("native-bin/claude");
+    std::fs::create_dir_all(process_path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    let mut held = ReapedChild(
+        Command::new(&process_path)
+            .arg("30")
+            .env_clear()
+            .env("HOME", root.path())
+            .env("SWAPDEX_TEST_NATIVE_REFRESH_LOCKS", "1")
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(Path::new(&format!("/proc/{}/environ", held.0.id())));
+
+    let (renewed, failed) = keep_alive_sweep(&paths, &[("work".into(), slot.clone())], now_ms());
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(renewed, ["work"]);
+    assert_eq!(
+        claude_file(&native)["claudeAiOauth"]["refreshToken"],
+        "NEW-RT-1"
+    );
+    assert_eq!(
+        claude_file(&slot)["claudeAiOauth"]["refreshToken"],
+        "OLD-RT"
+    );
+
+    held.0.kill().unwrap();
+    held.0.wait().unwrap();
+    expire_claude_file(&native);
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Ok(RefreshOutcome::Renewed)
+    );
+    assert_eq!(
+        claude_file(&native)["claudeAiOauth"]["refreshToken"],
+        "NEW-RT-2"
+    );
+    assert_eq!(
+        claude_file(&slot)["claudeAiOauth"]["refreshToken"],
+        "OLD-RT"
+    );
+    assert_eq!(calls(root.path()), 2);
 }
 
 #[test]
@@ -767,6 +986,41 @@ fn claude_success_does_not_overwrite_a_login_replaced_in_flight() {
         replacement,
         "a response for the old blob overwrote the newer login"
     );
+}
+
+#[test]
+fn a_slot_without_identity_cannot_spend_a_native_holders_refresh_generation() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "missing-identity");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::copy(
+        slot.join(".credentials.json"),
+        native.join(".credentials.json"),
+    )
+    .unwrap();
+    std::fs::copy(slot.join(".claude.json"), root.path().join(".claude.json")).unwrap();
+    std::fs::remove_file(slot.join(".claude.json")).unwrap();
+    let process = root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &process).unwrap();
+    let _held = ReapedChild(
+        Command::new(process)
+            .arg("30")
+            .env_clear()
+            .env("HOME", root.path())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(Path::new(&format!("/proc/{}/environ", _held.0.id())));
+    let curl = make_curl(root.path(), false, 200);
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Err(RefreshError::InUse)
+    );
+    assert_eq!(calls(root.path()), 0);
 }
 
 #[test]

@@ -2170,13 +2170,15 @@ fn account_health(
                     warnings.push("codex renewal deferred - refresh unverified".to_string());
                 }
             }
-            "claude-code" if crate::proxy::creds::slot_token_expired(&slot.config_dir, now_ms) => {
+            "claude-code"
+                if crate::proxy::creds::slot_token_expired_for(paths, &slot.config_dir, now_ms) =>
+            {
                 warnings.push("claude-code expired - needs refresh".to_string());
                 access_expired = true;
             }
             "claude-code" => {
                 if matches!(
-                    crate::proxy::creds::slot_token_detail(&slot.config_dir),
+                    crate::proxy::creds::slot_token_detail_for(paths, &slot.config_dir),
                     Err(crate::proxy::creds::TokenUnavailable::KeychainLocked)
                 ) {
                     warnings.push(
@@ -3924,7 +3926,7 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                 // makes a healthy account look broken. Carry the reason.
                 let note = match acc.get("status").and_then(|s| s.as_str()) {
                     Some("ok") | None => None,
-                    Some("throttled") => Some("endpoint busy - retrying".to_string()),
+                    Some("throttled") => Some("usage lookup limited - retrying".to_string()),
                     Some("expired") => Some("login expired".to_string()),
                     Some("offline") => acc
                         .get("detail")
@@ -6447,6 +6449,15 @@ pub fn run_account(
     let mut cmd = std::process::Command::new(exe);
     cmd.args(args);
     configure_managed_tool_home(&mut cmd, tool, home_var, &rec.config_dir);
+    if tool == "claude-code" {
+        let authentication = crate::shim::claude_authentication_command(args);
+        let authority = if authentication {
+            crate::claude_authority::resolve_for_authentication(paths, &rec.config_dir)?
+        } else {
+            crate::claude_authority::resolve(paths, &rec.config_dir)?
+        };
+        authority.configure_launch(paths, &mut cmd, authentication)?;
+    }
     // This is the path a sign-in takes, and signing in must reach the vendor
     // directly. An inherited proxy address both breaks the OAuth code exchange
     // and answers with whichever account the proxy already holds - so a fresh
@@ -6458,6 +6469,31 @@ pub fn run_account(
     }
     let err = cmd.exec();
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
+}
+
+/// Called by the generated shim only for a slot with a durable authority.
+/// All text passed to the native executable remains individual argv elements.
+pub fn launch_claude_authority(
+    paths: &Paths,
+    native: &std::path::Path,
+    args: &[String],
+) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!("a linked Claude launch requires its session config directory")
+        })?;
+    let authentication = crate::shim::claude_authentication_command(args);
+    let authority = if authentication {
+        crate::claude_authority::resolve_for_authentication(paths, &dir)?
+    } else {
+        crate::claude_authority::resolve(paths, &dir)?
+    };
+    let mut cmd = Command::new(native);
+    cmd.args(args);
+    authority.configure_launch(paths, &mut cmd, authentication)?;
+    Err(anyhow::anyhow!("could not launch Claude: {}", cmd.exec()))
 }
 
 /// Why a token could not be used, without guessing which kind of failure it was.
@@ -6552,7 +6588,12 @@ pub(crate) fn sign_in_child(paths: &Paths, name: &str, tool: &str) -> (bool, Str
             ),
         );
     };
-    match spawn_tool_login_in(&exe, tool, Some((home_var, rec.config_dir.as_path()))) {
+    match spawn_tool_login_in(
+        paths,
+        &exe,
+        tool,
+        Some((home_var, rec.config_dir.as_path())),
+    ) {
         Ok(_) => {
             // Whether the sign-in succeeded is the credential's story, not the
             // exit code's: the tool exits 0 when the user simply quits it.
@@ -7769,7 +7810,7 @@ pub fn refresh(paths: &Paths, name: Option<&str>) -> Result<i32> {
             failed += 1;
             continue;
         }
-        if !crate::proxy::creds::slot_token_expired(&r.config_dir, now) {
+        if !crate::proxy::creds::slot_token_expired_for(paths, &r.config_dir, now) {
             println!("  {} is already current", r.name);
             continue;
         }
@@ -8023,7 +8064,7 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
                 ", then exit it.".to_string()
             }
         );
-        spawn_tool_login(bin, tool)?;
+        spawn_tool_login(paths, bin, tool)?;
         if adapter.identity(paths).ok().flatten().is_none() {
             eprintln!(
                 "swapdex: no {} login was completed - nothing saved.",
@@ -8188,7 +8229,7 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
     // you straight back into the SAME account without asking. Tell them how to
     // avoid it BEFORE it happens.
     println!("  tip: {}", same_account_hint(tool));
-    let spawn = spawn_tool_login(bin, tool);
+    let spawn = spawn_tool_login(paths, bin, tool);
     // Re-take the STORE lock for the final store-global writes (timeline,
     // profile save). The per-tool credential lock above already excludes a
     // concurrent switch on THIS tool, so this only serializes with other-tool
@@ -8385,8 +8426,8 @@ fn codex_login_opts_out_of_device() -> bool {
     std::env::var("SWAPDEX_CODEX_LOGIN").is_ok_and(|v| v.eq_ignore_ascii_case("browser"))
 }
 
-fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
-    spawn_tool_login_in(std::path::Path::new(bin), tool, None)
+fn spawn_tool_login(paths: &Paths, bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
+    spawn_tool_login_in(paths, std::path::Path::new(bin), tool, None)
 }
 
 /// The same sign-in, optionally in one account's own home.
@@ -8399,10 +8440,19 @@ fn spawn_tool_login(bin: &str, tool: &str) -> Result<std::process::ExitStatus> {
 /// own came up looking signed in. Two ways to build one command is how that
 /// happened, so now there is one.
 fn spawn_tool_login_in(
+    paths: &Paths,
     bin: &std::path::Path,
     tool: &str,
     home: Option<(&str, &std::path::Path)>,
 ) -> Result<std::process::ExitStatus> {
+    let mut cmd = Command::new(bin);
+    if let Some((var, dir)) = home {
+        configure_managed_tool_home(&mut cmd, tool, var, dir);
+        if tool == "claude-code" {
+            crate::claude_authority::resolve_for_authentication(paths, dir)?
+                .configure_launch(paths, &mut cmd, true)?;
+        }
+    }
     // A shell Ctrl+C during the interactive sign-in hits the whole foreground
     // process group. With the default disposition it would kill swapdex before
     // the restore-stash branch runs - leaving the user locally signed out of
@@ -8414,10 +8464,6 @@ fn spawn_tool_login_in(
     let prev_int = unsafe { libc::signal(libc::SIGINT, ride_out as libc::sighandler_t) };
     #[allow(function_casts_as_integer)]
     let prev_quit = unsafe { libc::signal(libc::SIGQUIT, ride_out as libc::sighandler_t) };
-    let mut cmd = Command::new(bin);
-    if let Some((var, dir)) = home {
-        configure_managed_tool_home(&mut cmd, tool, var, dir);
-    }
     // A sign-in must reach the vendor directly: an inherited proxy address
     // answers with whichever account the proxy already holds.
     for var in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"] {
@@ -9115,12 +9161,12 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         unreadable: Option<String>,
     }
 
-    fn slot_quota_state(dir: &std::path::Path, now: i64) -> SlotQuotaState {
+    fn slot_quota_state(paths: &Paths, dir: &std::path::Path, now: i64) -> SlotQuotaState {
         use crate::adapters::claude::KeychainReadError as K;
 
         let identity_path = dir.join(".claude.json");
         let identity_before = std::fs::read(&identity_path).ok();
-        let credential = crate::adapters::claude::slot_credential(dir);
+        let credential = crate::claude_authority::credential(paths, dir);
         let identity_after = std::fs::read(&identity_path).ok();
         let identity_value = identity_after
             .as_deref()
@@ -9176,7 +9222,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     fn slot_quota_read(paths: &Paths, dir: &std::path::Path) -> SlotQuotaRead {
         let now = now_ms();
         let native = crate::live_login::resolve(paths, dir, "claude-code", now);
-        let initial = slot_quota_state(dir, now);
+        let initial = slot_quota_state(paths, dir, now);
         if let Some(native) = native {
             if initial.identity.as_ref() == Some(&native.identity) {
                 return SlotQuotaRead {

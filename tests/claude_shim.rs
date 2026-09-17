@@ -7,6 +7,108 @@ use swapdex::shim::shim_script;
 
 static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn linked_native_launches_and_logged_out_auth_keep_the_designated_store() {
+    use sha2::{Digest, Sha256};
+    let _exec_guard = fixture_exec_lock();
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join(".local/share/swapdex");
+    let slot = data.join("slots/linked");
+    let native_store = root.path().join(".claude");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::create_dir_all(&native_store).unwrap();
+    let identity =
+        br#"{"oauthAccount":{"accountUuid":"fixture-account","organizationUuid":"fixture-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    let identity_path = root.path().join(".claude.json");
+    std::fs::write(&identity_path, identity).unwrap();
+    std::fs::write(slot.join(".credentials.json"), br#"{"claudeAiOauth":{"accessToken":"old-copy","refreshToken":"fixture-refresh","expiresAt":1}}"#).unwrap();
+    let marker = slot.join(".swapdex-claude-authority.json");
+    std::fs::write(&marker, serde_json::to_vec(&serde_json::json!({
+        "version":1, "storage_dir":native_store, "identity_path":identity_path,
+        "securestorage_key":null, "account_uuid":"fixture-account", "organization_uuid":"fixture-org",
+        "linked_refresh_fingerprint":format!("refresh-token:claude-code:{}", Sha256::digest(b"fixture-refresh").iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+    })).unwrap()).unwrap();
+    let pointer = data.join("active-claude");
+    std::fs::write(&pointer, slot.to_str().unwrap()).unwrap();
+    std::fs::write(data.join("serving-claude"), "off").unwrap();
+    std::fs::write(
+        data.join("slots.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {"name":"linked","id":"linked","config_dir":slot,"adopted":false,"tool":"claude-code"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let native = root.path().join("native tool");
+    std::fs::write(&native, "#!/bin/sh\nprintf 'CONFIG=%s\\nSECURE=%s\\n' \"${CLAUDE_CONFIG_DIR-unset}\" \"${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}\"\nprintf 'ARG=%s\\n' \"$@\"\n").unwrap();
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim = root.path().join("claude");
+    std::fs::write(
+        &shim,
+        shim_script(&pointer, &native, Path::new(env!("CARGO_BIN_EXE_swapdex"))),
+    )
+    .unwrap();
+    let launch = |args: &[&str]| {
+        Command::new("sh")
+            .arg(&shim)
+            .args(args)
+            .env("HOME", root.path())
+            .env("SWAPDEX_ROOT", root.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .env_remove("ANTHROPIC_BASE_URL")
+            .output()
+            .unwrap()
+    };
+    let normal = launch(&["--resume", "session with spaces"]);
+    assert!(
+        normal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&normal.stderr)
+    );
+    let stdout = String::from_utf8(normal.stdout).unwrap();
+    assert!(
+        stdout.contains(&format!("CONFIG={}\nSECURE=\n", slot.display())),
+        "{stdout}"
+    );
+    assert!(stdout.contains("ARG=--resume\nARG=session with spaces\n"));
+    std::fs::write(&identity_path, b"{}").unwrap();
+    let login = launch(&["auth", "login"]);
+    assert!(
+        login.status.success(),
+        "{}",
+        String::from_utf8_lossy(&login.stderr)
+    );
+    assert!(String::from_utf8_lossy(&login.stdout)
+        .contains("CONFIG=unset\nSECURE=\nARG=auth\nARG=login\n"));
+    let fake_bin = root.path().join("fake-bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    std::os::unix::fs::symlink(&native, fake_bin.join("claude")).unwrap();
+    let direct = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .args(["run", "linked", "--", "--verbose", "auth", "login"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        direct.status.success(),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    assert!(String::from_utf8_lossy(&direct.stdout)
+        .contains("CONFIG=unset\nSECURE=\nARG=--verbose\nARG=auth\nARG=login\n"));
+    let normal = launch(&[]);
+    assert!(!normal.status.success());
+    assert!(normal.stdout.is_empty());
+    std::fs::remove_file(&marker).unwrap();
+    std::os::unix::fs::symlink("missing-authority-record", &marker).unwrap();
+    let invalid = launch(&["auth", "login"]);
+    assert!(!invalid.status.success());
+    assert!(invalid.stdout.is_empty());
+}
+
 fn fixture_exec_lock() -> MutexGuard<'static, ()> {
     FIXTURE_EXEC_LOCK
         .lock()

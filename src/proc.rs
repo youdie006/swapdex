@@ -380,6 +380,8 @@ pub(crate) struct NativeLoginProcess {
     /// Claude's raw secure-storage key. `None` is the bare Keychain service;
     /// `Some` is hashed by the adapter. Unused for Codex.
     pub(crate) claude_keychain_key: Option<String>,
+    /// Only native releases whose lock and reread protocol has been verified.
+    pub(crate) supports_refresh_locks: bool,
 }
 
 #[derive(Default)]
@@ -441,12 +443,17 @@ fn native_process_from_env(
     let (source_dir, identity_path, claude_keychain_key) = match tool {
         "claude-code" => {
             let config = nonempty(env.claude_config.as_deref());
-            let source = config
+            let config_dir = config
                 .map(std::path::PathBuf::from)
                 .or_else(|| home.as_ref().map(|home| home.join(".claude")))?;
             let identity = match config {
-                Some(_) => source.join(".claude.json"),
+                Some(_) => config_dir.join(".claude.json"),
                 None => home.as_ref()?.join(".claude.json"),
+            };
+            let source = match env.claude_securestorage.as_deref() {
+                Some("") => home.as_ref()?.join(".claude"),
+                Some(storage) => std::path::PathBuf::from(storage),
+                None => config_dir,
             };
             let key = slot_key(
                 env.claude_securestorage.as_deref(),
@@ -470,7 +477,130 @@ fn native_process_from_env(
         source_dir,
         identity_path,
         claude_keychain_key,
+        supports_refresh_locks: paths.sandboxed()
+            && text
+                .split([sep, '\n'])
+                .any(|field| field == "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS=1"),
     })
+}
+
+fn known_refresh_lock_executable(path: &std::path::Path) -> bool {
+    let verified_version = |version: Option<&str>| {
+        matches!(version, Some("2.1.271" | "2.1.272" | "2.1.273" | "2.1.274"))
+    };
+    // Standalone native installs retain their release number as the basename.
+    if verified_version(path.file_name().and_then(|name| name.to_str()))
+        && path
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|p| p == "versions")
+    {
+        return true;
+    }
+    // The native npm package uses bin/claude.exe on macOS as well as Linux.
+    // Node wrappers and unrelated executables never inherit this capability.
+    let Some(package) = path
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "bin"))
+        .and_then(|p| p.parent())
+    else {
+        return false;
+    };
+    if path.file_name().is_none_or(|name| name != "claude.exe")
+        || package.file_name().is_none_or(|name| name != "claude-code")
+        || package
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_none_or(|name| name != "@anthropic-ai")
+    {
+        return false;
+    }
+    let Some(manifest) = crate::atomic::read_regular(&package.join("package.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return false;
+    };
+    manifest["name"] == "@anthropic-ai/claude-code"
+        && manifest["bin"]["claude"] == "bin/claude.exe"
+        && verified_version(manifest["version"].as_str())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_refresh_locks_supported(pid: &str) -> bool {
+    let Ok(pid) = pid.parse::<i32>() else {
+        return false;
+    };
+    let mut bytes = vec![0u8; 4096];
+    let count = unsafe { libc::proc_pidpath(pid, bytes.as_mut_ptr().cast(), bytes.len() as u32) };
+    if count <= 0 {
+        return false;
+    }
+    let path = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    std::str::from_utf8(path)
+        .ok()
+        .is_some_and(|path| known_refresh_lock_executable(std::path::Path::new(path)))
+}
+
+#[cfg(test)]
+mod secure_storage_root_tests {
+    use super::*;
+
+    #[test]
+    fn verified_npm_native_install_participates_but_unknown_versions_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("node_modules/@anthropic-ai/claude-code");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        let binary = package.join("bin/claude.exe");
+        std::fs::write(&binary, b"fixture-native").unwrap();
+        let manifest = package.join("package.json");
+        std::fs::write(&manifest, br#"{"name":"@anthropic-ai/claude-code","version":"2.1.274","bin":{"claude":"bin/claude.exe"}}"#).unwrap();
+        assert!(known_refresh_lock_executable(&binary));
+        std::fs::write(&manifest, br#"{"name":"@anthropic-ai/claude-code","version":"2.1.999","bin":{"claude":"bin/claude.exe"}}"#).unwrap();
+        assert!(!known_refresh_lock_executable(&binary));
+        std::fs::write(
+            &manifest,
+            br#"{"name":"another-package","version":"2.1.274","bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .unwrap();
+        assert!(!known_refresh_lock_executable(&binary));
+        assert!(!known_refresh_lock_executable(&root.path().join("2.1.274")));
+    }
+
+    #[test]
+    fn explicit_secure_storage_keeps_identity_in_the_session_config() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let config = root.path().join("session-config");
+        let storage = root.path().join("shared-auth");
+        let text = format!(
+            "HOME={}\0CLAUDE_CONFIG_DIR={}\0CLAUDE_SECURESTORAGE_CONFIG_DIR={}\0",
+            root.path().display(),
+            config.display(),
+            storage.display()
+        );
+        let process =
+            native_process_from_env(&paths, "claude-code", "claude", &text, '\0').unwrap();
+        assert_eq!(process.source_dir, storage);
+        assert_eq!(process.identity_path, config.join(".claude.json"));
+    }
+
+    #[test]
+    fn explicit_empty_secure_storage_uses_default_auth_with_slot_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::rooted(root.path());
+        let config = root.path().join("session-config");
+        let text = format!(
+            "HOME={}\0CLAUDE_CONFIG_DIR={}\0CLAUDE_SECURESTORAGE_CONFIG_DIR=\0",
+            root.path().display(),
+            config.display()
+        );
+        let process =
+            native_process_from_env(&paths, "claude-code", "claude", &text, '\0').unwrap();
+        assert_eq!(process.source_dir, root.path().join(".claude"));
+        assert_eq!(process.identity_path, config.join(".claude.json"));
+        assert_eq!(process.claude_keychain_key, None);
+    }
 }
 
 /// A sandbox may only inspect native sources inside its own rooted HOME.
@@ -590,7 +720,11 @@ pub(crate) fn running_native_login_processes(
                 continue;
             };
             let text = String::from_utf8_lossy(&bytes);
-            if let Some(process) = native_process_from_env(paths, tool, comm.trim(), &text, '\0') {
+            if let Some(mut process) =
+                native_process_from_env(paths, tool, comm.trim(), &text, '\0')
+            {
+                process.supports_refresh_locks |= std::fs::read_link(entry.path().join("exe"))
+                    .is_ok_and(|path| known_refresh_lock_executable(&path));
                 processes.push(process);
             }
         }
@@ -610,7 +744,8 @@ pub(crate) fn running_native_login_processes(
             let Ok(text) = std::str::from_utf8(&bytes) else {
                 continue;
             };
-            if let Some(process) = native_process_from_env(paths, tool, &comm, text, '\0') {
+            if let Some(mut process) = native_process_from_env(paths, tool, &comm, text, '\0') {
+                process.supports_refresh_locks |= macos_refresh_locks_supported(&pid);
                 processes.push(process);
             }
         }
@@ -1298,7 +1433,7 @@ mod tests {
         let text = std::str::from_utf8(environ).unwrap();
         let process = native_process_from_env(&paths, "claude-code", "claude", text, '\0')
             .expect("path with spaces remains one environment value");
-        assert_eq!(process.source_dir, config);
+        assert_eq!(process.source_dir, secure);
         assert_eq!(process.identity_path, config.join(".claude.json"));
         assert_eq!(
             process.claude_keychain_key.as_deref(),

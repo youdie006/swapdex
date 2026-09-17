@@ -4,6 +4,30 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.165.8
+
+- **Keep supported open Claude sessions renewed.** Background renewal now
+  coordinates with Claude Code 2.1.271–2.1.274 using the native refresh locks
+  and rereads authentication under those locks. A running, verified native
+  holder no longer causes renewal to be deferred indefinitely. Unknown native
+  versions and ambiguous holders retain the conservative guard.
+- **Keep a copied slot tied to its current authentication source.** When one
+  live native store and a slot prove the same account, organization and refresh
+  generation, Swapdex records that store as their credential authority. The
+  binding survives process exit; proxy requests, quota reads and new managed
+  launches continue using it. Native launches keep their session configuration
+  while sharing authentication. Changed identities and independent logins are
+  never joined automatically, and an invalid authority cannot fall back to an
+  obsolete slot copy.
+- **Recover a rejected bearer from the linked Claude login.** A proxy request
+  rejected with HTTP 401 can renew its proven credential generation and retry
+  once, including while the native conversation remains open. Independent
+  native credentials and changed identities keep their existing guards.
+- **Name the usage lookup that was limited.** The dashboard now says
+  `usage lookup limited - retrying` for HTTP 429 from the usage API, replacing
+  the ambiguous `endpoint busy` note. It keeps the last reading and its age;
+  this status does not classify the login or the account's remaining quota.
+
 ## 0.165.7
 
 - **Explain stale usage instead of silently keeping old figures.** When a

@@ -5174,6 +5174,101 @@ fn codex_401_retries_a_same_account_replacement_without_oauth() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_bound_claude_authority_recovers_401_with_and_without_its_native_holder() {
+    for holder_alive in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+        let slot = root.path().join(".local/share/swapdex/slots/id-work");
+        let native = root.path().join(".claude");
+        std::fs::create_dir_all(&native).unwrap();
+        let identity =
+            br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+        std::fs::write(slot.join(".claude.json"), identity).unwrap();
+        std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+        let old_copy = std::fs::read(slot.join(".credentials.json")).unwrap();
+        std::fs::write(native.join(".credentials.json"), &old_copy).unwrap();
+        let holder = spawn_native_cli(
+            root.path(),
+            "claude",
+            &[
+                ("HOME", root.path()),
+                (
+                    "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS",
+                    std::path::Path::new("1"),
+                ),
+            ],
+        );
+        let paths = swapdex::paths::Paths::rooted(root.path());
+        let (_, failed) = swapdex::refresh::keep_alive_sweep(
+            &paths,
+            &[("work".into(), slot.clone())],
+            1_800_000_000_000,
+        );
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(slot.join(".swapdex-claude-authority.json").is_file());
+        let _holder = if holder_alive {
+            Some(holder)
+        } else {
+            holder.stop();
+            None
+        };
+        let curl = fake_oauth_curl(
+            root.path(),
+            r#"{"access_token":"AT-NEW","refresh_token":"RT-NEW","expires_in":3600}"#,
+            200,
+        );
+        let count = root.path().join("oauth-count");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let upstream = ControlledUpstream::start(move |request| {
+            let auth = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("authorization"))
+                .map(|header| header.value.as_str().to_string())
+                .unwrap_or_default();
+            let status = if auth == "Bearer AT-NEW" { 200 } else { 401 };
+            sink.lock().unwrap().push(auth);
+            request
+                .respond(tiny_http::Response::from_string("{}").with_status_code(status))
+                .unwrap();
+        });
+        let (proxy, port) = start_proxy_with_env(
+            root.path(),
+            upstream.url(),
+            &["--account", "work"],
+            &[
+                ("SWAPDEX_CURL", curl.to_str().unwrap()),
+                ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+                ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+            ],
+        );
+        let proxy = ReapedChild::new(proxy);
+        assert_eq!(
+            post_through_status(port, "{}"),
+            200,
+            "holder alive: {holder_alive}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Bearer AT-OLD", "Bearer AT-NEW"]
+        );
+        assert_eq!(std::fs::read(&count).unwrap(), b"x");
+        assert_eq!(
+            std::fs::read(slot.join(".credentials.json")).unwrap(),
+            old_copy
+        );
+        let renewed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(native.join(".credentials.json")).unwrap())
+                .unwrap();
+        assert_eq!(renewed["claudeAiOauth"]["refreshToken"], "RT-NEW");
+        proxy.stop();
+        upstream.close();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn an_unchanged_native_bearer_401_never_spends_its_refresh_token() {
     let root = tempfile::tempdir().unwrap();
     seed_slot(root.path(), "work", "id-work", "SLOT-ACCESS", true);

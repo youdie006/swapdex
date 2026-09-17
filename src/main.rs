@@ -203,6 +203,14 @@ enum Cmd {
     },
     /// Full-screen picker: switch, open a conversation, add accounts
     Ui,
+    /// Internal launcher for a slot with a shared native credential authority.
+    #[command(hide = true)]
+    ClaudeLaunch {
+        #[arg(long)]
+        native: std::path::PathBuf,
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run a local proxy so a RUNNING Claude session can change accounts
     Proxy {
         /// Port to listen on (0 picks a free one)
@@ -480,6 +488,9 @@ fn main() {
         Cmd::Restore { tool, dry_run } => commands::restore(&paths, *tool, *dry_run),
         Cmd::Sessions { json } => commands::sessions(&paths, *json),
         Cmd::Ui => commands::ui(&paths),
+        Cmd::ClaudeLaunch { native, args } => {
+            commands::launch_claude_authority(&paths, native, args)
+        }
         Cmd::Proxy {
             port,
             account,

@@ -41,6 +41,10 @@ pub struct LiveLogin {
     /// The access token may remain usable; callers can surface the warning
     /// without claiming that native ownership renewed it successfully.
     pub refresh_rejected_at_ms: Option<i64>,
+    /// Exact Claude blob that supplied this bearer, without exposing its tokens.
+    pub(crate) claude_credential_fingerprint: Option<String>,
+    /// Its source is also the selected slot's durable renewal authority.
+    pub(crate) claude_renewal_authority: bool,
 }
 
 fn regular_file(path: &Path) -> Option<Vec<u8>> {
@@ -140,6 +144,10 @@ fn login_from_credential(
                 identity_path,
                 identity,
                 refresh_rejected_at_ms: None,
+                claude_credential_fingerprint: Some(
+                    crate::refresh::claude_credential_fingerprint_from_blob(credential),
+                ),
+                claude_renewal_authority: false,
             })
         }
         "codex" => {
@@ -170,6 +178,8 @@ fn login_from_credential(
                 identity_path,
                 identity,
                 refresh_rejected_at_ms,
+                claude_credential_fingerprint: None,
+                claude_renewal_authority: false,
             })
         }
         _ => None,
@@ -181,6 +191,7 @@ fn same_generation(left: &LiveLogin, right: &LiveLogin) -> bool {
         && left.access_token.expose() == right.access_token.expose()
         && left.expires_at_ms == right.expires_at_ms
         && left.provider_account_id == right.provider_account_id
+        && left.claude_credential_fingerprint == right.claude_credential_fingerprint
 }
 
 /// Resolve a usable access token owned by an actual running native process.
@@ -191,6 +202,25 @@ fn same_generation(left: &LiveLogin, right: &LiveLogin) -> bool {
 /// remain responsible for blocking refresh when a native holder exists but no
 /// usable snapshot can be established.
 pub fn resolve(paths: &Paths, dir: &Path, tool: &str, now_ms: i64) -> Option<LiveLogin> {
+    if tool == "claude-code" {
+        // A registered authority survives process exit. Never fall back to a
+        // different native login or the obsolete slot copy if it is invalid.
+        let authority = crate::claude_authority::resolve(paths, dir).ok()?;
+        if authority.is_bound() {
+            let credential = authority.read(paths).ok()?;
+            let identity = authority.identity()?;
+            let mut login = login_from_credential(
+                credential.bytes(),
+                identity,
+                authority.storage_dir,
+                authority.identity_path,
+                tool,
+                now_ms,
+            )?;
+            login.claude_renewal_authority = true;
+            return Some(login);
+        }
+    }
     let selected_path = selected_identity_path(dir, tool)?;
     if !crate::proc::native_path_allowed(paths, &selected_path) {
         return None;
@@ -245,7 +275,10 @@ pub fn resolve(paths: &Paths, dir: &Path, tool: &str, now_ms: i64) -> Option<Liv
             continue;
         }
 
-        let Some(candidate) = login_from_credential(
+        let renewal_authority = tool == "claude-code"
+            && process.source_dir == dir
+            && process.claude_keychain_key.as_deref() == dir.to_str();
+        let Some(mut candidate) = login_from_credential(
             &credential,
             source_identity,
             process.source_dir,
@@ -255,6 +288,7 @@ pub fn resolve(paths: &Paths, dir: &Path, tool: &str, now_ms: i64) -> Option<Liv
         ) else {
             continue;
         };
+        candidate.claude_renewal_authority = renewal_authority;
         match &mut winner {
             None => winner = Some(candidate),
             Some(current) if same_generation(current, &candidate) => {

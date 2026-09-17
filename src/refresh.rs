@@ -874,19 +874,6 @@ where
     )
 }
 
-fn coordinate_refresh<F>(
-    paths: &Paths,
-    dir: &Path,
-    tool: &str,
-    generation: &str,
-    action: F,
-) -> RefreshResult
-where
-    F: FnOnce() -> Attempt,
-{
-    coordinate_refresh_attempt(paths, dir, tool, generation, action).result
-}
-
 fn coordinate_token_refresh<F>(
     paths: &Paths,
     dir: &Path,
@@ -1005,6 +992,93 @@ fn claude_identity_matches(
     })
 }
 
+/// A live native process using the selected credential store participates in
+/// Claude's two refresh locks and rereads the credential after taking them.
+/// An inherited config variable alone does not prove that cooperation.
+fn claude_holder_uncoordinated(
+    paths: &Paths,
+    dir: &Path,
+    authority: &crate::claude_authority::Authority,
+) -> bool {
+    let held = slot_in_use(paths, dir, "claude-code");
+    let expected = identity_file(dir, ".claude.json")
+        .and_then(|bytes| crate::live_login::identity_from_credential(&bytes, "claude-code"));
+    let selected_refresh = authority
+        .read(paths)
+        .ok()
+        .and_then(|credential| refresh_token_identity(credential.bytes(), "claude-code"));
+    let mut verified = false;
+    for process in crate::proc::running_native_login_processes(paths, "claude-code") {
+        let identity = identity_file(
+            process.identity_path.parent().unwrap_or(Path::new("")),
+            process
+                .identity_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+        )
+        .and_then(|bytes| crate::live_login::identity_from_credential(&bytes, "claude-code"));
+        let same_store = same_dir(&process.source_dir, &authority.storage_dir);
+        let same_identity = expected.is_some() && identity == expected;
+        let same_refresh = selected_refresh.as_ref().is_some_and(|selected| {
+            crate::adapters::claude::native_credentials(
+                paths,
+                &process.source_dir,
+                process.claude_keychain_key.as_deref(),
+            )
+            .as_deref()
+            .and_then(|bytes| refresh_token_identity(bytes, "claude-code"))
+            .as_ref()
+                == Some(selected)
+        });
+        if !same_identity && !same_store && !same_dir(&process.source_dir, dir) && !same_refresh {
+            continue;
+        }
+        if !same_store
+            || process.claude_keychain_key != authority.securestorage_key
+            || !same_identity
+            || !process.supports_refresh_locks
+        {
+            return true;
+        }
+        verified = true;
+    }
+    held && !verified
+}
+
+fn claude_lock(
+    storage_dir: &Path,
+) -> Result<crate::claude_refresh_lock::NativeRefreshLock, RefreshError> {
+    let started = Instant::now();
+    loop {
+        match crate::claude_refresh_lock::NativeRefreshLock::try_acquire(storage_dir) {
+            Ok(lock) => return Ok(lock),
+            Err(crate::claude_refresh_lock::LockError::Busy { .. }) => {
+                if started.elapsed() >= WAIT_FOR_REFRESH {
+                    return Err(RefreshError::AlreadyRefreshing);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                return Err(RefreshError::Offline(
+                    "could not coordinate with Claude's refresh lock".into(),
+                ))
+            }
+        }
+    }
+}
+
+fn claude_credential_current(
+    paths: &Paths,
+    authority: &crate::claude_authority::Authority,
+    expected: &crate::adapters::claude::SlotCredential,
+) -> bool {
+    authority.is_current(paths)
+        && authority
+            .read(paths)
+            .is_ok_and(|current| current == *expected)
+}
+
 fn refresh_slot_inner(
     paths: &Paths,
     dir: &Path,
@@ -1016,88 +1090,115 @@ fn refresh_slot_inner(
     if !claude_identity_matches(dir, expected_account_uuid, expected_identity) {
         return Err(RefreshError::AlreadyRefreshing);
     }
-    if expected_fingerprint.is_none() {
-        if let Some(result) = native_managed(paths, dir, "claude-code", now_ms) {
-            return result;
-        }
-    }
-    // Preflight before joining the gate: an attempt that never reaches OAuth
-    // must not suppress the next caller after the native process exits.
-    if slot_in_use(paths, dir, "claude-code") {
+    let authority = crate::claude_authority::resolve(paths, dir).map_err(|_| {
+        RefreshError::Refused("Claude credential authority could not be verified".into())
+    })?;
+    if claude_holder_uncoordinated(paths, dir, &authority) {
         return Err(RefreshError::InUse);
     }
-    let credential = read_credential(dir).map_err(|_| RefreshError::NoCredential)?;
+    let credential = authority.read(paths).map_err(|_| {
+        if authority.is_bound() {
+            RefreshError::Refused("Claude credential authority could not be read".into())
+        } else {
+            RefreshError::NoCredential
+        }
+    })?;
     if expected_fingerprint.is_some_and(|expected| fingerprint(credential.bytes()) != expected) {
         return Err(RefreshError::AlreadyRefreshing);
     }
-    if !claude_identity_matches(dir, expected_account_uuid, expected_identity) {
-        return Err(RefreshError::AlreadyRefreshing);
-    }
-    if let Some(result) = native_managed(paths, dir, "claude-code", now_ms) {
-        if !credential_unchanged(dir, &credential)
-            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
-        {
-            return Err(RefreshError::AlreadyRefreshing);
-        }
-        return result;
-    }
-    if refresh_token_expired(credential.bytes(), now_ms) {
-        return Err(RefreshError::Expired);
-    }
-    let token = refresh_token(credential.bytes()).ok_or(RefreshError::NoCredential)?;
     let generation = fingerprint(credential.bytes());
+    let key = claim_key(dir, "claude-code");
+    let source = source_fingerprint(&authority.storage_dir);
 
-    coordinate_refresh(paths, dir, "claude-code", &generation, || {
-        if !credential_unchanged(dir, &credential)
-            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
-        {
-            return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
-        }
-        if let Some(result) = native_managed(paths, dir, "claude-code", now_ms) {
-            return Attempt::before_exchange(result);
-        }
-        if slot_in_use(paths, dir, "claude-code") {
-            return Attempt::before_exchange(Err(RefreshError::InUse));
-        }
+    coordinate_with_key(
+        paths,
+        &key,
+        &generation,
+        &source,
+        ChangedSuccessPolicy::Retry,
+        || {
+            if claude_holder_uncoordinated(paths, dir, &authority) {
+                return Attempt::before_exchange(Err(RefreshError::InUse));
+            }
+            let lock = match claude_lock(&authority.storage_dir) {
+                Ok(lock) => lock,
+                Err(error) => return Attempt::before_exchange(Err(error)),
+            };
+            // Claude itself rereads only after both native locks are held. The
+            // generation observed before joining our account gate is never used
+            // as the exchange input without this second read.
+            if lock.ensure_owned().is_err()
+                || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+                || !authority.is_current(paths)
+                || claude_holder_uncoordinated(paths, dir, &authority)
+            {
+                return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            let current = match authority.read(paths) {
+                Ok(current) => current,
+                Err(_) => return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing)),
+            };
+            if current != credential
+                || expected_fingerprint
+                    .is_some_and(|expected| fingerprint(current.bytes()) != expected)
+            {
+                return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            if refresh_token_expired(current.bytes(), now_ms) {
+                return Attempt::before_exchange(Err(RefreshError::Expired));
+            }
+            let Some(token) = refresh_token(current.bytes()) else {
+                return Attempt::before_exchange(Err(RefreshError::NoCredential));
+            };
+            if lock.ensure_owned().is_err() {
+                return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
 
-        let response = post(&token);
-        // A login may replace the blob while the request is in flight. Its
-        // generation owns every later verdict, so neither a success nor a
-        // refusal for the old token may overwrite or poison it.
-        if !credential_unchanged(dir, &credential)
-            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
-        {
-            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
-        }
-        let (body, status) = match response {
-            Ok(response) => response,
-            Err(error) => return Attempt::after_exchange(Err(error)),
-        };
-        if status == 429 {
-            return Attempt::after_exchange(Err(RefreshError::Busy));
-        }
-        if status == 401 || status == 400 {
-            return Attempt::after_exchange(Err(RefreshError::Refused(short_reason(&body))));
-        }
-        if !(200..300).contains(&status) {
-            return Attempt::after_exchange(Err(RefreshError::Refused(format!("HTTP {status}"))));
-        }
-        let Some(merged) = merge_response(credential.bytes(), &body, now_ms) else {
-            return Attempt::after_exchange(Err(RefreshError::Refused(
-                "the server's answer had no access token".into(),
-            )));
-        };
-        if !credential_unchanged(dir, &credential)
-            || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
-        {
-            return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
-        }
-        let result = write_credential(dir, credential.source(), &merged)
-            .map(|()| RefreshOutcome::Renewed)
-            .map_err(|error| RefreshError::Refused(error.to_string()));
-        let result_generation = result.is_ok().then(|| fingerprint(&merged));
-        Attempt::after_exchange_with_generation(result, result_generation)
-    })
+            let response = post(&token);
+            // A login may replace the blob while the request is in flight. Its
+            // generation owns every later verdict, so neither a success nor a
+            // refusal for the old token may overwrite or poison it.
+            if lock.ensure_owned().is_err()
+                || !claude_credential_current(paths, &authority, &current)
+                || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+            {
+                return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            let (body, status) = match response {
+                Ok(response) => response,
+                Err(error) => return Attempt::after_exchange(Err(error)),
+            };
+            if status == 429 {
+                return Attempt::after_exchange(Err(RefreshError::Busy));
+            }
+            if status == 401 || status == 400 {
+                return Attempt::after_exchange(Err(RefreshError::Refused(short_reason(&body))));
+            }
+            if !(200..300).contains(&status) {
+                return Attempt::after_exchange(Err(RefreshError::Refused(format!(
+                    "HTTP {status}"
+                ))));
+            }
+            let Some(merged) = merge_response(current.bytes(), &body, now_ms) else {
+                return Attempt::after_exchange(Err(RefreshError::Refused(
+                    "the server's answer had no access token".into(),
+                )));
+            };
+            if lock.ensure_owned().is_err()
+                || !claude_credential_current(paths, &authority, &current)
+                || !claude_identity_matches(dir, expected_account_uuid, expected_identity)
+            {
+                return Attempt::after_exchange(Err(RefreshError::AlreadyRefreshing));
+            }
+            let result = authority
+                .write(paths, current.source(), &merged)
+                .map(|()| RefreshOutcome::Renewed)
+                .map_err(|error| RefreshError::Refused(error.to_string()));
+            let result_generation = result.is_ok().then(|| fingerprint(&merged));
+            Attempt::after_exchange_with_generation(result, result_generation)
+        },
+    )
+    .result
 }
 
 /// One short clause from an error body, for a message a person reads. Never the
@@ -1225,35 +1326,7 @@ fn refresh_token(blob: &[u8]) -> Option<String> {
         })
 }
 
-/// The one credential generation Claude Code uses for this slot.
-fn read_credential(
-    dir: &Path,
-) -> std::result::Result<
-    crate::adapters::claude::SlotCredential,
-    crate::adapters::claude::KeychainReadError,
-> {
-    crate::adapters::claude::slot_credential(dir)
-}
-
-fn credential_unchanged(dir: &Path, expected: &crate::adapters::claude::SlotCredential) -> bool {
-    read_credential(dir).is_ok_and(|current| current == *expected)
-}
-
-/// Put the renewed blob back where the old one was, so the tool's next run reads
-/// what was written rather than a second, competing copy.
-fn write_credential(
-    dir: &Path,
-    source: crate::adapters::claude::SlotCredentialSource,
-    blob: &[u8],
-) -> anyhow::Result<()> {
-    write_credential_with(
-        source,
-        blob,
-        |value| crate::atomic::write_secret(&dir.join(".credentials.json"), value),
-        |value| crate::adapters::claude::slot_keychain_write(dir, value),
-    )
-}
-
+#[cfg(test)]
 fn write_credential_with<F, K>(
     source: crate::adapters::claude::SlotCredentialSource,
     blob: &[u8],
@@ -1855,8 +1928,11 @@ pub(crate) fn codex_renewal_deferred(paths: &Paths, dir: &Path, now_secs: i64) -
 /// as the renewal path, then reuse its account-aware ownership guard. This
 /// check only explains why renewal stood down; it never starts an exchange.
 pub(crate) fn claude_renewal_deferred(paths: &Paths, dir: &Path, now_ms: i64) -> bool {
-    read_credential(dir).is_ok_and(|credential| {
-        wants_keep_alive(credential.bytes(), now_ms) && slot_in_use(paths, dir, "claude-code")
+    crate::claude_authority::resolve(paths, dir).is_ok_and(|authority| {
+        authority.read(paths).is_ok_and(|credential| {
+            wants_keep_alive(credential.bytes(), now_ms)
+                && claude_holder_uncoordinated(paths, dir, &authority)
+        })
     })
 }
 
@@ -2061,12 +2137,12 @@ mod keep_alive_tests {
     }
 }
 
-/// Renew every idle account whose token is heading for expiry. Returns the names
+/// Renew every coordinated account whose token is heading for expiry. Returns the names
 /// it renewed and the ones it could not, so a caller can say what happened.
 ///
 /// Deliberately per-account and forgiving: one account's dead refresh token must
-/// not stop the sweep reaching the next. `refresh_slot` refuses a slot the tool
-/// is running in, which is the guard that keeps this from logging anyone out.
+/// not stop the sweep reaching the next. Verified native holders share refresh
+/// locks; unknown or conflicting holders continue to defer renewal.
 pub fn keep_alive_sweep(
     paths: &Paths,
     slots: &[(String, std::path::PathBuf)],
@@ -2083,8 +2159,35 @@ pub(crate) fn keep_alive_sweep_report(
 ) -> KeepAliveReport {
     let mut report = KeepAliveReport::default();
     for (name, dir) in slots {
-        let Ok(credential) = read_credential(dir) else {
+        if crate::claude_authority::reconcile_live(paths, dir).is_err() {
+            report.failed.push((
+                name.clone(),
+                RefreshError::Refused("Claude credential authority could not be verified".into()),
+            ));
             continue;
+        }
+        let authority = match crate::claude_authority::resolve(paths, dir) {
+            Ok(authority) => authority,
+            Err(_) => {
+                report.failed.push((
+                    name.clone(),
+                    RefreshError::Refused(
+                        "Claude credential authority could not be verified".into(),
+                    ),
+                ));
+                continue;
+            }
+        };
+        let credential = match authority.read(paths) {
+            Ok(credential) => credential,
+            Err(_) if !authority.is_bound() => continue,
+            Err(_) => {
+                report.failed.push((
+                    name.clone(),
+                    RefreshError::Refused("Claude credential authority could not be read".into()),
+                ));
+                continue;
+            }
         };
         if !wants_keep_alive(credential.bytes(), now_ms) {
             continue;
