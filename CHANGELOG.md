@@ -4,7 +4,21 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.165.7
+
+- **Explain stale usage instead of silently keeping old figures.** When a
+  Claude quota read fails, the dashboard now keeps the failure reason beside
+  the last successful figures and their age. An expired slot held by a native
+  Claude session explains that renewal is deferred to its owner. Long notes
+  wrap below the gauges so narrower windows keep the cause and age visible.
+  Mouse selection follows the resulting row heights. Quota reads
+  remain read-only; the open dashboard picks up a verified usable native login
+  on its next background refresh.
+- **Stop counting unavailable accounts as usable capacity.** Missing, expired,
+  warned and paused accounts no longer inflate the ready count, available
+  headroom or next-reset forecast with old quota figures. Otherwise usable
+  accounts whose quota is spent still contribute zero remaining headroom;
+  accounts serving through extra usage retain their ready state.
 
 - **Update CI Python setup to actions/setup-python 7 (#26).** Both continuous
   integration and the dependency review workflow use the maintained action,

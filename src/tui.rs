@@ -16,6 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use std::path::PathBuf;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// How often the quota bars re-read the usage endpoint while the UI is open. Slow
 /// enough that watching the dashboard is not a stream of requests, often enough
@@ -723,12 +724,11 @@ pub struct Usage {
     pub five_h_reset: Option<i64>,
     pub seven_d: Option<f64>,
     pub seven_d_reset: Option<i64>,
-    /// For figures that are a SNAPSHOT rather than a live read (Codex has no
-    /// endpoint to ask): unix seconds when they were recorded. `None` means the
-    /// numbers are current as of this refresh.
+    /// For figures retained from a previous read: unix seconds when they were
+    /// recorded. `None` means the numbers are current as of this refresh.
     pub observed_at: Option<i64>,
-    /// Why there are no numbers, when there are none. Empty tracks alone cannot
-    /// distinguish "never read" from "could not be read" from "nothing left".
+    /// Why the latest read failed, even when older numbers are retained. Empty
+    /// tracks alone cannot distinguish "never read" from "could not be read".
     pub note: Option<String>,
     /// The account keeps serving past a full window, billed to extra usage. A
     /// window at 100% is then not the end of it: the account was answering turns
@@ -744,8 +744,8 @@ pub struct Usage {
 /// The word for an account whose windows are full but whose credits are not.
 pub const ON_CREDITS: &str = "credits";
 
-/// The trailing column for a row's figures: the reason there are none if there
-/// is one, else how old they are.
+/// The trailing column for a row's figures: why the latest read failed and,
+/// when previous figures remain, how old those figures are.
 ///
 /// `checking` says a live read is in flight and these numbers came from the last
 /// one. Remembered numbers are drawn immediately so the gauges are never blank,
@@ -754,7 +754,24 @@ pub const ON_CREDITS: &str = "credits";
 /// spent since is missing from it, and nothing on screen said so.
 fn trailing_note(u: &Usage, checking: bool) -> String {
     match &u.note {
-        Some(n) if !n.is_empty() => n.clone(),
+        Some(n) if !n.is_empty() => match u.observed_at {
+            Some(t) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let age = now.saturating_sub(t);
+                let compact = if age < 60 {
+                    "<1m".to_string()
+                } else if age >= 30 * 86400 {
+                    format!("{}d", age / 86400)
+                } else {
+                    fmt_reset(age)
+                };
+                format!("{n} · as of {compact}")
+            }
+            None => n.clone(),
+        },
         _ => {
             let age = observed_note(u.observed_at);
             match (checking, u.observed_at.is_some()) {
@@ -764,6 +781,50 @@ fn trailing_note(u: &Usage, checking: bool) -> String {
             }
         }
     }
+}
+
+/// Keep gauges on the account line. If its note cannot fit after them, draw
+/// that note on as many indented lines as the panel width requires.
+fn place_quota_note(top: &mut Vec<Span<'static>>, note: &str, width: usize) -> Vec<Line<'static>> {
+    if note.is_empty() {
+        return Vec::new();
+    }
+    let style = Style::default().fg(MUTED);
+    let used: usize = top.iter().map(|span| span.content.as_ref().width()).sum();
+    if used + 2 + note.width() <= width.saturating_sub(2) {
+        top.push(Span::styled(format!("  {note}"), style));
+        return Vec::new();
+    }
+
+    let limit = width.saturating_sub(4).max(1);
+    let (mut lines, mut current, mut current_width) = (Vec::new(), String::new(), 0usize);
+    for word in note.split_whitespace() {
+        let word_width = word.width();
+        if current_width > 0 && current_width + 1 + word_width > limit {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if current_width > 0 {
+            current.push(' ');
+            current_width += 1;
+        }
+        for ch in word.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if current_width + ch_width > limit && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+        .into_iter()
+        .map(|line| Line::from(Span::styled(format!("  {line}"), style)))
+        .collect()
 }
 
 pub struct Row {
@@ -2267,6 +2328,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                 Vec::new()
             };
         }
+        let mut main_item_heights = Vec::new();
         terminal.draw(|f| {
             // Two hint rows: ten keys on one line were unreadable, and hiding
             // most of them behind '?' was worse - you cannot use a key you cannot
@@ -2356,6 +2418,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // fill - assigned where the bars are appended, which
                             // every row does.
                             let text_cols;
+                            let detail_lines;
                             let mut top = vec![
                                 Span::styled(
                                     // A solid half-block, not a thin rule: this is
@@ -2469,15 +2532,12 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                                 top.push(Span::styled("  7d ", Style::default().fg(MUTED)));
                                 top.extend(quota_bar(u.seven_d, bw));
                                 top.push(Span::styled(t7, Style::default().fg(MUTED)));
-                                // Snapshot figures say when they were taken, so an
-                                // old number is never read as a current one.
+                                // Keep the cause and observation age visible
+                                // even after both gauges and reset times fill
+                                // the account line.
                                 let note = trailing_note(&u, quota_rx.is_some());
-                                if !note.is_empty() {
-                                    top.push(Span::styled(
-                                        format!("  {note}"),
-                                        Style::default().fg(Color::Rgb(96, 94, 116)),
-                                    ));
-                                }
+                                detail_lines =
+                                    place_quota_note(&mut top, &note, body.width as usize);
                             }
                             let top = mark_selected(top, text_cols, selected);
                             // One heading per tool, on its first account, so the
@@ -2537,6 +2597,8 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // three lines each meant five accounts filled a screen
                             // - the point of a dashboard is seeing them together.
                             lines.push(Line::from(top));
+                            lines.extend(detail_lines);
+                            main_item_heights.push(lines.len() as u16);
                             ListItem::new(lines)
                         })
                         .collect();
@@ -3058,7 +3120,7 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                         } else {
                             0
                         };
-                        let per = if is_main { 3 } else { 1 }; // menu rows are 1 line
+                        let per = 1; // menu rows are 1 line
                         let top = main_area.y + header + 1;
                         // Bottom of the list box's INNER area (above its border).
                         // A click below it (the foot/help rows) must not map to a
@@ -3068,20 +3130,11 @@ pub fn run(ctx: &mut dyn TuiCtx) -> Result<Outcome> {
                             // offset(): a scrolled list's first visible row is
                             // sel.offset(), not 0 - without it a click opened a
                             // hidden earlier entry (maybe another account).
-                            // Main rows are 3 lines, 4 when they carry a tool
-                            // heading, so the mapping must walk real heights -
-                            // a fixed stride would select the wrong account.
+                            // Account notes can wrap below gauges, and headings
+                            // add their own lines. Use the heights actually
+                            // rendered so a click cannot select another row.
                             let idx = if is_main {
-                                let heights: Vec<u16> = group_heads(&rows)
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, h)| match (*h, i) {
-                                        (true, 0) => 3,  // heading + blank + row
-                                        (true, _) => 4,  // blank + heading + blank + row
-                                        (false, _) => 1, // row
-                                    })
-                                    .collect();
-                                click_item_index(sel.offset(), m.row, top, &heights)
+                                click_item_index(sel.offset(), m.row, top, &main_item_heights)
                             } else {
                                 click_row_index(sel.offset(), m.row, top, per)
                             };
@@ -3586,14 +3639,18 @@ pub fn fleet_of<'a>(
     let (mut f, mut measured, mut sum) = (Fleet::default(), 0usize, 0.0f64);
     for r in rows {
         f.total += 1;
+        // A quota reset cannot repair an absent, expired, warned, or paused
+        // credential. Old measurements from those rows are not capacity.
+        if r.needs_login || r.stale || r.warn.is_some() || r.disabled {
+            continue;
+        }
         let u = usage(r);
-        // "Ready" is about serving, so a row with no login is never counted -
-        // an account nobody can use is not capacity.
+        // Full windows are not immediately usable unless credits can serve.
         let spent = u.is_some_and(|u| {
             !u.on_credits
                 && (u.five_h.is_some_and(|p| p >= SPENT) || u.seven_d.is_some_and(|p| p >= SPENT))
         });
-        if !r.needs_login && !spent {
+        if !spent {
             f.ready += 1;
         }
         if let Some(u) = u {
@@ -3686,6 +3743,35 @@ mod fleet_tests {
             })))
         });
         assert_eq!(f.ready, 1);
+    }
+
+    #[test]
+    fn unavailable_members_do_not_inflate_capacity_or_forecast() {
+        let mut missing = row("missing", true);
+        missing.warn = Some("no login".into());
+        let mut expired = row("expired", false);
+        expired.stale = true;
+        let mut warning = row("warning", false);
+        warning.warn = Some("refresh rejected".into());
+        let mut paused = row("paused", false);
+        paused.disabled = true;
+        let rows = [row("ready", false), missing, expired, warning, paused];
+        let usage = [
+            used(20.0, 500),
+            used(0.0, 100),
+            used(0.0, 200),
+            used(0.0, 300),
+            used(0.0, 400),
+        ];
+        let f = fleet_of(rows.iter(), |r| {
+            rows.iter()
+                .position(|candidate| candidate.name == r.name)
+                .map(|i| &usage[i])
+        });
+        assert_eq!(f.total, 5);
+        assert_eq!(f.ready, 1);
+        assert_eq!(f.left_pct, Some(80.0));
+        assert_eq!(f.next_reset, Some(500));
     }
 }
 
@@ -4004,6 +4090,18 @@ mod tests {
         assert_eq!(click_item_index(0, 7, 5, &real), 0, "its account line");
         assert_eq!(click_item_index(0, 8, 5, &real), 1);
         assert_eq!(click_item_index(0, 9, 5, &real), 2, "second group starts");
+        let with_detail = [4u16, 2, 4, 1];
+        assert_eq!(
+            click_item_index(0, 8, 5, &with_detail),
+            0,
+            "first note line"
+        );
+        assert_eq!(click_item_index(0, 10, 5, &with_detail), 1, "next row note");
+        assert_eq!(
+            click_item_index(0, 11, 5, &with_detail),
+            2,
+            "next group starts"
+        );
         assert_eq!(click_item_index(0, 12, 5, &real), 2, "still its account");
         assert_eq!(click_item_index(0, 13, 5, &real), 3);
         // Past the end clamps to the last item rather than panicking.
@@ -4365,8 +4463,8 @@ mod tests {
     // An account with no bars is the one thing the dashboard cannot explain by
     // drawing: empty tracks look identical whether the account was never read,
     // could not be read, or has genuinely nothing left. Whatever the reader was
-    // told goes in the trailing column, and it outranks the age caveat - a reading
-    // that failed has no age worth reporting.
+    // told goes in the trailing column. If old figures remain after a failed
+    // read, the same column gives their observation age.
     // The cursor has to be visible without covering the gauges: the bars carry
     // their own background, and that background IS the reading.
     // Starting a new conversation is the point of the screen, so it must be
@@ -4555,8 +4653,19 @@ mod tests {
         );
         assert_eq!(
             trailing_note(&u(Some("endpoint busy"), Some(now - 3 * 3600)), false),
-            "endpoint busy",
-            "the reason outranks the age"
+            "endpoint busy · as of 3h",
+            "a failed refresh needs its reason and the age of retained figures"
+        );
+        for reason in ["login expired", "endpoint busy", "network offline"] {
+            assert_eq!(
+                trailing_note(&u(Some(reason), Some(now - 11 * 3600)), false),
+                format!("{reason} · as of 11h")
+            );
+        }
+        assert_eq!(
+            trailing_note(&u(Some("endpoint busy"), Some(now - 60)), false),
+            "endpoint busy · as of 1m",
+            "even a recent retained reading is older than the failed refresh"
         );
         assert_eq!(
             trailing_note(&u(None, Some(now - 2 * 3600)), false),
@@ -4577,6 +4686,42 @@ mod tests {
         );
         // A live number has nothing to disclose, in flight or not.
         assert_eq!(trailing_note(&u(None, None), true), "");
+    }
+
+    #[test]
+    fn failed_read_note_wraps_below_gauges_when_the_row_is_narrow() {
+        let note = "login expired · renewal deferred to native session · as of 11h";
+        for width in [144usize, 80] {
+            let mut top = vec![Span::raw(format!(
+                "{}5h [93%] resets Fri9:37am  7d [30%] resets Fri9:37am",
+                " ".repeat(if width == 144 { 78 } else { 15 })
+            ))];
+            let original = top[0].content.to_string();
+            let detail = place_quota_note(&mut top, note, width);
+            assert_eq!(
+                top[0].content, original,
+                "gauges must remain on the account line"
+            );
+            assert!(!detail.is_empty(), "age would be clipped at width {width}");
+            let displayed = detail
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                displayed.join(" ").split_whitespace().collect::<Vec<_>>(),
+                note.split_whitespace().collect::<Vec<_>>()
+            );
+            assert!(detail.iter().all(|line| line.width() <= width - 2));
+        }
+
+        let mut wide = vec![Span::raw("5h [93%]  7d [30%]")];
+        assert!(place_quota_note(&mut wide, note, 200).is_empty());
+        assert!(wide.iter().any(|span| span.content.contains(note)));
     }
 
     #[test]

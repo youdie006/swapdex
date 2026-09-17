@@ -283,6 +283,9 @@ fn slot_only_quota_json_reports_expired_without_oauth_or_a_credential_write() {
     let value = fixture.quota();
 
     fixture.assert_expired_read_was_read_only(&value, &credential_before);
+    let detail = fixture.row(&value)["detail"].as_str().unwrap();
+    assert!(detail.contains("slot access expired"), "{detail}");
+    assert!(!detail.contains("renewal deferred"), "{detail}");
 }
 
 #[test]
@@ -338,8 +341,16 @@ fn an_expired_slot_owned_by_native_claude_is_still_only_reported() {
     assert!(
         row["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("expired")),
+            .is_some_and(|detail| detail.contains("expired")
+                && detail.contains("renewal deferred")
+                && detail.contains("native session")),
         "expired state was hidden: {row}"
+    );
+    let human = fixture.human_quota();
+    assert!(human.status.success(), "{human:?}");
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("renewal deferred to native session"),
+        "native ownership missing from human quota: {human:?}"
     );
     assert_eq!(fixture.calls("oauth-calls"), 0, "quota invoked OAuth");
     assert_eq!(
