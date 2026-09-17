@@ -42,6 +42,16 @@ from an explicit config directory, including the identity path and Keychain
 service. Native storage and session configuration are separate concerns;
 launch routing must preserve native session history and configuration.
 
+Descriptor writers serialize on a private per-slot metadata lock and retain
+the copied slot's native refresh locks to coordinate with renewal of that
+unbound slot. They do
+not acquire the chosen source's refresh locks: selecting that source performs
+no credential writes or OAuth exchange and remains possible while its native
+client is renewing. Repeated identity and exact generation reads guard the
+initial association; subsequent generations remain with that source. OAuth
+exchange and credential persistence still require both native refresh locks
+of the effective credential store.
+
 Once authority is established, an obsolete slot copy cannot become eligible
 for renewal merely because its former native process exited. Missing or
 mismatched authority remains an explicit error. New login and logout behavior

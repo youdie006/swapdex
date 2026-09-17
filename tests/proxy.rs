@@ -5198,20 +5198,29 @@ fn a_bound_claude_authority_recovers_401_with_and_without_its_native_holder() {
                 ),
             ],
         );
-        let paths = swapdex::paths::Paths::rooted(root.path());
-        let (_, failed) = swapdex::refresh::keep_alive_sweep(
-            &paths,
-            &[("work".into(), slot.clone())],
-            1_800_000_000_000,
-        );
-        assert!(failed.is_empty(), "{failed:?}");
-        assert!(slot.join(".swapdex-claude-authority.json").is_file());
+        if !holder_alive {
+            let paths = swapdex::paths::Paths::rooted(root.path());
+            let (_, failed) = swapdex::refresh::keep_alive_sweep(
+                &paths,
+                &[("work".into(), slot.clone())],
+                1_800_000_000_000,
+            );
+            assert!(failed.is_empty(), "{failed:?}");
+            assert!(slot.join(".swapdex-claude-authority.json").is_file());
+        }
         let _holder = if holder_alive {
             Some(holder)
         } else {
             holder.stop();
             None
         };
+        let native_locks = holder_alive.then(|| {
+            let custom = native.join(".oauth_refresh.lock");
+            let legacy = root.path().join(".claude.lock");
+            std::fs::create_dir(&custom).unwrap();
+            std::fs::create_dir(&legacy).unwrap();
+            (custom, legacy)
+        });
         let curl = fake_oauth_curl(
             root.path(),
             r#"{"access_token":"AT-NEW","refresh_token":"RT-NEW","expires_in":3600}"#,
@@ -5244,6 +5253,18 @@ fn a_bound_claude_authority_recovers_401_with_and_without_its_native_holder() {
             ],
         );
         let proxy = ReapedChild::new(proxy);
+        assert!(
+            slot.join(".swapdex-claude-authority.json").is_file(),
+            "startup must reconcile before the first request or next native launch"
+        );
+        if let Some((custom, legacy)) = native_locks {
+            assert!(
+                custom.is_dir() && legacy.is_dir(),
+                "association touched native locks"
+            );
+            std::fs::remove_dir(custom).unwrap();
+            std::fs::remove_dir(legacy).unwrap();
+        }
         assert_eq!(
             post_through_status(port, "{}"),
             200,

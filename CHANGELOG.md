@@ -13,7 +13,9 @@ All notable changes to swapdex are documented here. This project follows
   versions and ambiguous holders retain the conservative guard.
 - **Keep a copied slot tied to its current authentication source.** When one
   live native store and a slot prove the same account, organization and refresh
-  generation, Swapdex records that store as their credential authority. The
+  generation, Swapdex records that store as their credential authority before
+  proxy startup is announced, including while native refresh locks are held,
+  and rechecks it on scheduled sweeps. The
   binding survives process exit; proxy requests, quota reads and new managed
   launches continue using it. Native launches keep their session configuration
   while sharing authentication. Changed identities and independent logins are

@@ -68,6 +68,14 @@ has a usable deadline.
   organization, and exact refresh-token generation. The private descriptor
   pins the storage root, identity path, and bare/hashed Keychain selection.
   The selected source remains authoritative after its native process exits.
+  Initial association happens before proxy readiness is announced, so a new
+  managed launch need not wait for the first half-hour keep-alive sweep. This
+  startup step performs no OAuth exchange.
+  Descriptor writers serialize on a private per-slot metadata lock and retain
+  the copied slot's refresh locks to coordinate with slot renewal. They do not
+  acquire the chosen source's locks. A native source
+  renewal in progress therefore does not prevent association; OAuth exchange
+  and credential persistence still require the effective store's native locks.
 - Proxy serving, quota reads, strict slot capture, renewal, and managed
   launches follow that descriptor. Ordinary launches keep their session config;
   explicit native authentication updates the designated login source. Logout
@@ -92,19 +100,20 @@ real OAuth exchange was needed for the implementation checks.
 | Check | Result |
 | --- | --- |
 | Native directory locking | 12 focused tests, including stale locks, fresh heartbeat, successor identity, nonempty directories and future timestamps |
-| Durable authority | 9 focused tests, including logout/re-login, separate generations, identity changes, process exit, write source and launch environment |
+| Durable authority | 14 focused tests, including logout/re-login, separate generations, identity changes, process exit, write source, launch environment, concurrent writers and held source/slot locks |
 | Proxy regression | A linked bearer initially returned HTTP 401 without renewal; after the fix, native-alive and native-exited cases each exchange once and return success |
+| Startup association | Requiring the authority record before proxy readiness first failed, then passed after moving initial reconciliation ahead of listener readiness. A held native source lock initially prevented association; retaining only the slot-side native lock fixed it. No startup OAuth exchange is needed |
 | Missing-identity holder | Before the fix it spent the native holder's generation; after the fix it returns `InUse` with zero OAuth calls |
 | Native version gate | Unknown native sources cannot create authority; verified standalone and npm native installations are recognized |
 | Stock WSL Claude | 2.1.271, 2.1.272, 2.1.273, 2.1.274 each survived two consecutive synthetic renewals in one process |
 | Stock M3 Claude | 2.1.274 survived two consecutive synthetic file-store renewals in one process |
 | Generated launcher | Isolated executable test preserves session home, auth source and literal argv; logged-out inference and a dangling authority marker fail closed |
 | General behavior | First-use foreground scenarios, installed-launcher A-B-A routing and streaming checks passed with synthetic accounts and loopback providers |
-| Review | Read-only review found and drove fixes for crash recovery, missing-identity holders, unsupported binding and authentication after logout/leading options |
+| Review | Read-only review found and drove fixes for crash recovery, missing-identity holders, unsupported binding, authentication after logout/leading options and startup source-lock contention |
 
 Release-candidate source checks at version 0.165.8:
 
-- `cargo test --all --locked -q`: **1,268 passed, 0 failed, 2 ignored** across
+- `cargo test --all --locked -q`: **1,273 passed, 0 failed, 2 ignored** across
   30 test targets, including documentation tests.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed.
 - `cargo fmt --all -- --check` and `git diff --check`: passed. Generated man-page
@@ -116,6 +125,10 @@ Release-candidate source checks at version 0.165.8:
 - `scripts/verify-first-use.py --proxy-mode foreground`,
   `scripts/verify-installed-account-routing.py`, and
   `scripts/verify-streaming.py`: passed against the built candidate.
+- After the startup association and contention changes, the full 1,273-test
+  suite, clippy,
+  formatting/diff checks, first-use foreground and installed-routing fixtures
+  passed again.
 
 The stock-client fixture uses a fake curl OAuth exchange, loopback SSE model
 responses and blocked external HTTPS. Every successful run records the same

@@ -1245,6 +1245,20 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
                 s.list()
                     .into_iter()
                     .map(|r| {
+                        // A new managed launch can follow this startup immediately.
+                        // Establish proven shared authority before announcing the
+                        // proxy instead of leaving a copied slot eligible until
+                        // the first half-hour keep-alive sweep. No OAuth is sent.
+                        if opts.tool == "claude-code" {
+                            if let Err(error) =
+                                crate::claude_authority::reconcile_live(paths, &r.config_dir)
+                            {
+                                eprintln!(
+                                    "swapdex: could not reconcile Claude login for '{}': {error}",
+                                    r.name
+                                );
+                            }
+                        }
                         if opts.tool == "codex" {
                             codex::slot_auth(&r.config_dir)
                                 .map(|_| ())

@@ -2,10 +2,66 @@
 
 use crate::{live_login::LoginIdentity, paths::Paths};
 use anyhow::{bail, Context};
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 pub(crate) const RECORD: &str = ".swapdex-claude-authority.json";
+const ASSOCIATION_LOCK: &str = ".swapdex-claude-authority.lock";
+
+/// Serializes only the short descriptor association. The live native source's
+/// refresh remains independent: source credentials are checked, never written.
+struct AssociationLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl AssociationLock {
+    fn acquire(slot: &Path) -> anyhow::Result<Self> {
+        let path = slot.join(ASSOCIATION_LOCK);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+            .with_context(|| {
+                format!("open Claude authority association lock: {}", path.display())
+            })?;
+        let guard = Self { file, path };
+        guard.ensure_owned()?;
+        guard
+            .file
+            .lock_exclusive()
+            .context("lock Claude authority association")?;
+        guard.ensure_owned()?;
+        Ok(guard)
+    }
+
+    fn ensure_owned(&self) -> anyhow::Result<()> {
+        let opened = self.file.metadata()?;
+        let named = std::fs::symlink_metadata(&self.path)?;
+        if !opened.is_file()
+            || !named.file_type().is_file()
+            || opened.uid() != unsafe { libc::geteuid() }
+            || opened.mode() & 0o777 != 0o600
+            || opened.nlink() != 1
+            || (opened.dev(), opened.ino()) != (named.dev(), named.ino())
+        {
+            bail!("Claude authority association lock is not a private owned regular file");
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AssociationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Binding {
@@ -319,12 +375,20 @@ pub(crate) fn bind_to_native(
     if slot_real == native_real {
         return Ok(false);
     }
-    // Every participant taking two storage roots orders them identically.
-    // Each root itself takes the native new-then-legacy lock pair.
-    let mut roots = [slot_real, native_real];
-    roots.sort();
-    let first = crate::claude_refresh_lock::NativeRefreshLock::try_acquire(&roots[0])?;
-    let second = crate::claude_refresh_lock::NativeRefreshLock::try_acquire(&roots[1])?;
+    let association = AssociationLock::acquire(slot)?;
+    if record(slot)?.is_some() {
+        resolve(paths, slot)?;
+        return Ok(false);
+    }
+    if std::fs::canonicalize(slot)? != slot_real
+        || std::fs::canonicalize(&native.source_dir)? != native_real
+    {
+        bail!("Claude credential authority path changed during association");
+    }
+    // An unbound Swapdex refresh can still rotate the slot's token. Take its
+    // native-compatible pair, while leaving the live SOURCE pair available to
+    // Claude's own renewal. The metadata flock serializes bind callers.
+    let slot_refresh = crate::claude_refresh_lock::NativeRefreshLock::try_acquire(&slot_real)?;
     let slot_identity = regular(&slot.join(".claude.json"))?;
     let source_identity = regular(&native.identity_path)?;
     let Some(LoginIdentity::Claude {
@@ -376,8 +440,8 @@ pub(crate) fn bind_to_native(
         organization_uuid,
         linked_refresh_fingerprint: shared,
     };
-    first.ensure_owned()?;
-    second.ensure_owned()?;
+    slot_refresh.ensure_owned()?;
+    association.ensure_owned()?;
     crate::atomic::write_secret(&slot.join(RECORD), &serde_json::to_vec(&binding)?)?;
     Ok(true)
 }
@@ -452,6 +516,116 @@ mod tests {
         assert_eq!(authority.storage_dir, f.native.source_dir);
         assert_eq!(authority.identity_path, f.native.identity_path);
         assert_eq!(authority.securestorage_key, None, "bare Keychain service");
+    }
+
+    #[test]
+    fn association_does_not_take_the_native_source_refresh_lock() {
+        use std::os::unix::fs::MetadataExt;
+
+        let f = Fixture::new();
+        let held = crate::claude_refresh_lock::NativeRefreshLock::try_acquire(&f.native.source_dir)
+            .unwrap();
+        let custom = f.native.source_dir.join(".oauth_refresh.lock");
+        let legacy = f.root.path().join(".claude.lock");
+        let before = [
+            std::fs::metadata(&custom).unwrap(),
+            std::fs::metadata(&legacy).unwrap(),
+        ];
+        let old_slot = std::fs::read(f.slot.join(".credentials.json")).unwrap();
+        let old_source = std::fs::read(f.native.source_dir.join(".credentials.json")).unwrap();
+
+        assert!(bind_to_native(&f.paths, &f.slot, &f.native).unwrap());
+        held.ensure_owned().unwrap();
+        for (path, prior) in [custom, legacy].into_iter().zip(before) {
+            let current = std::fs::metadata(path).unwrap();
+            assert_eq!((current.dev(), current.ino()), (prior.dev(), prior.ino()));
+        }
+        assert_eq!(
+            std::fs::read(f.slot.join(".credentials.json")).unwrap(),
+            old_slot
+        );
+        assert_eq!(
+            std::fs::read(f.native.source_dir.join(".credentials.json")).unwrap(),
+            old_source
+        );
+        credential(&f.native.source_dir, "rotated-while-native-is-open");
+        assert_eq!(
+            resolve(&f.paths, &f.slot).unwrap().storage_dir,
+            f.native.source_dir
+        );
+    }
+
+    #[test]
+    fn association_refuses_a_slot_under_refresh() {
+        let f = Fixture::new();
+        let held = crate::claude_refresh_lock::NativeRefreshLock::try_acquire(&f.slot).unwrap();
+        let old_slot = std::fs::read(f.slot.join(".credentials.json")).unwrap();
+        let old_source = std::fs::read(f.native.source_dir.join(".credentials.json")).unwrap();
+
+        assert!(bind_to_native(&f.paths, &f.slot, &f.native).is_err());
+        held.ensure_owned().unwrap();
+        assert!(!f.slot.join(RECORD).exists());
+        assert_eq!(
+            std::fs::read(f.slot.join(".credentials.json")).unwrap(),
+            old_slot
+        );
+        assert_eq!(
+            std::fs::read(f.native.source_dir.join(".credentials.json")).unwrap(),
+            old_source
+        );
+    }
+
+    #[test]
+    fn concurrent_associations_create_one_authority_record() {
+        let f = Fixture::new();
+        let callers = 8;
+        let barrier = std::sync::Barrier::new(callers);
+        let wins = std::thread::scope(|scope| {
+            let attempts: Vec<_> = (0..callers)
+                .map(|_| {
+                    let barrier = &barrier;
+                    let paths = &f.paths;
+                    let slot = &f.slot;
+                    let native = &f.native;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        bind_to_native(paths, slot, native).unwrap()
+                    })
+                })
+                .collect();
+            attempts
+                .into_iter()
+                .map(|attempt| usize::from(attempt.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(wins, 1);
+        assert_eq!(
+            resolve(&f.paths, &f.slot).unwrap().storage_dir,
+            f.native.source_dir
+        );
+    }
+
+    #[test]
+    fn a_symlinked_association_lock_is_refused() {
+        let f = Fixture::new();
+        let target = f.root.path().join("unrelated-file");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, f.slot.join(".swapdex-claude-authority.lock")).unwrap();
+        assert!(bind_to_native(&f.paths, &f.slot, &f.native).is_err());
+        assert!(!f.slot.join(RECORD).exists());
+        assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn an_overly_permissive_association_lock_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new();
+        let lock = f.slot.join(".swapdex-claude-authority.lock");
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(bind_to_native(&f.paths, &f.slot, &f.native).is_err());
+        assert!(!f.slot.join(RECORD).exists());
     }
 
     #[test]
