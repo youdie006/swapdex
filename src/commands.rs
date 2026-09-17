@@ -6,7 +6,7 @@
 use crate::adapters::{self, Account, AuthTool};
 use crate::paths::Paths;
 use crate::store::Store;
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::process::Command;
 
@@ -6390,6 +6390,82 @@ pub fn adopt_slot(
     Ok(0)
 }
 
+/// An absent credential is the only unbound slot that may skip association.
+/// On macOS the Keychain is authoritative; an old credential file cannot prove
+/// the item exists. Query only the exact service's attributes, never its secret.
+fn claude_slot_credential_absent(paths: &Paths, dir: &std::path::Path) -> Result<bool> {
+    if cfg!(target_os = "macos") && !paths.sandboxed() && std::env::var_os("SWAPDEX_ROOT").is_none()
+    {
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        let service = crate::adapters::claude::slot_service(dir);
+        let mut check = std::process::Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", &service])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("check selected Claude Keychain service")?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = check.try_wait()? {
+                return match status.code() {
+                    Some(44) => Ok(true),
+                    Some(0) => Ok(false),
+                    _ => bail!("cannot verify whether the selected Claude Keychain item exists"),
+                };
+            }
+            if Instant::now() >= deadline {
+                check.kill().ok();
+                check.wait().ok();
+                bail!("timed out checking the selected Claude Keychain item");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    match std::fs::symlink_metadata(dir.join(".credentials.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error).context("inspect selected Claude credential"),
+        Ok(_) => Ok(false),
+    }
+}
+
+/// Guard a managed Claude launch before exec. A bound descriptor always wins;
+/// otherwise a present slot login must be associated with a matching live
+/// native store before either inference or a new explicit authentication.
+fn prepare_claude_launch(
+    paths: &Paths,
+    dir: &std::path::Path,
+    authentication: bool,
+    known_slot: bool,
+) -> Result<Option<crate::claude_authority::Authority>> {
+    let marker = dir.join(crate::claude_authority::RECORD);
+    let bound = match std::fs::symlink_metadata(&marker) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspect Claude authority marker"),
+    };
+    let registered = if known_slot || bound {
+        true
+    } else {
+        let slots = crate::slots::Slots::open_for(paths, "claude-code")?;
+        slots.default_dir().as_deref() == Some(dir)
+            || slots.list().iter().any(|slot| slot.config_dir == dir)
+    };
+    if !bound && !registered {
+        return Ok(None); // caller-chosen, unregistered CLAUDE_CONFIG_DIR
+    }
+    if !bound && !claude_slot_credential_absent(paths, dir)? {
+        crate::claude_authority::reconcile_live(paths, dir)?;
+    }
+    let authority = if authentication {
+        crate::claude_authority::resolve_for_authentication(paths, dir)?
+    } else {
+        crate::claude_authority::resolve(paths, dir)?
+    };
+    Ok(Some(authority))
+}
+
 /// Launch Claude in `<name>`'s permanent slot (create the slot on first use).
 /// swapdex never writes the credential here - the tool's own login does, into
 /// the slot's own `CLAUDE_CONFIG_DIR`. `exec` replaces this process, so this
@@ -6451,11 +6527,8 @@ pub fn run_account(
     configure_managed_tool_home(&mut cmd, tool, home_var, &rec.config_dir);
     if tool == "claude-code" {
         let authentication = crate::shim::claude_authentication_command(args);
-        let authority = if authentication {
-            crate::claude_authority::resolve_for_authentication(paths, &rec.config_dir)?
-        } else {
-            crate::claude_authority::resolve(paths, &rec.config_dir)?
-        };
+        let authority = prepare_claude_launch(paths, &rec.config_dir, authentication, true)?
+            .context("selected Claude account has no launch authority")?;
         authority.configure_launch(paths, &mut cmd, authentication)?;
     }
     // This is the path a sign-in takes, and signing in must reach the vendor
@@ -6471,7 +6544,7 @@ pub fn run_account(
     Err(anyhow::anyhow!("failed to launch {bin}: {err}"))
 }
 
-/// Called by the generated shim only for a slot with a durable authority.
+/// Called by the generated shim for every nonempty Claude config directory.
 /// All text passed to the native executable remains individual argv elements.
 pub fn launch_claude_authority(
     paths: &Paths,
@@ -6485,14 +6558,11 @@ pub fn launch_claude_authority(
             anyhow::anyhow!("a linked Claude launch requires its session config directory")
         })?;
     let authentication = crate::shim::claude_authentication_command(args);
-    let authority = if authentication {
-        crate::claude_authority::resolve_for_authentication(paths, &dir)?
-    } else {
-        crate::claude_authority::resolve(paths, &dir)?
-    };
     let mut cmd = Command::new(native);
     cmd.args(args);
-    authority.configure_launch(paths, &mut cmd, authentication)?;
+    if let Some(authority) = prepare_claude_launch(paths, &dir, authentication, false)? {
+        authority.configure_launch(paths, &mut cmd, authentication)?;
+    }
     Err(anyhow::anyhow!("could not launch Claude: {}", cmd.exec()))
 }
 

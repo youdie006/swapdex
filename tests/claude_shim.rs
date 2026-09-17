@@ -7,6 +7,17 @@ use swapdex::shim::shim_script;
 
 static FIXTURE_EXEC_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(target_os = "linux")]
+struct ReapedNative(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl Drop for ReapedNative {
+    fn drop(&mut self) {
+        self.0.kill().ok();
+        self.0.wait().ok();
+    }
+}
+
 #[test]
 fn linked_native_launches_and_logged_out_auth_keep_the_designated_store() {
     use sha2::{Digest, Sha256};
@@ -109,6 +120,237 @@ fn linked_native_launches_and_logged_out_auth_keep_the_designated_store() {
     assert!(invalid.stdout.is_empty());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
+    let _exec_guard = fixture_exec_lock();
+    for direct_run in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join(".local/share/swapdex");
+        let slot = store.join("slots/shared");
+        let source = root.path().join(".claude");
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let identity =
+            br#"{"oauthAccount":{"accountUuid":"same-account","organizationUuid":"same-org"}}"#;
+        let credential = br#"{"claudeAiOauth":{"accessToken":"AT-OLD","refreshToken":"RT-SHARED","expiresAt":1}}"#;
+        std::fs::write(slot.join(".claude.json"), identity).unwrap();
+        std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+        std::fs::write(slot.join(".credentials.json"), credential).unwrap();
+        std::fs::write(source.join(".credentials.json"), credential).unwrap();
+        std::fs::write(
+            store.join("slots.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "name":"shared", "id":"shared", "config_dir":slot,
+                "adopted":false, "tool":"claude-code"
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(store.join("active-claude"), slot.to_str().unwrap()).unwrap();
+        std::fs::write(store.join("serving-claude"), "off").unwrap();
+
+        let sleeping_claude = root.path().join("claude");
+        std::os::unix::fs::symlink("/bin/sleep", &sleeping_claude).unwrap();
+        let holder = ReapedNative(
+            Command::new(&sleeping_claude)
+                .arg("120")
+                .env_clear()
+                .env("HOME", root.path())
+                .env("SWAPDEX_TEST_NATIVE_REFRESH_LOCKS", "1")
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::fs::read_to_string(format!("/proc/{}/comm", holder.0.id()))
+            .unwrap_or_default()
+            .trim()
+            != "claude"
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let native = root.path().join("native tool");
+        std::fs::write(
+            &native,
+            "#!/bin/sh\nprintf 'CONFIG=%s\\nSECURE=%s\\n' \"${CLAUDE_CONFIG_DIR-unset}\" \"${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}\" > \"$NATIVE_EXEC_MARKER\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fake_bin = root.path().join("fake-bin");
+        std::fs::create_dir(&fake_bin).unwrap();
+        std::os::unix::fs::symlink(&native, fake_bin.join("claude")).unwrap();
+        let shim = root.path().join("shim");
+        std::fs::write(
+            &shim,
+            shim_script(
+                &store.join("active-claude"),
+                &native,
+                Path::new(env!("CARGO_BIN_EXE_swapdex")),
+            ),
+        )
+        .unwrap();
+
+        let real_slot = std::fs::canonicalize(&slot).unwrap();
+        let custom_lock = real_slot.join(".oauth_refresh.lock");
+        let mut legacy_name = real_slot.as_os_str().to_os_string();
+        legacy_name.push(".lock");
+        let legacy_lock = PathBuf::from(legacy_name);
+        std::fs::create_dir(&custom_lock).unwrap();
+        std::fs::create_dir(&legacy_lock).unwrap();
+        let marker = root.path().join("native-executed");
+        let launch = |authentication: bool| {
+            let mut command = if direct_run {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_swapdex"));
+                command.args(["run", "shared"]);
+                if authentication {
+                    command.args(["--", "auth", "login"]);
+                }
+                command
+            } else {
+                let mut command = Command::new("sh");
+                command.arg(&shim);
+                if authentication {
+                    command.args(["auth", "login"]);
+                }
+                command
+            };
+            command
+                .env("HOME", root.path())
+                .env("SWAPDEX_ROOT", root.path())
+                .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+                .env("NATIVE_EXEC_MARKER", &marker)
+                .env_remove("CLAUDE_CONFIG_DIR")
+                .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+                .env_remove("ANTHROPIC_BASE_URL")
+                .output()
+                .unwrap()
+        };
+        let blocked = launch(false);
+        assert!(
+            !blocked.status.success(),
+            "{} launch ran under the slot refresh lock",
+            if direct_run { "run" } else { "shim" }
+        );
+        assert!(
+            !marker.exists(),
+            "native executed under the slot refresh lock"
+        );
+        assert!(!slot.join(".swapdex-claude-authority.json").exists());
+        assert!(custom_lock.is_dir() && legacy_lock.is_dir());
+
+        std::fs::remove_dir(&custom_lock).unwrap();
+        std::fs::remove_dir(&legacy_lock).unwrap();
+        let launched = launch(false);
+        assert!(
+            launched.status.success(),
+            "{}",
+            String::from_utf8_lossy(&launched.stderr)
+        );
+        let native_env = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            native_env.contains(&format!("CONFIG={}\nSECURE=\n", slot.display())),
+            "{native_env}"
+        );
+        let bound: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(slot.join(".swapdex-claude-authority.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bound["storage_dir"], source.to_str().unwrap());
+        assert_eq!(
+            std::fs::read(slot.join(".credentials.json")).unwrap(),
+            credential
+        );
+        assert_eq!(
+            std::fs::read(source.join(".credentials.json")).unwrap(),
+            credential
+        );
+
+        // A fresh explicit auth on the same unbound copied login must first
+        // rediscover its designated source, then launch authentication there.
+        std::fs::remove_file(slot.join(".swapdex-claude-authority.json")).unwrap();
+        std::fs::remove_file(&marker).unwrap();
+        let auth = launch(true);
+        assert!(
+            auth.status.success(),
+            "{}",
+            String::from_utf8_lossy(&auth.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "CONFIG=unset\nSECURE=\n"
+        );
+        assert!(slot.join(".swapdex-claude-authority.json").is_file());
+    }
+}
+
+#[test]
+fn unregistered_custom_claude_home_keeps_its_native_launch() {
+    let _exec_guard = fixture_exec_lock();
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    let custom = root.path().join("custom-claude-home");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::create_dir(&custom).unwrap();
+    std::fs::write(store.join("serving-claude"), "off").unwrap();
+    let native = root.path().join("native tool");
+    std::fs::write(
+        &native,
+        "#!/bin/sh\nprintf 'CONFIG=%s\\nBASE=%s\\n' \"$CLAUDE_CONFIG_DIR\" \"$ANTHROPIC_BASE_URL\" > \"$NATIVE_EXEC_MARKER\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim = root.path().join("shim");
+    std::fs::write(
+        &shim,
+        shim_script(
+            &store.join("active-claude"),
+            &native,
+            Path::new(env!("CARGO_BIN_EXE_swapdex")),
+        ),
+    )
+    .unwrap();
+    let marker = root.path().join("native-executed");
+    let launch = || {
+        Command::new("sh")
+            .arg(&shim)
+            .env("HOME", root.path())
+            .env("SWAPDEX_ROOT", root.path())
+            .env("CLAUDE_CONFIG_DIR", &custom)
+            .env("ANTHROPIC_BASE_URL", "https://custom.example.test")
+            .env("NATIVE_EXEC_MARKER", &marker)
+            .output()
+            .unwrap()
+    };
+    let direct = launch();
+    assert!(
+        direct.status.success(),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        format!(
+            "CONFIG={}\nBASE=https://custom.example.test\n",
+            custom.display()
+        )
+    );
+
+    std::fs::remove_file(&marker).unwrap();
+    std::os::unix::fs::symlink(
+        "missing-authority-record",
+        custom.join(".swapdex-claude-authority.json"),
+    )
+    .unwrap();
+    let invalid = launch();
+    assert!(!invalid.status.success());
+    assert!(
+        !marker.exists(),
+        "invalid descriptor must stop native execution"
+    );
+}
+
 fn fixture_exec_lock() -> MutexGuard<'static, ()> {
     FIXTURE_EXEC_LOCK
         .lock()
@@ -119,6 +361,7 @@ struct LaunchAttempt {
     status: i32,
     native: String,
     calls: String,
+    launch_calls: String,
     stderr: String,
 }
 
@@ -152,9 +395,18 @@ fn launch_attempt(
     std::fs::write(
         &sx,
         r#"#!/bin/sh
-printf '%s\n' "$*" >> "$SX_CALLS"
 case "$1" in
-  proxy) printf '%s' "$SX_PROXY_STDOUT"; exit "$SX_PROXY_STATUS" ;;
+  proxy) printf '%s\n' "$*" >> "$SX_CALLS"; printf '%s' "$SX_PROXY_STDOUT"; exit "$SX_PROXY_STATUS" ;;
+  claude-launch)
+    printf '%s\n' "$*" >> "$SX_LAUNCH_CALLS"
+    shift
+    [ "$1" = --native ] || exit 2
+    native=$2
+    shift 2
+    [ "$1" = -- ] || exit 2
+    shift
+    exec "$native" "$@" ;;
+  *) exit 2 ;;
 esac
 "#,
     )
@@ -177,6 +429,7 @@ esac
         .env_remove("CLAUDE_CODE_USE_FOUNDRY")
         .env_remove("CLAUDE_CODE_USE_ANTHROPIC_AWS")
         .env("SX_CALLS", root.path().join("calls"))
+        .env("SX_LAUNCH_CALLS", root.path().join("launch-calls"))
         .env("SX_PROXY_STDOUT", proxy_stdout)
         .env("SX_PROXY_STATUS", proxy_status.to_string())
         .env("NATIVE_CALL", &native_call);
@@ -188,6 +441,7 @@ esac
         status: output.status.code().unwrap_or(-1),
         native: std::fs::read_to_string(native_call).unwrap_or_default(),
         calls: std::fs::read_to_string(root.path().join("calls")).unwrap_or_default(),
+        launch_calls: std::fs::read_to_string(root.path().join("launch-calls")).unwrap_or_default(),
         stderr: String::from_utf8(output.stderr).unwrap(),
     }
 }
@@ -243,6 +497,7 @@ fn valid_port_boundaries_route_claude_through_the_proxy() {
         );
         assert!(got.native.contains("home=") && got.native.contains("default home"));
         assert!(got.native.contains("arg=chat"));
+        assert!(got.launch_calls.contains("claude-launch"));
     }
 }
 

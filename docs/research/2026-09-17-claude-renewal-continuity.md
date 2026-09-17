@@ -76,6 +76,11 @@ has a usable deadline.
   acquire the chosen source's locks. A native source
   renewal in progress therefore does not prevent association; OAuth exchange
   and credential persistence still require the effective store's native locks.
+  When a proven association is blocked by the copied slot's lock, startup
+  refuses before announcing readiness. Managed launches also reconcile
+  readable unbound slots and propagate association failures. Fresh empty slots
+  retain native first-use login, and unrelated custom config directories retain
+  their existing routing.
 - Proxy serving, quota reads, strict slot capture, renewal, and managed
   launches follow that descriptor. Ordinary launches keep their session config;
   explicit native authentication updates the designated login source. Logout
@@ -107,13 +112,13 @@ real OAuth exchange was needed for the implementation checks.
 | Native version gate | Unknown native sources cannot create authority; verified standalone and npm native installations are recognized |
 | Stock WSL Claude | 2.1.271, 2.1.272, 2.1.273, 2.1.274 each survived two consecutive synthetic renewals in one process |
 | Stock M3 Claude | 2.1.274 survived two consecutive synthetic file-store renewals in one process |
-| Generated launcher | Isolated executable test preserves session home, auth source and literal argv; logged-out inference and a dangling authority marker fail closed |
+| Generated launcher | Isolated executable tests preserve session home, auth source and literal argv. Unbound shim/direct launches refuse held slot locks, then bind after release; empty first-use, explicit auth and external custom config remain usable. Logged-out inference and dangling descriptors fail closed |
 | General behavior | First-use foreground scenarios, installed-launcher A-B-A routing and streaming checks passed with synthetic accounts and loopback providers |
 | Review | Read-only review found and drove fixes for crash recovery, missing-identity holders, unsupported binding, authentication after logout/leading options and startup source-lock contention |
 
 Release-candidate source checks at version 0.165.8:
 
-- `cargo test --all --locked -q`: **1,273 passed, 0 failed, 2 ignored** across
+- `cargo test --all --locked -q`: **1,276 passed, 0 failed, 2 ignored** across
   30 test targets, including documentation tests.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed.
 - `cargo fmt --all -- --check` and `git diff --check`: passed. Generated man-page
@@ -125,7 +130,7 @@ Release-candidate source checks at version 0.165.8:
 - `scripts/verify-first-use.py --proxy-mode foreground`,
   `scripts/verify-installed-account-routing.py`, and
   `scripts/verify-streaming.py`: passed against the built candidate.
-- After the startup association and contention changes, the full 1,273-test
+- After the startup association, contention and launch-guard changes, the full 1,276-test
   suite, clippy,
   formatting/diff checks, first-use foreground and installed-routing fixtures
   passed again.

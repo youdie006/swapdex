@@ -5174,6 +5174,71 @@ fn codex_401_retries_a_same_account_replacement_without_oauth() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn claude_startup_refuses_an_unresolved_association_and_recovers_after_unlock() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-OLD", true);
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    let credentials = std::fs::read(slot.join(".credentials.json")).unwrap();
+    std::fs::write(native.join(".credentials.json"), &credentials).unwrap();
+    let _holder = spawn_native_cli(
+        root.path(),
+        "claude",
+        &[
+            ("HOME", root.path()),
+            (
+                "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS",
+                std::path::Path::new("1"),
+            ),
+        ],
+    );
+    let held = slot.join(".oauth_refresh.lock");
+    std::fs::create_dir(&held).unwrap();
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", "http://127.0.0.1:9")
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let exited = (0..40).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        matches!(child.try_wait(), Ok(Some(_)))
+    });
+    if !exited {
+        child.kill().ok();
+        child.wait().ok();
+        panic!("startup announced readiness while the copied login remained unbound");
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot reconcile Claude login"));
+    assert!(!store.join("proxy").exists());
+    assert!(!slot.join(".swapdex-claude-authority.json").exists());
+    assert_eq!(
+        std::fs::read(slot.join(".credentials.json")).unwrap(),
+        credentials
+    );
+    assert_eq!(
+        std::fs::read(native.join(".credentials.json")).unwrap(),
+        credentials
+    );
+    std::fs::remove_dir(held).unwrap();
+    let (proxy, _) = start_proxy_with_env(root.path(), "http://127.0.0.1:9", &[], &[]);
+    let proxy = ReapedChild::new(proxy);
+    assert!(slot.join(".swapdex-claude-authority.json").exists());
+    proxy.stop();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_bound_claude_authority_recovers_401_with_and_without_its_native_holder() {
     for holder_alive in [true, false] {
         let root = tempfile::tempdir().unwrap();

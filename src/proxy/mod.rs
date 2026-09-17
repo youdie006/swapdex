@@ -1240,36 +1240,29 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         // only, which meant it could not be asked about Codex at all - so the
         // refusal this note describes had no Codex half, and a Codex proxy with
         // nothing readable did exactly what it warns about.
-        let reads: Vec<_> = crate::slots::Slots::open_for(paths, &opts.tool)
-            .map(|s| {
-                s.list()
-                    .into_iter()
-                    .map(|r| {
-                        // A new managed launch can follow this startup immediately.
-                        // Establish proven shared authority before announcing the
-                        // proxy instead of leaving a copied slot eligible until
-                        // the first half-hour keep-alive sweep. No OAuth is sent.
-                        if opts.tool == "claude-code" {
-                            if let Err(error) =
-                                crate::claude_authority::reconcile_live(paths, &r.config_dir)
-                            {
-                                eprintln!(
-                                    "swapdex: could not reconcile Claude login for '{}': {error}",
-                                    r.name
-                                );
-                            }
-                        }
-                        if opts.tool == "codex" {
-                            codex::slot_auth(&r.config_dir)
-                                .map(|_| ())
-                                .ok_or(creds::TokenUnavailable::NoLogin)
-                        } else {
-                            creds::slot_token_detail_for(paths, &r.config_dir).map(|_| ())
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut reads = Vec::new();
+        if let Ok(slots) = crate::slots::Slots::open_for(paths, &opts.tool) {
+            for record in slots.list() {
+                // A managed launch can immediately follow readiness. A pending
+                // association must stop startup, not authorize the copied store.
+                // Empty/unreadable slots retain the account-aware diagnosis below.
+                if opts.tool == "claude-code"
+                    && crate::adapters::claude::slot_credential(&record.config_dir).is_ok()
+                {
+                    crate::claude_authority::reconcile_live(paths, &record.config_dir)
+                        .with_context(|| {
+                            format!("cannot reconcile Claude login for '{}'; retry after the current login operation finishes", record.name)
+                        })?;
+                }
+                reads.push(if opts.tool == "codex" {
+                    codex::slot_auth(&record.config_dir)
+                        .map(|_| ())
+                        .ok_or(creds::TokenUnavailable::NoLogin)
+                } else {
+                    creds::slot_token_detail_for(paths, &record.config_dir).map(|_| ())
+                });
+            }
+        }
         if let Some(why) = creds::startup_refusal(&reads) {
             return Err(anyhow!("{why}"));
         }

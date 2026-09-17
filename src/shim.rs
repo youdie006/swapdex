@@ -173,7 +173,7 @@ pub fn shim_script(pointer: &Path, real_claude: &Path, swapdex: &Path) -> String
          \t\texport CLAUDE_CONFIG_DIR\n\
          \tfi\n\
          fi\n\
-         if [ -n \"$CLAUDE_CONFIG_DIR\" ] && {{ [ -e \"$CLAUDE_CONFIG_DIR/.swapdex-claude-authority.json\" ] || [ -L \"$CLAUDE_CONFIG_DIR/.swapdex-claude-authority.json\" ]; }}; then\n\
+         if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then\n\
          \texec {sx} claude-launch --native {real} -- \"$@\"\n\
          fi\n\
          exec {real} \"$@\"\n",
