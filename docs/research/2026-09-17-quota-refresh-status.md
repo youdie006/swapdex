@@ -84,3 +84,33 @@ An already-running picker retains the executable it loaded. Applying new
 program code requires reopening that picker once; subsequent usage and login
 changes use the background refresh. Software self-update is separate from
 the stalled-read behavior reproduced here.
+
+## Separate native-session authentication failure
+
+After a fresh slot login, the user clarified that the picker was healthy but
+existing Claude conversations still said `Login expired`. A fresh usage GET
+with the slot credential succeeded. Eight existing native processes all used
+the default Claude home, whose OAuth access and refresh fields were empty and
+whose access deadline was zero. Native `claude auth status --json` reported
+`loggedIn: false` there and `loggedIn: true` in the newly authenticated slot.
+This was a separate native-login failure, not stale dashboard presentation.
+
+The installed Claude 2.1.274 implementation contains a dead-refresh-token path
+that writes that empty-field pattern after an invalid grant. This explains the
+file shape; it does not establish which earlier exchange invalidated the token.
+Its ordinary OAuth refresh check also probes credential-file modification time
+and invalidates the cached login when the file changes.
+
+At 2026-09-17 01:01:58 UTC, the empty default OAuth block was restored from the
+new login only after matching both account and organization identity. The
+operation retained unrelated MCP credentials, saved a mode-600 local backup,
+and checked that neither the source slot nor account-selection pointers changed.
+The repair helper was exercised against synthetic identities, mismatch cases,
+an already-populated destination and an atomic file write before use. Native
+authentication then reported logged in. All eight original native PIDs and
+both existing proxy services remained alive; no model request, OAuth exchange
+or native-session termination was used for the repair.
+
+This was a local installation repair, not an automatic re-login feature in
+0.165.7. Fresh-process authentication was verified; a successful response in
+each already-running user conversation was not inferred from that check.
