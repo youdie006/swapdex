@@ -1354,7 +1354,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swapdex"
-version = "0.165.8"
+version = "0.165.9"
 dependencies = [
  "anyhow",
  "base64",
@@ -1364,6 +1364,7 @@ dependencies = [
  "dirs",
  "fs2",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-util",
  "libc",

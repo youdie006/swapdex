@@ -4,6 +4,25 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.165.9
+
+- **Stop repeated usage requests after a lookup is limited.** A Claude usage
+  HTTP 429 now records a shared retry deadline after one request. The picker,
+  quota commands and proxy measurements honor that deadline, including across
+  concurrent calls and process restarts. Previously, each caller could send
+  four requests within about three seconds and immediately repeat the burst.
+- **Back off when the server supplies no useful wait.** Usage lookups retain
+  `Retry-After` response metadata. Positive delays and HTTP dates can extend
+  the wait up to 24 hours; zero, missing or invalid values use a one-minute
+  fallback that increases to 15 minutes after repeated rejections. Reads
+  during that wait do not extend it, and a non-429 response resets the history.
+- **Keep lookup failures separate from authentication and usage.** Deferred
+  reads retain the last successful figures and their original age. Local
+  coordination failures report that the usage lookup is unavailable instead
+  of claiming the network or login failed. These reads do not renew a login,
+  select another account or send a model request. Provider restrictions can
+  still reject a later lookup; restarting is not a remedy for HTTP 429.
+
 ## 0.165.8
 
 - **Keep supported open Claude sessions renewed.** Background renewal now

@@ -15,6 +15,7 @@ pub mod portable;
 pub mod proc;
 pub mod proxy;
 pub mod quota;
+pub(crate) mod quota_backoff;
 pub mod quota_cache;
 pub mod refresh;
 pub mod refresh_health;
