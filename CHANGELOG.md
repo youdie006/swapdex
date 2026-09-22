@@ -4,6 +4,26 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`doctor` reports a renewal that is standing down.** Renewing a login while
+  a session holds it would retire the token that session is using, so swapdex
+  defers - correctly. But only `ls` said so for Codex and only `quota` said so
+  for Claude, and the screen whose whole job is to answer "is this setup sound"
+  asked neither. Measured on a real machine: `ls` showed "codex renewal
+  deferred - refresh unverified" while `doctor`, same binary and same moment,
+  said "codex ok" about an account that had then gone nine days without a
+  renewal because a long-lived session kept the guard engaged. It is reported
+  as information rather than a fault, because the guard working is not a
+  problem - being unable to see it was.
+- **`doctor` says what actually differs between two builds.** The stale-service
+  check compares build ids and the sentence printed only the version, so one
+  version installed twice rendered "running 0.165.9 while this swapdex is
+  0.165.9" - a sentence that contrasts two values and prints them identically,
+  leaving nothing to act on. It now names a different build of that version.
+  Two installs of one version is the exact shape that has cost this project
+  days before.
+
 ## 0.165.9
 
 - **Stop repeated usage requests after a lookup is limited.** A Claude usage
