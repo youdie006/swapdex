@@ -307,6 +307,56 @@ fn verified_native_codex_ownership_replaces_deferral_without_hiding_expiry_or_re
     );
 }
 
+/// `doctor` is the screen whose whole job is to say whether the setup is sound,
+/// and it never asked whether renewal was being deferred.
+///
+/// Measured on a real machine: `ls` said "codex renewal deferred - refresh
+/// unverified" for the account, while `doctor` on the same binary at the same
+/// moment said "codex ok". The account had then gone nine days without a
+/// renewal because a long-lived session kept the guard engaged, and the health
+/// screen was the one place that could have said so.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_reports_a_codex_renewal_that_is_being_deferred() {
+    let root = tempfile::tempdir().unwrap();
+    let _slot = seed_codex(
+        root.path(),
+        "due",
+        "account-due",
+        "refresh-due",
+        now_secs() + 47 * 60 * 60,
+    );
+    let holder = root.path().join("running-codex");
+    std::fs::create_dir_all(&holder).unwrap();
+    std::fs::write(
+        holder.join("auth.json"),
+        codex_auth(
+            "account-due",
+            "holder-refresh",
+            &jwt(now_secs() + 7 * 86_400),
+        ),
+    )
+    .unwrap();
+    let mut running = running_codex(root.path(), &holder);
+
+    // The sibling screen already reports it. Without this the test would pass
+    // on a fixture that never reached the deferred state at all.
+    let row = json_row(root.path(), "due");
+    let listed = row["warning"].as_str().unwrap_or_default().to_string();
+
+    let said = combined(&run(root.path(), &["doctor"]));
+    running.stop();
+
+    assert!(
+        listed.contains("renewal deferred"),
+        "`ls` stopped reporting the deferral, so this measures nothing: {row}"
+    );
+    assert!(
+        said.contains("renewal deferred"),
+        "doctor is silent about a renewal `ls` reports as deferred:\n{said}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn due_codex_renewal_held_by_live_account_is_reported_as_deferred() {
@@ -367,6 +417,14 @@ fn due_codex_renewal_held_by_live_account_is_reported_as_deferred() {
     running.stop();
     let row = json_row(root.path(), "due");
     assert_eq!(row["warning"], serde_json::Value::Null, "{row}");
+    // The guard row that diverges: once the holder is gone the deferral must
+    // stop being reported, or "deferred" degrades into a line every account
+    // carries and nobody reads.
+    let said = combined(&run(root.path(), &["doctor"]));
+    assert!(
+        !said.contains("renewal deferred"),
+        "doctor still defers with no session holding the login:\n{said}"
+    );
 
     let mut running = running_codex(root.path(), &holder);
     std::fs::write(

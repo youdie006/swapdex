@@ -1623,6 +1623,19 @@ fn slot_login_of(
     SlotLogin::Present(secs.map(|s| s * 1000))
 }
 
+/// Is renewal standing down for this slot because a live session owns the login?
+///
+/// `ls` asks this for Codex and `quota` asks it for Claude; the health screen
+/// asked neither, so the one place whose job is to say whether a setup is sound
+/// stayed silent while an account went days without a renewal.
+fn renewal_deferred_for(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
+    match tool {
+        "codex" => crate::refresh::codex_renewal_deferred(paths, dir, now_ms() / 1000),
+        "claude-code" => crate::refresh::claude_renewal_deferred(paths, dir, now_ms()),
+        _ => false,
+    }
+}
+
 /// Whether a snapshot is old enough that its REFRESH token may itself be dead.
 ///
 /// An access token that merely lapsed is not news for any of these tools - they
@@ -5178,6 +5191,21 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 // Fresh, or present-but-undeterminable: stay quiet - doctor
                 // flags only what it can determine.
                 SlotLogin::Present(_) => {}
+            }
+            // Not a fault: the guard is doing its job, and renewing under a
+            // live session would retire the token that session is holding.
+            // But it is why an account can sit days past its renewal, so the
+            // screen that answers "is this sound" has to be able to say it.
+            if renewal_deferred_for(paths, tool, &r.config_dir) {
+                report(
+                    &key,
+                    true,
+                    format!(
+                        "renewal deferred - a running {} session holds this login; \
+                         it renews once that session exits",
+                        tool_binary(tool)
+                    ),
+                );
             }
         }
     }
@@ -8763,12 +8791,20 @@ fn stale_proxy_note(running: &str, current: &str, tool: &str) -> Option<String> 
         b.rsplit_once('-').map_or(b, |(v, _)| v)
     }
     (!running.is_empty() && running != current).then(|| {
+        // The comparison is on the build id; `ver` drops exactly the part that
+        // differs. Printing only the version then contrasted two identical
+        // strings - "running 0.165.9 while this swapdex is 0.165.9" - and left
+        // the row unactionable for the case it matters most in: one version
+        // installed twice.
+        let difference = if ver(running) == ver(current) {
+            format!("a different build of {}", ver(current))
+        } else {
+            format!("{} while this swapdex is {}", ver(running), ver(current))
+        };
         format!(
-            "running {} while this swapdex is {} - an upgrade does not restart it, \
+            "running {difference} - an upgrade does not restart it, \
              so it still behaves like the older build: `swapdex service install \
              --tool {}`",
-            ver(running),
-            ver(current),
             crate::commands::tool_binary(tool)
         )
     })
@@ -10656,6 +10692,32 @@ mod tests {
             stale_proxy_note("", "0.153.0-1788850863", "codex"),
             None,
             "a marker with no build id says nothing about age"
+        );
+    }
+
+    /// Two builds of the SAME version are the case the table skipped.
+    ///
+    /// The comparison is on the build id and the sentence printed only the
+    /// version, so `doctor` rendered "running 0.165.9 while this swapdex is
+    /// 0.165.9" - it contrasts two values and prints them identically, leaving
+    /// nothing to act on. Seen on a machine with the npm install and a local
+    /// build of one version, which is the shape `one installer per machine`
+    /// exists to warn about.
+    #[test]
+    fn a_different_build_of_one_version_says_what_actually_differs() {
+        let note = stale_proxy_note("0.165.9-1700000000", "0.165.9-1800000000", "codex")
+            .expect("a different build is still a different build");
+        assert!(
+            !note.contains("running 0.165.9 while this swapdex is 0.165.9"),
+            "the sentence contrasts two values it prints identically: {note}"
+        );
+        assert!(
+            note.contains("0.165.9"),
+            "the version is still worth naming: {note}"
+        );
+        assert!(
+            note.contains("swapdex service install --tool codex"),
+            "and the command that replaces it: {note}"
         );
     }
 
