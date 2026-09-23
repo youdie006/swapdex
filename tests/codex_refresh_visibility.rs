@@ -355,6 +355,75 @@ fn doctor_reports_a_codex_renewal_that_is_being_deferred() {
         said.contains("renewal deferred"),
         "doctor is silent about a renewal `ls` reports as deferred:\n{said}"
     );
+    // The Codex sentence, not Claude's: Codex renews only when it runs, so the
+    // holding session really is what stands in the way here.
+    assert!(
+        said.contains("renews once that session exits"),
+        "doctor gave a Codex slot the Claude explanation:\n{said}"
+    );
+}
+
+/// The holder guard has a ceiling: it may not outlast the token it protects.
+///
+/// The guard exists so a session's token is not retired under it. A Codex that
+/// runs refreshes its own token, so a holder that has let the token run down
+/// to its last day without refreshing is not using it - and there is nothing
+/// left for the guard to protect. Measured on a real machine: eleven Codex
+/// processes, seven days old, zero CPU seconds between them, holding a slot
+/// whose token was 23 hours from lapsing after nine days without a renewal.
+/// Deferring past that point turns "do not retire a live token" into "let a
+/// zombie hold this account until it dies".
+#[cfg(target_os = "linux")]
+#[test]
+fn a_holder_that_let_the_token_reach_its_last_day_no_longer_defers_renewal() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_codex(
+        root.path(),
+        "zombie",
+        "account-zombie",
+        "refresh-zombie",
+        now_secs() + 20 * 60 * 60,
+    );
+    let holder = root.path().join("running-codex");
+    std::fs::create_dir_all(&holder).unwrap();
+    std::fs::write(
+        holder.join("auth.json"),
+        codex_auth(
+            "account-zombie",
+            "holder-refresh",
+            &jwt(now_secs() + 20 * 60 * 60),
+        ),
+    )
+    .unwrap();
+    let mut running = running_codex(root.path(), &holder);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+
+    let keep_alive = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "--keep-alive"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    let said = combined(&keep_alive);
+    running.stop();
+
+    assert!(
+        !said.contains("renewal deferred"),
+        "a token on its last day is still held hostage by an idle holder:\n{said}"
+    );
+    assert!(
+        !std::fs::read(&count).unwrap_or_default().is_empty(),
+        "the renewal never reached curl - the guard still stood down:\n{said}"
+    );
+    // The fake curl answers 401, so the exchange is attempted and refused -
+    // which is the honest outcome here: the guard stepped aside and the
+    // server, not a zombie, had the last word.
+    assert!(
+        said.contains("idle too long to renew"),
+        "the attempted renewal was not reported as refused:\n{said}"
+    );
+    let _ = slot;
 }
 
 #[cfg(target_os = "linux")]

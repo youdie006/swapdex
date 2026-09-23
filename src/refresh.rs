@@ -1607,7 +1607,7 @@ fn refresh_codex_slot_inner(
                 }
                 return result;
             }
-            if slot_in_use(paths, dir, "codex") {
+            if codex_holder_defers(paths, dir, now_ms / 1000) {
                 return Err(RefreshError::InUse);
             }
             blob
@@ -1616,7 +1616,7 @@ fn refresh_codex_slot_inner(
             if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
                 return result;
             }
-            if slot_in_use(paths, dir, "codex") {
+            if codex_holder_defers(paths, dir, now_ms / 1000) {
                 return Err(RefreshError::InUse);
             }
             read_codex_credential(dir)?
@@ -1643,7 +1643,7 @@ fn refresh_codex_slot_inner(
         if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
             return Attempt::before_exchange(result);
         }
-        if slot_in_use(paths, dir, "codex") {
+        if codex_holder_defers(paths, dir, now_ms / 1000) {
             return Attempt::before_exchange(Err(RefreshError::InUse));
         }
 
@@ -1656,7 +1656,7 @@ fn refresh_codex_slot_inner(
             if let Some(result) = native_managed(paths, dir, "codex", now_ms) {
                 return Attempt::before_exchange(result);
             }
-            if slot_in_use(paths, dir, "codex") {
+            if codex_holder_defers(paths, dir, now_ms / 1000) {
                 return Attempt::before_exchange(Err(RefreshError::InUse));
             }
 
@@ -1887,6 +1887,85 @@ pub const KEEP_ALIVE_CODEX_WINDOW_SECS: i64 = 2 * 24 * 60 * 60;
 /// The deadline is in the access token's own `exp` claim. A credential with no
 /// refresh token cannot be renewed from here, and a deadline that could not be
 /// read is not an expired one - neither is grounds for spending a refresh token.
+/// A holder may defer renewal only while the token it holds has a day left.
+///
+/// The guard exists so a session's token is not retired under it. A Codex that
+/// runs refreshes its own token, so a holder that has let the token run down to
+/// its final day without refreshing is not using it, and there is nothing left
+/// for the guard to protect. Past this point deferring stops meaning "do not
+/// retire a live token" and starts meaning "let an idle process hold this
+/// account until it dies" - measured as eleven seven-day-old Codex processes
+/// with zero CPU seconds between them, holding a slot 23 hours from lapsing.
+pub const CODEX_HOLDER_CEILING_SECS: i64 = 24 * 60 * 60;
+
+/// Whether a live holder still earns a deferral for this slot.
+///
+/// Every site that consults `slot_in_use` for Codex goes through here, so the
+/// refresh path and the screens that explain it answer from one rule.
+fn codex_holder_defers(paths: &Paths, dir: &Path, now_secs: i64) -> bool {
+    // Ask the HOLDER's credential, not the slot's. A twin - a live process
+    // holding the same account through its own home - can be fresh while the
+    // slot's own token has lapsed; reading the slot there released a holder
+    // that was actively using the login (tests/refresh.rs, the twin cases).
+    // The idle processes this ceiling exists for hold the slot dir itself, so
+    // for them the two files are one and the ceiling still bites.
+    codex_holder_dirs(paths, dir).into_iter().any(|holder| {
+        let exp = std::fs::read(holder.join("auth.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| {
+                v["tokens"]["access_token"]
+                    .as_str()
+                    .and_then(crate::proxy::codex::jwt_expiry)
+            });
+        // No readable expiry: keep the guard - a token that cannot be dated is
+        // a token that cannot be proven abandoned.
+        exp.is_none_or(|exp| exp - now_secs > CODEX_HOLDER_CEILING_SECS)
+    })
+}
+
+/// Every running Codex home that holds this slot's login: the slot dir itself
+/// when a process was launched there, and any other home whose credential
+/// carries the same account or refresh token. Same three questions as
+/// `slot_in_use`, collected instead of short-circuited.
+fn codex_holder_dirs(paths: &Paths, dir: &Path) -> Vec<std::path::PathBuf> {
+    let tool = "codex";
+    let running = crate::proc::running_config_dirs(tool);
+    let mut holders: Vec<std::path::PathBuf> = running
+        .iter()
+        .filter(|active| same_dir(active, dir))
+        .cloned()
+        .collect();
+    let candidate_account = account_of(dir, tool);
+    let candidate_token = refresh_token_identity_of(dir, tool);
+    if candidate_account.is_none() && candidate_token.is_none() {
+        return holders;
+    }
+    for process in crate::proc::running_native_login_processes(paths, tool) {
+        if credential_owner_matches_path(
+            &process.identity_path,
+            tool,
+            candidate_account.as_deref(),
+            candidate_token.as_deref(),
+        ) {
+            holders.push(process.source_dir.clone());
+        }
+    }
+    for active in running {
+        if (!paths.sandboxed() || inside_paths(paths, &active))
+            && credential_owner_matches_dir(
+                &active,
+                tool,
+                candidate_account.as_deref(),
+                candidate_token.as_deref(),
+            )
+        {
+            holders.push(active);
+        }
+    }
+    holders
+}
+
 pub fn wants_keep_alive_codex(blob: &[u8], now_secs: i64) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob) else {
         return false;
@@ -1919,7 +1998,7 @@ pub(crate) struct KeepAliveReport {
 /// and account-aware process guard as the refresh path itself.
 pub(crate) fn codex_renewal_deferred(paths: &Paths, dir: &Path, now_secs: i64) -> bool {
     std::fs::read(dir.join("auth.json")).is_ok_and(|blob| {
-        wants_keep_alive_codex(&blob, now_secs) && slot_in_use(paths, dir, "codex")
+        wants_keep_alive_codex(&blob, now_secs) && codex_holder_defers(paths, dir, now_secs)
     })
 }
 
