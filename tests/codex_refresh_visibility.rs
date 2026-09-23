@@ -384,18 +384,10 @@ fn a_holder_that_let_the_token_reach_its_last_day_no_longer_defers_renewal() {
         "refresh-zombie",
         now_secs() + 20 * 60 * 60,
     );
-    let holder = root.path().join("running-codex");
-    std::fs::create_dir_all(&holder).unwrap();
-    std::fs::write(
-        holder.join("auth.json"),
-        codex_auth(
-            "account-zombie",
-            "holder-refresh",
-            &jwt(now_secs() + 20 * 60 * 60),
-        ),
-    )
-    .unwrap();
-    let mut running = running_codex(root.path(), &holder);
+    // The measured shape: the idle processes were launched IN the slot, so
+    // CODEX_HOME is the slot directory and the token they hold is the slot's
+    // own. A holder in some other home is a different case and is honoured.
+    let mut running = running_codex(root.path(), &slot);
     let curl = fake_curl(root.path());
     let count = root.path().join("curl-count");
 

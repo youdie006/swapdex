@@ -1910,6 +1910,15 @@ fn codex_holder_defers(paths: &Paths, dir: &Path, now_secs: i64) -> bool {
     // The idle processes this ceiling exists for hold the slot dir itself, so
     // for them the two files are one and the ceiling still bites.
     codex_holder_dirs(paths, dir).into_iter().any(|holder| {
+        // Only a holder living IN the slot directory can be judged by the
+        // slot's token: that is the one file it refreshes, so a full lifetime
+        // without a write means it is not using the login. A holder in any
+        // other home - a twin, a native process sharing the token - refreshes
+        // a file this code cannot see, and a live process there is a live
+        // process. The gate caught both shapes; they are honoured unconditionally.
+        if !same_dir(&holder, dir) {
+            return true;
+        }
         let exp = std::fs::read(holder.join("auth.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
