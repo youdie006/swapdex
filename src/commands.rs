@@ -5197,15 +5197,24 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             // But it is why an account can sit days past its renewal, so the
             // screen that answers "is this sound" has to be able to say it.
             if renewal_deferred_for(paths, tool, &r.config_dir) {
-                report(
-                    &key,
-                    true,
-                    format!(
+                // The two tools defer for opposite reasons and one sentence
+                // cannot serve both. A native Claude session refreshes its own
+                // token hourly, so the login stays fresh and nothing waits on
+                // exit - telling a Claude user it "renews once that session
+                // exits" sends them to kill a healthy session. Codex renews only
+                // when it runs, so there the session really is what stands in
+                // the way, with a ceiling past which it no longer does.
+                let why = match tool {
+                    "claude-code" => "renewal deferred to native session - the running claude \
+                                      session refreshes this login itself"
+                        .to_string(),
+                    _ => format!(
                         "renewal deferred - a running {} session holds this login; \
                          it renews once that session exits",
                         tool_binary(tool)
                     ),
-                );
+                };
+                report(&key, true, why);
             }
         }
     }

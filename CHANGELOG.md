@@ -16,6 +16,25 @@ All notable changes to swapdex are documented here. This project follows
   renewal because a long-lived session kept the guard engaged. It is reported
   as information rather than a fault, because the guard working is not a
   problem - being unable to see it was.
+- **An idle session can no longer hold an account past its token.** Renewal
+  is deferred while a Codex session holds the login, so the token that session
+  is using is not retired under it. That guard had no ceiling. Measured: eleven
+  seven-day-old Codex processes with zero CPU seconds between them - windows
+  left open in a terminal - holding a slot that had gone nine days without a
+  renewal and was 23 hours from lapsing; after that the proxy would have
+  silently forwarded the reader's own credential in its place. A Codex that
+  runs refreshes its own token, so a holder that has let it reach its last day
+  is not using it, and the guard now stands aside there. A holder with more
+  than a day left still defers, exactly as before.
+- **`doctor` explains a deferred Claude renewal the way Claude works.** The
+  deferral row added in this batch used one sentence for both tools - "it
+  renews once that session exits" - which is true of Codex and false of
+  Claude. A native Claude session refreshes its own token about hourly, so the
+  login stays fresh and nothing waits on exit; measured on a real machine the
+  authority file had been refreshed within the hour while the "deferred" row
+  sat beside it. Read literally, the Codex sentence sent a Claude user to kill
+  a healthy session. Claude's row now says the session refreshes the login
+  itself, the way `quota` already did.
 - **`doctor` says what actually differs between two builds.** The stale-service
   check compares build ids and the sentence printed only the version, so one
   version installed twice rendered "running 0.165.9 while this swapdex is

@@ -315,6 +315,62 @@ fn slot_only_human_quota_reports_expired_without_oauth_or_a_credential_write() {
     assert_eq!(fixture.credential_bytes(), credential_before);
 }
 
+/// The doctor row for a deferred Claude renewal must say what Claude does.
+///
+/// A native Claude session refreshes its own token about hourly, so swapdex
+/// stands down while one holds the login - and the login stays fresh. Measured
+/// on a real machine: authority file refreshed within the hour, holders with
+/// hours of CPU time, nothing waiting on anything. The Codex wording "it
+/// renews once that session exits" is false here - nothing renews on exit, the
+/// session already is - and read literally it sends the reader to kill a
+/// healthy session. `quota` already words the Claude case correctly.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_says_the_native_claude_session_renews_the_login_itself() {
+    let fixture = Fixture::new(false);
+    let claude = fixture.root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sleep", &claude).unwrap();
+    let held = ReapedChild(Some(
+        Command::new(&claude)
+            .arg("30")
+            .env("CLAUDE_CONFIG_DIR", &fixture.slot)
+            .spawn()
+            .unwrap(),
+    ));
+    wait_for(Path::new(&format!(
+        "/proc/{}/environ",
+        held.0.as_ref().unwrap().id()
+    )));
+
+    // Same environment the quota command runs under, but `doctor` - the
+    // quota builder pins its own subcommand.
+    let out = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .arg("doctor")
+        .env("SWAPDEX_ROOT", fixture.root.path())
+        .env("HOME", fixture.root.path())
+        .env("SWAPDEX_CURL", &fixture.curl)
+        .env("SWAPDEX_OAUTH_URL", "https://oauth.test/token")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    drop(held);
+    let said =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("renewal deferred"),
+        "doctor stopped reporting the deferral, so this measures nothing:\n{said}"
+    );
+    assert!(
+        !said.contains("renews once that session exits"),
+        "doctor tells a Claude user the login renews on exit - it renews itself:\n{said}"
+    );
+    assert!(
+        said.contains("native session") || said.contains("refreshes this login itself"),
+        "doctor does not say the session is doing the renewing:\n{said}"
+    );
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn an_expired_slot_owned_by_native_claude_is_still_only_reported() {
