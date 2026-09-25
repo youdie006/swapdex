@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.0
 
 - **Codex's status line shows the account that is paying.** Codex repaints its
   weekly and 5-hour figures only from its own account-usage reads, which it
