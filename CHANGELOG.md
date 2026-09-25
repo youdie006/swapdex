@@ -4,6 +4,22 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## 0.166.1
+
+- **Fresh Codex launches work again.** 0.166.0 pointed Codex's
+  `chatgpt_base_url` at the local proxy so the status line would read usage
+  from the paying account. Codex 0.156 refuses a workspace backend that is not
+  HTTPS and exits at startup - "workspace backend must use an HTTPS origin
+  without credentials" - so every Codex started through a regenerated shim
+  failed immediately. The override is gone. It was also unnecessary: a fresh
+  Codex window through the proxy already shows the paying account's weekly
+  figure (checked: 90% left, matching the account serving it). The "weekly 0%
+  left" seen before came from windows open for days, and the entry for it in
+  0.166.0 below states a cause that was never measured.
+- Note: upgrading does not regenerate the shims; `swapdex shim` does. A
+  machine that upgraded to 0.166.0 without running it was never affected, and
+  one that did should run `swapdex shim` again after installing this.
+
 ## 0.166.0
 
 - **`doctor` reports a renewal that is standing down.** Renewing a login while

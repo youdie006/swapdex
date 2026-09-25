@@ -2191,13 +2191,12 @@ fn a_running_codex_session_follows_a_pointer_change() {
     );
 }
 
-/// Codex's usage lookup goes to the account that PAYS, not the session's own.
+/// A `/backend-api/...` request that reaches the proxy is answered with the
+/// paying account's credentials and sent to the ChatGPT root, like a turn.
 ///
-/// The status line in every Codex window read "weekly 0% left" while the proxy
-/// was serving those windows from an account with 98% left: the lookup went to
-/// `chatgpt_base_url` with the session's own login and never touched the proxy.
-/// Routed through it, the proxy must rewrite that pair exactly as it does for a
-/// turn, and send the path to the ChatGPT root.
+/// The shim does not route Codex's `chatgpt_base_url` here - Codex refuses a
+/// non-HTTPS workspace backend (0.166.0 tried, and fresh launches failed) - so
+/// this pins the proxy's own behaviour for such paths, not a shim guarantee.
 #[test]
 fn codex_usage_is_asked_of_the_account_that_pays() {
     let root = tempfile::tempdir().unwrap();
@@ -3514,16 +3513,11 @@ mod codex_routing_ignores_inherited_shell_state {
     }
 
     fn managed_args(original: &[&str]) -> Vec<String> {
-        [
-            "-c",
-            "openai_base_url=http://127.0.0.1:8788/v1",
-            "-c",
-            "chatgpt_base_url=http://127.0.0.1:8788/backend-api/",
-        ]
-        .into_iter()
-        .chain(original.iter().copied())
-        .map(str::to_owned)
-        .collect()
+        ["-c", "openai_base_url=http://127.0.0.1:8788/v1"]
+            .into_iter()
+            .chain(original.iter().copied())
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]

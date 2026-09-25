@@ -175,16 +175,11 @@ fn native_launch_resume_and_exec_share_one_stable_provider() {
     ] {
         let got = launch(args, false, false);
         assert_eq!(
-            &got.args[..4],
-            &[
-                "-c",
-                "openai_base_url=http://127.0.0.1:8788/v1",
-                "-c",
-                "chatgpt_base_url=http://127.0.0.1:8788/backend-api/"
-            ],
+            &got.args[..2],
+            &["-c", "openai_base_url=http://127.0.0.1:8788/v1"],
             "{args:?}"
         );
-        assert_eq!(&got.args[4..], args);
+        assert_eq!(&got.args[2..], args);
         assert!(!got.args.iter().any(|a| a.contains("model_provider")));
         assert!(got.calls.contains("repair-codex-sessions --quiet"));
         assert!(
@@ -237,16 +232,11 @@ fn profile_choices_remain_managed_and_reach_codex_unchanged() {
     ] {
         let got = launch(args, true, false);
         assert_eq!(
-            &got.args[..4],
-            &[
-                "-c",
-                "openai_base_url=http://127.0.0.1:8788/v1",
-                "-c",
-                "chatgpt_base_url=http://127.0.0.1:8788/backend-api/"
-            ],
+            &got.args[..2],
+            &["-c", "openai_base_url=http://127.0.0.1:8788/v1"],
             "{args:?}"
         );
-        assert_eq!(&got.args[4..], args, "{args:?}");
+        assert_eq!(&got.args[2..], args, "{args:?}");
         assert!(got.home.ends_with("chosen home"));
     }
 }
@@ -270,7 +260,7 @@ fn prompt_words_and_option_values_do_not_select_a_command() {
                 .any(|a| a == "openai_base_url=http://127.0.0.1:8788/v1"),
             "{args:?}"
         );
-        assert_eq!(&got.args[4..], args);
+        assert_eq!(&got.args[2..], args);
         assert!(got.home.ends_with("chosen home"));
     }
 }
