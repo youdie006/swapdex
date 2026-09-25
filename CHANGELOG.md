@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.1
 
 - **Upgrading swapdex now updates the launcher too.** Only `swapdex shim` ever
   wrote a shim, and nothing ran it on upgrade, so a fix to the launcher reached
