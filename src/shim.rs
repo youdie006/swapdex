@@ -301,9 +301,26 @@ if [ "$sx_plain" = no ]; then
     fi
     port=$({sx} proxy --ensure --tool codex 2>/dev/null)
     {proxy_result}
+    # Codex repaints its usage only from reads at `chatgpt_base_url`, and takes
+    # that URL only over HTTPS. The proxy answers it on a TLS port with a
+    # certificate Codex is told to trust. Skipped when the user already names a
+    # CA for Codex: replacing theirs would break whatever it was there for.
+    sx_usage=
+    if [ "$sx_use_proxy" = yes ] && [ -z "${{CODEX_CA_CERTIFICATE:-}}" ] && [ -z "${{SSL_CERT_FILE:-}}" ] && [ -r {ca} ]; then
+        sx_usage=$({sx} proxy --usage-port --tool codex 2>/dev/null)
+        case "$sx_usage" in ''|*[!0-9]*) sx_usage= ;; esac
+    fi
+    if [ -n "$sx_usage" ]; then
+        CODEX_CA_CERTIFICATE={ca}
+        export CODEX_CA_CERTIFICATE
+    fi
     if [ "$sx_use_proxy" = yes ]; then
         if [ "$sx_last_config" -eq 0 ]; then
-            set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+            if [ -n "$sx_usage" ]; then
+                set -- -c openai_base_url="http://127.0.0.1:$port/v1" -c chatgpt_base_url="https://127.0.0.1:$sx_usage/backend-api/" "$@"
+            else
+                set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+            fi
         else
             # Codex can discard root -c flags when a subcommand has its own.
             # Rebuild the argument list so the managed URL has the same scope
@@ -314,6 +331,9 @@ if [ "$sx_plain" = no ]; then
                 sx_arg_index=$((sx_arg_index + 1))
                 if [ "$sx_arg_index" -eq "$sx_last_config" ]; then
                     set -- "$@" -c openai_base_url="http://127.0.0.1:$port/v1"
+                    if [ -n "$sx_usage" ]; then
+                        set -- "$@" -c chatgpt_base_url="https://127.0.0.1:$sx_usage/backend-api/"
+                    fi
                 fi
                 set -- "$@" "$sx_arg"
             done
@@ -326,6 +346,13 @@ exec {real} "$@"
         ptr = sh_quote(pointer),
         real = sh_quote(real_codex),
         proxy_result = proxy_result,
+        ca = sh_quote(
+            &pointer
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("codex-tls")
+                .join("ca.pem")
+        ),
     )
 }
 
@@ -1062,7 +1089,7 @@ mod tests {
         // HTTPS origin without credentials"). 0.166.0 shipped it and broke
         // every fresh launch.
         assert!(
-            !s.contains("-c chatgpt_base_url="),
+            !s.contains("chatgpt_base_url=\"http:"),
             "the shim points chatgpt_base_url at a plain-HTTP proxy: {s}"
         );
         assert!(!s.contains("set -- -c model_provider="));
@@ -1074,6 +1101,114 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Run the generated codex shim with a fake swapdex that reports `8788` for
+    /// the proxy and `18788` for its usage listener, and a fake Codex that
+    /// prints its arguments and the CA it was handed. Returns (args, ca).
+    fn run_codex_shim_with_usage(
+        with_ca_file: bool,
+        env: &[(&str, &str)],
+        input: &[&str],
+    ) -> (Vec<String>, String) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().unwrap();
+        let pointer = root.path().join("active-codex");
+        let real = root.path().join("real codex");
+        let swapdex = root.path().join("fake swapdex");
+        let shim = root.path().join("codex shim");
+        std::fs::write(&pointer, root.path().join("codex-home").to_str().unwrap()).unwrap();
+        if with_ca_file {
+            std::fs::create_dir_all(root.path().join("codex-tls")).unwrap();
+            std::fs::write(root.path().join("codex-tls/ca.pem"), "ca").unwrap();
+        }
+        std::fs::write(
+            &real,
+            "#!/bin/sh\nprintf 'CA=%s\\0' \"${CODEX_CA_CERTIFICATE:-}\"\nprintf '%s\\0' \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &swapdex,
+            "#!/bin/sh\ncase \"$*\" in *--usage-port*) printf 18788 ;; proxy*) printf 8788 ;; esac\n",
+        )
+        .unwrap();
+        std::fs::write(&shim, codex_shim_script(&pointer, &real, &swapdex)).unwrap();
+        for path in [&real, &swapdex] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut cmd = Command::new("sh");
+        cmd.arg(&shim)
+            .args(input)
+            .env_remove("CODEX_CA_CERTIFICATE")
+            .env_remove("SSL_CERT_FILE")
+            .env("CODEX_HOME", root.path().join("codex-home"))
+            .env("SWAPDEX_ROOT", root.path());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let output = cmd.output().unwrap();
+        assert!(output.status.success(), "{input:?}: {:?}", output.stderr);
+        let mut parts: Vec<String> = output
+            .stdout
+            .split(|b| *b == 0)
+            .map(|b| String::from_utf8(b.to_vec()).unwrap())
+            .collect();
+        assert_eq!(parts.pop().as_deref(), Some(""), "missing final NUL");
+        let ca = parts.remove(0);
+        let ca = ca.strip_prefix("CA=").unwrap().to_string();
+        let expected_ca = root
+            .path()
+            .join("codex-tls/ca.pem")
+            .to_string_lossy()
+            .into_owned();
+        (parts, if ca == expected_ca { "OURS".into() } else { ca })
+    }
+
+    /// With the usage listener up and nobody else's CA in the way, the shim sends
+    /// Codex's usage reads to the proxy over HTTPS and hands Codex the CA - on
+    /// both argument paths, and with the model URL left on its own plain-HTTP
+    /// origin. The pair must stay on DIFFERENT origins: Codex rewrites a provider
+    /// that shares `chatgpt_base_url`'s origin onto the routed backend.
+    #[test]
+    fn the_codex_shim_routes_usage_reads_over_https_with_its_ca() {
+        let usage = "chatgpt_base_url=https://127.0.0.1:18788/backend-api/";
+        let model = "openai_base_url=http://127.0.0.1:8788/v1";
+        let (args, ca) = run_codex_shim_with_usage(true, &[], &["exec", "prompt"]);
+        assert_eq!(args, ["-c", model, "-c", usage, "exec", "prompt"]);
+        assert_eq!(ca, "OURS", "Codex was not told to trust the usage listener");
+
+        let (args, ca) = run_codex_shim_with_usage(true, &[], &["exec", "-c", "model=x", "prompt"]);
+        assert_eq!(
+            args,
+            ["exec", "-c", model, "-c", usage, "-c", "model=x", "prompt"],
+            "the scoped branch lost the usage route"
+        );
+        assert_eq!(ca, "OURS");
+    }
+
+    /// The over-corrections: no CA file means no route (a Codex told to trust a
+    /// file that is not there fails to start), and a CA the user already named
+    /// for Codex is never replaced - it is there for a reason this shim cannot
+    /// see, and replacing it would break every other HTTPS call Codex makes.
+    #[test]
+    fn the_codex_shim_leaves_usage_alone_without_a_ca_or_over_the_users_own() {
+        let model = "openai_base_url=http://127.0.0.1:8788/v1";
+        let (args, ca) = run_codex_shim_with_usage(false, &[], &["exec", "prompt"]);
+        assert_eq!(args, ["-c", model, "exec", "prompt"], "routed without a CA");
+        assert_eq!(ca, "", "exported a CA that does not exist");
+
+        for var in ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"] {
+            let (args, ca) =
+                run_codex_shim_with_usage(true, &[(var, "/etc/corp-ca.pem")], &["exec", "prompt"]);
+            assert_eq!(
+                args,
+                ["-c", model, "exec", "prompt"],
+                "routed usage over the user's own {var}"
+            );
+            assert_ne!(ca, "OURS", "replaced the user's {var}");
+        }
+    }
+
     #[test]
     fn codex_proxy_override_shares_the_last_real_config_scope() {
         use std::os::unix::fs::PermissionsExt;

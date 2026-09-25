@@ -233,6 +233,10 @@ enum Cmd {
         /// there is none. Used by the `claude` shim; exits non-zero if it cannot.
         #[arg(long)]
         ensure: bool,
+        /// Print the port of the running Codex proxy's usage listener (TLS),
+        /// or exit non-zero if it has none. Used by the `codex` shim.
+        #[arg(long, conflicts_with = "ensure")]
+        usage_port: bool,
         /// Step off an account once a window reaches this fraction (e.g. 0.98),
         /// instead of waiting for it to refuse a turn. Costs one usage read per
         /// account every couple of minutes.
@@ -492,6 +496,11 @@ fn main() {
             commands::launch_claude_authority(&paths, native, args)
         }
         Cmd::Proxy {
+            tool,
+            usage_port: true,
+            ..
+        } => commands::proxy_usage_port(&paths, *tool),
+        Cmd::Proxy {
             port,
             account,
             tool,
@@ -499,6 +508,7 @@ fn main() {
             no_auto,
             ensure,
             threshold,
+            ..
         } => commands::proxy(
             &paths,
             *port,

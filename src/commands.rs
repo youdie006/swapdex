@@ -2941,6 +2941,19 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// `proxy --usage-port` - the TLS port Codex's `chatgpt_base_url` should name,
+/// read from the live proxy's marker. Silent and non-zero when there is none, so
+/// the shim leaves Codex's usage reads alone rather than point them at nothing.
+pub fn proxy_usage_port(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
+    match crate::proxy::usage_port_for(paths, slot_tool(sel)) {
+        Some(port) => {
+            println!("{port}");
+            Ok(0)
+        }
+        None => Ok(1),
+    }
+}
+
 /// `proxy` - run proxy mode in the foreground. Claude Code pointed at it
 /// (`ANTHROPIC_BASE_URL`) gets its account chosen per request, so a RUNNING
 /// conversation can change accounts without a restart or a resume.

@@ -1275,6 +1275,10 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
             .ok_or_else(|| anyhow!("cannot bind 127.0.0.1:{}: {e}", opts.port))?,
     };
     let port = server.server_addr().port();
+    let usage = (opts.tool == "codex")
+        .then(|| start_usage_listener(paths, port))
+        .flatten();
+    let usage_port = usage.as_ref().map(|u| u.server_addr().port());
     // Announce the proxy so the installed `claude` shim points at it by itself -
     // "<pid> <port>", pid so a stale marker (killed proxy) is detectable.
     let marker = crate::shim::proxy_marker_for(paths, &opts.tool);
@@ -1284,7 +1288,12 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     // installed, verified, and still not be what answers the next request.
     let announced = std::fs::write(
         &marker,
-        format!("{} {port} {}\n", std::process::id(), build_id()),
+        // A fourth field, the usage listener's port, only when there is one:
+        // earlier readers stop after three and must keep working.
+        match usage_port {
+            Some(u) => format!("{} {port} {} {u}\n", std::process::id(), build_id()),
+            None => format!("{} {port} {}\n", std::process::id(), build_id()),
+        },
     )
     .is_ok();
     if announced {
@@ -1390,6 +1399,36 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
                 measure_codex(&paths_m, &sl.list());
             } else {
                 refresh_measured(&paths_m, &sl.list(), &sh_m);
+            }
+        });
+    }
+
+    if let Some(usage) = usage {
+        let (paths, sh) = (paths.clone(), sh.clone());
+        let opts = Opts {
+            port,
+            account: opts.account.clone(),
+            tool: opts.tool.clone(),
+            auto: opts.auto,
+            threshold: opts.threshold,
+            threshold_pinned: opts.threshold_pinned,
+        };
+        std::thread::spawn(move || {
+            while let Ok(rq) = usage.recv() {
+                let (paths, sh) = (paths.clone(), sh.clone());
+                let opts = Opts {
+                    port: opts.port,
+                    account: opts.account.clone(),
+                    tool: opts.tool.clone(),
+                    auto: opts.auto,
+                    threshold: opts.threshold,
+                    threshold_pinned: opts.threshold_pinned,
+                };
+                std::thread::spawn(move || {
+                    if let Err(e) = handle(rq, &paths, &opts, &sh) {
+                        eprintln!("swapdex proxy: {e:#}");
+                    }
+                });
             }
         });
     }
@@ -1991,6 +2030,7 @@ fn forward_turn(
         })
         .collect();
     let is_codex = opts.tool == "codex";
+    let arrived_tls = rq.is_tls();
     let url = if is_codex {
         codex::upstream_url(&sh.base, rq.url())
     } else {
@@ -2010,6 +2050,22 @@ fn forward_turn(
             stamp()
         );
         std::io::stdout().flush().ok();
+        let mut headers = client_headers.clone();
+        if let Some(auth) = client_auth.clone() {
+            headers.push(("authorization".into(), auth));
+        }
+        return upstream::forward(&sh.agent, &method, &url, &headers, &client_body);
+    }
+
+    // Codex's own backend calls reach this proxy only on the TLS listener, which
+    // the shim names as its `chatgpt_base_url`. Of those, only the usage read
+    // belongs to the account that pays: that is what repaints Codex's status
+    // line. Everything else is the session's business with ChatGPT - workspace
+    // discovery above all, which Codex refuses to start without when it answers
+    // with another account's workspaces ("selected workspace missing from
+    // routing discovery", measured) - so it goes out with the client's own
+    // credential, untouched.
+    if is_codex && arrived_tls && !codex::is_usage_read(&path) {
         let mut headers = client_headers.clone();
         if let Some(auth) = client_auth.clone() {
             headers.push(("authorization".into(), auth));
@@ -2890,6 +2946,42 @@ fn take_the_port(paths: &Paths, tool: &str, port: u16) -> Option<server::Server>
         }
     }
     None
+}
+
+/// Where Codex's usage listener sits relative to the proxy's own port. Fixed,
+/// not ephemeral: a Codex session reads its `chatgpt_base_url` once, at launch,
+/// so a restarted proxy must come back at the same address or every open window
+/// loses its usage reads.
+pub const USAGE_PORT_OFFSET: u16 = 10_000;
+
+/// The TLS listener Codex's `chatgpt_base_url` points at. Any failure here only
+/// costs the status line its paying account's numbers, so it is reported and
+/// the proxy carries on without it.
+fn start_usage_listener(paths: &Paths, port: u16) -> Option<server::Server> {
+    let config = match crate::codex_tls::server_config(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  usage listener off: {e:#}");
+            return None;
+        }
+    };
+    let preferred = port.checked_add(USAGE_PORT_OFFSET).unwrap_or(0);
+    match server::Server::tls(("127.0.0.1", preferred), config.clone())
+        .or_else(|_| server::Server::tls(("127.0.0.1", 0), config))
+    {
+        Ok(s) => Some(s),
+        Err(e) => {
+            println!("  usage listener off: cannot bind 127.0.0.1: {e}");
+            None
+        }
+    }
+}
+
+/// The usage listener's port for a live proxy, from its marker's fourth field.
+pub fn usage_port_for(paths: &Paths, tool: &str) -> Option<u16> {
+    running_proxy_for(paths, tool)?;
+    let raw = std::fs::read_to_string(crate::shim::proxy_marker_for(paths, tool)).ok()?;
+    raw.split_whitespace().nth(3)?.parse().ok()
 }
 
 pub fn running_proxy_for(paths: &Paths, tool: &str) -> Option<(i32, u16, String)> {

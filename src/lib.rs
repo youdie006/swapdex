@@ -5,6 +5,7 @@ pub(crate) mod claude_authority;
 pub(crate) mod claude_refresh_lock;
 pub mod codex_limits;
 pub mod codex_sessions;
+pub mod codex_tls;
 pub mod codex_usage;
 pub mod commands;
 pub mod live_login;

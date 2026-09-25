@@ -30,7 +30,21 @@ pub(super) struct Server {
 
 impl Server {
     pub fn http(addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let listener = TcpListener::bind(addr)?;
+        Self::start(TcpListener::bind(addr)?, None)
+    }
+
+    /// The same listener speaking TLS. Requests from it report `is_tls()`.
+    pub fn tls(
+        addr: impl ToSocketAddrs,
+        config: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
+    ) -> io::Result<Self> {
+        Self::start(
+            TcpListener::bind(addr)?,
+            Some(tokio_rustls::TlsAcceptor::from(config)),
+        )
+    }
+
+    fn start(listener: TcpListener, tls: Option<tokio_rustls::TlsAcceptor>) -> io::Result<Self> {
         let addr = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -42,43 +56,9 @@ impl Server {
             .name("swapdex-http".into())
             .spawn(move || {
                 runtime.block_on(async move {
-                    let listener = match tokio::net::TcpListener::from_std(listener) {
-                        Ok(listener) => listener,
-                        Err(error) => {
-                            let _ = requests.send(Err(error));
-                            return;
-                        }
-                    };
-                    tokio::pin!(stopped);
-                    loop {
-                        let accepted = tokio::select! {
-                            _ = &mut stopped => break,
-                            accepted = listener.accept() => accepted,
-                        };
-                        let (socket, _) = match accepted {
-                            Ok(pair) => pair,
-                            Err(error) => {
-                                let _ = requests.send(Err(error));
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                continue;
-                            }
-                        };
-                        let requests = requests.clone();
-                        tokio::spawn(async move {
-                            let service =
-                                service_fn(move |request| receive(request, requests.clone()));
-                            // Flush when a producer is waiting for more bytes.
-                            // Half-close permits a client to finish uploading
-                            // before waiting for its streamed response.
-                            let _ = http1::Builder::new()
-                                .timer(TokioTimer::new())
-                                .header_read_timeout(std::time::Duration::from_secs(30))
-                                .half_close(true)
-                                .keep_alive(true)
-                                .pipeline_flush(false)
-                                .serve_connection(TokioIo::new(socket), service)
-                                .await;
-                        });
+                    tokio::select! {
+                        _ = stopped => {}
+                        _ = accept_loop(listener, tls, requests) => {}
                     }
                 });
             })?;
@@ -103,6 +83,62 @@ impl Server {
     }
 }
 
+async fn accept_loop(
+    listener: TcpListener,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    requests: mpsc::Sender<io::Result<Request>>,
+) {
+    let listener = match tokio::net::TcpListener::from_std(listener) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = requests.send(Err(error));
+            return;
+        }
+    };
+    let secure = tls.is_some();
+    loop {
+        let (socket, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(error) => {
+                let _ = requests.send(Err(error));
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let requests = requests.clone();
+        let tls = tls.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| receive(request, requests.clone(), secure));
+            // Flush when a producer is waiting for more bytes.
+            // Half-close permits a client to finish uploading
+            // before waiting for its streamed response.
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_secs(30))
+                .half_close(true)
+                .keep_alive(true)
+                .pipeline_flush(false);
+            match tls {
+                Some(acceptor) => {
+                    // A handshake that fails - a client that does not trust
+                    // this certificate, say - is that client's problem alone.
+                    if let Ok(stream) = acceptor.accept(socket).await {
+                        let _ = builder
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    }
+                }
+                None => {
+                    let _ = builder
+                        .serve_connection(TokioIo::new(socket), service)
+                        .await;
+                }
+            }
+        });
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
@@ -120,11 +156,13 @@ pub(super) struct Request {
     headers: Vec<Header>,
     body: Vec<u8>,
     response: Option<oneshot::Sender<hyper::Response<Body>>>,
+    secure: bool,
 }
 
 async fn receive(
     request: hyper::Request<Incoming>,
     requests: mpsc::Sender<io::Result<Request>>,
+    secure: bool,
 ) -> io::Result<hyper::Response<Body>> {
     let (parts, body) = request.into_parts();
     let body = body.collect().await.map_err(io::Error::other)?.to_bytes();
@@ -149,6 +187,7 @@ async fn receive(
             .collect(),
         body: body.to_vec(),
         response: Some(response),
+        secure,
     };
     requests
         .send(Ok(request))
@@ -167,6 +206,10 @@ impl Request {
     }
     pub fn headers(&self) -> &[Header] {
         &self.headers
+    }
+    /// Arrived on the TLS listener - the one Codex's `chatgpt_base_url` names.
+    pub fn is_tls(&self) -> bool {
+        self.secure
     }
     pub fn take_body(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.body)
