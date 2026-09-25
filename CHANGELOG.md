@@ -4,6 +4,21 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Upgrading swapdex now updates the launcher too.** Only `swapdex shim` ever
+  wrote a shim, and nothing ran it on upgrade, so a fix to the launcher reached
+  nobody whose shim an earlier version had written. 0.166.1 was exactly that:
+  it removed the flag that made every Codex launch exit, and a machine whose
+  shim 0.166.0 had written kept the broken launcher on the fixed binary. Every
+  shimmed launch already asks this binary for its proxy, so that is where a
+  shim an older build wrote is now rewritten - keeping the native binary it
+  wraps, touching only shims that call this swapdex (one that calls another
+  install is left for `doctor` to name), and atomically, so a shell part-way
+  through the old script keeps reading it. `doctor` gains a `shim content`
+  row: it had said "the shims call this swapdex" about a shim whose contents
+  were an older build's.
+
 ## 0.167.0
 
 - **Codex's status line shows the account that is paying.** Codex repaints its

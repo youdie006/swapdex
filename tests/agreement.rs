@@ -115,6 +115,122 @@ fn fixture() -> tempfile::TempDir {
     t
 }
 
+/// Run swapdex with a PATH holding a fake native `codex`, so `swapdex shim`
+/// has something to wrap. Returns (stdout+stderr, exit code).
+fn run_with_native_codex(root: &Path, args: &[&str]) -> (String, i32) {
+    let native = root.join("native-bin");
+    std::fs::create_dir_all(&native).unwrap();
+    let codex = native.join("codex");
+    if !codex.exists() {
+        std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = Command::new(bin())
+        .args(args)
+        .env("SWAPDEX_ROOT", root)
+        .env("HOME", root)
+        .env("PATH", format!("{}:/usr/bin:/bin", native.display()))
+        .output()
+        .unwrap();
+    (
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// What an older swapdex wrote: today's shim with one of its lines gone - the
+/// usage route that 0.167.0 added, the kind of fix a stale shim never carries.
+fn age_the_codex_shim(shim: &Path) -> String {
+    let current = std::fs::read_to_string(shim).unwrap();
+    let aged: String = current
+        .lines()
+        .filter(|l| !l.contains("chatgpt_base_url=\"https"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_ne!(
+        aged, current,
+        "the fixture shim had no usage route to remove"
+    );
+    std::fs::write(shim, &aged).unwrap();
+    current
+}
+
+/// Upgrading swapdex must not leave the launcher on the old behaviour.
+///
+/// Only `swapdex shim` wrote a shim, and nothing ran it on upgrade. So 0.166.1's
+/// hotfix - which removed a flag that made every Codex launch exit - reached no
+/// one whose shim 0.166.0 had written: they kept a launcher that could not
+/// start Codex, on a binary that no longer produced it. Every launch already
+/// asks this binary for its proxy (`proxy --ensure`), so that is where a shim
+/// written by an older build gets rewritten.
+#[test]
+fn a_launch_rewrites_a_shim_an_older_swapdex_wrote() {
+    let t = fixture();
+    let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
+    let shim = root.join(".local/share/swapdex/bin/codex");
+    let fresh = age_the_codex_shim(&shim);
+
+    let _ = run_with_native_codex(root, &["proxy", "--ensure", "--tool", "codex"]);
+    assert_eq!(
+        std::fs::read_to_string(&shim).unwrap(),
+        fresh,
+        "a launch left the shim an older swapdex wrote"
+    );
+}
+
+/// The over-correction: a shim that calls a DIFFERENT swapdex belongs to that
+/// install. Rewriting it would silently move the user onto this binary; doctor
+/// already names the split, and that is the user's call.
+#[test]
+fn a_launch_leaves_a_shim_that_calls_another_swapdex() {
+    let t = fixture();
+    let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
+    let shim = root.join(".local/share/swapdex/bin/codex");
+    let fresh = std::fs::read_to_string(&shim).unwrap();
+    let foreign = fresh.replace(bin(), "/opt/other/swapdex");
+    assert_ne!(foreign, fresh, "the shim did not embed this binary's path");
+    std::fs::write(&shim, &foreign).unwrap();
+
+    let _ = run_with_native_codex(root, &["proxy", "--ensure", "--tool", "codex"]);
+    assert_eq!(
+        std::fs::read_to_string(&shim).unwrap(),
+        foreign,
+        "rewrote a shim that belongs to another swapdex"
+    );
+}
+
+/// doctor said "the shims call this swapdex" about a shim whose CONTENT was an
+/// older build's - the check looked at which binary it calls, never at what it
+/// does with it.
+#[test]
+fn doctor_reports_a_shim_an_older_swapdex_wrote() {
+    let t = fixture();
+    let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
+    let shim = root.join(".local/share/swapdex/bin/codex");
+    let (fresh_doctor, _) = run_with_native_codex(root, &["doctor"]);
+    assert!(
+        !fresh_doctor.contains("older swapdex"),
+        "a current shim was called stale:\n{fresh_doctor}"
+    );
+    age_the_codex_shim(&shim);
+    let (said, _) = run_with_native_codex(root, &["doctor"]);
+    assert!(
+        said.contains("older swapdex"),
+        "doctor passes a shim an older swapdex wrote:\n{said}"
+    );
+}
+
 /// Every account that a command will ACT on must be one a listing SHOWS.
 ///
 /// `ls` built its rows from saved snapshots only. On a machine whose accounts

@@ -3043,6 +3043,10 @@ fn proxy_ensure(paths: &Paths, port: u16, tool: &str) -> Result<i32> {
     // been deleted.
     // Two proxies cannot share a port. Codex takes the next one, so the shim for
     // either tool can start its own without asking the user to pick.
+    // Every shimmed launch comes through here, which makes it the one place an
+    // upgrade can reach the launcher itself. Best effort: a shim that cannot be
+    // rewritten still launches, as it did before.
+    let _ = crate::shim::refresh_if_stale(paths, tool);
     let startup = crate::slots::proxy_startup_route(paths, tool)?;
     if startup == crate::slots::ProxyStartupRoute::Unmanaged {
         return Ok(crate::shim::PROXY_PASSTHROUGH_EXIT_STATUS);
@@ -4896,6 +4900,26 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     stale.push((tool_binary(tool).to_string(), called));
                 }
             }
+            // Which binary a shim calls says nothing about what it does: a shim
+            // an older build wrote calls this one and still runs the old
+            // launcher, and this row said "the shims call this swapdex".
+            let aged: Vec<&str> = ["claude-code", "codex"]
+                .into_iter()
+                .filter(|t| crate::shim::stale_shim(paths, t).is_some())
+                .collect();
+            report(
+                "shim content",
+                aged.is_empty(),
+                if aged.is_empty() {
+                    "the shims are the ones this swapdex writes".to_string()
+                } else {
+                    format!(
+                        "the {} shim was written by an older swapdex - the next launch \
+                         rewrites it, or run `swapdex shim` now",
+                        tool_binary(aged[0])
+                    )
+                },
+            );
             report(
                 "shim target",
                 stale.is_empty(),

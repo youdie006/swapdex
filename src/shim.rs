@@ -1497,6 +1497,62 @@ mod tests {
     }
 }
 
+/// The native binary a shim hands off to, read back from its closing
+/// `exec '<path>' "$@"`.
+pub fn real_path_in(text: &str) -> Option<PathBuf> {
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("exec "))?;
+    let token = line
+        .trim_start()
+        .strip_prefix("exec ")?
+        .strip_suffix(" \"$@\"")?
+        .trim();
+    let inner = token.strip_prefix('\'')?.strip_suffix('\'')?;
+    let path = inner.replace("'\\''", "'");
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// A shim this build would write differently, with what it would write.
+///
+/// Only a shim that calls THIS swapdex: one that calls another install belongs
+/// to that install, and doctor names the split instead. The new text keeps the
+/// paths the installed shim already embeds, so the only difference is the
+/// template - what an older build wrote.
+pub fn stale_shim(paths: &Paths, tool: &str) -> Option<(PathBuf, String)> {
+    let shim = shim_path_for(paths, tool);
+    let text = std::fs::read_to_string(&shim).ok()?;
+    let called = swapdex_path_in(&text)?;
+    let me = std::env::current_exe().ok()?;
+    let same = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if same(&called) != same(&me) {
+        return None;
+    }
+    let real = real_path_in(&text)?;
+    let expected = match tool {
+        "claude-code" => shim_script(&paths.store_dir().join("active-claude"), &real, &called),
+        "codex" => codex_shim_script(&paths.store_dir().join("active-codex"), &real, &called),
+        _ => return None,
+    };
+    (expected != text).then_some((shim, expected))
+}
+
+/// Rewrite a shim an older build wrote. Upgrading swapdex never did: only
+/// `swapdex shim` wrote one, so a fix to the launcher - 0.166.1's, which stopped
+/// every Codex launch from exiting - reached nobody who had run the version
+/// before. Atomic, so a shell part-way through reading the old script keeps it.
+pub fn refresh_if_stale(paths: &Paths, tool: &str) -> Result<bool> {
+    let Some((shim, expected)) = stale_shim(paths, tool) else {
+        return Ok(false);
+    };
+    let tmp = shim.with_extension(format!("swapdex-{}", std::process::id()));
+    std::fs::write(&tmp, expected).context("write refreshed shim")?;
+    make_executable(&tmp)?;
+    std::fs::rename(&tmp, &shim).context("replace shim")?;
+    Ok(true)
+}
+
 /// The swapdex binary a generated shim calls, recovered from the shim itself.
 ///
 /// A shim embeds an ABSOLUTE path to whichever swapdex wrote it. With two copies
@@ -1521,6 +1577,30 @@ pub fn swapdex_path_in(text: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod embedded_path_tests {
     use super::*;
+
+    /// The refresh keeps the native binary the installed shim wraps, so reading
+    /// it back must survive the quoting `sh_quote` applies - a path with a quote
+    /// or a space came back mangled, the refresh would point the launcher at
+    /// nothing.
+    #[test]
+    fn the_wrapped_binary_is_read_back_exactly() {
+        for real in ["/usr/bin/codex", "/opt/it's here/codex", "/a b/claude"] {
+            let real = Path::new(real);
+            let codex =
+                codex_shim_script(Path::new("/s/active-codex"), real, Path::new("/x/swapdex"));
+            assert_eq!(
+                real_path_in(&codex).as_deref(),
+                Some(real),
+                "codex: {real:?}"
+            );
+            let claude = shim_script(Path::new("/s/active-claude"), real, Path::new("/x/swapdex"));
+            assert_eq!(
+                real_path_in(&claude).as_deref(),
+                Some(real),
+                "claude: {real:?}"
+            );
+        }
+    }
     use std::path::Path;
 
     #[test]
