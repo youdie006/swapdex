@@ -42,6 +42,12 @@ pub fn upstream_url(base: &str, path: &str) -> String {
     format!("{}{}", base.trim_end_matches('/'), rest)
 }
 
+/// The one `chatgpt_base_url` call answered as the paying account: Codex's
+/// usage read, which is all its status line repaints from.
+pub fn is_usage_read(path: &str) -> bool {
+    path.split('?').next().unwrap_or(path) == "/backend-api/wham/usage"
+}
+
 /// One account's ChatGPT credentials, as the backend wants them.
 pub struct Auth {
     pub token: Secret,

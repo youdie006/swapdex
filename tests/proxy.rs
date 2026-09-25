@@ -2268,6 +2268,95 @@ fn codex_usage_is_asked_of_the_account_that_pays() {
     );
 }
 
+/// Over the usage listener, only the usage read is answered as the payer.
+///
+/// Measured against the live backend: answering Codex's workspace discovery
+/// (`wham/accounts/check`) with the paying account's workspaces stopped Codex
+/// at startup - "selected workspace missing from routing discovery". So the
+/// usage read gets the payer's pair and every other call keeps the client's.
+#[test]
+fn the_usage_listener_answers_only_usage_as_the_payer() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    let sink: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM_CODEX", &upstream)
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Wait for the announcement, then read the usage port the way the shim does.
+    {
+        let out = child.stdout.as_mut().unwrap();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 && b[0] != b'\n' {}
+    }
+    let usage = Command::new(bin())
+        .args(["proxy", "--usage-port", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let usage_port: u16 = String::from_utf8_lossy(&usage.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("no usage port: {usage:?}"));
+
+    let ca = std::fs::read(root.path().join(".local/share/swapdex/codex-tls/ca.pem")).unwrap();
+    let ca = ureq::tls::Certificate::from_pem(&ca).unwrap();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&[ca]))
+                .build(),
+        )
+        .build()
+        .into();
+    for path in [
+        "/backend-api/wham/usage",
+        "/backend-api/wham/accounts/check",
+    ] {
+        let status = agent
+            .get(format!("https://127.0.0.1:{usage_port}{path}"))
+            .header("authorization", "Bearer CLIENT-TOKEN")
+            .header("chatgpt-account-id", "acct-client")
+            .call()
+            .unwrap_or_else(|e| panic!("{path}: {e}"))
+            .status();
+        assert_eq!(status.as_u16(), 200, "{path}");
+    }
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    let pair = |path: &str| {
+        seen.iter()
+            .find(|(_, _, p)| p == path)
+            .map(|(a, b, _)| (a.clone(), b.clone()))
+            .unwrap_or_else(|| panic!("{path} never reached the backend: {seen:?}"))
+    };
+    assert_eq!(
+        pair("/backend-api/wham/usage"),
+        ("Bearer AT-WORK".into(), "acct-work".into()),
+        "the usage read was not asked of the paying account"
+    );
+    assert_eq!(
+        pair("/backend-api/wham/accounts/check"),
+        ("Bearer CLIENT-TOKEN".into(), "acct-client".into()),
+        "workspace discovery was answered with the payer's workspaces"
+    );
+}
+
 /// A fake Codex backend that refuses ONE account and serves every other. Records
 /// the (authorization, account-id) pair of each request it saw.
 fn fake_codex_upstream_refusing(

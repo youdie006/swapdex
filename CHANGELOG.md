@@ -4,6 +4,32 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Codex's status line shows the account that is paying.** Codex repaints its
+  weekly and 5-hour figures only from its own account-usage reads, which it
+  sends to `chatgpt_base_url` with the window's own login - so behind the proxy
+  a window started in one account kept showing that account's quota while
+  another paid for its turns, and never moved. Codex accepts that URL only over
+  HTTPS, which is why 0.166.0's plain-HTTP attempt stopped every fresh launch.
+  The Codex proxy now also listens on TLS, and the shim points
+  `chatgpt_base_url` there and hands Codex the CA through
+  `CODEX_CA_CERTIFICATE`, which Codex adds to its system roots. Only the usage
+  read is answered as the paying account; every other backend call - workspace
+  discovery above all, which Codex refuses to start without when it lists
+  another account's workspaces - keeps the window's own login. The CA is
+  name-constrained to 127.0.0.1 and localhost and its signing key never touches
+  disk, so trusting it vouches for nothing beyond this machine's loopback. If
+  you already set `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE`, the route is left
+  off rather than replace your CA.
+
+  Checked with a real Codex on a window whose own account had 99% left while
+  another paid: the status line read 84%, the paying account's figure, and
+  read 99% with the route off. A real turn through `codex exec` still went to
+  the proxy's HTTP origin and was paid by the paying account. None of eleven
+  other Codex switchers surveyed does this; the ones that appear to swap the
+  whole login and restart Codex.
+
 ## 0.166.1
 
 - **Fresh Codex launches work again.** 0.166.0 pointed Codex's
