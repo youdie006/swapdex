@@ -256,7 +256,7 @@ sx_last_config=0
 port=
 sx_explicit_config() {{
     sx_key=$(printf '%s' "${{1%%=*}}" | tr -d '[:space:]')
-    case "$sx_key" in model_provider|openai_base_url|model_providers.*) return 0 ;; esac
+    case "$sx_key" in model_provider|openai_base_url|chatgpt_base_url|model_providers.*) return 0 ;; esac
     return 1
 }}
 for a in "$@"; do
@@ -303,7 +303,7 @@ if [ "$sx_plain" = no ]; then
     {proxy_result}
     if [ "$sx_use_proxy" = yes ]; then
         if [ "$sx_last_config" -eq 0 ]; then
-            set -- -c openai_base_url="http://127.0.0.1:$port/v1" "$@"
+            set -- -c openai_base_url="http://127.0.0.1:$port/v1" -c chatgpt_base_url="http://127.0.0.1:$port/backend-api/" "$@"
         else
             # Codex can discard root -c flags when a subcommand has its own.
             # Rebuild the argument list so the managed URL has the same scope
@@ -313,7 +313,7 @@ if [ "$sx_plain" = no ]; then
                 if [ "$sx_arg_index" -eq 0 ]; then set --; fi
                 sx_arg_index=$((sx_arg_index + 1))
                 if [ "$sx_arg_index" -eq "$sx_last_config" ]; then
-                    set -- "$@" -c openai_base_url="http://127.0.0.1:$port/v1"
+                    set -- "$@" -c openai_base_url="http://127.0.0.1:$port/v1" -c chatgpt_base_url="http://127.0.0.1:$port/backend-api/"
                 fi
                 set -- "$@" "$sx_arg"
             done
@@ -1057,6 +1057,14 @@ mod tests {
             s.contains("openai_base_url=\"http://127.0.0.1:$port/v1\""),
             "routes the built-in provider without changing session identity: {s}"
         );
+        // Codex reads its usage from `chatgpt_base_url`, not from the provider.
+        // Left alone, the status line asked with the session's own login - the
+        // account the proxy is NOT paying with - and every window showed
+        // "weekly 0% left" while the account serving it had 98% left.
+        assert!(
+            s.contains("chatgpt_base_url=\"http://127.0.0.1:$port/backend-api/\""),
+            "routes Codex's usage lookups through the proxy too: {s}"
+        );
         assert!(!s.contains("set -- -c model_provider="));
         // A validated port is the only result that adds the proxy override.
         assert!(
@@ -1089,14 +1097,20 @@ mod tests {
         }
 
         let base = "openai_base_url=http://127.0.0.1:8788/v1";
+        let cg = "chatgpt_base_url=http://127.0.0.1:8788/backend-api/";
         for (input, expected) in [
-            (vec!["exec", "prompt"], vec!["-c", base, "exec", "prompt"]),
+            (
+                vec!["exec", "prompt"],
+                vec!["-c", base, "-c", cg, "exec", "prompt"],
+            ),
             (
                 vec!["exec", "-c", "model_reasoning_effort=low", "prompt"],
                 vec![
                     "exec",
                     "-c",
                     base,
+                    "-c",
+                    cg,
                     "-c",
                     "model_reasoning_effort=low",
                     "prompt",
@@ -1108,6 +1122,8 @@ mod tests {
                     "exec",
                     "-c",
                     base,
+                    "-c",
+                    cg,
                     "--config",
                     "model_reasoning_effort=low",
                     "prompt",
@@ -1118,6 +1134,8 @@ mod tests {
                 vec![
                     "-c",
                     base,
+                    "-c",
+                    cg,
                     "-c",
                     "model_reasoning_effort=low",
                     "exec",
@@ -1133,6 +1151,8 @@ mod tests {
                     "-c",
                     base,
                     "-c",
+                    cg,
+                    "-c",
                     "model=second",
                     "prompt",
                 ],
@@ -1153,6 +1173,8 @@ mod tests {
                     "-c",
                     base,
                     "-c",
+                    cg,
+                    "-c",
                     "model_reasoning_effort=low",
                     "prompt",
                 ],
@@ -1164,13 +1186,23 @@ mod tests {
                     "-c",
                     base,
                     "-c",
+                    cg,
+                    "-c",
                     "model_reasoning_effort = \"low\"",
                     "prompt",
                 ],
             ),
             (
                 vec!["exec", "-cmodel_reasoning_effort=low", "prompt"],
-                vec!["exec", "-c", base, "-cmodel_reasoning_effort=low", "prompt"],
+                vec![
+                    "exec",
+                    "-c",
+                    base,
+                    "-c",
+                    cg,
+                    "-cmodel_reasoning_effort=low",
+                    "prompt",
+                ],
             ),
             (
                 vec!["exec", "--config=model_reasoning_effort=low", "prompt"],
@@ -1178,6 +1210,8 @@ mod tests {
                     "exec",
                     "-c",
                     base,
+                    "-c",
+                    cg,
                     "--config=model_reasoning_effort=low",
                     "prompt",
                 ],
@@ -1191,6 +1225,8 @@ mod tests {
                     "-c",
                     base,
                     "-c",
+                    cg,
+                    "-c",
                     "model=second",
                     "--",
                     "-c",
@@ -1198,7 +1234,7 @@ mod tests {
             ),
             (
                 vec!["exec", "--", "-c", "prompt"],
-                vec!["-c", base, "exec", "--", "-c", "prompt"],
+                vec!["-c", base, "-c", cg, "exec", "--", "-c", "prompt"],
             ),
             (
                 vec!["exec", "-c", "model_provider=fixture", "prompt"],

@@ -1887,50 +1887,24 @@ pub const KEEP_ALIVE_CODEX_WINDOW_SECS: i64 = 2 * 24 * 60 * 60;
 /// The deadline is in the access token's own `exp` claim. A credential with no
 /// refresh token cannot be renewed from here, and a deadline that could not be
 /// read is not an expired one - neither is grounds for spending a refresh token.
-/// A holder may defer renewal only while the token it holds has a day left.
+/// Whether a live holder earns a deferral for this slot.
 ///
-/// The guard exists so a session's token is not retired under it. A Codex that
-/// runs refreshes its own token, so a holder that has let the token run down to
-/// its final day without refreshing is not using it, and there is nothing left
-/// for the guard to protect. Past this point deferring stops meaning "do not
-/// retire a live token" and starts meaning "let an idle process hold this
-/// account until it dies" - measured as eleven seven-day-old Codex processes
-/// with zero CPU seconds between them, holding a slot 23 hours from lapsing.
-pub const CODEX_HOLDER_CEILING_SECS: i64 = 24 * 60 * 60;
-
-/// Whether a live holder still earns a deferral for this slot.
+/// A Codex process running IN the slot directory does not: Codex reloads
+/// auth.json from disk before it refreshes ("Skipping token refresh because
+/// auth changed after guarded reload", in the 0.156 binary), so a renewal
+/// swapdex writes is the one that process picks up. And behind the proxy it
+/// never refreshes on its own - it never sees a 401 - so deferring to it meant
+/// nobody renewed at all. Measured: sessions with hours of CPU time holding a
+/// slot that went eleven days without a renewal. An earlier revision of this
+/// guard called those processes idle; that measured their `node` wrappers, not
+/// Codex.
 ///
-/// Every site that consults `slot_in_use` for Codex goes through here, so the
-/// refresh path and the screens that explain it answer from one rule.
-fn codex_holder_defers(paths: &Paths, dir: &Path, now_secs: i64) -> bool {
-    // Ask the HOLDER's credential, not the slot's. A twin - a live process
-    // holding the same account through its own home - can be fresh while the
-    // slot's own token has lapsed; reading the slot there released a holder
-    // that was actively using the login (tests/refresh.rs, the twin cases).
-    // The idle processes this ceiling exists for hold the slot dir itself, so
-    // for them the two files are one and the ceiling still bites.
-    codex_holder_dirs(paths, dir).into_iter().any(|holder| {
-        // Only a holder living IN the slot directory can be judged by the
-        // slot's token: that is the one file it refreshes, so a full lifetime
-        // without a write means it is not using the login. A holder in any
-        // other home - a twin, a native process sharing the token - refreshes
-        // a file this code cannot see, and a live process there is a live
-        // process. The gate caught both shapes; they are honoured unconditionally.
-        if !same_dir(&holder, dir) {
-            return true;
-        }
-        let exp = std::fs::read(holder.join("auth.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| {
-                v["tokens"]["access_token"]
-                    .as_str()
-                    .and_then(crate::proxy::codex::jwt_expiry)
-            });
-        // No readable expiry: keep the guard - a token that cannot be dated is
-        // a token that cannot be proven abandoned.
-        exp.is_none_or(|exp| exp - now_secs > CODEX_HOLDER_CEILING_SECS)
-    })
+/// A holder in any OTHER home refreshes a file this code cannot see, and its
+/// in-memory token is not reloaded from this slot, so it still defers.
+fn codex_holder_defers(paths: &Paths, dir: &Path, _now_secs: i64) -> bool {
+    codex_holder_dirs(paths, dir)
+        .into_iter()
+        .any(|holder| !same_dir(&holder, dir))
 }
 
 /// Every running Codex home that holds this slot's login: the slot dir itself
@@ -1985,11 +1959,24 @@ pub fn wants_keep_alive_codex(blob: &[u8], now_secs: i64) -> bool {
     {
         return false;
     }
-    v["tokens"]["access_token"]
+    let access_due = v["tokens"]["access_token"]
         .as_str()
         .and_then(crate::proxy::codex::jwt_expiry)
-        .is_some_and(|exp| exp - now_secs <= KEEP_ALIVE_CODEX_WINDOW_SECS)
+        .is_some_and(|exp| exp - now_secs <= KEEP_ALIVE_CODEX_WINDOW_SECS);
+    // Age, not only the access deadline. Two refresh tokens were already
+    // rejected the first time anything tried them, 8.4 and 11.9 days after
+    // issue, because the first attempt came two days before the access token
+    // lapsed. Renewing on age keeps the token away from that edge and finds a
+    // dead one while the access token still has days left.
+    let aged = v["last_refresh"]
+        .as_str()
+        .and_then(crate::session_link::rfc3339_to_secs)
+        .is_some_and(|at| now_secs - at >= CODEX_REFRESH_AGE_SECS);
+    access_due || aged
 }
+
+/// How old a Codex refresh may get before keep-alive renews it anyway.
+pub const CODEX_REFRESH_AGE_SECS: i64 = 5 * 24 * 60 * 60;
 
 /// A keep-alive pass distinguishes an OAuth renewal from a native client that
 /// already owns usable access. A deferred account is due, but the safety guard
@@ -2528,14 +2515,19 @@ mod codex_in_use_tests {
 
     /// The Codex renewal refuses a slot a live session is on.
     ///
-    /// This is the guard `refresh_codex_slot` documents, and the reason the
-    /// keep-alive sweep cannot log an account out: the session in that slot
-    /// holds the refresh token the renewal retires, so its own next renewal
-    /// would fail. The slot deliberately has no `auth.json`, so a renewal that
-    /// gets past the guard stops at `NoCredential` - what this asserts against -
-    /// without reaching the network.
+    /// A Codex session in the slot itself no longer refuses the renewal.
+    ///
+    /// This used to assert the opposite, on the premise that the session's own
+    /// next renewal would fail once swapdex retired its token. Codex reloads
+    /// auth.json before it refreshes ("Skipping token refresh because auth
+    /// changed after guarded reload", 0.156 binary), so it picks up swapdex's
+    /// renewal instead - and behind the proxy it never renews at all, which is
+    /// how a slot went eleven days untouched and its refresh token died. The
+    /// slot deliberately has no `auth.json`, so a renewal past the guard stops
+    /// at `NoCredential` without reaching the network. Holders in OTHER homes
+    /// still refuse; the twin tests in tests/refresh.rs cover that side.
     #[test]
-    fn a_running_session_refuses_the_renewal() {
+    fn a_session_in_the_slot_does_not_refuse_the_renewal() {
         let root = std::env::temp_dir().join(format!("swapdex_cx_ref_{}", std::process::id()));
         let slot = root.join("slot");
         std::fs::create_dir_all(&slot).unwrap();
@@ -2570,8 +2562,8 @@ mod codex_in_use_tests {
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(
-            matches!(verdict, Err(RefreshError::InUse)),
-            "renewed a slot a live session holds: {verdict:?}"
+            matches!(verdict, Err(RefreshError::NoCredential)),
+            "a Codex session in the slot still blocked the renewal: {verdict:?}"
         );
     }
 }

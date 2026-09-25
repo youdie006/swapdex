@@ -418,6 +418,101 @@ fn a_holder_that_let_the_token_reach_its_last_day_no_longer_defers_renewal() {
     let _ = slot;
 }
 
+/// A Codex slot whose credential was last refreshed `age_days` ago, with an
+/// access token still `left_days` from lapsing.
+fn seed_aged_codex(root: &Path, name: &str, age_days: i64, left_days: i64) -> PathBuf {
+    let slot = seed_codex(
+        root,
+        name,
+        &format!("account-{name}"),
+        &format!("refresh-{name}"),
+        now_secs() + left_days * 86_400,
+    );
+    let path = slot.join("auth.json");
+    let mut auth: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    auth["last_refresh"] = rfc3339(now_secs() - age_days * 86_400).into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&auth).unwrap()).unwrap();
+    slot
+}
+
+fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = era * 400 + yoe + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Renewal must not wait for the access token to run down.
+///
+/// Measured: two Codex refresh tokens were already rejected the first time
+/// anything tried them - 8.4 and 11.9 days after they were issued - because
+/// keep-alive only began asking two days before the access token lapsed, and a
+/// Codex session sitting in the slot was trusted to renew it instead. That
+/// session never does while the proxy serves it: it never sees a 401. So the
+/// age of the refresh decides now, and a Codex holder in the slot does not stand
+/// in the way - Codex reloads auth.json from disk before it refreshes, so a
+/// renewal swapdex writes is the one it picks up.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_codex_login_is_renewed_by_age_even_with_codex_open_in_the_slot() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_aged_codex(root.path(), "aged", 6, 4);
+    let mut running = running_codex(root.path(), &slot);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+
+    let keep_alive = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "--keep-alive"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    let said = combined(&keep_alive);
+    running.stop();
+
+    assert!(
+        !std::fs::read(&count).unwrap_or_default().is_empty(),
+        "a six-day-old refresh was left to age while Codex sat in the slot:\n{said}"
+    );
+}
+
+/// The over-correction: a login refreshed yesterday is left alone. Rotating a
+/// refresh token nobody needs rotated is a chance to lose it for nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_recently_refreshed_codex_login_is_not_renewed_again() {
+    let root = tempfile::tempdir().unwrap();
+    let _slot = seed_aged_codex(root.path(), "fresh", 1, 9);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+
+    let keep_alive = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "--keep-alive"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    let said = combined(&keep_alive);
+    assert!(
+        std::fs::read(&count).unwrap_or_default().is_empty(),
+        "a login refreshed yesterday was renewed again:\n{said}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn due_codex_renewal_held_by_live_account_is_reported_as_deferred() {
@@ -488,13 +583,19 @@ fn due_codex_renewal_held_by_live_account_is_reported_as_deferred() {
     );
 
     let mut running = running_codex(root.path(), &holder);
+    // Not due on either clock: seven days of access left, and refreshed just
+    // now. The shared helper stamps a fixed calendar date, which ages into
+    // "due by age" as the calendar moves on.
+    let mut replacement: serde_json::Value = serde_json::from_slice(&codex_auth(
+        "account-due",
+        "replacement-refresh",
+        &jwt(now_secs() + 7 * 86_400),
+    ))
+    .unwrap();
+    replacement["last_refresh"] = rfc3339(now_secs()).into();
     std::fs::write(
         slot.join("auth.json"),
-        codex_auth(
-            "account-due",
-            "replacement-refresh",
-            &jwt(now_secs() + 7 * 86_400),
-        ),
+        serde_json::to_vec_pretty(&replacement).unwrap(),
     )
     .unwrap();
     let row = json_row(root.path(), "due");

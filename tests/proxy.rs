@@ -2191,6 +2191,84 @@ fn a_running_codex_session_follows_a_pointer_change() {
     );
 }
 
+/// Codex's usage lookup goes to the account that PAYS, not the session's own.
+///
+/// The status line in every Codex window read "weekly 0% left" while the proxy
+/// was serving those windows from an account with 98% left: the lookup went to
+/// `chatgpt_base_url` with the session's own login and never touched the proxy.
+/// Routed through it, the proxy must rewrite that pair exactly as it does for a
+/// turn, and send the path to the ChatGPT root.
+#[test]
+fn codex_usage_is_asked_of_the_account_that_pays() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    let sink: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream(sink.clone());
+
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM_CODEX", &upstream)
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port = {
+        let out = child.stdout.as_mut().unwrap();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 {
+            if b[0] == b'\n' {
+                break;
+            }
+            line.push(b[0]);
+        }
+        let line = String::from_utf8_lossy(&line).to_string();
+        line.rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .unwrap_or_else(|| panic!("codex proxy did not announce a port: {line}"))
+    };
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let status = agent
+        .get(format!("http://127.0.0.1:{port}/backend-api/wham/usage"))
+        .header("authorization", "Bearer CLIENT-TOKEN")
+        .header("chatgpt-account-id", "acct-client")
+        .call()
+        .expect("proxy answered")
+        .status();
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(status.as_u16(), 200, "the usage lookup was not served");
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "the lookup reached the backend once: {seen:?}"
+    );
+    assert_eq!(
+        (seen[0].0.as_str(), seen[0].1.as_str()),
+        ("Bearer AT-WORK", "acct-work"),
+        "usage was asked with the session's own login, not the payer's"
+    );
+    assert_eq!(
+        seen[0].2, "/backend-api/wham/usage",
+        "the lookup did not land on the ChatGPT backend root"
+    );
+}
+
 /// A fake Codex backend that refuses ONE account and serves every other. Records
 /// the (authorization, account-id) pair of each request it saw.
 fn fake_codex_upstream_refusing(
@@ -3436,11 +3514,16 @@ mod codex_routing_ignores_inherited_shell_state {
     }
 
     fn managed_args(original: &[&str]) -> Vec<String> {
-        ["-c", "openai_base_url=http://127.0.0.1:8788/v1"]
-            .into_iter()
-            .chain(original.iter().copied())
-            .map(str::to_owned)
-            .collect()
+        [
+            "-c",
+            "openai_base_url=http://127.0.0.1:8788/v1",
+            "-c",
+            "chatgpt_base_url=http://127.0.0.1:8788/backend-api/",
+        ]
+        .into_iter()
+        .chain(original.iter().copied())
+        .map(str::to_owned)
+        .collect()
     }
 
     #[test]

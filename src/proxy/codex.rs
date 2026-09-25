@@ -31,6 +31,13 @@ pub fn base_url() -> String {
 /// which is not an endpoint - so the version prefix is dropped here rather than
 /// left for the backend to reject.
 pub fn upstream_url(base: &str, path: &str) -> String {
+    // `chatgpt_base_url` lookups - usage, above all - are siblings of the
+    // responses endpoint, not children of it, so they go to the backend root.
+    if path.starts_with("/backend-api/") {
+        let base = base.trim_end_matches('/');
+        let root = base.strip_suffix("/backend-api/codex").unwrap_or(base);
+        return format!("{root}{path}");
+    }
     let rest = path.strip_prefix("/v1").unwrap_or(path);
     format!("{}{}", base.trim_end_matches('/'), rest)
 }
@@ -148,6 +155,28 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    /// Codex asks for its usage at `chatgpt_base_url` + `/wham/usage`, a sibling
+    /// of the responses endpoint rather than a child of it. Routed through the
+    /// proxy it arrives as `/backend-api/...` and must land on the ChatGPT root,
+    /// not under `/backend-api/codex`.
+    #[test]
+    fn a_backend_api_path_lands_on_the_chatgpt_root() {
+        let base = "https://chatgpt.com/backend-api/codex";
+        assert_eq!(
+            upstream_url(base, "/backend-api/wham/usage"),
+            "https://chatgpt.com/backend-api/wham/usage"
+        );
+        assert_eq!(
+            upstream_url(base, "/backend-api/wham/usage?x=1"),
+            "https://chatgpt.com/backend-api/wham/usage?x=1"
+        );
+        // A test upstream carries no `/backend-api/codex` suffix to strip.
+        assert_eq!(
+            upstream_url("http://127.0.0.1:9", "/backend-api/wham/usage"),
+            "http://127.0.0.1:9/backend-api/wham/usage"
+        );
     }
 
     #[test]
