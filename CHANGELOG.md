@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.166.0
 
 - **`doctor` reports a renewal that is standing down.** Renewing a login while
   a session holds it would retire the token that session is using, so swapdex
@@ -16,16 +16,32 @@ All notable changes to swapdex are documented here. This project follows
   renewal because a long-lived session kept the guard engaged. It is reported
   as information rather than a fault, because the guard working is not a
   problem - being unable to see it was.
-- **An idle session can no longer hold an account past its token.** Renewal
-  is deferred while a Codex session holds the login, so the token that session
-  is using is not retired under it. That guard had no ceiling. Measured: eleven
-  seven-day-old Codex processes with zero CPU seconds between them - windows
-  left open in a terminal - holding a slot that had gone nine days without a
-  renewal and was 23 hours from lapsing; after that the proxy would have
-  silently forwarded the reader's own credential in its place. A Codex that
-  runs refreshes its own token, so a holder that has let it reach its last day
-  is not using it, and the guard now stands aside there. A holder with more
-  than a day left still defers, exactly as before.
+- **Codex logins are renewed before they can die.** Two Codex refresh tokens
+  were already rejected the first time anything tried them, 8.4 and 11.9 days
+  after they were issued, and every Codex window stopped. Two things let that
+  happen. Keep-alive only began asking two days before the access token
+  lapsed. And a Codex session running in the slot was trusted to renew the
+  login itself, so swapdex stood down - but behind the proxy that session never
+  sees a 401 and never renews; one slot went eleven days untouched while its
+  sessions ran for hours. Keep-alive now renews a Codex login once it is five
+  days old, and a Codex session in the slot no longer blocks it: Codex reloads
+  auth.json before it refreshes, so the renewal swapdex writes is the one it
+  picks up. A process holding the account from a different home still defers.
+  Why the refresh tokens died unused is not established; renewing early keeps
+  them off that edge and finds a dead one while days of access remain.
+
+  Correction to the previous two commits in this batch: they described those
+  sessions as idle, with zero CPU seconds. That measured their `node` launch
+  wrappers. The Codex processes underneath had used hours of CPU.
+- **The Codex status line shows the account that is paying.** Every Codex
+  window read "weekly 0% left" while the proxy was serving them from an
+  account with 98% left. Codex fetches usage from `chatgpt_base_url`, which the
+  shim never pointed at the proxy, so the lookup went out with the session's
+  own login - the account swapdex was not paying with. The shim now routes
+  `chatgpt_base_url` through the proxy as well, which answers it with the
+  paying account's credentials exactly as it does a turn. Checked against the
+  live backend: a lookup sent with placeholder credentials came back 200,
+  served by the paying account.
 - **`doctor` explains a deferred Claude renewal the way Claude works.** The
   deferral row added in this batch used one sentence for both tools - "it
   renews once that session exits" - which is true of Codex and false of
