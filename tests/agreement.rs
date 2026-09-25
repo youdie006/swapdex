@@ -231,6 +231,72 @@ fn doctor_reports_a_shim_an_older_swapdex_wrote() {
     );
 }
 
+/// A live Codex proxy marker, owned by this test process so it reads as alive.
+fn mark_codex_proxy(root: &Path, usage_port: Option<u16>) {
+    let store = root.join(".local/share/swapdex");
+    let tail = usage_port.map_or(String::new(), |p| format!(" {p}"));
+    std::fs::write(
+        store.join("proxy-codex"),
+        format!("{} 8788 test-build{tail}\n", std::process::id()),
+    )
+    .unwrap();
+}
+
+fn doctor_usage_row(root: &Path, env: &[(&str, &str)]) -> String {
+    let mut cmd = Command::new(bin());
+    cmd.arg("doctor")
+        .env("SWAPDEX_ROOT", root)
+        .env_remove("CODEX_CA_CERTIFICATE")
+        .env_remove("SSL_CERT_FILE");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    text.lines()
+        .find(|l| l.starts_with("usage:codex"))
+        .unwrap_or_else(|| panic!("doctor has no usage:codex row:\n{text}"))
+        .to_string()
+}
+
+/// Codex's status line shows the paying account only while the usage route is
+/// up, and every way it can be down is silent: the status line just goes back
+/// to the window's own account. doctor names which state this machine is in.
+#[test]
+fn doctor_says_whether_codex_usage_reads_reach_the_payer() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+
+    mark_codex_proxy(root, Some(18788));
+    let on = doctor_usage_row(root, &[]);
+    assert!(
+        on.contains(" ok "),
+        "a working route reported as a problem: {on}"
+    );
+    assert!(
+        on.contains("18788"),
+        "the row does not name the listener: {on}"
+    );
+
+    mark_codex_proxy(root, None);
+    let off = doctor_usage_row(root, &[]);
+    assert!(
+        off.contains("problem"),
+        "a proxy with no usage listener passed as fine: {off}"
+    );
+
+    mark_codex_proxy(root, Some(18788));
+    for var in ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"] {
+        let row = doctor_usage_row(root, &[(var, "/etc/corp.pem")]);
+        assert!(
+            row.contains(var),
+            "the route is left off for {var} and doctor does not say why: {row}"
+        );
+    }
+}
+
 /// Every account that a command will ACT on must be one a listing SHOWS.
 ///
 /// `ls` built its rows from saved snapshots only. On a machine whose accounts

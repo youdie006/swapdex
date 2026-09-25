@@ -18,6 +18,12 @@ All notable changes to swapdex are documented here. This project follows
   through the old script keeps reading it. `doctor` gains a `shim content`
   row: it had said "the shims call this swapdex" about a shim whose contents
   were an older build's.
+- **`doctor` says whether Codex's status line can show the paying account.**
+  Every way the usage route can be off is silent - the status line just goes
+  back to each window's own account. A new `usage:codex` row, shown while a
+  Codex proxy runs, names the state: working (with the listener's port),
+  left off because `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE` is set, or a
+  problem when the proxy has no usage listener.
 
 ## 0.167.0
 

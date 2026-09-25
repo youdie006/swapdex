@@ -5497,6 +5497,40 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         }
     }
 
+    // Whether Codex's status line can show the account that pays. Every way the
+    // route can be off is silent - the status line just goes back to the
+    // window's own account - so name the state. Only with a Codex proxy up;
+    // without one there is no payer to disagree with the window.
+    if crate::proxy::running_proxy_for(paths, "codex").is_some() {
+        let user_ca = ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"]
+            .into_iter()
+            .find(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+        let (ok, msg) = match (user_ca, crate::proxy::usage_port_for(paths, "codex")) {
+            (Some(var), _) => (
+                true,
+                format!(
+                    "{var} is set, so swapdex leaves Codex's CA alone - its status line \
+                     shows each window's own account, not the one paying"
+                ),
+            ),
+            (None, Some(port)) => (
+                true,
+                format!(
+                    "Codex's status line reads the paying account (usage listener on \
+                     127.0.0.1:{port}; windows started before it keep their own account)"
+                ),
+            ),
+            (None, None) => (
+                false,
+                "the Codex proxy has no usage listener, so Codex's status line shows each \
+                 window's own account - restart it (`swapdex service install --tool \
+                 codex`) and read its log if the listener stays off"
+                    .to_string(),
+            ),
+        };
+        report("usage:codex", ok, msg);
+    }
+
     // CLIs on PATH - informational (a codex-only user is not "broken").
     let mut found = Vec::new();
     for cli in ["claude", "codex", "gemini", "agy"] {
