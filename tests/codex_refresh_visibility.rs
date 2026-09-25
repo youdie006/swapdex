@@ -420,6 +420,7 @@ fn a_holder_that_let_the_token_reach_its_last_day_no_longer_defers_renewal() {
 
 /// A Codex slot whose credential was last refreshed `age_days` ago, with an
 /// access token still `left_days` from lapsing.
+#[cfg(target_os = "linux")]
 fn seed_aged_codex(root: &Path, name: &str, age_days: i64, left_days: i64) -> PathBuf {
     let slot = seed_codex(
         root,
@@ -436,6 +437,7 @@ fn seed_aged_codex(root: &Path, name: &str, age_days: i64, left_days: i64) -> Pa
     slot
 }
 
+#[cfg(target_os = "linux")]
 fn rfc3339(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
