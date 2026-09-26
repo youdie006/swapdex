@@ -99,8 +99,16 @@ impl RefreshError {
                 "'{name}' {tool} renewal deferred - refresh unverified while a {tool} session \
                  is using this account; retry after the session exits"
             ),
-            Self::Expired => format!(
+            // Claude's credential states when its refresh token lapses, so an
+            // expired one really did sit idle. Codex's says nothing of the kind:
+            // there this is the login server refusing the token, and an account
+            // in use all day was told it had been idle.
+            Self::Expired if flag.is_empty() => format!(
                 "'{name}' has been idle too long to renew - \
+                 `swapdex run {name}{flag}` signs it in again"
+            ),
+            Self::Expired => format!(
+                "the login server refused to renew '{name}' - \
                  `swapdex run {name}{flag}` signs it in again"
             ),
             Self::Busy => format!(
@@ -1805,6 +1813,7 @@ mod tests {
         assert!(refresh_token_expired(blob.as_bytes(), now));
         let msg = RefreshError::Expired.remedy("work", "claude-code");
         assert!(msg.contains("swapdex run work"), "names the way out: {msg}");
+        assert!(msg.contains("idle too long"), "names why: {msg}");
         // Unknown is not expired.
         assert!(!refresh_token_expired(br#"{"claudeAiOauth":{}}"#, now));
     }
