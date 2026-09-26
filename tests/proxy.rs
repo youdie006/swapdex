@@ -3028,8 +3028,11 @@ fn late_inflight_refusal_cannot_override_a_newer_human_selection() {
                 let output = proxy.stop_with_stdout();
                 upstream.close();
                 let seen = seen.lock().unwrap().clone();
+                // Codex gets the payer's refusal as a 403 it shows, never as a
+                // 401 that would make it renew the window's own login.
+                let refused = if tool == "codex" { 403 } else { 401 };
                 assert_eq!(
-                    first, 401,
+                    first, refused,
                     "tool={tool} auto={auto} preobserved={choice_observed_by_request}: late A did not keep its own result; seen={seen:?}\n{output}"
                 );
                 assert_eq!(
@@ -5155,7 +5158,7 @@ fn codex_repeated_401_is_bounded_to_one_same_account_recovery() {
     );
     let proxy = ReapedChild::new(proxy);
 
-    assert_eq!(post_codex_turn(port).0, 401);
+    assert_eq!(post_codex_turn(port).0, 403);
     assert_eq!(
         *seen.lock().unwrap(),
         vec![
@@ -5223,6 +5226,55 @@ fn a_renewed_login_that_is_still_refused_is_not_renewed_again_on_later_turns() {
         !output.contains("signs it in again"),
         "a refusal that survives a fresh login was blamed on the login: {output}"
     );
+    upstream.close();
+}
+
+/// Codex answers a 401 by renewing the login in its OWN home. Behind the proxy
+/// that login did not make the request - the paying account's did - so relaying
+/// the payer's 401 spent the window's refresh token for nothing, and when that
+/// token had rotated elsewhere Codex told the user to sign that account in again.
+#[test]
+fn a_refusal_of_the_paying_login_is_not_handed_to_codex_as_its_own() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    let curl = fake_oauth_curl(root.path(), r#"{"error":"refresh_token_reused"}"#, 401);
+    let upstream = ControlledUpstream::start(move |request| {
+        request
+            .respond(
+                tiny_http::Response::from_string(
+                    r#"{"error":{"message":"Incorrect API key provided"}}"#,
+                )
+                .with_status_code(401),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let (status, body) = post_codex_turn(port);
+    assert_eq!(
+        status, 403,
+        "the payer's refusal went back as the window's own: {body}"
+    );
+    assert!(
+        body.contains("'work' was refused by the provider"),
+        "the answer does not name the account that was refused: {body}"
+    );
+    proxy.stop();
     upstream.close();
 }
 
@@ -5312,7 +5364,8 @@ fn codex_401_does_not_refresh_a_replacement_subject_in_the_same_workspace() {
     let output = proxy.stop_with_stdout();
     upstream.close();
 
-    assert_eq!(status, 401, "replacement account B must not carry A's turn");
+    // A's refusal comes back as A's, not as the window's own 401.
+    assert_eq!(status, 403, "replacement account B must not carry A's turn");
     assert_eq!(
         *seen.lock().unwrap(),
         vec![format!("Bearer {CODEX_JWT_LIVE}")]
