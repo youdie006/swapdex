@@ -4824,6 +4824,25 @@ fn fake_oauth_curl(root: &std::path::Path, answer: &str, status: u16) -> std::pa
     p
 }
 
+/// A fake login server that, like the real one, answers every exchange with a
+/// new access token and a new refresh token.
+fn rotating_oauth_curl(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = root.join("rotating-oauth-curl");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n\
+             printf x >> \"$FAKE_OAUTH_COUNT\"\n\
+             n=$(wc -c < \"$FAKE_OAUTH_COUNT\")\n\
+             printf '{{\"access_token\":\"{CODEX_JWT_LIVE_NEW}%s\",\"refresh_token\":\"RT-%s\"}}\\n200' $n $n\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
 fn start_codex_proxy_env(
     root: &std::path::Path,
     upstream: &str,
@@ -5147,6 +5166,63 @@ fn codex_repeated_401_is_bounded_to_one_same_account_recovery() {
     );
     assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
     proxy.stop();
+    upstream.close();
+}
+
+/// An outage refuses a freshly renewed login exactly as it refused the old one.
+/// Renewing again on later turns only spends refresh tokens: during a provider
+/// outage one account was renewed every few minutes while every login was
+/// refused alike, until the login server refused one exchange and the account
+/// was reported as needing a new sign-in it did not need.
+#[test]
+fn a_renewed_login_that_is_still_refused_is_not_renewed_again_on_later_turns() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "id-work",
+        CODEX_JWT_LIVE,
+        "acct-work",
+        true,
+    );
+    // The real login server rotates both tokens on every exchange.
+    let curl = rotating_oauth_curl(root.path());
+    let count = root.path().join("oauth-count");
+    // The outage flapped: the same login was served and refused seconds apart.
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream = ControlledUpstream::start(move |request| {
+        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let status = if n.is_multiple_of(2) { 401 } else { 200 };
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(status))
+            .unwrap();
+    });
+    let (proxy, port) = start_codex_proxy_env(
+        root.path(),
+        upstream.url(),
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+            ("FAKE_OAUTH_COUNT", count.to_str().unwrap()),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    post_codex_turn(port);
+    // Past the window in which one exchange's result is shared, so a second
+    // exchange is what the next refusal would cost.
+    std::thread::sleep(std::time::Duration::from_secs(31));
+    post_codex_turn(port);
+    assert_eq!(
+        std::fs::read(&count).unwrap(),
+        b"x",
+        "a login renewed moments ago and still refused was renewed again"
+    );
+    let output = proxy.stop_with_stdout();
+    assert!(
+        !output.contains("signs it in again"),
+        "a refusal that survives a fresh login was blamed on the login: {output}"
+    );
     upstream.close();
 }
 

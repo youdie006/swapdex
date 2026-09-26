@@ -119,6 +119,9 @@ struct Shared {
     /// the credential that earned it, so a token refresh retires it - without
     /// this, a re-authorized account stayed sidelined for a dead reason.
     replaced_at: Mutex<HashMap<String, i64>>,
+    /// When each account was last renewed because the upstream refused it,
+    /// and whether the refusal of that renewed login was already reported.
+    renewed_on_rejection: Mutex<HashMap<String, (i64, bool)>>,
     /// Said once when a Codex response turns out to state its own windows.
     /// Whether Codex sends those headers is undocumented and was never checked
     /// here, so the first arrival is worth seeing - and its absence stays
@@ -1359,6 +1362,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         refused_at: Mutex::new(HashMap::new()),
         ok_at: Mutex::new(HashMap::new()),
         replaced_at: Mutex::new(HashMap::new()),
+        renewed_on_rejection: Mutex::new(HashMap::new()),
         agent: upstream::agent(),
         base: if opts.tool == "codex" {
             codex::base_url()
@@ -1860,8 +1864,17 @@ fn usable_bearer(
 /// bearer may renew only when its exact source generation was also the selected
 /// renewal authority. The refresh operation still verifies the native lock
 /// protocol, identity, and generation; unrelated native copies never opt in.
+/// How long a login renewed because the upstream refused it is not renewed
+/// again for the same reason.
+const RENEWAL_BACKOFF_SECS: i64 = 10 * 60;
+
+fn renewal_backing_off(renewed_at: i64, now: i64) -> bool {
+    now - renewed_at < RENEWAL_BACKOFF_SECS
+}
+
 fn recover_rejected_bearer(
     paths: &Paths,
+    sh: &Shared,
     tool: &str,
     slot: &crate::slots::SlotRecord,
     rejected: &[u8],
@@ -1913,6 +1926,22 @@ fn recover_rejected_bearer(
             return Some(current_auth.token);
         }
     }
+    // A login renewed moments ago and refused again is not refused for its
+    // login: an outage refuses every login alike, and renewing on each later
+    // turn only spends refresh tokens until the login server refuses one too.
+    if let Some((at, said)) = sh.renewed_on_rejection.held().get_mut(&slot.name) {
+        if renewal_backing_off(*at, now_secs()) {
+            if !std::mem::replace(said, true) {
+                println!(
+                    "  {}: refused again right after a renewal - the provider is refusing it, \
+                     not its login; not renewing again for now",
+                    slot.name
+                );
+                std::io::stdout().flush().ok();
+            }
+            return None;
+        }
+    }
     let refreshed = match tool {
         "codex" => {
             let expected = codex_binding?;
@@ -1941,6 +1970,9 @@ fn recover_rejected_bearer(
     };
     match refreshed {
         Ok(crate::refresh::RefreshOutcome::Renewed) => {
+            sh.renewed_on_rejection
+                .held()
+                .insert(slot.name.clone(), (now_secs(), false));
             println!(
                 "  {}: renewed its login after upstream rejected it",
                 slot.name
@@ -2310,6 +2342,7 @@ fn forward_turn(
                 unauthorized_recovery.push(slot.name.clone());
                 if let Some(replacement) = recover_rejected_bearer(
                     paths,
+                    sh,
                     &opts.tool,
                     &slot,
                     auth.token.expose(),
@@ -2523,6 +2556,7 @@ fn forward_turn(
                 unauthorized_recovery.push(slot.name.clone());
                 if let Some(replacement) = recover_rejected_bearer(
                     paths,
+                    sh,
                     &opts.tool,
                     &slot,
                     token.expose(),
@@ -3201,6 +3235,13 @@ mod refusal_recording_tests {
     /// exactly the "count refusal rounds, not responses" mistake.
     ///
     /// Only the verdict that ends the round is about the account.
+    #[test]
+    fn a_renewal_backoff_ends() {
+        assert!(renewal_backing_off(1_000, 1_000));
+        assert!(renewal_backing_off(1_000, 1_000 + RENEWAL_BACKOFF_SECS - 1));
+        assert!(!renewal_backing_off(1_000, 1_000 + RENEWAL_BACKOFF_SECS));
+    }
+
     #[test]
     fn a_throttle_that_will_be_retried_is_not_a_refusal() {
         // Mid-round: the proxy is going to try this same account again.

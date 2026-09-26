@@ -4,6 +4,23 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A provider outage no longer burns refresh tokens.** When the upstream
+  refused a turn, the proxy renewed that account's login and retried - and on
+  the next refused turn it renewed again, because a turn served in between
+  cleared the refusal. On 2026-09-26 a Codex outage refused every login alike,
+  flapping between served and refused, and the paying account was renewed
+  every few minutes for no gain until the login server refused one exchange
+  and the account was reported as needing a new sign-in. A login renewed
+  because of a refusal is now not renewed again for the same reason for ten
+  minutes; the proxy says once that the provider, not the login, is refusing.
+- **`doctor` names a login whose renewal was refused.** `ls` said "re-login
+  required" for such an account while `doctor` passed it as ok, because the
+  login keeps serving until its current token lapses. The slot row now says
+  so, with the command that signs it in again, read from the same record `ls`
+  reads.
+
 ## 0.167.1
 
 - **Upgrading swapdex now updates the launcher too.** Only `swapdex shim` ever

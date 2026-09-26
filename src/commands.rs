@@ -2133,6 +2133,21 @@ struct AccountHealth {
     renewal_owner: std::collections::BTreeMap<String, String>,
 }
 
+/// When this slot's renewal was definitively refused, read from the same
+/// sources `ls` reads, so doctor and the listing cannot disagree about it.
+fn refresh_rejected_at(
+    paths: &Paths,
+    tool: &str,
+    dir: &std::path::Path,
+    now_ms: i64,
+) -> Option<i64> {
+    match crate::live_login::resolve(paths, dir, tool, now_ms) {
+        Some(login) => login.refresh_rejected_at_ms,
+        None if tool == "codex" => crate::refresh_health::codex_rejection(dir),
+        None => None,
+    }
+}
+
 fn account_health(
     paths: &Paths,
     name: &str,
@@ -5228,6 +5243,18 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 // Fresh, or present-but-undeterminable: stay quiet - doctor
                 // flags only what it can determine.
                 SlotLogin::Present(_) => {}
+            }
+            if refresh_rejected_at(paths, tool, &r.config_dir, now_ms()).is_some() {
+                report(
+                    &key,
+                    false,
+                    format!(
+                        "the login server refused its renewal - it serves only until its \
+                         current token lapses; `swapdex run {}{}` signs it in again",
+                        r.name,
+                        tool_flag(tool)
+                    ),
+                );
             }
             // Not a fault: the guard is doing its job, and renewing under a
             // live session would retire the token that session is holding.
