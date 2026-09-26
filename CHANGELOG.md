@@ -6,15 +6,19 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
-- **A refused paying account no longer spends the Codex window's own login.**
-  Codex answers a 401 by renewing the login in its own home. Behind the proxy
-  that login never made the request - the paying account's did - but the
-  proxy handed the payer's 401 back as is, so the window renewed its own
-  login for nothing, and where that token had already rotated Codex told the
-  user to sign the window's account in again. The refusal now reaches Codex
-  as a 403 that it shows as written: which account the provider refused,
-  that the window's own login was not used, and to check `swapdex doctor`.
-  A 403 rather than a 5xx, because Codex retries a 5xx for over a minute.
+- **A refused paying account no longer spends the window's own login.** Both
+  Codex and Claude Code answer a 401 by renewing their own login (Claude Code
+  measured: only a 401, not a 400 or 403, sends it to the token endpoint).
+  Behind the proxy that login usually never made the request - the paying
+  account's did - but the proxy handed the payer's 401 back as is, so the
+  window renewed its own login for nothing, and where that token had already
+  rotated the client told the user to sign the window's account in again.
+  Such a refusal now reaches the client as a 403 it shows as written: which
+  account the provider refused, that the window's own login was not used, and
+  to check `swapdex doctor`. A 403 rather than a 5xx, because the clients
+  retry a 5xx for over a minute. When the request did go out with the
+  window's own login, the 401 is still passed on, since renewing it is that
+  window's job.
 
 ## 0.167.2
 
