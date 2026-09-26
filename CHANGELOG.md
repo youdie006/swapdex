@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.2
 
 - **A provider outage no longer burns refresh tokens.** When the upstream
   refused a turn, the proxy renewed that account's login and retried - and on
