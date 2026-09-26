@@ -22,6 +22,13 @@ All notable changes to swapdex are documented here. This project follows
   the block lifted. A 400 or 403 now counts only when its body states an OAuth
   error code, in any of the three shapes Codex itself reads; a 401 still
   counts whatever it says, as it does for Codex.
+- **A refused Codex renewal is no longer blamed on idleness.** When the Codex
+  login server refused a refresh token, swapdex said the account "has been
+  idle too long to renew" - including for an account in use all day, whose
+  token had been refused during an outage. Codex's credential records no
+  expiry for its refresh token, so the message now says what is known: the
+  login server refused to renew it. Claude, whose credential does state when
+  its refresh token lapses, keeps the idle wording.
 - **`doctor` names a login whose renewal was refused.** `ls` said "re-login
   required" for such an account while `doctor` passed it as ok, because the
   login keeps serving until its current token lapses. The slot row now says

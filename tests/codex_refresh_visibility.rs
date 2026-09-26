@@ -412,7 +412,7 @@ fn a_holder_that_let_the_token_reach_its_last_day_no_longer_defers_renewal() {
     // which is the honest outcome here: the guard stepped aside and the
     // server, not a zombie, had the last word.
     assert!(
-        said.contains("idle too long to renew"),
+        said.contains("refused to renew"),
         "the attempted renewal was not reported as refused:\n{said}"
     );
     let _ = slot;
@@ -837,7 +837,14 @@ fn definitive_refresh_rejection_persists_into_later_listings() {
     let refresh = run_with_curl(root.path(), &curl, &["refresh", "rejected"], &[]);
     let refresh_text = combined(&refresh);
     assert_eq!(refresh.status.code(), Some(4), "{refresh_text}");
-    assert!(refresh_text.contains("idle too long"), "{refresh_text}");
+    // The server refused this token; nothing says the account sat idle, and
+    // one that was in use all day was told it had.
+    assert!(refresh_text.contains("refused to renew"), "{refresh_text}");
+    assert!(!refresh_text.contains("idle"), "{refresh_text}");
+    assert!(
+        refresh_text.contains("swapdex run rejected --tool codex"),
+        "{refresh_text}"
+    );
     assert!(
         !refresh_text.contains("server-body-sentinel"),
         "{refresh_text}"
