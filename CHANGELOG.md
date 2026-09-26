@@ -15,6 +15,13 @@ All notable changes to swapdex are documented here. This project follows
   and the account was reported as needing a new sign-in. A login renewed
   because of a refusal is now not renewed again for the same reason for ten
   minutes; the proxy says once that the provider, not the login, is refusing.
+- **A blocked login server no longer marks a Codex account for re-login.**
+  Any 400 or 403 from the Codex token endpoint was recorded as the server's
+  verdict on the refresh token, so a CDN challenge page or an empty answer in
+  front of it left the account reported as "re-login required" long after
+  the block lifted. A 400 or 403 now counts only when its body states an OAuth
+  error code, in any of the three shapes Codex itself reads; a 401 still
+  counts whatever it says, as it does for Codex.
 - **`doctor` names a login whose renewal was refused.** `ls` said "re-login
   required" for such an account while `doctor` passed it as ok, because the
   login keeps serving until its current token lapses. The slot row now says

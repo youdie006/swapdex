@@ -932,6 +932,76 @@ fn every_definitive_oauth_status_persists_rejection() {
     }
 }
 
+/// A 400 or 403 whose body is not an OAuth error answer - a CDN challenge page,
+/// an empty body - is not the login server's verdict on this refresh token.
+/// Recording it as one told the user to sign in again, and kept saying so
+/// after the page went away. Codex itself treats such answers as transient.
+#[test]
+fn a_refusal_that_is_not_an_oauth_answer_is_not_a_verdict() {
+    for status in ["400", "403"] {
+        for body in ["<html><title>Just a moment...</title></html>", "{}"] {
+            let root = tempfile::tempdir().unwrap();
+            let slot = seed_codex(
+                root.path(),
+                "blocked",
+                "account-blocked",
+                "refresh-blocked",
+                now_secs() - 60,
+            );
+            let curl = fake_curl(root.path());
+            let refresh = run_with_curl(
+                root.path(),
+                &curl,
+                &["refresh", "blocked"],
+                &[("FAKE_STATUS", status), ("FAKE_BODY", body)],
+            );
+            let said = combined(&refresh);
+            assert!(
+                !slot.join(STATUS_FILE).exists(),
+                "HTTP {status} {body:?} was recorded as a rejection: {said}"
+            );
+            assert!(
+                !said.contains("signs it in again"),
+                "HTTP {status} {body:?} was blamed on the login: {said}"
+            );
+        }
+    }
+}
+
+/// Every shape in which the login server states an error code is its verdict,
+/// the same three shapes Codex reads, and so is any 401.
+#[test]
+fn every_shape_of_oauth_error_code_is_a_verdict() {
+    // A 401 is the verdict whatever its body says, as it is for Codex.
+    for (status, body) in [
+        ("403", r#"{"error":"refresh_token_reused"}"#),
+        ("403", r#"{"error":{"code":"refresh_token_reused"}}"#),
+        ("403", r#"{"code":"refresh_token_reused"}"#),
+        ("401", "<html></html>"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let slot = seed_codex(
+            root.path(),
+            "reused",
+            "account-reused",
+            "refresh-reused",
+            now_secs() - 60,
+        );
+        let curl = fake_curl(root.path());
+        let refresh = run_with_curl(
+            root.path(),
+            &curl,
+            &["refresh", "reused"],
+            &[("FAKE_STATUS", status), ("FAKE_BODY", body)],
+        );
+        assert!(
+            slot.join(STATUS_FILE).is_file(),
+            "HTTP {status} {body} was not recorded: {}",
+            combined(&refresh)
+        );
+    }
+}
+
 #[test]
 fn successful_refresh_clears_matching_old_rejection() {
     let root = tempfile::tempdir().unwrap();
