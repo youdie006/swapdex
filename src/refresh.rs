@@ -1671,7 +1671,7 @@ fn refresh_codex_slot_inner(
             if status == 429 {
                 return Attempt::after_exchange(Err(RefreshError::Busy));
             }
-            if matches!(status, 400 | 401 | 403) {
+            if status == 401 || (matches!(status, 400 | 403) && is_oauth_error(&body)) {
                 let _ =
                     crate::refresh_health::record_codex_rejection(dir, &health_fingerprint, now_ms);
                 return Attempt::after_exchange(Err(RefreshError::Expired));
@@ -1719,6 +1719,17 @@ fn refresh_codex_slot_inner(
         }
     }
     attempt.result
+}
+
+/// Does this body carry an OAuth error code? Only such an answer is the login
+/// server's verdict on the refresh token; a CDN challenge page or an empty
+/// body in front of it says nothing about the login.
+fn is_oauth_error(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
+        v["error"].as_str().is_some_and(|c| !c.is_empty())
+            || v["error"]["code"].as_str().is_some_and(|c| !c.is_empty())
+            || v["code"].as_str().is_some_and(|c| !c.is_empty())
+    })
 }
 
 fn post_codex(refresh_token: &str) -> Result<(String, u32), RefreshError> {
