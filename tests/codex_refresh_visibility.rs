@@ -866,6 +866,42 @@ fn definitive_refresh_rejection_persists_into_later_listings() {
     );
 }
 
+/// `ls` said "re-login required" while doctor, the screen that answers "is
+/// this sound", passed the same account as ok. The login still serves while
+/// its access token lasts, which is exactly why nothing else would say so.
+#[test]
+fn doctor_names_a_slot_whose_refresh_was_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_codex(
+        root.path(),
+        "rejected",
+        "account-rejected",
+        "refresh-rejected",
+        now_secs() + 10 * 86_400,
+    );
+    let healthy = combined(&run(root.path(), &["doctor"]));
+    assert!(
+        !healthy
+            .lines()
+            .any(|l| l.starts_with("slot:rejected") && l.contains("refused")),
+        "a login nobody refused was reported as refused:\n{healthy}"
+    );
+    let fingerprint = swapdex::refresh_health::codex_credential_fingerprint(&slot).unwrap();
+    swapdex::refresh_health::record_codex_rejection(&slot, &fingerprint, now_secs() * 1000)
+        .unwrap();
+
+    let said = combined(&run(root.path(), &["doctor"]));
+    let row = said
+        .lines()
+        .find(|l| l.starts_with("slot:rejected") && l.contains("refused"))
+        .unwrap_or_else(|| panic!("doctor passed a refused login without a word:\n{said}"));
+    assert!(row.contains("problem"), "{row}");
+    assert!(
+        row.contains("swapdex run rejected --tool codex"),
+        "the row does not say how to sign it in again: {row}"
+    );
+}
+
 #[test]
 fn every_definitive_oauth_status_persists_rejection() {
     for status in ["400", "401", "403"] {
