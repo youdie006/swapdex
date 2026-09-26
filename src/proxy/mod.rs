@@ -2182,6 +2182,9 @@ fn forward_turn(
     // which account performs the one retry.
     let mut recovered_codex: Option<(crate::secret::Secret, CodexRecoveryBinding)> = None;
     let mut recovered_claude: Option<(crate::secret::Secret, ClaudeRecoveryBinding)> = None;
+    // The authorization the last upstream attempt carried, to tell a refusal of
+    // the client's own login from one of a login substituted for it.
+    let mut sent_auth: Option<String>;
     let up = 'accounts: loop {
         // Hold token and expiry from the same verified native snapshot. A newer
         // login in the CLI's actual store must not be condemned by a stale slot
@@ -2306,6 +2309,7 @@ fn forward_turn(
             };
             let mut headers = client_headers.clone();
             codex::apply_auth(&mut headers, &auth);
+            sent_auth = authorization_of(&headers);
             note_serving_for(paths, &opts.tool, &slot.name);
             // Retries of THIS account for a throttle, counted so a wall is not
             // mistaken for a pause and retried forever.
@@ -2508,6 +2512,7 @@ fn forward_turn(
             "authorization".into(),
             format!("Bearer {}", String::from_utf8_lossy(token.expose())),
         ));
+        sent_auth = authorization_of(&headers);
         // Keep the account identity in the body consistent with the token serving
         // this turn: the client names the account the conversation started with.
         let mut body = client_body.clone();
@@ -2827,14 +2832,16 @@ fn forward_turn(
         }
     };
 
-    // Codex answers a 401 by renewing the login in its own home, and that login
-    // did not make this request - the paying account's did. Handing Codex the
-    // payer's 401 spent the window's refresh token for nothing, and when that
-    // token had rotated elsewhere Codex told the user to sign the wrong account
-    // in again. Client-owned requests returned above, before any substitution.
-    // A 403 is shown to the user with this message and ends the turn; a 5xx
-    // would keep Codex retrying a refusal for over a minute.
-    if is_codex && up.status == 401 {
+    // Both clients answer a 401 by renewing their own login (Codex by its
+    // source; Claude Code measured: only a 401 sends it to the token endpoint),
+    // and that login did not make this request - the paying account's did.
+    // Handing over the payer's 401 spent the window's refresh token for
+    // nothing, and where that token had rotated elsewhere the client told the
+    // user to sign the wrong account in again. Passthrough requests returned
+    // above; a request that went out with the client's own login gets its 401,
+    // which is that login's to renew. A 403 is shown with this message and
+    // ends the turn; a 5xx would keep the client retrying a refusal.
+    if up.status == 401 && sent_auth != client_auth {
         let message = format!(
             "'{}' was refused by the provider (HTTP 401) - this window's own login was not \
              used, so signing it in again will not help; `swapdex doctor` says whether '{}' \
@@ -2874,6 +2881,13 @@ fn forward_turn(
         }
     }
     Ok(up)
+}
+
+fn authorization_of(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.clone())
 }
 
 /// Identifies the build a proxy is running. The version alone is too coarse - a

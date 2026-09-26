@@ -3028,9 +3028,9 @@ fn late_inflight_refusal_cannot_override_a_newer_human_selection() {
                 let output = proxy.stop_with_stdout();
                 upstream.close();
                 let seen = seen.lock().unwrap().clone();
-                // Codex gets the payer's refusal as a 403 it shows, never as a
-                // 401 that would make it renew the window's own login.
-                let refused = if tool == "codex" { 403 } else { 401 };
+                // The payer's refusal comes back as a 403 the client shows, never
+                // as a 401 that would make it renew the window's own login.
+                let refused = 403;
                 assert_eq!(
                     first, refused,
                     "tool={tool} auto={auto} preobserved={choice_observed_by_request}: late A did not keep its own result; seen={seen:?}\n{output}"
@@ -4963,13 +4963,57 @@ fn claude_repeated_401_is_bounded_to_one_same_account_recovery() {
     );
     let proxy = ReapedChild::new(proxy);
 
-    assert_eq!(post_through_status(port, "{}"), 401);
+    assert_eq!(post_through_status(port, "{}"), 403);
     assert_eq!(
         *seen.lock().unwrap(),
         vec!["Bearer AT-OLD".to_string(), "Bearer AT-NEW".to_string()],
         "the replacement's 401 is returned without a recovery loop"
     );
     assert_eq!(std::fs::read(&count).unwrap(), b"x", "one OAuth exchange");
+    proxy.stop();
+    upstream.close();
+}
+
+/// Claude Code answers a 401 by renewing its OWN login (measured: only a 401,
+/// not a 400 or 403, sends it to the token endpoint). Behind the proxy that
+/// login did not make the request, so relaying the payer's 401 spent the
+/// window's refresh token for nothing.
+#[test]
+fn a_refusal_of_the_paying_login_is_not_handed_to_claude_as_its_own() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-WORK", true);
+    let curl = fake_oauth_curl(root.path(), r#"{"error":"invalid_grant"}"#, 400);
+    let upstream = ControlledUpstream::start(move |request| {
+        request
+            .respond(
+                tiny_http::Response::from_string(
+                    r#"{"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}"#,
+                )
+                .with_status_code(401),
+            )
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let status = post_through_status(port, "{}");
+    let body = post_through(port, "{}");
+    assert_eq!(
+        status, 403,
+        "the payer's refusal went back as the window's own: {body}"
+    );
+    assert!(
+        body.contains("'work' was refused by the provider"),
+        "the answer does not name the account that was refused: {body}"
+    );
     proxy.stop();
     upstream.close();
 }
@@ -5030,7 +5074,8 @@ fn claude_401_does_not_refresh_after_the_selected_identity_is_replaced() {
     let output = proxy.stop_with_stdout();
     upstream.close();
 
-    assert_eq!(status, 401, "replacement account B must not carry A's turn");
+    // A's refusal comes back as A's, not as the window's own 401.
+    assert_eq!(status, 403, "replacement account B must not carry A's turn");
     assert_eq!(*seen.lock().unwrap(), vec!["Bearer AT-OLD".to_string()]);
     assert!(
         !count.exists(),
@@ -5274,6 +5319,22 @@ fn a_refusal_of_the_paying_login_is_not_handed_to_codex_as_its_own() {
         body.contains("'work' was refused by the provider"),
         "the answer does not name the account that was refused: {body}"
     );
+    // A window whose own login is the one refused gets the 401: renewing it
+    // is that window's job, and Codex does it on a 401 only.
+    let own: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let status = own
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("authorization", format!("Bearer {CODEX_JWT_LIVE}"))
+        .header("chatgpt-account-id", "acct-work")
+        .header("content-type", "application/json")
+        .send(b"{\"input\":[]}".as_slice())
+        .expect("proxy answered")
+        .status()
+        .as_u16();
+    assert_eq!(status, 401, "the window's own refusal was withheld");
     proxy.stop();
     upstream.close();
 }
@@ -5696,11 +5757,29 @@ fn an_unchanged_native_bearer_401_never_spends_its_refresh_token() {
         ],
     );
     let proxy = ReapedChild::new(proxy);
-
-    assert_eq!(post_through_status(port, "{}"), 401);
+    // A window on another login is not told its own login was refused.
+    assert_eq!(post_through_status(port, "{}"), 403);
+    // The native session itself sent that bearer: the refusal is its own, and
+    // renewing is its job, so it gets the 401.
+    let own: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let status = own
+        .post(format!("http://127.0.0.1:{port}/v1/messages"))
+        .header("authorization", "Bearer NATIVE-SAME")
+        .header("content-type", "application/json")
+        .send(b"{}".as_slice())
+        .expect("proxy answered")
+        .status()
+        .as_u16();
+    assert_eq!(status, 401, "the native login's own refusal was withheld");
     assert_eq!(
         *seen.lock().unwrap(),
-        vec!["Bearer NATIVE-SAME".to_string()]
+        vec![
+            "Bearer NATIVE-SAME".to_string(),
+            "Bearer NATIVE-SAME".to_string()
+        ]
     );
     assert!(
         !count.exists(),
