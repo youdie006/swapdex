@@ -2827,6 +2827,31 @@ fn forward_turn(
         }
     };
 
+    // Codex answers a 401 by renewing the login in its own home, and that login
+    // did not make this request - the paying account's did. Handing Codex the
+    // payer's 401 spent the window's refresh token for nothing, and when that
+    // token had rotated elsewhere Codex told the user to sign the wrong account
+    // in again. Client-owned requests returned above, before any substitution.
+    // A 403 is shown to the user with this message and ends the turn; a 5xx
+    // would keep Codex retrying a refusal for over a minute.
+    if is_codex && up.status == 401 {
+        let message = format!(
+            "'{}' was refused by the provider (HTTP 401) - this window's own login was not \
+             used, so signing it in again will not help; `swapdex doctor` says whether '{}' \
+             needs a new sign-in",
+            slot.name, slot.name
+        );
+        let body = serde_json::json!({
+            "type": "error",
+            "error": { "type": "swapdex_proxy_error", "message": message }
+        })
+        .to_string();
+        return Ok(upstream::Upstream {
+            status: 403,
+            headers: vec![("content-type".into(), "application/json".into())],
+            reader: Box::new(std::io::Cursor::new(body.into_bytes())),
+        });
+    }
     // A 429 we could not rotate around still goes back as a 429 - it is true. But
     // Claude Code reads a `Retry-After` over 20s as "cool down for thirty
     // minutes", and half an hour is absurd when the user can press Enter and be

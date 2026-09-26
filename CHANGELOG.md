@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A refused paying account no longer spends the Codex window's own login.**
+  Codex answers a 401 by renewing the login in its own home. Behind the proxy
+  that login never made the request - the paying account's did - but the
+  proxy handed the payer's 401 back as is, so the window renewed its own
+  login for nothing, and where that token had already rotated Codex told the
+  user to sign the window's account in again. The refusal now reaches Codex
+  as a 403 that it shows as written: which account the provider refused,
+  that the window's own login was not used, and to check `swapdex doctor`.
+  A 403 rather than a 5xx, because Codex retries a 5xx for over a minute.
+
 ## 0.167.2
 
 - **A provider outage no longer burns refresh tokens.** When the upstream
