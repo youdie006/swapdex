@@ -8103,7 +8103,12 @@ fn refresh_codex(
             failed += 1;
             continue;
         }
-        if !crate::proxy::codex::slot_token_expired(&r.config_dir, now / 1000) {
+        // A recorded refusal can be wrong - one taken while the provider was down
+        // - and the login keeps serving on its access token, so nothing else
+        // tries it again before that lapses. Asked by name, try it now.
+        if !crate::proxy::codex::slot_token_expired(&r.config_dir, now / 1000)
+            && crate::refresh_health::codex_rejection(&r.config_dir).is_none()
+        {
             println!("  {} is already current", r.name);
             continue;
         }

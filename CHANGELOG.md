@@ -20,6 +20,15 @@ All notable changes to swapdex are documented here. This project follows
   window's own login, the 401 is still passed on, since renewing it is that
   window's job.
 
+- **`swapdex refresh <name>` re-checks a Codex login marked refused.** An
+  account whose renewal was refused keeps serving on its access token, so
+  nothing tries it again before that lapses - and asking `refresh` by name
+  answered "already current" while `ls` beside it said "re-login required".
+  A recorded refusal can be wrong (one taken while the provider was down), so
+  `refresh` now asks the login server again: a renewal clears the mark, and a
+  second refusal confirms that a sign-in is needed. A login with no recorded
+  refusal is still left alone while it is current.
+
 ## 0.167.2
 
 - **A provider outage no longer burns refresh tokens.** When the upstream

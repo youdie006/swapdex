@@ -1041,6 +1041,66 @@ fn successful_refresh_clears_matching_old_rejection() {
     assert_eq!(row["warning"], serde_json::Value::Null, "{row}");
 }
 
+/// A refusal recorded while the provider was down can be wrong, and the account
+/// still serves on its access token, so nothing renews it before that lapses.
+/// Asking `refresh` by name is the way to find out now - but it answered
+/// "already current" beside `ls` saying "re-login required", and tried nothing.
+#[test]
+fn refresh_by_name_rechecks_a_refused_login_that_still_serves() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_codex(
+        root.path(),
+        "refused",
+        "account-refused",
+        "refresh-refused",
+        now_secs() + 10 * 86_400,
+    );
+    let curl = fake_curl(root.path());
+    let count = root.path().join("exchanges");
+    // Unrefused and serving: there is nothing to find out, so nothing is spent.
+    let current = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "refused"],
+        &[("FAKE_COUNT_PATH", count.to_str().unwrap())],
+    );
+    assert!(
+        combined(&current).contains("already current"),
+        "{}",
+        combined(&current)
+    );
+    assert!(!count.exists(), "a healthy login was renewed for nothing");
+
+    let fingerprint = swapdex::refresh_health::codex_credential_fingerprint(&slot).unwrap();
+    swapdex::refresh_health::record_codex_rejection(&slot, &fingerprint, now_secs() * 1000)
+        .unwrap();
+    let response = serde_json::json!({
+        "access_token": jwt(now_secs() + 20 * 86_400),
+        "id_token": "header.recovered-identity.signature"
+    })
+    .to_string();
+    let renewed = run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "refused"],
+        &[
+            ("FAKE_STATUS", "200"),
+            ("FAKE_BODY", response.as_str()),
+            ("FAKE_COUNT_PATH", count.to_str().unwrap()),
+        ],
+    );
+    let said = combined(&renewed);
+    assert!(
+        count.exists(),
+        "the refused login was not tried again: {said}"
+    );
+    assert!(renewed.status.success(), "{said}");
+    assert!(
+        !slot.join(STATUS_FILE).exists(),
+        "a login the server just renewed is still marked refused: {said}"
+    );
+}
+
 #[test]
 fn transient_and_malformed_failures_do_not_become_permanent_rejections() {
     let root = tempfile::tempdir().unwrap();
