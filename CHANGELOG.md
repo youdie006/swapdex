@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.3
 
 - **A refused paying account no longer spends the window's own login.** Both
   Codex and Claude Code answer a 401 by renewing their own login (Claude Code
