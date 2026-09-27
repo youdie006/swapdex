@@ -410,6 +410,12 @@ fn is_our_shim(path: &Path) -> bool {
 /// Feeds doctor's engagement check - an installed shim that PATH never reaches
 /// LOOKS set up while `swapdex use` silently does nothing.
 pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
+    resolved_on_path("claude")
+}
+
+/// The same answer for any tool binary: the first `binary` on PATH, and
+/// whether it is one of swapdex's shims.
+pub(crate) fn resolved_on_path(binary: &str) -> Option<(PathBuf, bool)> {
     let path = std::env::var_os("PATH")?;
     let cwd = std::env::current_dir().ok();
     for dir in std::env::split_paths(&path) {
@@ -420,7 +426,7 @@ pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
         } else {
             continue;
         };
-        let cand = dir.join("claude");
+        let cand = dir.join(binary);
         if is_executable_file(&cand) {
             let ours = is_our_shim(&cand);
             return Some((cand, ours));

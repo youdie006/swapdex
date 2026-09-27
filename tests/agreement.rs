@@ -32,6 +32,22 @@ fn run(root: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// `run` with no swapdex shim on PATH: the launch these tests describe is the
+/// one that bypasses the shim, and the developer's own PATH usually has one.
+fn run_unshimmed(root: &Path, args: &[&str]) -> (String, String, i32) {
+    let out = Command::new(bin())
+        .args(args)
+        .env("SWAPDEX_ROOT", root)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
 fn chmod600(p: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
@@ -3087,6 +3103,65 @@ fn seed_codex_slot_as(root: &Path, name: &str, email: &str, account_id: &str, re
     std::fs::write(&reg, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
 }
 
+fn ls_with_path(root: &Path, path: &str) -> String {
+    let out = Command::new(bin())
+        .arg("ls")
+        .env("SWAPDEX_ROOT", root)
+        .env("HOME", root)
+        .env("PATH", path)
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// The login left in `~/.codex` is what a launch that bypasses the shim uses.
+/// With the shim first on PATH, a plain `codex` follows the pointer instead -
+/// yet `ls` still said it "would launch on" the leftover account and told the
+/// user to run `swapdex shim`, which was already in place.
+#[test]
+fn a_shimmed_codex_is_not_said_to_launch_on_the_leftover_login() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "one", "one@example.com", "acct-one", "rt-one");
+    seed_codex_snapshot(root, "two", "two@example.com", "acct-two", "rt-two");
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    std::fs::copy(
+        root.join(".local/share/swapdex/accounts/two/codex/auth"),
+        root.join(".codex/auth.json"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".local/share/swapdex/active-codex"),
+        root.join(".local/share/swapdex/slots/one")
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    let (said, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "{said}");
+    let native = root.join("native-bin");
+    let shims = root.join(".local/share/swapdex/bin");
+
+    let bare = ls_with_path(root, &format!("{}:/usr/bin:/bin", native.display()));
+    assert!(
+        bare.contains("would launch on 'two'"),
+        "without the shim on PATH the leftover login is what launches:\n{bare}"
+    );
+    let shimmed = ls_with_path(
+        root,
+        &format!("{}:{}:/usr/bin:/bin", shims.display(), native.display()),
+    );
+    assert!(
+        !shimmed.contains("would launch on"),
+        "the shim is first on PATH, so a plain launch follows the pointer:\n{shimmed}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
@@ -3213,7 +3288,7 @@ fn a_tool_dir_that_disagrees_with_the_pointer_is_reported() {
     let (_, err, code) = run(root, &["use", "cx-one", "--tool", "codex"]);
     assert_eq!(code, 0, "use failed: {err}");
 
-    let (out, err, _) = run(root, &["ls"]);
+    let (out, err, _) = run_unshimmed(root, &["ls"]);
     let said = format!("{out}{err}");
     assert!(
         said.contains("orphan"),
@@ -3244,7 +3319,7 @@ fn a_tool_dir_that_agrees_with_the_pointer_is_not_reported() {
     let (_, err, code) = run(root, &["use", "same", "--tool", "codex"]);
     assert_eq!(code, 0, "use failed: {err}");
 
-    let (out, err, _) = run(root, &["ls"]);
+    let (out, err, _) = run_unshimmed(root, &["ls"]);
     let said = format!("{out}{err}");
     assert!(
         !said.contains("would launch"),
@@ -3420,7 +3495,7 @@ fn status_names_the_abandoned_login_too() {
     let (_, err, code) = run(root, &["use", "cx-one", "--tool", "codex"]);
     assert_eq!(code, 0, "use failed: {err}");
 
-    let (st, _, _) = run(root, &["status"]);
+    let (st, _, _) = run_unshimmed(root, &["status"]);
     assert!(
         st.contains("cx-one"),
         "status does not name the account the pointer serves:\n{st}"

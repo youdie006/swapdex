@@ -2357,6 +2357,14 @@ pub(crate) fn tool_dir_disagrees(
     tool: &str,
     pointed_at: &str,
 ) -> Option<String> {
+    // With the shim first on PATH a plain launch follows the pointer, so the
+    // login left in the tool's own dir is not what launches.
+    if matches!(
+        crate::shim::resolved_on_path(tool_binary(tool)),
+        Some((_, true))
+    ) {
+        return None;
+    }
     let adapter = adapters::all().into_iter().find(|a| a.name() == tool)?;
     let id = adapter.identity(paths).ok().flatten()?;
     let live = matched_profile_name(store, tool, &id.account_id)?;

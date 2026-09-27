@@ -24,6 +24,14 @@ All notable changes to swapdex are documented here. This project follows
   same message, which both show immediately. Failures a retry can fix, like
   a dropped connection, are still a 502.
 
+- **`ls`, `status` and `doctor` stop saying a shimmed launch goes elsewhere.**
+  They compared the login left in the tool's own directory (`~/.codex`,
+  `~/.claude`) with the account swapdex points at, and when the two differed
+  said a plain `codex` "would launch on" the leftover account - `ls` adding
+  "run `swapdex shim`". With the shim first on PATH that was false twice: a
+  plain launch follows the pointer, and the shim was already installed. The
+  note now appears only when a launch really bypasses the shim.
+
 ## 0.167.3
 
 - **A refused paying account no longer spends the window's own login.** Both
