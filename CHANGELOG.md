@@ -15,6 +15,15 @@ All notable changes to swapdex are documented here. This project follows
   `sandbox`, `plugin` and `update` now go straight to Codex. Commands that can
   reach a model, and `doctor`, are routed as before.
 
+- **An account that cannot serve is reported at once, not after minutes of
+  retries.** When the chosen account had no usable login - its renewal
+  refused, its credential unreadable, or every account refused - the proxy
+  answered 502. Both clients retry a 5xx before showing anything: measured,
+  Codex kept retrying past 90 seconds and Claude Code sent ten attempts over
+  more than two and a half minutes. These answers are now a 403 carrying the
+  same message, which both show immediately. Failures a retry can fix, like
+  a dropped connection, are still a 502.
+
 ## 0.167.3
 
 - **A refused paying account no longer spends the window's own login.** Both

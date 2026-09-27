@@ -5916,6 +5916,93 @@ fn a_lapsed_codex_slot_renews_itself_before_serving_a_turn() {
     );
 }
 
+/// A Claude account with no usable login cannot serve a turn, and retrying
+/// will not change that. Claude Code retries a 5xx ten times over more than
+/// two and a half minutes (measured) before it shows anything, so the answer
+/// has to be one it shows at once.
+#[test]
+fn a_claude_slot_that_cannot_be_renewed_is_answered_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-WORK", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    std::fs::write(
+        slot.join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"AT-WORK","refreshToken":"R","expiresAt":1000}}"#,
+    )
+    .unwrap();
+    let curl = fake_oauth_curl(root.path(), r#"{"error":"invalid_grant"}"#, 400);
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        "http://127.0.0.1:1",
+        &[],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let status = post_through_status(port, "{}");
+    let body = post_through(port, "{}");
+    proxy.stop();
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("'work'"), "{body}");
+}
+
+/// A slot whose credential can no longer be read is in the same position: no
+/// retry reads it, so the client is answered at once.
+#[test]
+fn a_claude_slot_with_an_unreadable_login_is_answered_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-WORK", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let (proxy, port) = start_proxy(root.path(), "http://127.0.0.1:1", &[]);
+    let proxy = ReapedChild::new(proxy);
+    // It became unreadable while the proxy was serving.
+    std::fs::write(slot.join(".credentials.json"), b"not json").unwrap();
+
+    let status = post_through_status(port, "{}");
+    let body = post_through(port, "{}");
+    proxy.stop();
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("'work'"), "{body}");
+}
+
+/// Every account refused and held out: nothing left to try, and a retry only
+/// asks the same accounts again.
+#[test]
+fn a_fleet_whose_every_login_was_refused_is_answered_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT-WORK", true);
+    let curl = fake_oauth_curl(root.path(), r#"{"error":"invalid_grant"}"#, 400);
+    let upstream = ControlledUpstream::start(move |request| {
+        request
+            .respond(tiny_http::Response::from_string("{}").with_status_code(401))
+            .unwrap();
+    });
+    let (proxy, port) = start_proxy_with_env(
+        root.path(),
+        upstream.url(),
+        &["--auto"],
+        &[
+            ("SWAPDEX_CURL", curl.to_str().unwrap()),
+            ("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
+        ],
+    );
+    let proxy = ReapedChild::new(proxy);
+
+    let _ = post_through_status(port, "{}");
+    let status = post_through_status(port, "{}");
+    let body = post_through(port, "{}");
+    let output = proxy.stop_with_stdout();
+    upstream.close();
+    assert_eq!(status, 403, "{body}\n{output}");
+    assert!(
+        body.contains("credentials were rejected"),
+        "{body}\n{output}"
+    );
+}
+
 /// When renewal cannot help, the honest answer is to get out of the way - the
 /// same thing the Claude path does one branch above, and for the same reason:
 /// serving a turn with a token known to be dead earns a 401 and names this
@@ -5943,10 +6030,13 @@ fn a_codex_slot_that_cannot_be_renewed_does_not_send_another_login() {
             ("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token"),
         ],
     );
-    let (status, _) = post_codex_turn(port);
+    let (status, body) = post_codex_turn(port);
     proxy.kill().ok();
     proxy.wait().ok();
-    assert_eq!(status, 502);
+    // Retrying cannot fix a login that is gone, and Codex retries a 5xx for
+    // over a minute before saying anything: this has to be an answer it shows.
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("'work'"), "{body}");
 
     let seen = sink.lock().unwrap().clone();
     assert!(

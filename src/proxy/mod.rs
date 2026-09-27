@@ -1987,6 +1987,24 @@ fn recover_rejected_bearer(
         .filter(|replacement| replacement.expose() != rejected)
 }
 
+/// A turn no retry can serve: the account's login is missing or refused. Both
+/// clients retry a 5xx for minutes before saying anything (Codex over 90 s,
+/// Claude Code ten times over 150 s, measured), and show a 403 at once.
+#[derive(Debug)]
+struct NotRetryable(String);
+
+impl std::fmt::Display for NotRetryable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotRetryable {}
+
+fn not_retryable(message: String) -> anyhow::Error {
+    anyhow::Error::new(NotRetryable(message))
+}
+
 fn handle(mut rq: server::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>) -> Result<()> {
     if is_codex_responses_websocket(&rq, opts) {
         rq.respond(tiny_http::Response::empty(tiny_http::StatusCode(426)))?;
@@ -1999,13 +2017,18 @@ fn handle(mut rq: server::Request, paths: &Paths, opts: &Opts, sh: &Arc<Shared>)
         Ok(up) => up,
         Err(e) => {
             let msg = format!("{e:#}");
+            let status = if e.downcast_ref::<NotRetryable>().is_some() {
+                403
+            } else {
+                502
+            };
             let body = serde_json::json!({
                 "type": "error",
                 "error": { "type": "swapdex_proxy_error", "message": msg.clone() }
             })
             .to_string();
             let resp = tiny_http::Response::from_string(body)
-                .with_status_code(tiny_http::StatusCode(502))
+                .with_status_code(tiny_http::StatusCode(status))
                 .with_header(
                     tiny_http::Header::from_bytes(&b"content-type"[..], &b"application/json"[..])
                         .expect("static header"),
@@ -2225,13 +2248,13 @@ fn forward_turn(
             && native_login.is_none()
             && creds::slot_token_expired_for(paths, &slot.config_dir, now_ms())
         {
-            return Err(anyhow!(
+            return Err(not_retryable(format!(
                 "selected account '{}' has no usable Claude access token: {}",
                 slot.name,
                 renewal_problem.unwrap_or_else(|| {
                     "renewal did not produce a usable login; check `swapdex refresh`".into()
                 })
-            ));
+            )));
         }
         // Codex expresses the serving account as a header PAIR - the OAuth
         // bearer and the account id it belongs to - and sends no account
@@ -2299,13 +2322,13 @@ fn forward_turn(
                 },
             };
             let Some((auth, recovery_binding)) = usable else {
-                return Err(anyhow!(
+                return Err(not_retryable(format!(
                     "selected account '{}' has no usable Codex login: {}",
                     slot.name,
                     renewal_problem.unwrap_or_else(|| {
                         "check `swapdex refresh` or sign in to this account".into()
                     })
-                ));
+                )));
             };
             let mut headers = client_headers.clone();
             codex::apply_auth(&mut headers, &auth);
@@ -2503,7 +2526,7 @@ fn forward_turn(
         let (token, recovery_binding) = match credential {
             Ok(credential) => credential,
             Err(why) => {
-                return Err(anyhow!("{}", why.remedy(&slot.name, &opts.tool)));
+                return Err(not_retryable(why.remedy(&slot.name, &opts.tool)));
             }
         };
         let serving_uuid = recovery_binding.account_uuid.clone();
@@ -2819,10 +2842,10 @@ fn forward_turn(
                 let held_out = sh.unusable.held().active(std::time::Instant::now());
                 if held_out > 0 && held_out >= names.len().max(1) {
                     let first = names.first().cloned().unwrap_or_else(|| "<name>".into());
-                    return Err(anyhow!(
+                    return Err(not_retryable(format!(
                         "the managed accounts' credentials were rejected. Check `swapdex refresh {first}` \
                          and the selected account's login before retrying."
-                    ));
+                    )));
                 }
                 println!("{}: no other account can serve this turn", slot.name);
                 std::io::stdout().flush().ok();
