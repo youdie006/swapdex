@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Local-only Codex commands no longer wait on the proxy.** The Codex shim
+  treated only a few commands (`login`, `mcp`, `apply` and the like) as
+  needing no routing, so `codex queue` - which only writes a message into a
+  local thread - first ran a session repair and a proxy check, and took 2.4 to
+  7.1 seconds instead of 0.4, long enough to time out a caller that allowed
+  ten. `queue`, `archive`, `unarchive`, `delete`, `migrate-rollouts`,
+  `sandbox`, `plugin` and `update` now go straight to Codex. Commands that can
+  reach a model, and `doctor`, are routed as before.
+
 ## 0.167.3
 
 - **A refused paying account no longer spends the window's own login.** Both
