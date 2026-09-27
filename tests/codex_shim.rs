@@ -222,6 +222,36 @@ fn auth_help_and_explicit_backend_choices_bypass_routing() {
     }
 }
 
+/// Commands that only touch local state never reach a model, yet each paid
+/// for a session repair and a proxy check first: `codex queue` took 2.4 to 7.1
+/// seconds through the shim against 0.4 direct, and timed out a caller that
+/// allows ten.
+#[test]
+fn local_only_commands_skip_repair_and_routing() {
+    for args in [
+        &["queue", "--thread", "t1", "hello"][..],
+        &["archive", "t1"],
+        &["unarchive", "t1"],
+        &["delete", "t1"],
+        &["migrate-rollouts"],
+        &["sandbox", "linux", "true"],
+        &["plugin", "list"],
+        &["update"],
+    ] {
+        let got = launch_attempt(args, false, false, "", 1);
+        assert_eq!(got.status, 0, "{args:?}: {}", got.stderr);
+        assert!(got.native_invoked, "{args:?}");
+        let got_args: Vec<_> = got.stdout.lines().skip(1).collect();
+        assert_eq!(got_args, args, "{args:?}");
+        assert!(!got.calls.contains("proxy"), "{args:?}: {}", got.calls);
+        assert!(
+            !got.calls.contains("repair-codex-sessions"),
+            "{args:?}: {}",
+            got.calls
+        );
+    }
+}
+
 #[test]
 fn profile_choices_remain_managed_and_reach_codex_unchanged() {
     for args in [
@@ -247,6 +277,8 @@ fn prompt_words_and_option_values_do_not_select_a_command() {
         &["exec", "login"][..],
         &["exec", "resume"],
         &["exec", "--", "logout"],
+        &["exec", "queue"],
+        &["--", "delete"],
         &["--", "login"],
         &["-C", "login", "resume"],
         &["-m", "login", "resume"],

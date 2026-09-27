@@ -290,7 +290,10 @@ for a in "$@"; do
         *)
             if [ -z "$sx_command" ]; then
                 sx_command="$a"
-                case "$a" in login|logout|completion|mcp|mcp-server|debug|features|apply|help) sx_plain=yes ;; esac
+                # Commands that reach no model: auth, local thread-store edits,
+                # sandboxed local commands and self-maintenance. Routing them
+                # cost a session repair and a proxy check on every call.
+                case "$a" in login|logout|completion|mcp|mcp-server|debug|features|apply|help|queue|archive|unarchive|delete|migrate-rollouts|sandbox|plugin|update) sx_plain=yes ;; esac
             fi
             ;;
     esac
