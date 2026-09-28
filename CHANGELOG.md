@@ -32,6 +32,18 @@ All notable changes to swapdex are documented here. This project follows
   plain launch follows the pointer, and the shim was already installed. The
   note now appears only when a launch really bypasses the shim.
 
+- **`doctor` checks that the Codex shim is what PATH reaches.** Only the
+  Claude shim was checked, so a `codex` earlier on PATH than the shim - an nvm
+  bin directory, say - left every `swapdex use` unread with no row to say so.
+  A `shim:codex` row now reports it the way the Claude row does.
+- **A shim shadowed on PATH is reported as a problem, not "open a new
+  terminal".** When the shim directory was already on PATH but another
+  `claude` or `codex` came first, `doctor` read the shell profile, found the
+  shim set up there, and said the shell simply had not picked it up yet. A new
+  terminal repeats the same order - typically an nvm line after the shim's -
+  so the row now names the binary that runs instead and says to put the shim
+  first.
+
 ## 0.167.3
 
 - **A refused paying account no longer spends the window's own login.** Both
