@@ -404,17 +404,11 @@ fn is_our_shim(path: &Path) -> bool {
     head.contains(SHIM_MARKER) || head.contains(SHIM_MARKER_CODEX)
 }
 
-/// What a plain `claude` typed in THIS environment resolves to: the first
-/// `claude` file on PATH. The bool says whether that is swapdex's own shim (by
-/// content marker, robust to path spelling). `None` when PATH has no `claude`.
+/// What a plain `binary` typed in THIS environment resolves to: the first
+/// such file on PATH. The bool says whether that is one of swapdex's own shims
+/// (by content marker, robust to path spelling). `None` when PATH has none.
 /// Feeds doctor's engagement check - an installed shim that PATH never reaches
 /// LOOKS set up while `swapdex use` silently does nothing.
-pub(crate) fn resolved_claude() -> Option<(PathBuf, bool)> {
-    resolved_on_path("claude")
-}
-
-/// The same answer for any tool binary: the first `binary` on PATH, and
-/// whether it is one of swapdex's shims.
 pub(crate) fn resolved_on_path(binary: &str) -> Option<(PathBuf, bool)> {
     let path = std::env::var_os("PATH")?;
     let cwd = std::env::current_dir().ok();

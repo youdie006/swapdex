@@ -4732,6 +4732,86 @@ fn serving_reach(has_proxy: bool, accounts: usize) -> Option<String> {
     })
 }
 
+/// Shim ENGAGEMENT, not mere existence: an installed shim that PATH never
+/// reaches looks set up while a plain launch still runs bare - `swapdex use`
+/// flips the pointer and nothing reads it.
+fn shim_engagement(paths: &Paths, tool: &str) -> (bool, String) {
+    let bin = tool_binary(tool);
+    let shim_file = crate::shim::shim_path_for(paths, tool);
+    if !shim_file.exists() {
+        return (
+            true,
+            format!(
+                "{bin} shim not installed - run `swapdex shim` so a plain \
+                 `{bin}` follows `swapdex use`"
+            ),
+        );
+    }
+    let shim_dir_path = shim_file.parent().unwrap_or(&shim_file).to_path_buf();
+    let shim_dir = shim_dir_path.display();
+    let resolved = crate::shim::resolved_on_path(bin);
+    let active = matches!(resolved, Some((_, true)));
+    let profile = crate::shim::shell_profile_text_for(paths);
+    // The shim directory already on this PATH, yet another binary answers
+    // first: that is shadowing, not a shell that has yet to read its profile.
+    // A new terminal repeats the same order - an nvm line after the shim's is
+    // the usual cause - so "open a new terminal" sent people nowhere.
+    let shadowed = !active
+        && std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir == shim_dir_path));
+    let reach = if shadowed {
+        crate::shim::ShimReach::Missing
+    } else {
+        crate::shim::shim_reach_for(
+            paths,
+            active,
+            profile.as_ref().map(|(_, t)| t.as_str()),
+            &shim_dir_path,
+        )
+    };
+    match reach {
+        crate::shim::ShimReach::Active => (
+            true,
+            format!("{bin} shim active - plain `{bin}` follows `swapdex use`"),
+        ),
+        // Set up correctly; THIS shell has not picked it up. Two ordinary
+        // causes - a shell that never reads the profile (a script, a cron job,
+        // `ssh host cmd`), or one that started before the profile was edited.
+        // Neither is a fault, and calling it one sends someone to fix a
+        // configuration that is already right.
+        crate::shim::ShimReach::ConfiguredElsewhere => {
+            let p = profile
+                .as_ref()
+                .map(|(p, _)| crate::util::redact_path(&p.display().to_string()))
+                .unwrap_or_else(|| "your shell profile".to_string());
+            (
+                true,
+                format!(
+                    "{bin} shim set up in {p} but not on THIS shell's PATH - \
+                     open a new terminal (or `source {p}`); a shell that does \
+                     not read that file, like a script or `ssh host cmd`, \
+                     never will"
+                ),
+            )
+        }
+        crate::shim::ShimReach::Missing => (
+            false,
+            match resolved {
+                Some((found, _)) => format!(
+                    "{bin} shim installed but NOT taking effect - plain `{bin}` \
+                     runs {} instead; add the shim first on PATH: \
+                     export PATH=\"{shim_dir}:$PATH\"",
+                    found.display()
+                ),
+                None => format!(
+                    "{bin} shim installed but PATH has no `{bin}` at all - \
+                     add it: export PATH=\"{shim_dir}:$PATH\""
+                ),
+            },
+        ),
+    }
+}
+
 pub fn doctor(paths: &Paths) -> Result<i32> {
     use std::os::unix::fs::PermissionsExt;
     // Stat BEFORE Store::open, which self-heals the mode to 0700 - otherwise
@@ -5143,73 +5223,20 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     );
                 }
             }
-            // Shim ENGAGEMENT, not mere existence: an installed shim that PATH
-            // never reaches looks set up while a plain `claude` still runs
-            // bare - `swapdex use` flips the pointer and nothing reads it.
-            let shim_file = crate::shim::shim_path(paths);
-            let (shim_ok, shim_msg) = if !shim_file.exists() {
-                (
-                    true,
-                    "claude shim not installed - run `swapdex shim` so a plain \
-                     `claude` follows `swapdex use`"
-                        .to_string(),
-                )
-            } else {
-                let shim_dir_path = shim_file.parent().unwrap_or(&shim_file).to_path_buf();
-                let shim_dir = shim_dir_path.display();
-                let resolved = crate::shim::resolved_claude();
-                let active = matches!(resolved, Some((_, true)));
-                let profile = crate::shim::shell_profile_text_for(paths);
-                match crate::shim::shim_reach_for(
-                    paths,
-                    active,
-                    profile.as_ref().map(|(_, t)| t.as_str()),
-                    &shim_dir_path,
-                ) {
-                    crate::shim::ShimReach::Active => (
-                        true,
-                        "claude shim active - plain `claude` follows `swapdex use`".to_string(),
-                    ),
-                    // Set up correctly; THIS shell has not picked it up. Two
-                    // ordinary causes - a shell that never reads the profile
-                    // (a script, a cron job, `ssh host cmd`), or one that
-                    // started before the profile was edited. Neither is a
-                    // fault, and calling it one sends someone to fix a
-                    // configuration that is already right.
-                    crate::shim::ShimReach::ConfiguredElsewhere => {
-                        let p = profile
-                            .as_ref()
-                            .map(|(p, _)| crate::util::redact_path(&p.display().to_string()))
-                            .unwrap_or_else(|| "your shell profile".to_string());
-                        (
-                            true,
-                            format!(
-                                "claude shim set up in {p} but not on THIS shell's PATH - \
-                                 open a new terminal (or `source {p}`); a shell that does \
-                                 not read that file, like a script or `ssh host cmd`, \
-                                 never will"
-                            ),
-                        )
-                    }
-                    crate::shim::ShimReach::Missing => (
-                        false,
-                        match resolved {
-                            Some((found, _)) => format!(
-                                "claude shim installed but NOT taking effect - plain `claude` \
-                                 runs {} instead; add the shim first on PATH: \
-                                 export PATH=\"{shim_dir}:$PATH\"",
-                                found.display()
-                            ),
-                            None => format!(
-                                "claude shim installed but PATH has no `claude` at all - \
-                                 add it: export PATH=\"{shim_dir}:$PATH\""
-                            ),
-                        },
-                    ),
-                }
-            };
+            let (shim_ok, shim_msg) = shim_engagement(paths, "claude-code");
             report("shim", shim_ok, shim_msg);
         }
+    }
+
+    // The same question for Codex. Only Claude's shim was ever checked, so a
+    // `codex` earlier on PATH than the shim left every switch unread with no
+    // row to say so.
+    if crate::slots::Slots::open_for(paths, "codex")
+        .map(|s| !s.list().is_empty())
+        .unwrap_or(false)
+    {
+        let (ok, msg) = shim_engagement(paths, "codex");
+        report("shim:codex", ok, msg);
     }
 
     // Per-slot login health (read-only), for EVERY tool. Flag only a slot with

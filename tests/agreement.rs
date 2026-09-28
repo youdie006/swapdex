@@ -3162,6 +3162,60 @@ fn a_shimmed_codex_is_not_said_to_launch_on_the_leftover_login() {
     );
 }
 
+fn doctor_with_path(root: &Path, path: &str) -> String {
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("SWAPDEX_ROOT", root)
+        .env("HOME", root)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// doctor checked that the Claude shim is what PATH reaches and never asked
+/// the same of Codex, so a `codex` earlier on PATH than the shim - an nvm bin
+/// dir, say - left every switch unread with no row to say so, and no row
+/// reads as a passing one.
+#[test]
+fn doctor_says_whether_the_codex_shim_is_what_path_reaches() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    let (said, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "{said}");
+    let native = root.join("native-bin");
+    let shims = root.join(".local/share/swapdex/bin");
+
+    let row = |path: String| -> String {
+        let text = doctor_with_path(root, &path);
+        text.lines()
+            .find(|l| l.starts_with("shim:codex"))
+            .unwrap_or_else(|| panic!("doctor has no shim:codex row:\n{text}"))
+            .to_string()
+    };
+    let shadowed = row(format!(
+        "{}:{}:/usr/bin:/bin",
+        native.display(),
+        shims.display()
+    ));
+    assert!(shadowed.contains("problem"), "{shadowed}");
+    assert!(
+        shadowed.contains(&native.join("codex").display().to_string()),
+        "the row does not say what runs instead: {shadowed}"
+    );
+    let first = row(format!(
+        "{}:{}:/usr/bin:/bin",
+        shims.display(),
+        native.display()
+    ));
+    assert!(first.contains(" ok "), "{first}");
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
