@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim
   treated only a few commands (`login`, `mcp`, `apply` and the like) as
