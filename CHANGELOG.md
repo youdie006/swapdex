@@ -14,6 +14,15 @@ All notable changes to swapdex are documented here. This project follows
   7d bars. Readings whose window has reset are not shown, and another
   account's reading never stands in.
 
+- **`swapdex serve` with no name answers for every tool.** Asked "who pays",
+  it answered for Claude only - the default of a command that switches one
+  tool - so right after `serve <name> --tool codex` moved the turns it still
+  named no Codex payer. With no `--tool` it now prints one line per tool
+  (`turns are served by 'kong' (claude)`, `... 'youdie' (codex)`); with
+  `--tool` it answers for that tool alone. The "no account is directing turns"
+  answer also lost the source code's indentation it printed on its second
+  line.
+
 ## 0.167.5
 
 - **The stale-copy note in `ls` gives a command that re-saves only that copy.**
