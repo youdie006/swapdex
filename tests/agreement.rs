@@ -3245,6 +3245,33 @@ fn the_stale_note_names_a_command_that_resaves_that_tool() {
     );
 }
 
+/// `--tool all` is documented as "every tool", and commands that act on one
+/// tool quietly took it to mean Claude: `serve x --tool all` switched only
+/// Claude and said nothing, so the user believed every tool had moved. A
+/// command that acts on one tool has to refuse it and say which to name.
+#[test]
+fn a_one_tool_command_refuses_tool_all_instead_of_meaning_claude() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    for args in [
+        &["serve", "cx", "--tool", "all"][..],
+        &["share-history", "--tool", "all", "--dry-run"],
+        &["share-history", "--tool", "gemini", "--dry-run"],
+    ] {
+        let (out, err, code) = run(root, args);
+        let said = format!("{out}{err}");
+        assert_ne!(code, 0, "{args:?} was accepted:\n{said}");
+        assert!(
+            said.contains("--tool claude") && said.contains("--tool codex"),
+            "{args:?} does not say which tool to name:\n{said}"
+        );
+    }
+    // Leaving `--tool` out still means Claude, as it always has.
+    let (out, err, code) = run(root, &["share-history", "--dry-run"]);
+    assert_eq!(code, 0, "{out}{err}");
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
