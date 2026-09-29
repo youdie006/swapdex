@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.5
 
 - **The stale-copy note in `ls` gives a command that re-saves only that copy.**
   It said to run `add --update`. Without a name that fails outside a
@@ -62,6 +62,7 @@ All notable changes to swapdex are documented here. This project follows
   services. With a service installed on Linux it now says
   `journalctl --user -u 'swapdex-*'`, and still names the folder for
   launch-started proxies.
+- Update the hyper-util dependency from 0.1.20 to 0.1.21 (#63).
 
 ## 0.167.4
 
