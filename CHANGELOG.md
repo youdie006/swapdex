@@ -25,6 +25,15 @@ All notable changes to swapdex are documented here. This project follows
   `antigravity` and `all` instead of reading them as Claude. Leaving `--tool`
   out still means Claude everywhere it did.
 
+- **`doctor` stops calling shared conversations unreachable.** It warned
+  that `~/.claude` held conversations a plain `claude -r` could not reach
+  while another account was active, and said to adopt `~/.claude` - also when
+  the active account's `projects` links into `~/.claude/projects` (what
+  `share-history` sets up), where `-r` lists exactly those conversations, and
+  when no default is set at all, where a plain `claude` runs in `~/.claude`
+  itself. The row now appears only when the default account really reads
+  another store.
+
 ## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim

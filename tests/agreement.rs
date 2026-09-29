@@ -3272,6 +3272,54 @@ fn a_one_tool_command_refuses_tool_all_instead_of_meaning_claude() {
     assert_eq!(code, 0, "{out}{err}");
 }
 
+fn default_store_row(root: &Path) -> Option<String> {
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("SWAPDEX_ROOT", root)
+        .env("HOME", root)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.starts_with("default store"))
+        .map(str::to_string)
+}
+
+/// doctor warned that conversations in `~/.claude` are out of reach of a plain
+/// `claude -r` while another account is active - also on a machine where every
+/// account's `projects` is a link into `~/.claude/projects` (what
+/// `share-history` sets up), where those conversations are exactly what
+/// `-r` lists. It then told the user to adopt `~/.claude`, which they did not
+/// need.
+#[test]
+fn doctor_does_not_call_shared_history_unreachable() {
+    let t = fixture();
+    let root = t.path();
+    std::fs::create_dir_all(root.join(".claude/projects/-work-repo")).unwrap();
+    seed_slot(root, "work", "work@example.com");
+    // No default yet: a plain `claude` runs in ~/.claude itself.
+    let unset = default_store_row(root);
+    assert!(unset.is_none(), "nothing redirects `claude` yet: {unset:?}");
+    let (_, err, code) = run(root, &["use", "work"]);
+    assert_eq!(code, 0, "{err}");
+
+    let apart = default_store_row(root);
+    assert!(
+        apart.as_deref().is_some_and(|r| r.contains("problem")),
+        "a store that shares nothing really is out of reach: {apart:?}"
+    );
+
+    let projects = root.join(".local/share/swapdex/slots/work/projects");
+    let _ = std::fs::remove_dir_all(&projects);
+    std::os::unix::fs::symlink(root.join(".claude/projects"), &projects).unwrap();
+    let shared = default_store_row(root);
+    assert!(
+        shared.is_none(),
+        "the account reads ~/.claude/projects itself, so nothing is out of reach: {shared:?}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root

@@ -5164,7 +5164,20 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 let held = std::fs::read_dir(bare.join("projects"))
                     .map(|rd| rd.flatten().count())
                     .unwrap_or(0);
-                if !registered && held > 0 {
+                // Out of reach only if `claude` is redirected somewhere that
+                // does not list them: with no default it runs in ~/.claude
+                // itself, and an account whose `projects` links into
+                // ~/.claude/projects (what `share-history` sets up) lists them.
+                let reachable = slots.default_dir().is_none_or(|dir| {
+                    match (
+                        std::fs::canonicalize(dir.join("projects")),
+                        std::fs::canonicalize(bare.join("projects")),
+                    ) {
+                        (Ok(a), Ok(b)) => a == b,
+                        _ => false,
+                    }
+                });
+                if !registered && held > 0 && !reachable {
                     report(
                         "default store",
                         false,
