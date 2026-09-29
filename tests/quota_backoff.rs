@@ -215,6 +215,75 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// A declined read is no reading - but the last reading taken is still a fact
+/// with a date on it. `quota` printed only "declined to answer" while the
+/// cache, and the proxy's own log, held that account's numbers from minutes
+/// before. It now shows them, dated, beside the note.
+#[test]
+fn a_throttled_quota_row_shows_the_last_reading_with_its_age() {
+    let fixture = Fixture::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    std::fs::write(
+        fixture
+            .root
+            .path()
+            .join(".local/share/swapdex/quota-cache.json"),
+        serde_json::json!({"fixture": {
+            "five_h": 14.0, "five_h_reset": now + 3600,
+            "seven_d": 17.0, "seven_d_reset": now + 86400,
+            "at": now - 600
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let human = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .arg("quota")
+        .env("SWAPDEX_ROOT", fixture.root.path())
+        .env("HOME", fixture.root.path())
+        .env("SWAPDEX_CURL", &fixture.curl)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&human.stdout);
+    assert!(said.contains("declined to answer"), "{said}");
+    assert!(
+        said.contains("last reading, 10m ago"),
+        "no dated last reading:\n{said}"
+    );
+    assert!(
+        said.contains("86% left") && said.contains("83% left"),
+        "the last reading's numbers are missing:\n{said}"
+    );
+
+    // Another account's reading is never shown as this one's.
+    std::fs::write(
+        fixture
+            .root
+            .path()
+            .join(".local/share/swapdex/quota-cache.json"),
+        serde_json::json!({"someone-else": {
+            "five_h": 50.0, "five_h_reset": now + 3600, "at": now - 60
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let other = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .arg("quota")
+        .env("SWAPDEX_ROOT", fixture.root.path())
+        .env("HOME", fixture.root.path())
+        .env("SWAPDEX_CURL", &fixture.curl)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&other.stdout);
+    assert!(!said.contains("last reading"), "{said}");
+}
+
 #[test]
 fn sequential_quota_processes_share_one_throttled_usage_request() {
     let fixture = Fixture::new();
