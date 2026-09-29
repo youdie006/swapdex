@@ -54,6 +54,15 @@ All notable changes to swapdex are documented here. This project follows
   Claude as before, `<- pays (codex)` for Codex, with "no login" added when the
   paying account has none.
 
+- **`service status` points a Linux machine at the journal for its logs.**
+  It ended with "logs: ~/.local/share/swapdex/logs". A macOS launchd agent
+  writes there, but the systemd unit names no output file, so on Linux a
+  supervised proxy logs to the journal and that folder held only what
+  launch-started proxies once wrote - days stale on a machine running the
+  services. With a service installed on Linux it now says
+  `journalctl --user -u 'swapdex-*'`, and still names the folder for
+  launch-started proxies.
+
 ## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim
