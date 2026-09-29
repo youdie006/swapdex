@@ -7987,9 +7987,11 @@ pub fn service_status(paths: &Paths) -> Result<i32> {
     // refusal still has the unit, and a supervised proxy nothing reports on is
     // exactly the one nobody removes. The unit's location comes from `paths` so
     // a sandboxed run reports on the sandbox rather than on the machine.
+    let mut any_installed = false;
     for tool in ["claude-code", "codex", "gemini", "antigravity"] {
         let path = crate::service::unit_path(paths, tool);
         let installed = path.exists();
+        any_installed |= installed;
         let running = crate::proxy::running_proxy_for(paths, tool).is_some();
         // A proxy that keeps dying and being restarted reads as "running" on
         // the instant this runs, which is how a crash every hour stayed
@@ -8012,10 +8014,17 @@ pub fn service_status(paths: &Paths) -> Result<i32> {
             note.map(|n| format!("  - {n}")).unwrap_or_default()
         );
     }
-    println!(
-        "  logs: {}",
-        crate::util::redact_path(&crate::service::log_dir(paths).display().to_string())
-    );
+    let dir = crate::util::redact_path(&crate::service::log_dir(paths).display().to_string());
+    // A launchd agent writes its log into that folder; a systemd unit names no
+    // output file, so a supervised proxy logs to the journal and the folder
+    // holds only what launch-started proxies wrote.
+    if any_installed && !cfg!(target_os = "macos") {
+        println!(
+            "  logs: `journalctl --user -u 'swapdex-*'` (a proxy a launch started writes to {dir})"
+        );
+    } else {
+        println!("  logs: {dir}");
+    }
     Ok(0)
 }
 

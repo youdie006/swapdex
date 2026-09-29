@@ -3422,6 +3422,43 @@ fn ls_marks_the_payer_of_each_tool() {
     );
 }
 
+/// `service status` ended with "logs: ~/.local/share/swapdex/logs". A launchd
+/// agent writes there, but a systemd unit sets no output file, so on Linux a
+/// supervised proxy logs to the journal and that folder only ever held what
+/// launch-started proxies wrote - days stale on a machine running services.
+#[cfg(target_os = "linux")]
+#[test]
+fn service_status_points_a_systemd_machine_at_the_journal() {
+    let t = fixture();
+    let root = t.path();
+    let logs_line = |root: &Path| -> String {
+        let (out, err, code) = run(root, &["service", "status"]);
+        assert_eq!(code, 0, "{out}{err}");
+        out.lines()
+            .find(|l| l.trim_start().starts_with("logs:"))
+            .unwrap_or_else(|| panic!("no logs line:\n{out}"))
+            .to_string()
+    };
+    let none = logs_line(root);
+    assert!(
+        !none.contains("journalctl"),
+        "no service is installed: {none}"
+    );
+
+    let units = root.join(".config/systemd/user");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("swapdex-codex.service"),
+        "[Service]\nExecStart=/bin/true proxy --tool codex\n",
+    )
+    .unwrap();
+    let installed = logs_line(root);
+    assert!(
+        installed.contains("journalctl --user -u 'swapdex-*'"),
+        "a systemd service logs to the journal: {installed}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
