@@ -34,6 +34,18 @@ All notable changes to swapdex are documented here. This project follows
   itself. The row now appears only when the default account really reads
   another store.
 
+- **"Not saved" notes name the tool to save.** `status` and `doctor` put
+  "not saved - run `swapdex add <name>`" on a single tool's row, but `add`
+  with no `--tool` saves every tool's live login under that name - so saving
+  an unsaved Gemini or Codex login this way also filed whatever Claude account
+  was signed in. They now say `swapdex add <name> --tool gemini` and so on.
+- **Switching away from an unsaved login says how to actually keep it.** The
+  note said "`swapdex restore` undoes this switch; `swapdex add <name>` would
+  keep it" - but after the switch `add` saves the login just switched to, and
+  both commands act on every tool without `--tool`. It now gives the sequence
+  that keeps the outgoing login, for that tool only:
+  `swapdex restore --tool claude`, then `swapdex add <name> --tool claude`.
+
 ## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim
