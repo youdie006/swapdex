@@ -3384,6 +3384,44 @@ fn the_outgoing_login_note_keeps_the_login_it_names() {
     );
 }
 
+/// With a Claude payer and a Codex payer at once, `ls` marked only the Claude
+/// one: "one mark can only carry one name". But every row carries its own
+/// mark, so the Codex payer went unmarked on exactly the machines that use
+/// both - `serve x --tool codex` then looked like it had not taken.
+#[test]
+fn ls_marks_the_payer_of_each_tool() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "cl", "cl@example.com");
+    seed_slot(root, "idle", "idle@example.com");
+    seed_codex_slot(root, "cx", "cx@example.com");
+    for args in [&["serve", "cl"][..], &["serve", "cx", "--tool", "codex"]] {
+        let (o, e, c) = run(root, args);
+        assert_eq!(c, 0, "{args:?}: {o}{e}");
+    }
+    let (listing, _, _) = run(root, &["ls"]);
+    let row = |name: &str| -> String {
+        listing
+            .lines()
+            .find(|l| l.trim_start_matches(['*', ' ']).starts_with(name))
+            .unwrap_or_else(|| panic!("no row for {name}:\n{listing}"))
+            .to_string()
+    };
+    let cl = row("cl");
+    // A Claude-only payer keeps the words it always had.
+    assert!(cl.trim_end().ends_with("<- pays"), "{cl}");
+    let idle = row("idle");
+    assert!(
+        !idle.contains("pays"),
+        "an account paying for nothing was marked: {idle}"
+    );
+    let cx = row("cx");
+    assert!(
+        cx.contains("<- pays (codex)"),
+        "the codex payer is not marked:\n{listing}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root

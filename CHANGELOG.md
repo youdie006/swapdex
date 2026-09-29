@@ -46,6 +46,14 @@ All notable changes to swapdex are documented here. This project follows
   that keeps the outgoing login, for that tool only:
   `swapdex restore --tool claude`, then `swapdex add <name> --tool claude`.
 
+- **`ls` marks the paying account of every tool.** With a Claude payer and a
+  Codex payer at once, only the Claude one was marked, so on machines that use
+  both, `swapdex serve <name> --tool codex` moved the turns and the list named
+  nobody as paying for them - the "the switch did not take" appearance that
+  the mark exists to prevent. Each payer's row is now marked: `<- pays` for
+  Claude as before, `<- pays (codex)` for Codex, with "no login" added when the
+  paying account has none.
+
 ## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim

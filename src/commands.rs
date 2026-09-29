@@ -2048,43 +2048,6 @@ pub fn listable(snapshots: &[&str], slots: &[&str]) -> Vec<String> {
     all
 }
 
-/// Who is paying, across tools.
-///
-/// `ls` asked Claude's registry alone, so serving a Codex account moved the
-/// turns correctly and the listing marked nobody - the same "the switch did
-/// nothing" appearance fixed for Claude in 0.80.0, still live on the Codex
-/// side. Claude wins when both have a payer: one mark can only carry one name,
-/// and Claude is the tool the rest of the row is about.
-pub fn payer_of_any(per_tool: &[(&str, Option<&str>)]) -> Option<String> {
-    let pick = |want: &str| {
-        per_tool
-            .iter()
-            .find(|(t, _)| *t == want)
-            .and_then(|(_, p)| p.map(str::to_string))
-    };
-    pick("claude-code").or_else(|| per_tool.iter().find_map(|(_, p)| p.map(str::to_string)))
-}
-
-/// The mark a single row gets for paying, if any.
-///
-/// `serve rnd` says "turns -> rnd", and then `ls` starred a different account -
-/// the one holding the login on disk - with the paying account named nowhere.
-/// Switching looked like it had not taken, which is what its owner concluded,
-/// repeatedly, over a day.
-///
-/// `None` when there is nothing to disambiguate: same account, or nothing
-/// paying. An extra mark on the common case is noise.
-pub fn row_suffix(
-    row: &str,
-    _signed_in: Option<&str>,
-    paying: Option<&str>,
-) -> Option<&'static str> {
-    // Marked even when the payer also holds the login. Suppressing it there
-    // meant that of three accounts, switching to one produced no visible
-    // change at all, which reads as that one switch having failed.
-    (row == paying?).then_some("pays")
-}
-
 /// Who pays, when that is not who the tool is signed in as.
 ///
 /// `ls` marks the account Claude holds a login for. When a proxy is paying with
@@ -2639,7 +2602,8 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         /// Set when this row is the account PAYING and a different one holds
         /// the login. `serve` said "turns -> rnd" and the list starred another
         /// name, so the switch read as not having taken.
-        pays: bool,
+        /// The tools this account pays for, each marked on its own row.
+        pays_for: Vec<&'static str>,
     }
     // Same resolution the proxy performs, so what this screen claims and what
     // the proxy does cannot drift apart.
@@ -2657,23 +2621,14 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             )
         })
         .collect();
-    let refs: Vec<(&str, Option<&str>)> = payers.iter().map(|(t, p)| (*t, p.as_deref())).collect();
-    let paying = payer_of_any(&refs);
     // A selected account with no login cannot pay. Managed requests now fail
     // explicitly; selection alone must not imply it served a request.
-    let payer_has_login = paying.as_deref().is_some_and(|who| {
-        payers.iter().any(|(t, p)| {
-            p.as_deref() == Some(who)
-                && crate::slots::Slots::open_for(paths, t).is_ok_and(|s| {
-                    s.get(who)
-                        .is_some_and(|r| crate::proxy::has_login(paths, t, &r.config_dir))
-                })
+    let payer_login = |tool: &str, who: &str| {
+        crate::slots::Slots::open_for(paths, tool).is_ok_and(|s| {
+            s.get(who)
+                .is_some_and(|r| crate::proxy::has_login(paths, tool, &r.config_dir))
         })
-    });
-    let signed_in = active_by_tool(&store, paths)
-        .into_iter()
-        .find(|(t, _)| *t == "claude-code")
-        .map(|(_, n)| n);
+    };
     let rows: Vec<Row> = profiles
         .iter()
         .map(|p| {
@@ -2692,7 +2647,11 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 .collect::<Vec<_>>()
                 .join(", ");
             Row {
-                pays: row_suffix(&p.name, signed_in.as_deref(), paying.as_deref()).is_some(),
+                pays_for: payers
+                    .iter()
+                    .filter(|(_, who)| who.as_deref() == Some(p.name.as_str()))
+                    .map(|(t, _)| *t)
+                    .collect(),
                 name: p.name.clone(),
                 ident: identity_column(email, tier),
                 tools,
@@ -2763,11 +2722,27 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
         // The paying account is named on its own row: `serve` moved the turns
         // there, and without this the list starred a different name and the
         // switch read as not having taken.
-        let pays = match (r.pays, payer_has_login) {
-            (true, true) => "  <- pays",
+        // Every tool's payer is marked on its own row. Only one name used to
+        // be marked, Claude's winning, so the Codex payer went unmarked on
+        // exactly the machines that use both. A Claude-only payer keeps the
+        // words it always had.
+        let pays = if r.pays_for.is_empty() {
+            String::new()
+        } else {
+            let mut notes: Vec<&str> = if r.pays_for == ["claude-code"] {
+                Vec::new()
+            } else {
+                r.pays_for.clone()
+            };
             // Same words `payer_line` uses, so the two screens cannot drift.
-            (true, false) => "  <- pays (no login)",
-            (false, _) => "",
+            if r.pays_for.iter().any(|t| !payer_login(t, &r.name)) {
+                notes.push("no login");
+            }
+            if notes.is_empty() {
+                "  <- pays".to_string()
+            } else {
+                format!("  <- pays ({})", notes.join(", "))
+            }
         };
         // Being out of rotation is a thing somebody chose, and the screen that
         // lists accounts is where they would look to check. It was settable and
@@ -10646,10 +10621,10 @@ mod tests {
         best_identity, classify_migration_profile, codex_account_sources, codex_identity,
         codex_quota_lines, codex_row, codex_usage_row, home_note, keychain_verdict,
         last_slot_warning, listable, login_is_ancient, name_means_two_accounts, new_account_prompt,
-        payer_line, payer_note, payer_of_any, pick_active, quota_brief, row_needs_login,
-        row_suffix, sign_in_remedy, sign_out_blocked_remedy, stale_hint, stale_marker,
-        stale_proxy_note, suggested_profile_name, switch_line, unhonoured_ask, unknown_account,
-        win_line, MigrationClass,
+        payer_line, payer_note, pick_active, quota_brief, row_needs_login, sign_in_remedy,
+        sign_out_blocked_remedy, stale_hint, stale_marker, stale_proxy_note,
+        suggested_profile_name, switch_line, unhonoured_ask, unknown_account, win_line,
+        MigrationClass,
     };
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -11131,38 +11106,6 @@ mod tests {
         assert_eq!(quota_brief(None, None), "usage unread");
     }
 
-    /// Whoever pays for ANY tool gets marked, not just Claude's payer.
-    ///
-    /// `ls` asked `Slots::open_for(paths, "claude-code")` who pays, so serving a
-    /// Codex account moved the turns correctly and the listing marked nobody -
-    /// the same "the switch did nothing" appearance that was fixed for Claude in
-    /// 0.80.0, still live on the Codex side.
-    #[test]
-    fn a_payer_of_any_tool_is_marked() {
-        // Claude pays: as before.
-        assert_eq!(
-            payer_of_any(&[("claude-code", Some("alpha")), ("codex", None)]).as_deref(),
-            Some("alpha")
-        );
-        // Only Codex has a payer: it gets marked.
-        assert_eq!(
-            payer_of_any(&[("claude-code", None), ("codex", Some("cx"))]).as_deref(),
-            Some("cx")
-        );
-        // Both: Claude's answer is the one a single mark can carry, and it is
-        // the tool `ls` is otherwise about.
-        assert_eq!(
-            payer_of_any(&[("claude-code", Some("alpha")), ("codex", Some("cx"))]).as_deref(),
-            Some("alpha")
-        );
-        // Nobody: nothing marked.
-        assert_eq!(
-            payer_of_any(&[("claude-code", None), ("codex", None)]),
-            None
-        );
-        assert_eq!(payer_of_any(&[]), None);
-    }
-
     /// The remedy must name the TOOL, or it sends the reader to the wrong one.
     ///
     /// A Codex account that could not serve was told to run `swapdex run
@@ -11283,28 +11226,6 @@ mod tests {
         // Snapshots only: unchanged from before.
         assert_eq!(listable(&["claude"], &[]), vec!["claude"]);
         assert!(listable(&[], &[]).is_empty());
-    }
-
-    /// The list must show the switch that was just made.
-    ///
-    /// `serve rnd` says "turns -> rnd", and then `ls` starred a different
-    /// account - the one holding the login on disk - with the paying account
-    /// named nowhere. Switching looked like it had not taken, which is exactly
-    /// what its owner concluded, repeatedly.
-    #[test]
-    fn the_list_shows_which_account_pays() {
-        // Signed in as kong, paying with rnd: the row for rnd says so.
-        assert_eq!(row_suffix("rnd", Some("kong"), Some("rnd")), Some("pays"));
-        // ...and the row for kong is not marked as paying.
-        assert_eq!(row_suffix("kong", Some("kong"), Some("rnd")), None);
-        // The payer is marked EVEN WHEN it also holds the login. Suppressing
-        // it there meant that of three accounts, switching to one of them
-        // produced no visible change at all - reading as that switch failing.
-        assert_eq!(row_suffix("kong", Some("kong"), Some("kong")), Some("pays"));
-        // Nothing paying (no proxy): nothing to say.
-        assert_eq!(row_suffix("kong", Some("kong"), None), None);
-        // A row that is neither is never marked.
-        assert_eq!(row_suffix("bsgong", Some("kong"), Some("rnd")), None);
     }
 
     /// `ls` marks the account Claude is signed in AS. When a proxy is paying
