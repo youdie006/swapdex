@@ -1738,13 +1738,31 @@ fn profile_detail(
 ///
 /// Empty when nothing is stale. When EVERYTHING is stale it promises nothing,
 /// because there is nothing to reassure anyone about.
-pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
+pub fn stale_hint(stale: &[&str], healthy: &[&str], resave: &[(&str, &str)]) -> String {
     if stale.is_empty() {
         return String::new();
     }
+    // One exact command per stale copy. A bare `add --update` needs a name off
+    // a terminal, and with no `--tool` it re-saves every tool from whatever is
+    // live - overwriting the account's healthy copies with another account's
+    // login.
+    let commands: Vec<String> = resave
+        .iter()
+        .map(|(name, tool)| {
+            format!(
+                "`swapdex add {name} --tool {} --update`",
+                add_tool_value(tool)
+            )
+        })
+        .collect();
+    let save = if commands.is_empty() {
+        "re-save it with `swapdex add <name> --tool <tool> --update`".to_string()
+    } else {
+        commands.join(", ")
+    };
     let mut out = format!(
         "  ({}: this saved copy is old, so its token may no longer work - run that \
-         tool once, then `add --update` saves whatever it signed in as)",
+         tool once, then {save} saves whatever it signed in as)",
         stale.join(", ")
     );
     if !healthy.is_empty() {
@@ -1754,6 +1772,15 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str]) -> String {
         ));
     }
     out
+}
+
+/// The value `add --tool` takes for a tool: Claude is `claude` there, and the
+/// flag cannot be left out, because leaving it out means every tool.
+fn add_tool_value(tool: &str) -> &str {
+    match tool {
+        "claude-code" => "claude",
+        other => other,
+    }
 }
 
 /// The payer's remaining quota, short enough for a status bar.
@@ -2690,6 +2717,8 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     // A lone marker reads as "this account is broken" when the others work.
     let mut stale_tools: Vec<String> = Vec::new();
     let mut healthy_tools: Vec<String> = Vec::new();
+    // Each stale copy by account, so the note can name the command for it.
+    let mut resave: Vec<(String, String)> = Vec::new();
     // Who the user has taken out of rotation; the proxy reads the same file.
     let cfg = crate::settings::load(paths);
     for r in &rows {
@@ -2713,6 +2742,9 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 }
                 // The note already names the tools ("gemini stale"), so it is
                 // the authority on which side each one falls.
+                if w.contains(t) && !resave.iter().any(|(n, x)| n == &r.name && x == t) {
+                    resave.push((r.name.clone(), t.to_string()));
+                }
                 let bucket = if w.contains(t) {
                     &mut stale_tools
                 } else {
@@ -2753,7 +2785,11 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     if saw_refreshable {
         let stale: Vec<&str> = stale_tools.iter().map(String::as_str).collect();
         let healthy: Vec<&str> = healthy_tools.iter().map(String::as_str).collect();
-        let hint = stale_hint(&stale, &healthy);
+        let pairs: Vec<(&str, &str)> = resave
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
+        let hint = stale_hint(&stale, &healthy, &pairs);
         if hint.is_empty() {
             println!(
                 "  (expired/stale: run that tool once and sign in - re-saving the profile \
@@ -11252,7 +11288,11 @@ mod tests {
     /// broken" when Claude and Codex are working perfectly well.
     #[test]
     fn a_stale_hint_says_what_to_do_per_tool_and_what_still_works() {
-        let h = stale_hint(&["gemini", "antigravity"], &["claude-code", "codex"]);
+        let h = stale_hint(
+            &["gemini", "antigravity"],
+            &["claude-code", "codex"],
+            &[("work", "gemini"), ("work", "antigravity")],
+        );
         assert!(h.contains("gemini"), "{h}");
         assert!(h.contains("antigravity"), "{h}");
         // Re-saving alone is not offered as the fix: running the tool comes
@@ -11266,7 +11306,8 @@ mod tests {
         );
         let (run_at, save_at) = (
             h.find("run that tool once").unwrap(),
-            h.find("add --update").expect("and re-saving is the second"),
+            h.find("swapdex add work --tool gemini --update")
+                .expect("and re-saving that copy, by name and tool, is the second"),
         );
         assert!(run_at < save_at, "in that order: {h}");
         // And it says the account still serves its healthy tools.
@@ -11276,10 +11317,22 @@ mod tests {
         );
     }
 
+    /// The command must be one `add` accepts and that touches only the stale
+    /// copy: Claude is `--tool claude` there, and leaving the flag out means
+    /// every tool.
+    #[test]
+    fn the_resave_command_names_a_tool_add_accepts() {
+        let h = stale_hint(&["claude-code"], &["codex"], &[("work", "claude-code")]);
+        assert!(
+            h.contains("`swapdex add work --tool claude --update`"),
+            "{h}"
+        );
+    }
+
     /// Nothing stale, nothing said.
     #[test]
     fn no_stale_tool_means_no_hint() {
-        assert!(stale_hint(&[], &["claude-code"]).is_empty());
+        assert!(stale_hint(&[], &["claude-code"], &[]).is_empty());
     }
 
     /// It says the token is dead; it only knows the copy is old.
@@ -11292,7 +11345,7 @@ mod tests {
     /// broken" about one that works.
     #[test]
     fn the_stale_hint_does_not_assert_a_lapse_it_cannot_know() {
-        let h = stale_hint(&["g-cli"], &["codex"]);
+        let h = stale_hint(&["g-cli"], &["codex"], &[]);
         assert!(h.contains("g-cli"), "{h}");
         assert!(
             h.contains("may"),
@@ -11311,7 +11364,7 @@ mod tests {
     /// claiming otherwise would be the opposite failure.
     #[test]
     fn all_tools_stale_promises_nothing() {
-        let h = stale_hint(&["gemini"], &[]);
+        let h = stale_hint(&["gemini"], &[], &[("work", "gemini")]);
         assert!(h.contains("gemini"), "{h}");
         assert!(!h.contains("still"), "nothing is still working: {h}");
     }

@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The stale-copy note in `ls` gives a command that re-saves only that copy.**
+  It said to run `add --update`. Without a name that fails outside a
+  terminal, and without `--tool` it re-saves every tool from whatever is
+  signed in - so following it to refresh one old codex copy could overwrite the
+  same account's Claude copy with a different account's login. The note now
+  names each stale copy's own command, such as
+  `swapdex add work --tool codex --update`, with Claude as `--tool claude`.
+
 ## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim

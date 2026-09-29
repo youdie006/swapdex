@@ -3216,6 +3216,35 @@ fn doctor_says_whether_the_codex_shim_is_what_path_reaches() {
     assert!(first.contains(" ok "), "{first}");
 }
 
+/// The stale note told the user to run `add --update`. Without a name that
+/// fails off a terminal, and without `--tool` it re-saves EVERY tool from
+/// whatever is live - so following it to refresh one old codex copy could
+/// overwrite the account's Claude copy with another account's login. The note
+/// has to be a command that does only the thing it describes.
+#[test]
+fn the_stale_note_names_a_command_that_resaves_that_tool() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_snapshot(root, "old", "old@example.com", "acct-old", "rt-old");
+    let auth = root.join(".local/share/swapdex/accounts/old/codex/auth");
+    let text = std::fs::read_to_string(&auth).unwrap();
+    std::fs::write(
+        &auth,
+        text.replace("2026-09-03T02:56:06Z", "2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+    let (out, err, _) = run(root, &["ls"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("stale"),
+        "the fixture copy is not stale:\n{said}"
+    );
+    assert!(
+        said.contains("swapdex add old --tool codex --update"),
+        "the note does not say how to re-save this codex copy:\n{said}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
