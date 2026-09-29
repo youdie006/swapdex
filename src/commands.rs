@@ -984,11 +984,15 @@ fn use_account_inner(
                                 .as_ref()
                                 .map(identity_line)
                                 .unwrap_or_else(|| "current".into());
+                            // After the switch `add` saves the login switched
+                            // TO, and with no `--tool` both commands act on
+                            // every tool: bring it back first, this tool only.
+                            let flag = add_tool_value(tool);
                             eprintln!(
                                 "swapdex: note - the outgoing {tool} login ({who}) is not \
                                  saved as a profile; only the last 2 backups keep it. \
-                                 `swapdex restore` undoes this switch; `swapdex add <name>` \
-                                 would keep it for good."
+                                 `swapdex restore --tool {flag}` brings it back, then \
+                                 `swapdex add <name> --tool {flag}` keeps it for good."
                             );
                         }
                     }
@@ -2977,7 +2981,11 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
                 let name = matched_profile_name(&store, tool, &id.account_id);
                 let saved = match &name {
                     Some(n) => format!("profile '{n}'"),
-                    None => "not saved - run `swapdex add <name>`".to_string(),
+                    // Named per tool: `add` with no `--tool` saves every tool.
+                    None => format!(
+                        "not saved - run `swapdex add <name> --tool {}`",
+                        add_tool_value(tool)
+                    ),
                 };
                 let exp = expiry_note(id.expires_at, tool);
                 println!("{tool}: {} ({saved}){exp}", identity_line(&id));
@@ -4945,7 +4953,12 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             Ok(Some(id)) => {
                 let saved = matched_profile_name(&store, tool, &id.account_id)
                     .map(|n| format!("profile '{n}'"))
-                    .unwrap_or_else(|| "not saved - `swapdex add <name>` keeps it".into());
+                    .unwrap_or_else(|| {
+                        format!(
+                            "not saved - `swapdex add <name> --tool {}` keeps it",
+                            add_tool_value(tool)
+                        )
+                    });
                 report(
                     tool,
                     true,

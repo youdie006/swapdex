@@ -3320,6 +3320,70 @@ fn doctor_does_not_call_shared_history_unreachable() {
     );
 }
 
+/// "not saved - run `swapdex add <name>`" sat on one tool's row, but `add`
+/// with no `--tool` saves EVERY tool's live login under that name - so saving
+/// the codex login this way also filed whatever Claude account was signed in
+/// under the same name. Both screens that print it must name the tool.
+#[test]
+fn the_not_saved_note_names_the_tool_to_save() {
+    let t = fixture();
+    let root = t.path();
+    seed_live_codex(root, "loose@example.com");
+    for cmd in ["status", "doctor"] {
+        let (out, err, _) = run(root, &[cmd]);
+        let said = format!("{out}{err}");
+        let row = said
+            .lines()
+            .find(|l| l.starts_with("codex") && l.contains("not saved"))
+            .unwrap_or_else(|| panic!("{cmd} has no unsaved codex row:\n{said}"));
+        assert!(
+            row.contains("swapdex add <name> --tool codex"),
+            "{cmd} would save every tool: {row}"
+        );
+    }
+}
+
+/// Switching away from a login nobody saved says how to keep it. It said
+/// "`swapdex restore` undoes this switch; `swapdex add <name>` would keep it" -
+/// but after the switch `add` saves the login just switched TO, and with no
+/// `--tool` both commands act on every tool. The note has to be the sequence
+/// that keeps the outgoing login, for this tool only.
+#[test]
+fn the_outgoing_login_note_keeps_the_login_it_names() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    let (o, e, c) = run(root, &["add", "a", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    // A different account signs in and is never saved.
+    seed_claude(root, "uuid-b", "b@example.com");
+    let (out, err, code) = run(root, &["use", "a", "--tool", "claude"]);
+    let said = format!("{out}{err}");
+    assert_eq!(code, 0, "{said}");
+    let note = said
+        .lines()
+        .find(|l| l.contains("is not saved as a profile"))
+        .unwrap_or_else(|| panic!("no note about the unsaved login:\n{said}"));
+    let restore = note.find("swapdex restore --tool claude");
+    let keep = note.find("swapdex add <name> --tool claude");
+    assert!(
+        restore.is_some() && keep.is_some() && restore < keep,
+        "the note must bring the login back, then save it, for Claude only: {note}"
+    );
+    // And following it does keep the outgoing login, under the new name.
+    let (o, e, c) = run(root, &["restore", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    let (o, e, c) = run(root, &["add", "kept", "--tool", "claude"]);
+    assert_eq!(c, 0, "{o}{e}");
+    let (listing, _, _) = run(root, &["ls"]);
+    assert!(
+        listing
+            .lines()
+            .any(|l| l.contains("kept") && l.contains("b@example.com")),
+        "following the note did not keep the outgoing login:\n{listing}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
