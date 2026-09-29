@@ -9932,13 +9932,48 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             Fetch::Coordination(msg) => {
                 println!("  usage lookup coordination unavailable - {msg}")
             }
-            Fetch::Throttled => println!("  {}", throttled_note()),
+            Fetch::Throttled => {
+                println!("  {}", throttled_note());
+                for line in last_reading(paths, &r.name, now) {
+                    println!("  {line}");
+                }
+            }
         }
         println!();
     }
     print_codex_quota(paths, now);
     println!("quota reads provider usage; `swapdex usage` shows local session activity.");
     Ok(0)
+}
+
+/// The last reading taken for an account, dated. A declined read is no
+/// reading, but the one before it is still a fact with a time on it: `quota`
+/// showed nothing while the cache - and the proxy's own log - held numbers
+/// from minutes earlier. Readings whose window has since reset are not kept.
+fn last_reading(paths: &Paths, name: &str, now: i64) -> Vec<String> {
+    let Some(e) = crate::quota_cache::load_for(paths, "claude-code").remove(name) else {
+        return Vec::new();
+    };
+    let secs = (now - e.at).max(0);
+    let age = if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    };
+    let mut out = vec![format!("last reading, {age} ago:")];
+    for (label, used, reset) in [
+        ("5h", e.five_h, e.five_h_reset),
+        ("7d", e.seven_d, e.seven_d_reset),
+    ] {
+        if let Some(used_pct) = used {
+            let w = crate::quota::Window {
+                used_pct,
+                resets_at: reset,
+            };
+            out.push(win_line(label, &w, now));
+        }
+    }
+    out
 }
 
 /// What to say when the usage endpoint declined to answer.

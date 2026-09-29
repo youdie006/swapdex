@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`quota` shows the last reading when the usage endpoint declines.** A
+  throttled Claude account's row said only that the endpoint "declined to
+  answer just now", while the reading taken minutes earlier sat in swapdex's
+  cache and the proxy's own log printed it. The row now keeps that note and
+  adds the last reading with its age ("last reading, 10m ago:") and its 5h and
+  7d bars. Readings whose window has reset are not shown, and another
+  account's reading never stands in.
+
 ## 0.167.5
 
 - **The stale-copy note in `ls` gives a command that re-saves only that copy.**
