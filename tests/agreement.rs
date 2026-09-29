@@ -3459,6 +3459,46 @@ fn service_status_points_a_systemd_machine_at_the_journal() {
     );
 }
 
+/// `swapdex serve` with no name answers "who pays?", and answered for Claude
+/// only - the default tool of a command that switches one - so the codex payer,
+/// whose turns had just moved, went unnamed. Asked with no `--tool`, it now
+/// names each tool's payer. And the "nobody is directing turns" answer carried
+/// a line break followed by the source's own indentation.
+#[test]
+fn serve_with_no_name_names_every_tools_payer() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "cl", "cl@example.com");
+    seed_codex_slot(root, "cx", "cx@example.com");
+    let (o, e, c) = run(root, &["serve", "cl"]);
+    assert_eq!(c, 0, "{o}{e}");
+
+    let (before, _, _) = run(root, &["serve"]);
+    assert!(before.contains("'cl' (claude)"), "{before}");
+    assert!(
+        before.contains("no account is directing turns (codex)"),
+        "the codex side is not answered:\n{before}"
+    );
+    assert!(
+        !before.lines().any(|l| l.starts_with("          ")),
+        "a line carries the source's indentation:\n{before}"
+    );
+
+    let (o, e, c) = run(root, &["serve", "cx", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    let (after, _, _) = run(root, &["serve"]);
+    assert!(
+        after.contains("'cl' (claude)") && after.contains("'cx' (codex)"),
+        "both payers must be named:\n{after}"
+    );
+    // Asked about one tool, it still answers for that tool alone.
+    let (one, _, _) = run(root, &["serve", "--tool", "codex"]);
+    assert!(
+        one.contains("'cx' (codex)") && !one.contains("'cl'"),
+        "{one}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root

@@ -7284,6 +7284,30 @@ fn tool_flag(tool: &str) -> String {
     }
 }
 
+/// One tool's answer to "who pays for turns now".
+fn serving_answer(slots: &crate::slots::Slots, tool: &str) -> String {
+    let bin = tool_binary(tool);
+    if slots.serving_is_off() {
+        return format!("passthrough is on ({bin}) - each session pays with its own login");
+    }
+    match slots.serving_dir() {
+        Some(dir) => {
+            let who = slots
+                .list()
+                .into_iter()
+                .find(|r| r.config_dir == dir)
+                .map(|r| r.name)
+                .unwrap_or_else(|| "(unknown)".into());
+            format!("turns are served by '{who}' ({bin})")
+        }
+        None => format!(
+            "no account is directing turns ({bin}) - each session pays for itself\n  \
+             `swapdex serve <name>{}` hands them to one without moving your conversations",
+            tool_flag(tool)
+        ),
+    }
+}
+
 pub fn serve(
     paths: &Paths,
     name: Option<&str>,
@@ -7356,24 +7380,22 @@ pub fn serve(
         return Ok(0);
     }
     let Some(name) = name else {
-        if slots.serving_is_off() {
-            println!("passthrough is on ({bin}) - each session pays with its own login");
-            return Ok(0);
-        }
-        match slots.serving_dir() {
-            Some(dir) => {
-                let who = slots
-                    .list()
-                    .into_iter()
-                    .find(|r| r.config_dir == dir)
-                    .map(|r| r.name)
-                    .unwrap_or_else(|| "(unknown)".into());
-                println!("turns are served by '{who}' ({bin})");
+        // "Who pays?" With no `--tool` it is asked of every tool that has a
+        // payer to choose: answering for Claude alone - the default of a
+        // command that switches ONE tool - left the Codex payer unnamed right
+        // after its turns had moved.
+        if sel.is_none() {
+            for t in ["claude-code", "codex"] {
+                if t == tool {
+                    println!("{}", serving_answer(&slots, t));
+                } else {
+                    let other = crate::slots::Slots::open_for(paths, t)?;
+                    other.prune_serving();
+                    println!("{}", serving_answer(&other, t));
+                }
             }
-            None => println!(
-                "no account is directing turns ({bin}) - each session pays for itself\n                   `swapdex serve <name>{}` hands them to one without moving your conversations",
-                tool_flag(tool)
-            ),
+        } else {
+            println!("{}", serving_answer(&slots, tool));
         }
         return Ok(0);
     };
