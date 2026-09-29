@@ -14,6 +14,17 @@ All notable changes to swapdex are documented here. This project follows
   names each stale copy's own command, such as
   `swapdex add work --tool codex --update`, with Claude as `--tool claude`.
 
+- **`--tool all` is refused by commands that act on one tool, instead of
+  quietly meaning Claude.** The help for `serve`, `run`, `adopt`, `proxy` and
+  `service install`/`uninstall` lists `all` as "every tool", but these
+  commands read it as Claude: `swapdex serve work --tool all` switched only
+  Claude (or failed with "no accounts saved yet" for a codex-only account), and
+  `service install --tool all` installed only the Claude service. They now
+  stop and say to name `--tool claude` or `--tool codex`. `share-history`,
+  which exists for Claude and codex only, likewise refuses `gemini`,
+  `antigravity` and `all` instead of reading them as Claude. Leaving `--tool`
+  out still means Claude everywhere it did.
+
 ## 0.167.4
 
 - **Local-only Codex commands no longer wait on the proxy.** The Codex shim

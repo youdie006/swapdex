@@ -62,7 +62,8 @@ pub enum ToolSel {
     Codex,
     Gemini,
     Antigravity,
-    /// Every tool (the default when --tool is omitted)
+    /// Every tool - for commands that act on several, where it is also the
+    /// default; a command that acts on one tool refuses it
     #[value(alias = "both")]
     All,
 }
@@ -3004,7 +3005,7 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
 /// read from the live proxy's marker. Silent and non-zero when there is none, so
 /// the shim leaves Codex's usage reads alone rather than point them at nothing.
 pub fn proxy_usage_port(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
-    match crate::proxy::usage_port_for(paths, slot_tool(sel)) {
+    match crate::proxy::usage_port_for(paths, single_tool(sel, "proxy")?) {
         Some(port) => {
             println!("{port}");
             Ok(0)
@@ -3029,7 +3030,7 @@ pub fn proxy(
 ) -> Result<i32> {
     // Refuse where the relay does not exist, rather than starting a Claude proxy
     // under another tool's name and port.
-    let tool = slot_tool(sel);
+    let tool = single_tool(sel, "proxy")?;
     if !crate::proxy::carries(tool) {
         eprintln!("{}", crate::proxy::cannot_carry(tool));
         return Ok(2);
@@ -3055,7 +3056,7 @@ pub fn proxy(
     let opts = crate::proxy::Opts {
         port,
         account,
-        tool: slot_tool(sel).to_string(),
+        tool: single_tool(sel, "proxy")?.to_string(),
         auto,
         threshold,
         threshold_pinned,
@@ -6589,7 +6590,7 @@ pub fn adopt_slot(
     dir: &std::path::Path,
     sel: Option<ToolSel>,
 ) -> Result<i32> {
-    let tool = slot_tool(sel);
+    let tool = single_tool(sel, "adopt")?;
     let mut slots = crate::slots::Slots::open_for_update(paths, tool)?;
     let rec = slots.adopt(name, dir)?;
     println!(
@@ -6707,7 +6708,7 @@ pub fn run_account(
     args: &[String],
 ) -> Result<i32> {
     use std::os::unix::process::CommandExt;
-    let tool = slot_tool(sel);
+    let tool = single_tool(sel, "run")?;
     let Some(home_var) = crate::slots::home_var(tool) else {
         eprintln!(
             "swapdex: {tool} has no per-account home to launch into - only claude and codex do"
@@ -6970,6 +6971,32 @@ pub(crate) fn one_tool(sel: ToolSel) -> Option<&'static str> {
         ToolSel::Gemini => Some("gemini"),
         ToolSel::Antigravity => Some("antigravity"),
         ToolSel::All => None,
+    }
+}
+
+/// The tool a command that acts on ONE tool was asked for. `--tool all` cannot
+/// name one tool, and taking it for Claude switched only Claude while the user
+/// believed every tool had moved - so it is refused, naming what to pass.
+pub(crate) fn single_tool(sel: Option<ToolSel>, command: &str) -> Result<&'static str> {
+    if matches!(sel, Some(ToolSel::All)) {
+        return Err(anyhow::anyhow!(
+            "`swapdex {command}` acts on one tool, so `--tool all` cannot apply - \
+             name it: --tool claude or --tool codex"
+        ));
+    }
+    Ok(slot_tool(sel))
+}
+
+/// For a command that exists for Claude and codex only: anything else is refused
+/// rather than quietly read as Claude.
+pub fn claude_or_codex(sel: Option<ToolSel>, command: &str) -> Result<&'static str> {
+    match sel {
+        None | Some(ToolSel::Claude) => Ok("claude-code"),
+        Some(ToolSel::Codex) => Ok("codex"),
+        Some(_) => Err(anyhow::anyhow!(
+            "`swapdex {command}` works for Claude and Codex only - \
+             name one: --tool claude or --tool codex"
+        )),
     }
 }
 
@@ -7263,7 +7290,7 @@ pub fn serve(
     sel: Option<ToolSel>,
     quiet: bool,
 ) -> Result<i32> {
-    let tool = slot_tool(sel);
+    let tool = single_tool(sel, "serve")?;
     // Turns are paid through the relay, so where there is none there is no
     // payer to choose. `proxy` and `service install` already refuse these tools
     // by name; this one wrote a serving pointer, said "now <name>", and sent the
@@ -7900,7 +7927,7 @@ fn install_verdict(came_up: bool, tool: &str) -> (bool, String) {
 }
 
 pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
-    let tool = slot_tool(sel);
+    let tool = single_tool(sel, "service install")?;
     // The unit runs `proxy --tool <tool>`. Installing one for a tool the proxy
     // cannot carry put a Claude proxy on that tool's port, under the supervisor,
     // restarted forever by KeepAlive.
@@ -7941,7 +7968,7 @@ pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
 
 /// `swapdex service uninstall` - stop it and take the unit away.
 pub fn service_uninstall(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
-    let tool = slot_tool(sel);
+    let tool = single_tool(sel, "service uninstall")?;
     match crate::service::uninstall(paths, tool)? {
         Some(p) => println!(
             "removed {}",

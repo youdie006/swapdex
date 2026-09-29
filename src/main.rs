@@ -524,14 +524,8 @@ fn main() {
         Cmd::FallbackModel { value } => commands::fallback_model(&paths, value.as_deref()),
         Cmd::Strategy { value } => commands::strategy(&paths, value.as_deref()),
         Cmd::Auto { state } => commands::auto(&paths, state.as_deref()),
-        Cmd::ShareHistory { tool, dry_run } => commands::share_history(
-            &paths,
-            match tool {
-                Some(ToolSel::Codex) => "codex",
-                _ => "claude-code",
-            },
-            *dry_run,
-        ),
+        Cmd::ShareHistory { tool, dry_run } => commands::claude_or_codex(*tool, "share-history")
+            .and_then(|tool| commands::share_history(&paths, tool, *dry_run)),
         Cmd::Slash => commands::install_slash(&paths),
         Cmd::Threshold { value } => commands::threshold(&paths, value.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),
