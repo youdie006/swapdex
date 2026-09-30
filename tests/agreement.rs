@@ -3499,6 +3499,62 @@ fn serve_with_no_name_names_every_tools_payer() {
     );
 }
 
+/// A window started before the usage route pays through the proxy while its
+/// status line reads its OWN account, which does not move - so its numbers sat
+/// still until the window was restarted and then dropped at once. doctor said
+/// only "windows started before it keep their own account", which named no
+/// window. It now names each one by pid.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_names_a_codex_window_started_without_the_usage_route() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    mark_codex_proxy(root, Some(18788));
+    // A stand-in window: /bin/sh under the name `codex`, kept alive by its
+    // script while its arguments carry what a real launch would.
+    let bin = root.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("codex");
+    std::fs::copy("/bin/sh", &fake).unwrap();
+    let spawn = |extra: &[&str]| {
+        let mut args = vec![
+            "-c",
+            "sleep 30",
+            "codex",
+            "-c",
+            "openai_base_url=http://127.0.0.1:8788/v1",
+        ];
+        args.extend_from_slice(extra);
+        Command::new(&fake)
+            .args(&args)
+            .env("SWAPDEX_ROOT", root)
+            .spawn()
+            .unwrap()
+    };
+    let mut stale = spawn(&[]);
+    let mut current = spawn(&[
+        "-c",
+        "chatgpt_base_url=https://127.0.0.1:18788/backend-api/",
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let row = doctor_usage_row(root, &[]);
+    let _ = stale.kill();
+    let _ = current.kill();
+    let _ = stale.wait();
+    let _ = current.wait();
+    assert!(row.contains("problem"), "{row}");
+    assert!(
+        row.contains(&stale.id().to_string()),
+        "the window reading its own account is not named: {row}"
+    );
+    assert!(
+        !row.contains(&current.id().to_string()),
+        "a window that reads the payer was named: {row}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
