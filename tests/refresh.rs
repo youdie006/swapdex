@@ -29,6 +29,21 @@ fn fake_oauth(sink: Arc<Mutex<Vec<String>>>, response: &'static str) -> String {
     format!("http://127.0.0.1:{port}/v1/oauth/token")
 }
 
+/// A login server that refuses every refresh with `status`.
+fn refusing_oauth(sink: Arc<Mutex<Vec<String>>>, status: u16, body: &'static str) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let mut seen = String::new();
+            std::io::Read::read_to_string(rq.as_reader(), &mut seen).ok();
+            sink.lock().unwrap().push(seen);
+            let _ = rq.respond(tiny_http::Response::from_string(body).with_status_code(status));
+        }
+    });
+    format!("http://127.0.0.1:{port}/v1/oauth/token")
+}
+
 /// A Claude account whose access token lapsed an hour ago and whose refresh
 /// token is still good - the state every idle account reaches.
 fn seed_lapsed_account(root: &std::path::Path, name: &str, id: &str) -> std::path::PathBuf {
@@ -208,51 +223,69 @@ fn a_refused_renewal_changes_nothing() {
 /// only a browser sign-in brings it back. Three accounts on the machine this was
 /// written for died exactly that way and stayed dead for a week.
 ///
-/// So the sweep renews AHEAD of expiry - a token with hours left still gets
-/// exercised - and it must reach an account nobody is using, which is the one at
-/// risk.
+/// So the sweep renews AHEAD of the refresh token's end, and it must reach an
+/// account nobody is using, which is the one at risk. It does NOT renew because
+/// the ACCESS token is about to lapse: every renewal rotates the refresh token,
+/// and one renewed two hours after the last - which that rule did to
+/// eight-hour tokens - was stranded by a login server that processed it and
+/// answered 503.
 #[test]
-fn keep_alive_renews_an_account_that_has_not_lapsed_yet() {
+fn keep_alive_renews_by_the_refresh_tokens_end_not_the_access_tokens() {
     let root = tempfile::tempdir().unwrap();
     let slot = seed_lapsed_account(root.path(), "idle", "aaaa1111");
-    // Rewrite it to something still VALID, a couple of hours from expiry: the
-    // state `swapdex refresh` would leave alone and neglect would then kill.
+    // Still VALID, a couple of hours from expiry: the state `swapdex refresh`
+    // leaves alone. What decides a keep-alive is the refresh token's end.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    std::fs::write(
-        slot.join(".credentials.json"),
-        format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
-               "expiresAt":{},"refreshTokenExpiresAt":{}}}}}"#,
-            now_ms + 2 * 3_600_000,
-            now_ms + 30 * 86_400_000
-        ),
-    )
-    .unwrap();
+    let write = |refresh_end: i64| {
+        std::fs::write(
+            slot.join(".credentials.json"),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
+                   "expiresAt":{},"refreshTokenExpiresAt":{}}}}}"#,
+                now_ms + 2 * 3_600_000,
+                refresh_end
+            ),
+        )
+        .unwrap();
+    };
 
     let asked = Arc::new(Mutex::new(Vec::new()));
     let url = fake_oauth(
         asked.clone(),
         r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
     );
-    let out = Command::new(bin())
-        .args(["refresh", "--keep-alive"])
-        .env("SWAPDEX_ROOT", root.path())
-        .env("SWAPDEX_OAUTH_URL", &url)
-        .output()
-        .unwrap();
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let sweep = || {
+        let out = Command::new(bin())
+            .args(["refresh", "--keep-alive"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_OAUTH_URL", &url)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
 
+    // Two hours of access left, weeks of refresh token: nothing to renew.
+    write(now_ms + 30 * 86_400_000);
+    let said = sweep();
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        0,
+        "a refresh token weeks from its end was rotated anyway: {said}"
+    );
+    // Two days from the refresh token's end: renewed, once.
+    write(now_ms + 2 * 86_400_000);
+    let said = sweep();
     assert_eq!(
         asked.lock().unwrap().len(),
         1,
-        "a token still valid for two hours was exercised anyway: {said}"
+        "a refresh token near its end was not renewed: {said}"
     );
     let after = std::fs::read_to_string(slot.join(".credentials.json")).unwrap();
     assert!(
@@ -796,6 +829,22 @@ fn the_keep_alive_sweep_renews_an_account_once() {
             ("work-copy", "bbbb2222", "u-shared"),
         ],
     );
+    // Due by the refresh token's end, which is what a sweep renews on.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for id in ["aaaa1111", "bbbb2222"] {
+        let path = root
+            .path()
+            .join(".local/share/swapdex/slots")
+            .join(id)
+            .join(".credentials.json");
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["claudeAiOauth"]["refreshTokenExpiresAt"] = (now_ms + 2 * 86_400_000).into();
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    }
     let asked = Arc::new(Mutex::new(Vec::new()));
     let url = rotating_oauth(asked.clone());
 
@@ -923,5 +972,60 @@ fn restore_says_when_the_backup_it_puts_back_was_retired() {
     assert!(
         said.contains("retired") || said.contains("rotated") || said.contains("renew"),
         "restore put back a retired login without a word:\n{said}"
+    );
+}
+
+/// A refresh token the login server refused has settled the account: only a
+/// sign-in helps. The sweep logged the refusal and tried again every pass, and
+/// `ls`, reading only the access token, could not tell a refused account from
+/// an idle one. The refusal is now recorded and shown, the sweep stops
+/// retrying it, and asking by name still re-checks it.
+#[test]
+fn a_refused_claude_refresh_is_recorded_shown_and_not_swept_again() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "gone", "cccc3333");
+    let path = slot.join(".credentials.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    v["claudeAiOauth"]["refreshTokenExpiresAt"] = (now_ms + 86_400_000).into();
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = refusing_oauth(
+        asked.clone(),
+        400,
+        r#"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#,
+    );
+    let swapdex = |args: &[&str]| {
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_OAUTH_URL", &url)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+
+    let said = swapdex(&["refresh", "--keep-alive"]);
+    assert_eq!(asked.lock().unwrap().len(), 1, "{said}");
+    let listing = swapdex(&["ls"]);
+    assert!(
+        listing.contains("refresh rejected - re-login required"),
+        "the refusal is not shown:\n{listing}"
+    );
+    let said = swapdex(&["refresh", "--keep-alive"]);
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "the sweep spent another request on a refused token: {said}"
+    );
+    let said = swapdex(&["refresh", "gone"]);
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        2,
+        "asking by name did not re-check the refused token: {said}"
     );
 }

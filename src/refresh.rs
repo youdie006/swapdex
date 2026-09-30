@@ -1180,6 +1180,12 @@ fn refresh_slot_inner(
                 return Attempt::after_exchange(Err(RefreshError::Busy));
             }
             if status == 401 || status == 400 {
+                // Bound to the token that was refused, so a later sign-in
+                // clears it without anyone deleting the record.
+                if let Some(fp) = crate::refresh_health::claude_refresh_fingerprint(current.bytes())
+                {
+                    let _ = crate::refresh_health::record_claude_rejection(dir, &fp, now_ms);
+                }
                 return Attempt::after_exchange(Err(RefreshError::Refused(short_reason(&body))));
             }
             if !(200..300).contains(&status) {
@@ -1427,10 +1433,24 @@ mod claude_credential_source_tests {
 
     #[test]
     fn keep_alive_uses_the_selected_keychain_expiry() {
-        let now = 1_800_000_000_000;
+        let now: i64 = 1_800_000_000_000;
+        let day: i64 = 24 * 60 * 60 * 1000;
+        let with_refresh_end = |refresh: &str, refresh_end: i64| {
+            serde_json::to_vec(&serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": "AT",
+                    "refreshToken": refresh,
+                    "expiresAt": now + day,
+                    "refreshTokenExpiresAt": refresh_end
+                }
+            }))
+            .unwrap()
+        };
+        // The file's refresh token is far from its end; the selected Keychain
+        // one is a day from it, and only reading the Keychain says so.
         let selected = choose_slot_credential(
-            Some(blob("OLD-AT", "OLD-RT", now + KEEP_ALIVE_WINDOW_MS * 2)),
-            Ok(blob("NEW-AT", "NEW-RT", now + 1_000)),
+            Some(with_refresh_end("OLD-RT", now + 20 * day)),
+            Ok(with_refresh_end("NEW-RT", now + day)),
         )
         .expect("Keychain credential");
         assert_eq!(selected.source(), SlotCredentialSource::Keychain);
@@ -1857,14 +1877,55 @@ mod tests {
     }
 }
 
-/// How long before an access token lapses a keep-alive sweep renews it.
+/// How long before a refresh token's stated end a keep-alive sweep renews it.
 ///
-/// Deliberately wide. "Is this token unusable right NOW" is a different
-/// question, asked when a turn is waiting, and answered on the serving path by
-/// `slot_token_expired` and `has_usable_login`. This one answers "will this
-/// account still work tomorrow", and the sweep runs whether or not anybody is
-/// using the account.
-pub const KEEP_ALIVE_WINDOW_MS: i64 = 6 * 60 * 60 * 1000;
+/// The sweep exists so an idle account keeps a live refresh token: that is
+/// what a sign-in would otherwise be needed for. It used to renew any account
+/// whose ACCESS token was within six hours of lapsing, written when that token
+/// lived an hour. With eight-hour tokens it renewed every account every two
+/// hours - and every renewal rotates the refresh token, so each one was a
+/// chance for a server that processes a renewal but answers 5xx to strand the
+/// new token and retire the old. One account died exactly so, two hours after
+/// its previous renewal. The server states each refresh token's lifetime
+/// (about three weeks); renewing inside its last three days keeps it alive
+/// with a renewal every couple of weeks.
+pub const KEEP_ALIVE_REFRESH_WINDOW_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+
+/// When the login server refused this Claude slot's current refresh token, if
+/// it did. Read from the same credential the renewal path would send.
+pub(crate) fn claude_refresh_rejected_at(paths: &Paths, dir: &Path) -> Option<i64> {
+    let authority = crate::claude_authority::resolve(paths, dir).ok()?;
+    let credential = authority.read(paths).ok()?;
+    let fingerprint = crate::refresh_health::claude_refresh_fingerprint(credential.bytes())?;
+    crate::refresh_health::claude_rejection(dir, &fingerprint)
+}
+
+/// Whether a Claude slot's refresh token cannot be shown to be live: past its
+/// stated end, or with no stated end at all. A lapsed ACCESS token with a
+/// refresh token known to be live is not expired: the next use renews it.
+pub(crate) fn claude_refresh_token_not_known_live(paths: &Paths, dir: &Path, now_ms: i64) -> bool {
+    crate::claude_authority::resolve(paths, dir)
+        .ok()
+        .and_then(|authority| authority.read(paths).ok())
+        .is_none_or(|credential| {
+            refresh_token_expired(credential.bytes(), now_ms)
+                || serde_json::from_slice::<serde_json::Value>(credential.bytes())
+                    .ok()
+                    .and_then(|v| v["claudeAiOauth"]["refreshTokenExpiresAt"].as_i64())
+                    .is_none()
+        })
+}
+
+/// Whether a Claude credential's access token has already lapsed. A sweep no
+/// longer renews for this alone, but it is still why the account cannot serve
+/// until something renews it - which is what a deferral explains.
+fn access_lapsed(blob: &[u8], now_ms: i64) -> bool {
+    serde_json::from_slice::<serde_json::Value>(blob).is_ok_and(|v| {
+        v["claudeAiOauth"]["expiresAt"]
+            .as_i64()
+            .is_some_and(|exp| exp <= now_ms)
+    })
+}
 
 /// Should a keep-alive sweep renew this credential now?
 ///
@@ -1873,9 +1934,12 @@ pub const KEEP_ALIVE_WINDOW_MS: i64 = 6 * 60 * 60 * 1000;
 /// and then only a browser sign-in brings it back. Three of this machine's
 /// accounts died exactly that way and stayed dead for a week.
 ///
-/// So the sweep renews ahead of expiry rather than at it. Nothing to renew, or a
-/// refresh token already gone, is not this function's problem: renewing needs a
-/// refresh token, and a dead one needs a human.
+/// So the sweep renews ahead of the REFRESH token's end, not the access
+/// token's: a lapsed access token is renewed by the next use, which needs no
+/// sweep. Without a stated refresh-token lifetime the sweep waits for the
+/// access token to lapse. Nothing to renew, or a refresh token already gone,
+/// is not this function's problem: renewing needs a refresh token, and a dead
+/// one needs a human.
 pub fn wants_keep_alive(blob: &[u8], now_ms: i64) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob) else {
         return false;
@@ -1887,15 +1951,15 @@ pub fn wants_keep_alive(blob: &[u8], now_ms: i64) -> bool {
     if refresh_token_expired(blob, now_ms) {
         return false;
     }
-    oauth["expiresAt"]
-        .as_i64()
-        .is_some_and(|exp| exp - now_ms <= KEEP_ALIVE_WINDOW_MS)
+    match oauth["refreshTokenExpiresAt"].as_i64() {
+        Some(end) => end - now_ms <= KEEP_ALIVE_REFRESH_WINDOW_MS,
+        None => oauth["expiresAt"].as_i64().is_some_and(|exp| exp <= now_ms),
+    }
 }
 
 /// How long before a Codex access token lapses the sweep renews it.
 ///
-/// Claude's token lives an hour, so any daily use renews it and the sweep is a
-/// safety net. Codex's lives ten days and ONLY a Codex run renews it, so for an
+/// Claude's sweep renews by its refresh token's stated end. Codex's lives ten days and ONLY a Codex run renews it, so for an
 /// account nobody has opened the sweep is the only thing standing between it and
 /// a re-login. Two days is late enough that a daily sweep renews about once a
 /// week rather than every pass - each renewal rotates the refresh token, and
@@ -2025,7 +2089,8 @@ pub(crate) fn codex_renewal_deferred(paths: &Paths, dir: &Path, now_secs: i64) -
 pub(crate) fn claude_renewal_deferred(paths: &Paths, dir: &Path, now_ms: i64) -> bool {
     crate::claude_authority::resolve(paths, dir).is_ok_and(|authority| {
         authority.read(paths).is_ok_and(|credential| {
-            wants_keep_alive(credential.bytes(), now_ms)
+            (wants_keep_alive(credential.bytes(), now_ms)
+                || access_lapsed(credential.bytes(), now_ms))
                 && claude_holder_uncoordinated(paths, dir, &authority)
         })
     })
@@ -2197,17 +2262,41 @@ mod keep_alive_tests {
     }
     const NOW: i64 = 1_700_000_000_000;
 
+    /// Every renewal rotates the refresh token, and a renewal the server
+    /// processes but answers with a 5xx strands the new token: the old one is
+    /// already retired. An account renewed two hours after its last renewal -
+    /// what a six-hour window did to eight-hour tokens - died exactly that way.
+    /// So an idle account is renewed only when its REFRESH token nears its end,
+    /// and an access token about to lapse is left for the next use to renew.
     #[test]
-    fn an_idle_account_is_renewed_before_it_lapses() {
+    fn an_idle_account_is_renewed_only_when_its_refresh_token_nears_its_end() {
         let hour = 60 * 60 * 1000;
+        let day = 24 * hour;
         assert!(
-            wants_keep_alive(&blob(2 * hour, "r", None), NOW),
-            "two hours left is inside the window"
+            !wants_keep_alive(&blob(2 * hour, "r", Some(19 * day)), NOW),
+            "a fresh refresh token is not renewed because its access token nears expiry"
         );
         assert!(
-            !wants_keep_alive(&blob(12 * hour, "r", None), NOW),
-            "half a day left needs nothing yet"
+            !wants_keep_alive(&blob(-2 * hour, "r", Some(19 * day)), NOW),
+            "even a lapsed access token waits for its next use"
         );
+        assert!(
+            wants_keep_alive(&blob(6 * hour, "r", Some(2 * day)), NOW),
+            "a refresh token two days from its end is renewed"
+        );
+        assert!(
+            !wants_keep_alive(&blob(6 * hour, "r", Some(4 * day)), NOW),
+            "four days out needs nothing yet"
+        );
+    }
+
+    /// Without a stated refresh-token lifetime, the only safe sign is the access
+    /// token having lapsed: renew then, not hours before.
+    #[test]
+    fn without_a_stated_lifetime_an_account_is_renewed_once_it_lapses() {
+        let hour = 60 * 60 * 1000;
+        assert!(!wants_keep_alive(&blob(2 * hour, "r", None), NOW));
+        assert!(wants_keep_alive(&blob(-1, "r", None), NOW));
     }
 
     /// Renewing takes a refresh token. Without one - or with one already gone -
@@ -2285,6 +2374,13 @@ pub(crate) fn keep_alive_sweep_report(
             }
         };
         if !wants_keep_alive(credential.bytes(), now_ms) {
+            continue;
+        }
+        // A refused refresh token stays refused; retrying it every pass only
+        // repeats the failure. `swapdex refresh <name>` still re-checks it.
+        if crate::refresh_health::claude_refresh_fingerprint(credential.bytes())
+            .is_some_and(|fp| crate::refresh_health::claude_rejection(dir, &fp).is_some())
+        {
             continue;
         }
         match refresh_slot(paths, dir, now_ms) {

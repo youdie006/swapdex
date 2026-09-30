@@ -6,6 +6,24 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Keep-alive no longer renews idle Claude accounts every two hours.** The
+  sweep renewed any account whose access token was near expiry. Claude access
+  tokens now last eight hours, so every idle account was renewed several times
+  a day, and every renewal rotates the single-use refresh token. One of those
+  renewals was processed by the login server, which then answered 503; the new
+  refresh token was never delivered and the account was signed out. The sweep
+  now renews by the refresh token's own stated end (about 20 days), within
+  three days of it. An account with no stated end is renewed only once its
+  access token has lapsed.
+- **A refused Claude refresh is recorded and shown.** When the login server
+  refused a Claude refresh token, the sweep logged it and tried again every
+  pass, and `ls` could not tell that account from an idle one. The refusal is
+  now recorded for that token: `ls` says "refresh rejected - re-login
+  required", `doctor` fails that slot, and the sweep stops retrying it.
+  `swapdex refresh <name>` still checks again, and signing in clears it. An
+  idle account whose access token lapsed but whose refresh token is known to
+  be live is no longer called "expired".
+
 - **`whereis` lists a shared conversation once.** With shared history every
   account's `projects` (Claude) or `sessions` (Codex) is one directory,
   and `whereis` read it once per account - so each conversation appeared once

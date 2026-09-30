@@ -228,6 +228,73 @@ fn clear_codex_rejection_inner(
     }
 }
 
+/// Claude's rejection evidence, beside Codex's rather than in the same file: a
+/// slot holds one tool's login, but the two markers must never be able to
+/// stand in for each other.
+const CLAUDE_STATUS_FILE: &str = ".swapdex-claude-refresh-status.json";
+const CLAUDE_PROVIDER: &str = "claude-code";
+
+/// A stable, non-secret digest of a Claude credential's refresh token. The
+/// access token rotates hourly without the refresh token changing, so a digest
+/// of the whole blob would orphan the evidence at the next access renewal.
+pub fn claude_refresh_fingerprint(blob: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(blob).ok()?;
+    let refresh = value["claudeAiOauth"]["refreshToken"].as_str()?;
+    if refresh.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    for part in [
+        b"swapdex-refresh-health-v1".as_slice(),
+        CLAUDE_PROVIDER.as_bytes(),
+        refresh.as_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(fingerprint, "{byte:02x}").ok()?;
+    }
+    Some(fingerprint)
+}
+
+/// Record that the login server definitively refused this Claude refresh
+/// token. The caller holds the credential it sent, so the verdict is bound to
+/// that token and to no later login.
+pub fn record_claude_rejection(dir: &Path, fingerprint: &str, now_ms: i64) -> Result<()> {
+    let Some(_lock) =
+        lock_directory(dir).map_err(|_| anyhow!("could not persist Claude refresh rejection"))?
+    else {
+        return Ok(());
+    };
+    let status = StatusToWrite {
+        version: STATUS_VERSION,
+        kind: STATUS_TYPE,
+        provider: CLAUDE_PROVIDER,
+        rejected_at_ms: now_ms,
+        credential_fingerprint: fingerprint,
+    };
+    let bytes = serde_json::to_vec_pretty(&status)
+        .map_err(|_| anyhow!("could not persist Claude refresh rejection"))?;
+    crate::atomic::write_secret(&dir.join(CLAUDE_STATUS_FILE), &bytes)
+        .map_err(|_| anyhow!("could not persist Claude refresh rejection"))
+}
+
+/// When this exact Claude refresh token was refused, if it was. Evidence for
+/// any other token - a new sign-in, a renewal since - does not apply.
+pub fn claude_rejection(dir: &Path, fingerprint: &str) -> Option<i64> {
+    let bytes = read_bounded_regular(&dir.join(CLAUDE_STATUS_FILE), MAX_STATUS_BYTES)?;
+    let status: StoredStatus = serde_json::from_slice(&bytes).ok()?;
+    (status.version == STATUS_VERSION
+        && status.kind == STATUS_TYPE
+        && status.provider == CLAUDE_PROVIDER
+        && status.credential_fingerprint == fingerprint)
+        .then_some(status.rejected_at_ms)
+}
+
 fn read_status(dir: &Path) -> Option<StoredStatus> {
     let bytes = read_bounded_regular(&dir.join(STATUS_FILE), MAX_STATUS_BYTES)?;
     let status: StoredStatus = serde_json::from_slice(&bytes).ok()?;
