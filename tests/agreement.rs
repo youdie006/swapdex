@@ -3555,6 +3555,73 @@ fn doctor_names_a_codex_window_started_without_the_usage_route() {
     );
 }
 
+/// With shared history every account's `projects` is ONE directory, and
+/// `whereis` listed each conversation once per account that links to it - four
+/// times on a machine with three accounts and the default store - under a
+/// header saying the account column is "whose store holds it". One file is one
+/// conversation: list it once and name everyone who shares it.
+#[test]
+fn whereis_lists_a_shared_conversation_once() {
+    let t = fixture();
+    let root = t.path();
+    let shared = root.join(".claude/projects/-work-repo");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("11111111-2222-3333-4444-555555555555.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    for name in ["one", "two"] {
+        seed_slot(root, name, &format!("{name}@example.com"));
+        let projects = root
+            .join(".local/share/swapdex/slots")
+            .join(name)
+            .join("projects");
+        let _ = std::fs::remove_dir_all(&projects);
+        std::os::unix::fs::symlink(root.join(".claude/projects"), &projects).unwrap();
+    }
+    let (out, err, code) = run(root, &["whereis"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let resumes = out
+        .lines()
+        .filter(|l| l.contains("11111111-2222-3333-4444-555555555555"))
+        .count();
+    assert_eq!(resumes, 1, "one file, listed once:\n{out}");
+    let row = out
+        .lines()
+        .find(|l| l.contains("-work-repo"))
+        .unwrap_or_else(|| panic!("no row:\n{out}"));
+    assert!(
+        row.contains("one") && row.contains("two"),
+        "the row does not name the accounts sharing it: {row}"
+    );
+
+    // The same for Codex, whose accounts share one `sessions` directory.
+    let day = root.join(".codex/sessions/2026/09/30");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(
+        day.join("rollout-2026-09-30T00-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"),
+        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/work/cx-repo\"}}\n",
+    )
+    .unwrap();
+    for name in ["cx1", "cx2"] {
+        seed_codex_slot(root, name, &format!("{name}@example.com"));
+        let sessions = root
+            .join(".local/share/swapdex/slots")
+            .join(name)
+            .join("sessions");
+        let _ = std::fs::remove_dir_all(&sessions);
+        std::os::unix::fs::symlink(root.join(".codex/sessions"), &sessions).unwrap();
+    }
+    let (out, err, code) = run(root, &["whereis"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let resumes = out
+        .lines()
+        .filter(|l| l.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"))
+        .count();
+    assert_eq!(resumes, 1, "one rollout, listed once:\n{out}");
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
