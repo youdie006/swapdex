@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.6
 
 - **`quota` shows the last reading when the usage endpoint declines.** A
   throttled Claude account's row said only that the endpoint "declined to
