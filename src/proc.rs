@@ -885,6 +885,86 @@ pub fn running_config_dirs(tool: &str) -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Whether a Codex command line was launched through swapdex's proxy but not
+/// with its usage route. Such a window pays through the proxy while its status
+/// line reads its OWN account, whose numbers do not move. A window not started
+/// through the proxy pays with its own account, so its own numbers are right,
+/// and helpers (codex app-server, mcp, exec-server) have no status line.
+pub(crate) fn proxied_without_usage_route(command_line: &str) -> bool {
+    let line = command_line.replace('"', "");
+    let helper = [" app-server", " mcp", "exec-server"]
+        .iter()
+        .any(|h| line.contains(h));
+    !helper
+        && line.contains("openai_base_url=http://127.0.0.1")
+        && !line.contains("chatgpt_base_url=https://127.0.0.1")
+}
+
+/// The running Codex windows that pay through the proxy while their status line
+/// shows their own account, by pid. Under a test store only processes started
+/// for that store count, so a sandboxed run reports on the sandbox.
+pub fn codex_windows_without_usage_route(paths: &crate::paths::Paths) -> Vec<u32> {
+    let root = paths
+        .sandboxed()
+        .then(|| paths.home().to_string_lossy().into_owned());
+    let mut found = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        for e in rd.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            if comm.trim() != "codex" {
+                continue;
+            }
+            let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) else {
+                continue;
+            };
+            if let Some(root) = &root {
+                let env = std::fs::read(e.path().join("environ")).unwrap_or_default();
+                let wanted = format!("SWAPDEX_ROOT={root}");
+                if !env.split(|b| *b == 0).any(|v| v == wanted.as_bytes()) {
+                    continue;
+                }
+            }
+            let line = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if proxied_without_usage_route(&line) {
+                found.push(pid);
+            }
+        }
+        found.sort_unstable();
+        return found;
+    }
+    // macOS: `ps` gives each command line. A sandboxed run cannot tell its own
+    // processes from the machine's there, so it reports none.
+    if root.is_some() {
+        return found;
+    }
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-ww", "-o", "pid=,comm=,command="])
+        .output()
+    else {
+        return found;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pid), Some(comm)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if !comm.ends_with("/codex") && comm != "codex" {
+            continue;
+        }
+        let rest: Vec<&str> = parts.collect();
+        if proxied_without_usage_route(&rest.join(" ")) {
+            if let Ok(pid) = pid.parse() {
+                found.push(pid);
+            }
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
 /// Whether one exact config directory is held by a running tool process.
 pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
     running_config_dirs(tool).into_iter().any(|d| d == dir)
@@ -892,6 +972,27 @@ pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::proxied_without_usage_route;
+
+    /// Only a window paying through the proxy without the usage route reads the
+    /// wrong account: one with the route reads the payer, one launched without
+    /// the proxy pays with (and reads) its own, and helpers have no status line.
+    #[test]
+    fn a_proxied_window_without_the_usage_route_is_named() {
+        let proxied = "codex -c openai_base_url=http://127.0.0.1:8788/v1 resume";
+        assert!(proxied_without_usage_route(proxied));
+        assert!(proxied_without_usage_route(
+            "codex -c openai_base_url=\"http://127.0.0.1:8788/v1\""
+        ));
+        assert!(!proxied_without_usage_route(&format!(
+            "{proxied} -c chatgpt_base_url=https://127.0.0.1:18788/backend-api/"
+        )));
+        assert!(!proxied_without_usage_route("codex resume"));
+        assert!(!proxied_without_usage_route(
+            "codex app-server -c openai_base_url=http://127.0.0.1:8788/v1"
+        ));
+    }
+
     use super::*;
 
     // The slot a process holds is what decides whose credential a renewal would

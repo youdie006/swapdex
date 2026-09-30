@@ -23,6 +23,16 @@ All notable changes to swapdex are documented here. This project follows
   answer also lost the source code's indentation it printed on its second
   line.
 
+- **`doctor` names the Codex windows whose status line shows the wrong
+  account.** A window launched before the usage route pays through the proxy
+  while its status line reads its own account, whose numbers do not move - so
+  they sat still until the window was restarted and then dropped at once.
+  `doctor` said only "windows started before it keep their own account",
+  which named none of them. It now reports each one as a problem with its pid
+  and start time ("restart them: pid 3325392 (started Sep 16 23:27)"). A
+  window started without the proxy is not listed: it pays with its own
+  account, so its own numbers are the right ones.
+
 ## 0.167.5
 
 - **The stale-copy note in `ls` gives a command that re-saves only that copy.**

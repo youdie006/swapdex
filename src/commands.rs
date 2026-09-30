@@ -5613,13 +5613,34 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                      shows each window's own account, not the one paying"
                 ),
             ),
-            (None, Some(port)) => (
-                true,
-                format!(
-                    "Codex's status line reads the paying account (usage listener on \
-                     127.0.0.1:{port}; windows started before it keep their own account)"
-                ),
-            ),
+            // A window launched before the route pays through the proxy while
+            // its status line reads its own account, whose numbers do not move
+            // - so they sat still until a restart dropped them at once. Saying
+            // "windows started before it" named none of them.
+            (None, Some(port)) => {
+                match crate::proc::codex_windows_without_usage_route(paths).as_slice() {
+                    [] => (
+                        true,
+                        format!(
+                            "Codex's status line reads the paying account (usage listener on \
+                         127.0.0.1:{port})"
+                        ),
+                    ),
+                    stale => (
+                        false,
+                        format!(
+                            "{} Codex window(s) started before the usage route show their own \
+                         account's usage, not the one paying - restart them: {}",
+                            stale.len(),
+                            stale
+                                .iter()
+                                .map(|pid| describe_pid(*pid))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ),
+                }
+            }
             (None, None) => (
                 false,
                 "the Codex proxy has no usage listener, so Codex's status line shows each \
@@ -7281,6 +7302,30 @@ fn tool_flag(tool: &str) -> String {
     match tool {
         "claude-code" | "claude" => String::new(),
         other => format!(" --tool {other}"),
+    }
+}
+
+/// "pid 123 (started Sep 16 21:58)", or the bare pid when `ps` cannot say.
+fn describe_pid(pid: u32) -> String {
+    let started = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // "Tue Sep 16 21:58:59 2026" -> "Sep 16 21:58"
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            match parts.as_slice() {
+                [_, month, day, time, ..] => {
+                    format!("{month} {day} {}", time.get(..5).unwrap_or(time))
+                }
+                _ => s,
+            }
+        });
+    match started {
+        Some(when) => format!("pid {pid} (started {when})"),
+        None => format!("pid {pid}"),
     }
 }
 
