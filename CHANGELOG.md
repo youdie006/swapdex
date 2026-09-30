@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`whereis` lists a shared conversation once.** With shared history every
+  account's `projects` (Claude) or `sessions` (Codex) is one directory,
+  and `whereis` read it once per account - so each conversation appeared once
+  per account that links to it, four times on a machine with three Claude
+  accounts and the default store, and its fifteen rows held about four
+  conversations. Stores that are the same directory are now read once, and
+  the row names every account sharing it (`rnd, bsgong, kong, (default
+  ~/.claude)`). The Codex conversations those duplicates crowded out show again.
+
 ## 0.167.6
 
 - **`quota` shows the last reading when the usage endpoint declines.** A

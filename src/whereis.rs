@@ -106,7 +106,7 @@ fn cwd_in(text: &str) -> Option<String> {
 /// Codex conversations across every account, newest first.
 pub fn find_codex(paths: &Paths, project_filter: Option<&str>, limit: usize) -> Vec<Found> {
     let mut out = Vec::new();
-    for (account, dir) in codex_stores(paths) {
+    for (account, dir) in shared_stores(codex_stores(paths), "sessions") {
         let mut files = Vec::new();
         collect_rollouts(&dir.join("sessions"), &mut files);
         // Newest first, so a filter that matches many still answers quickly.
@@ -193,11 +193,31 @@ pub fn stores(paths: &Paths) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// Stores that are one directory under different accounts, merged: with
+/// shared history every account's `projects` (or `sessions`) links to the same
+/// place, and reading each link listed every conversation once per account.
+/// The label names every account sharing it; the first one's config dir is
+/// the one a resume uses, since each of them reads the same file.
+fn shared_stores(stores: Vec<(String, PathBuf)>, sub: &str) -> Vec<(String, PathBuf)> {
+    let mut groups: Vec<(PathBuf, Vec<String>, PathBuf)> = Vec::new();
+    for (account, dir) in stores {
+        let key = std::fs::canonicalize(dir.join(sub)).unwrap_or_else(|_| dir.join(sub));
+        match groups.iter_mut().find(|(k, _, _)| *k == key) {
+            Some((_, names, _)) => names.push(account),
+            None => groups.push((key, vec![account], dir)),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, names, dir)| (names.join(", "), dir))
+        .collect()
+}
+
 /// Conversations across every account, newest first. `project_filter` matches a
 /// substring of the encoded project path; `None` searches all of them.
 pub fn find(paths: &Paths, project_filter: Option<&str>, limit: usize) -> Vec<Found> {
     let mut out = Vec::new();
-    for (account, dir) in stores(paths) {
+    for (account, dir) in shared_stores(stores(paths), "projects") {
         collect_store(&account, &dir, project_filter, &mut out);
     }
     out.sort_by_key(|f| std::cmp::Reverse(f.modified));
