@@ -2139,6 +2139,7 @@ fn refresh_rejected_at(
     match crate::live_login::resolve(paths, dir, tool, now_ms) {
         Some(login) => login.refresh_rejected_at_ms,
         None if tool == "codex" => crate::refresh_health::codex_rejection(dir),
+        None if tool == "claude-code" => crate::refresh::claude_refresh_rejected_at(paths, dir),
         None => None,
     }
 }
@@ -2193,8 +2194,27 @@ fn account_health(
                     warnings.push("codex renewal deferred - refresh unverified".to_string());
                 }
             }
+            // A refused refresh token needs a sign-in; so does one past its
+            // stated end, or one with no stated end whose access has lapsed.
+            // A lapsed ACCESS token alone does not: keep-alive now renews by
+            // the refresh token's end, so an idle account's access lapses
+            // between renewals and the next use renews it.
             "claude-code"
-                if crate::proxy::creds::slot_token_expired_for(paths, &slot.config_dir, now_ms) =>
+                if crate::refresh::claude_refresh_rejected_at(paths, &slot.config_dir)
+                    .is_some() =>
+            {
+                let at = crate::refresh::claude_refresh_rejected_at(paths, &slot.config_dir)
+                    .unwrap_or_default();
+                warnings.push("claude-code refresh rejected - re-login required".to_string());
+                refresh_rejected_at_ms.insert("claude-code".to_string(), at);
+            }
+            "claude-code"
+                if crate::proxy::creds::slot_token_expired_for(paths, &slot.config_dir, now_ms)
+                    && crate::refresh::claude_refresh_token_not_known_live(
+                        paths,
+                        &slot.config_dir,
+                        now_ms,
+                    ) =>
             {
                 warnings.push("claude-code expired - needs refresh".to_string());
                 access_expired = true;

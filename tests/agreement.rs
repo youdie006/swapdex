@@ -3622,6 +3622,58 @@ fn whereis_lists_a_shared_conversation_once() {
     assert_eq!(resumes, 1, "one rollout, listed once:\n{out}");
 }
 
+/// An idle Claude account's access token now lapses between keep-alive
+/// renewals, which happen by the refresh token's end. That is not an expired
+/// account - the next use renews it - so `ls` must not call it one. A refresh
+/// token the login server refused is, and must say so.
+#[test]
+fn an_idle_claude_account_is_not_called_expired_until_its_refresh_is_refused() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "idle", "idle@example.com");
+    let slot = root.join(".local/share/swapdex/slots/idle");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let blob = serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+        "accessToken":"AT","refreshToken":"RT-IDLE","expiresAt": now_ms - 3_600_000,
+        "refreshTokenExpiresAt": now_ms + 20 * 86_400_000i64, "subscriptionType":"max"}}))
+    .unwrap();
+    std::fs::write(slot.join(".credentials.json"), &blob).unwrap();
+    chmod600(&slot.join(".credentials.json"));
+
+    let row = |listing: &str| -> String {
+        listing
+            .lines()
+            .find(|l| l.trim_start_matches(['*', ' ']).starts_with("idle"))
+            .unwrap_or_else(|| panic!("no idle row:\n{listing}"))
+            .to_string()
+    };
+    let (listing, _, _) = run(root, &["ls"]);
+    let idle = row(&listing);
+    assert!(
+        !idle.contains("expired"),
+        "an idle account with a live refresh token was called expired: {idle}"
+    );
+
+    let fingerprint = swapdex::refresh_health::claude_refresh_fingerprint(&blob).unwrap();
+    swapdex::refresh_health::record_claude_rejection(&slot, &fingerprint, now_ms).unwrap();
+    let (listing, _, _) = run(root, &["ls"]);
+    let refused = row(&listing);
+    assert!(
+        refused.contains("refresh rejected - re-login required"),
+        "a refused refresh token is not reported: {refused}"
+    );
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.lines()
+            .any(|l| l.starts_with("slot:idle") && l.contains("refused")),
+        "doctor passes a refused Claude login:\n{said}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root
