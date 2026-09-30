@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.7
 
 - **Keep-alive no longer renews idle Claude accounts every two hours.** The
   sweep renewed any account whose access token was near expiry. Claude access
