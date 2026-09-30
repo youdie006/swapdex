@@ -135,7 +135,9 @@ fn credit(
     now: u64,
     toks: u64,
 ) {
-    if toks == 0 {
+    // Outside the window counts for no one, so it must not create a row: a
+    // long session's early lines named a payer from months ago at "0 tok".
+    if toks == 0 || now.saturating_sub(ts) > D7 {
         return;
     }
     // `payer_at`, not `attribute`. The two answer different questions:
@@ -434,6 +436,34 @@ pub fn human(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A long session's file is read because it changed this week, but its
+    /// early lines can be months old. Crediting one created the payer's row
+    /// before the window was checked, so `usage` listed an account last used
+    /// in July at "0 tok" for both windows - an account that no longer exists.
+    #[test]
+    fn an_event_outside_the_window_does_not_create_a_row() {
+        let now = 30 * 86_400;
+        let events = vec![
+            crate::session_link::Event {
+                ts: 0,
+                tool: "codex".into(),
+                account: "gone".into(),
+                action: "serve".into(),
+            },
+            crate::session_link::Event {
+                ts: (now - 10 * 86_400) as i64,
+                tool: "codex".into(),
+                account: "live".into(),
+                action: "serve".into(),
+            },
+        ];
+        let mut map = std::collections::BTreeMap::new();
+        credit(&mut map, &events, "codex", 86_400, now, 500);
+        credit(&mut map, &events, "codex", now - 3_600, now, 40);
+        assert!(!map.contains_key("gone"), "{map:?}");
+        assert_eq!(map.get("live"), Some(&(40, 40)));
+    }
+
     use super::*;
 
     #[test]

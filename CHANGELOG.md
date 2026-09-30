@@ -33,6 +33,13 @@ All notable changes to swapdex are documented here. This project follows
   window started without the proxy is not listed: it pays with its own
   account, so its own numbers are the right ones.
 
+- **`usage` no longer lists an old account at "0 tok".** A long session's
+  file is read when it changed this week, but its early lines can be months
+  old, and crediting one created that line's payer's row before the 7-day
+  window was checked. On the machine this was found, `usage` listed `@codex` -
+  an account renamed away in July - at 0 tokens in both windows. Lines
+  outside the window now credit no one.
+
 ## 0.167.5
 
 - **The stale-copy note in `ls` gives a command that re-saves only that copy.**
