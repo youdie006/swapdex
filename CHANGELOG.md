@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Only a re-login code counts as a refused login.** Claude recorded every
+  HTTP 400 from the token endpoint as a refusal, and Codex any OAuth error
+  code, but the endpoint answers a request it cannot parse with the same 400.
+  Since 0.167.7 a recorded refusal also stops the keep-alive sweep, so one
+  such answer could leave a live login to age out. A refusal is now recorded
+  only for a 401, or a 400/403 naming `invalid_grant`, `refresh_token_reused`,
+  `refresh_token_expired`, `refresh_token_invalidated` or a similar re-login
+  code - the rule claude-swap, clauth and codex-pooler use.
+- **The sweep checks a refused login again after a day.** A recorded refusal
+  kept the sweep away for good; now it does for 24 hours, so a verdict the
+  server did not mean costs one request a day instead of the login.
+
 ## 0.167.8
 
 - **A Claude login with its tokens emptied is no longer listed as fine.**
