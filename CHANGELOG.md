@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.8
 
 - **A Claude login with its tokens emptied is no longer listed as fine.**
   When Claude Code's own renewal is refused it empties both tokens but leaves
