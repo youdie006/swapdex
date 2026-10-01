@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A Claude login with its tokens emptied is no longer listed as fine.**
+  When Claude Code's own renewal is refused it empties both tokens but leaves
+  the refresh token's stated end in the file. 0.167.7 took that end as proof
+  the login lived, so `ls` showed such an account with no note at all. A
+  missing or empty refresh token now counts as not live, and the row says
+  "claude-code expired - needs refresh" again.
+- **Keep-alive stops resending a refused Codex refresh token.** Once the login
+  server refused a Codex refresh token, every sweep sent it again - nine
+  requests in one morning for an account that needed a sign-in. The sweep now
+  skips a token whose refusal is recorded, as it does for Claude since 0.167.7;
+  `swapdex refresh <name>` still re-checks it.
+
 ## 0.167.7
 
 - **Keep-alive no longer renews idle Claude accounts every two hours.** The

@@ -3674,6 +3674,40 @@ fn an_idle_claude_account_is_not_called_expired_until_its_refresh_is_refused() {
     );
 }
 
+/// Claude Code empties both tokens when its own renewal is refused, but leaves
+/// the refresh token's stated end in place. That end is no evidence the login
+/// lives: `ls` listed such an account with no note at all.
+#[test]
+fn a_claude_login_with_its_tokens_emptied_is_not_listed_as_fine() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "blank", "blank@example.com");
+    let slot = root.join(".local/share/swapdex/slots/blank");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(
+        slot.join(".credentials.json"),
+        serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+            "accessToken":"","refreshToken":"","expiresAt": 0,
+            "refreshTokenExpiresAt": now_ms + 17 * 86_400_000i64, "subscriptionType":"team"}}))
+        .unwrap(),
+    )
+    .unwrap();
+    chmod600(&slot.join(".credentials.json"));
+
+    let (listing, _, _) = run(root, &["ls"]);
+    let row = listing
+        .lines()
+        .find(|l| l.trim_start_matches(['*', ' ']).starts_with("blank"))
+        .unwrap_or_else(|| panic!("no blank row:\n{listing}"));
+    assert!(
+        row.contains("expired"),
+        "a login with no tokens is listed as if it were fine: {row}"
+    );
+}
+
 /// A saved copy-model codex snapshot in the store.
 fn seed_codex_snapshot(root: &Path, name: &str, email: &str, account_id: &str, refresh: &str) {
     let d = root

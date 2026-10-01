@@ -1900,15 +1900,16 @@ pub(crate) fn claude_refresh_rejected_at(paths: &Paths, dir: &Path) -> Option<i6
     crate::refresh_health::claude_rejection(dir, &fingerprint)
 }
 
-/// Whether a Claude slot's refresh token cannot be shown to be live: past its
-/// stated end, or with no stated end at all. A lapsed ACCESS token with a
+/// Whether a Claude slot's refresh token cannot be shown to be live: missing
+/// or emptied, past its stated end, or with no stated end at all. A lapsed ACCESS token with a
 /// refresh token known to be live is not expired: the next use renews it.
 pub(crate) fn claude_refresh_token_not_known_live(paths: &Paths, dir: &Path, now_ms: i64) -> bool {
     crate::claude_authority::resolve(paths, dir)
         .ok()
         .and_then(|authority| authority.read(paths).ok())
         .is_none_or(|credential| {
-            refresh_token_expired(credential.bytes(), now_ms)
+            refresh_token(credential.bytes()).is_none_or(|token| token.is_empty())
+                || refresh_token_expired(credential.bytes(), now_ms)
                 || serde_json::from_slice::<serde_json::Value>(credential.bytes())
                     .ok()
                     .and_then(|v| v["claudeAiOauth"]["refreshTokenExpiresAt"].as_i64())
@@ -2121,6 +2122,10 @@ pub(crate) fn keep_alive_sweep_codex_report(
             continue;
         };
         if !wants_keep_alive_codex(&blob, now_ms / 1000) {
+            continue;
+        }
+        // Refused stays refused; `swapdex refresh <name>` still re-checks it.
+        if crate::refresh_health::codex_rejection(dir).is_some() {
             continue;
         }
         match refresh_codex_slot(paths, dir, now_ms) {

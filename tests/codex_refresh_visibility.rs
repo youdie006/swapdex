@@ -1621,3 +1621,34 @@ fn manual_refresh_does_not_call_unsigned_slots_current() {
         }
     }
 }
+
+/// A refused Codex refresh token stays refused, and the sweep sent it again
+/// every pass: nine requests in one morning for an account that needed a
+/// sign-in. Asking by name still re-checks it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_sweep_does_not_resend_a_refused_codex_refresh_token() {
+    let root = tempfile::tempdir().unwrap();
+    let _slot = seed_aged_codex(root.path(), "gone", 6, 4);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+    let sends = || std::fs::read(&count).unwrap_or_default().len();
+    let vars = [("FAKE_COUNT_PATH", count.to_str().unwrap())];
+
+    let first = run_with_curl(root.path(), &curl, &["refresh", "--keep-alive"], &vars);
+    assert_eq!(sends(), 1, "{}", combined(&first));
+    let second = run_with_curl(root.path(), &curl, &["refresh", "--keep-alive"], &vars);
+    assert_eq!(
+        sends(),
+        1,
+        "the sweep sent a refused refresh token again:\n{}",
+        combined(&second)
+    );
+    let by_name = run_with_curl(root.path(), &curl, &["refresh", "gone"], &vars);
+    assert_eq!(
+        sends(),
+        2,
+        "asking by name did not re-check it:\n{}",
+        combined(&by_name)
+    );
+}
