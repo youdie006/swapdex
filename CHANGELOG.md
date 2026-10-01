@@ -17,6 +17,18 @@ All notable changes to swapdex are documented here. This project follows
   requests in one morning for an account that needed a sign-in. The sweep now
   skips a token whose refusal is recorded, as it does for Claude since 0.167.7;
   `swapdex refresh <name>` still re-checks it.
+- **Claude rows name which Max plan.** `ls` said only `max`, and `quota`
+  named no plan for Claude at all while its Codex rows showed `[pro]`. Both
+  now read the plan from the credential, including the Max tier it carries
+  (`[max 20x]`, `[max 5x]`, `[team]`), and an account that lives in a slot
+  shows its slot's current plan rather than the saved copy's. `ls --json`
+  carries the same label in `tier`; `status --json` keeps the plain value.
+- **`ls` no longer tells a refused login to re-save its snapshot.** The
+  footnote under the list read any note naming a tool as a stale copy, so an
+  account marked "refresh rejected - re-login required" was also told
+  `swapdex add <name> --tool codex --update`, which re-saves the refused
+  login. Only expired or stale copies are listed there now; the refused row
+  keeps its own sign-in remedy, as `doctor` gives it.
 
 ## 0.167.7
 

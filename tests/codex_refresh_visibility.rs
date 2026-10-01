@@ -1652,3 +1652,43 @@ fn the_sweep_does_not_resend_a_refused_codex_refresh_token() {
         combined(&by_name)
     );
 }
+
+/// A refused login needs a sign-in, which its own row and `doctor` say. The
+/// footnote under `ls` read every warning that named a tool as a stale copy and
+/// told the same account to `add --update` - re-saving the refused login.
+#[test]
+fn a_refused_login_is_not_told_to_resave_its_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    // Another account's expired copy is what prints the footnote at all.
+    let dirs = seed_slots(
+        root.path(),
+        &[
+            ("refused", "slot-refused", "codex"),
+            ("lapsed", "slot-lapsed", "codex"),
+        ],
+    );
+    for (dir, who) in dirs.iter().zip(["refused", "lapsed"]) {
+        std::fs::write(
+            dir.join("auth.json"),
+            codex_auth(
+                &format!("account-{who}"),
+                &format!("refresh-{who}"),
+                &jwt(now_secs() - 60),
+            ),
+        )
+        .unwrap();
+    }
+    let curl = fake_curl(root.path());
+    run_with_curl(root.path(), &curl, &["refresh", "refused"], &[]);
+
+    let said = combined(&run(root.path(), &["ls"]));
+    assert!(
+        said.contains("swapdex add lapsed --tool codex --update"),
+        "{said}"
+    );
+    assert!(said.contains("codex refresh rejected"), "{said}");
+    assert!(
+        !said.contains("swapdex add refused --tool codex --update"),
+        "a refused login was told to re-save its snapshot:\n{said}"
+    );
+}

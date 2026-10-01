@@ -1034,6 +1034,28 @@ fn capture_slot_credential(
     crate::claude_authority::credential(paths, paths.claude_dir())
 }
 
+/// The plan a Claude credential names, as a person reads it: `max 20x`, `max
+/// 5x`, `team`, `pro`. `subscriptionType` says only `max`; which Max is in
+/// `rateLimitTier` (`default_claude_max_20x`).
+pub fn plan_label(credential: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(credential).ok()?;
+    let oauth = &v["claudeAiOauth"];
+    let plan = oauth["subscriptionType"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let multiple = oauth["rateLimitTier"]
+        .as_str()
+        .and_then(|tier| tier.rsplit('_').next())
+        .filter(|x| {
+            x.strip_suffix('x')
+                .is_some_and(|n| n.parse::<u32>().is_ok())
+        });
+    Some(match multiple {
+        Some(x) if plan == "max" => format!("{plan} {x}"),
+        _ => plan.to_string(),
+    })
+}
+
 /// The LIVE Claude credential JSON (file or Keychain) - the active account's
 /// token, kept fresh by Claude Code. Used only by `swapdex quota` to read the
 /// active account's remaining quota; never leaves the machine except as that
@@ -1269,6 +1291,36 @@ impl AuthTool for Claude {
 #[cfg(test)]
 mod tests {
     use super::slot_service;
+
+    #[test]
+    fn plan_label_names_which_max() {
+        let label = |sub: &str, tier: Option<&str>| {
+            let mut oauth = serde_json::json!({"subscriptionType": sub});
+            if let Some(tier) = tier {
+                oauth["rateLimitTier"] = tier.into();
+            }
+            plan_label(&serde_json::to_vec(&serde_json::json!({"claudeAiOauth": oauth})).unwrap())
+        };
+        assert_eq!(
+            label("max", Some("default_claude_max_20x")).as_deref(),
+            Some("max 20x")
+        );
+        assert_eq!(
+            label("max", Some("default_claude_max_5x")).as_deref(),
+            Some("max 5x")
+        );
+        assert_eq!(label("max", Some("default")).as_deref(), Some("max"));
+        assert_eq!(label("max", None).as_deref(), Some("max"));
+        assert_eq!(
+            label("team", Some("default_raven")).as_deref(),
+            Some("team")
+        );
+        assert_eq!(
+            label("pro", Some("default_claude_pro_2x")).as_deref(),
+            Some("pro")
+        );
+        assert_eq!(label("", Some("default_claude_max_20x")), None);
+    }
 
     // Every slot's item is named from its directory, including `~/.claude` when
     // that directory is a registered account - which is what a slot IS, and how

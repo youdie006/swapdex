@@ -1671,7 +1671,7 @@ fn profile_detail(
             else {
                 return Some(unreadable);
             };
-            let (Ok(creds), Ok(oauth)) = (
+            let (Ok(_), Ok(oauth)) = (
                 serde_json::from_slice::<Value>(cred_part.expose()),
                 serde_json::from_slice::<Value>(oauth_part.expose()),
             ) else {
@@ -1686,9 +1686,7 @@ fn profile_detail(
             let marker = snapshot_is_stale(&snap, tool).then_some("stale");
             Some((
                 oauth["emailAddress"].as_str().map(String::from),
-                creds["claudeAiOauth"]["subscriptionType"]
-                    .as_str()
-                    .map(String::from),
+                adapters::claude::plan_label(cred_part.expose()),
                 marker,
             ))
         }
@@ -2569,6 +2567,21 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 // The saved profile's plan describes a different account.
                 tier = None;
             }
+            // A Claude slot's own credential names its plan now; the saved
+            // copy's can be months old.
+            if tool == "claude-code" {
+                if let Some(slot) = crate::slots::Slots::open_for(paths, tool)
+                    .ok()
+                    .and_then(|slots| slots.get(&p.name))
+                {
+                    if let Some(plan) = crate::claude_authority::credential(paths, &slot.config_dir)
+                        .ok()
+                        .and_then(|c| adapters::claude::plan_label(c.bytes()))
+                    {
+                        tier = Some(plan);
+                    }
+                }
+            }
         };
         if crossed_names.contains(&p.name) {
             let conflict =
@@ -2725,14 +2738,25 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                     continue;
                 }
                 // The note already names the tools ("gemini stale"), so it is
-                // the authority on which side each one falls.
-                if w.contains(t) && !resave.iter().any(|(n, x)| n == &r.name && x == t) {
+                // the authority on which side each one falls. Only an expired
+                // or stale copy is re-saved; a refused login needs a sign-in,
+                // which its own note says, and a deferred one is still fine.
+                let notes: Vec<&str> = w
+                    .split(", ")
+                    .filter(|note| note.split_whitespace().next() == Some(t))
+                    .collect();
+                let lapsed = notes
+                    .iter()
+                    .any(|note| note.contains("expired") || note.contains("stale"));
+                if lapsed && !resave.iter().any(|(n, x)| n == &r.name && x == t) {
                     resave.push((r.name.clone(), t.to_string()));
                 }
-                let bucket = if w.contains(t) {
+                let bucket = if lapsed {
                     &mut stale_tools
-                } else {
+                } else if notes.is_empty() {
                     &mut healthy_tools
+                } else {
+                    continue;
                 };
                 if !bucket.iter().any(|x| x == t) {
                     bucket.push(t.to_string());
@@ -9570,6 +9594,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         /// The plain profile name - what `--json` reports and `use` hints take.
         name: String,
         email: Option<String>,
+        plan: Option<String>,
         token: Option<String>,
         active: bool,
         /// The saved token has already lapsed. Sending it earns a refusal that
@@ -9582,6 +9607,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
 
     struct SlotQuotaState {
         email: Option<String>,
+        plan: Option<String>,
         uuid: Option<String>,
         identity: Option<crate::live_login::LoginIdentity>,
         token: Option<String>,
@@ -9591,6 +9617,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
 
     struct SlotQuotaRead {
         email: Option<String>,
+        plan: Option<String>,
         uuid: Option<String>,
         token: Option<String>,
         expired: bool,
@@ -9622,6 +9649,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             .and_then(|bytes| crate::live_login::identity_from_credential(bytes, "claude-code"));
         if identity_before != identity_after {
             return SlotQuotaState {
+                plan: None,
                 email,
                 uuid,
                 identity,
@@ -9632,6 +9660,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         }
         match credential {
             Ok(credential) => SlotQuotaState {
+                plan: adapters::claude::plan_label(credential.bytes()),
                 email,
                 uuid,
                 identity,
@@ -9642,6 +9671,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 unreadable: None,
             },
             Err(error) => SlotQuotaState {
+                plan: None,
                 email,
                 uuid,
                 identity,
@@ -9662,6 +9692,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         if let Some(native) = native {
             if initial.identity.as_ref() == Some(&native.identity) {
                 return SlotQuotaRead {
+                    plan: initial.plan.clone(),
                     email: initial.email,
                     uuid: initial.uuid,
                     token: Some(String::from_utf8_lossy(native.access_token.expose()).to_string()),
@@ -9670,6 +9701,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 };
             }
             return SlotQuotaRead {
+                plan: initial.plan.clone(),
                 email: initial.email,
                 uuid: initial.uuid,
                 token: None,
@@ -9680,6 +9712,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             };
         }
         SlotQuotaRead {
+            plan: initial.plan,
             email: initial.email,
             uuid: initial.uuid,
             token: initial.token,
@@ -9700,6 +9733,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     let live_expired = live_credential
         .as_deref()
         .is_some_and(|credential| q::credentials_expired(credential, now_ms()));
+    let live_plan = live_credential
+        .as_deref()
+        .and_then(adapters::claude::plan_label);
 
     let mut rows: Vec<Row> = Vec::new();
     let mut matched_live = false;
@@ -9710,6 +9746,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             }
             let snap = store.load(&p.name, "claude-code").ok().flatten();
             let (mut email, mut uuid, mut token) = (None, None, None);
+            let mut plan = None;
             let mut expired = false;
             if let Some(s) = &snap {
                 if let Some(o) = s
@@ -9722,6 +9759,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 token = s
                     .part("credentials")
                     .and_then(|c| q::token_from_credentials(c.expose()));
+                plan = s
+                    .part("credentials")
+                    .and_then(|c| adapters::claude::plan_label(c.expose()));
                 expired = s
                     .part("credentials")
                     .is_some_and(|c| q::credentials_expired(c.expose(), now_ms()));
@@ -9738,6 +9778,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 // when the slot is unreadable, neither its credential nor its
                 // identity may fall back to the old snapshot.
                 let current = slot_quota_read(paths, dir);
+                plan = current.plan;
                 email = current.email;
                 uuid = current.uuid;
                 token = current.token;
@@ -9767,6 +9808,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                 } else {
                     email
                 },
+                plan: if use_live { live_plan.clone() } else { plan },
                 token: if use_live { live_token.clone() } else { token },
                 active,
                 expired: if use_live { live_expired } else { expired },
@@ -9803,6 +9845,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     r.name.clone()
                 },
                 name: r.name.clone(),
+                plan: current.plan,
                 email: current.email,
                 token: current.token,
                 active,
@@ -9818,6 +9861,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
             Row {
                 label: "(active login, not saved)".into(),
                 name: "(active login, not saved)".into(),
+                plan: live_plan.clone(),
                 email: live_id.as_ref().and_then(|a| a.email.clone()),
                 token: live_token.clone(),
                 active: true,
@@ -9979,9 +10023,9 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     println!("live from Anthropic's usage endpoint; opt-in network, spends 0 message quota.\n");
     for (i, f) in &results {
         let r = &rows[*i];
-        match &r.email {
-            Some(e) => println!("{}   {}", r.label, e),
-            None => println!("{}", r.label),
+        match identity_column(r.email.clone(), r.plan.clone()) {
+            ident if ident.is_empty() => println!("{}", r.label),
+            ident => println!("{}   {}", r.label, ident),
         }
         match f {
             Fetch::Ok(qd) => {
