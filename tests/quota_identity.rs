@@ -135,3 +135,70 @@ printf '{"five_hour":{"utilization":%s}}\n200' "$usage"
         }
     }
 }
+
+/// Codex rows name the plan beside the address (`[pro]`); Claude rows named
+/// nothing in `quota`, and `ls` said only `max` - which Max, 5x or 20x, is in
+/// the same credential as `rateLimitTier`.
+#[test]
+fn claude_rows_name_the_plan_and_its_max_tier() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots/big");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        slot.join(".claude.json"),
+        serde_json::json!({"oauthAccount":{"accountUuid":"u-big","emailAddress":"big@example.com"}})
+            .to_string(),
+    )
+    .unwrap();
+    let credential = serde_json::json!({"claudeAiOauth":{
+        "accessToken":"BIG-ACCESS", "refreshToken":"BIG-RT", "expiresAt":9_000_000_000_000_i64,
+        "subscriptionType":"max", "rateLimitTier":"default_claude_max_20x"}})
+    .to_string();
+    std::fs::write(slot.join(".credentials.json"), &credential).unwrap();
+    std::fs::set_permissions(
+        slot.join(".credentials.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::json!([{
+            "name":"big", "id":"big", "tool":"claude-code", "adopted":false, "config_dir":slot
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let curl = root.path().join("fake-curl");
+    std::fs::write(
+        &curl,
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"five_hour\":{\"utilization\":12}}\\n200'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let swapdex = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("HOME", root.path())
+            .env("SWAPDEX_CURL", &curl)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let quota = swapdex(&["quota"]);
+    assert!(
+        quota
+            .lines()
+            .any(|l| l.starts_with("big") && l.contains("big@example.com [max 20x]")),
+        "quota does not name the plan:\n{quota}"
+    );
+    let listing = swapdex(&["ls"]);
+    assert!(
+        listing.contains("big@example.com [max 20x]"),
+        "ls does not name the Max tier:\n{listing}"
+    );
+}

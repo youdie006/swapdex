@@ -4,6 +4,32 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A Claude login with its tokens emptied is no longer listed as fine.**
+  When Claude Code's own renewal is refused it empties both tokens but leaves
+  the refresh token's stated end in the file. 0.167.7 took that end as proof
+  the login lived, so `ls` showed such an account with no note at all. A
+  missing or empty refresh token now counts as not live, and the row says
+  "claude-code expired - needs refresh" again.
+- **Keep-alive stops resending a refused Codex refresh token.** Once the login
+  server refused a Codex refresh token, every sweep sent it again - nine
+  requests in one morning for an account that needed a sign-in. The sweep now
+  skips a token whose refusal is recorded, as it does for Claude since 0.167.7;
+  `swapdex refresh <name>` still re-checks it.
+- **Claude rows name which Max plan.** `ls` said only `max`, and `quota`
+  named no plan for Claude at all while its Codex rows showed `[pro]`. Both
+  now read the plan from the credential, including the Max tier it carries
+  (`[max 20x]`, `[max 5x]`, `[team]`), and an account that lives in a slot
+  shows its slot's current plan rather than the saved copy's. `ls --json`
+  carries the same label in `tier`; `status --json` keeps the plain value.
+- **`ls` no longer tells a refused login to re-save its snapshot.** The
+  footnote under the list read any note naming a tool as a stale copy, so an
+  account marked "refresh rejected - re-login required" was also told
+  `swapdex add <name> --tool codex --update`, which re-saves the refused
+  login. Only expired or stale copies are listed there now; the refused row
+  keeps its own sign-in remedy, as `doctor` gives it.
+
 ## 0.167.7
 
 - **Keep-alive no longer renews idle Claude accounts every two hours.** The

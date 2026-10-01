@@ -1621,3 +1621,74 @@ fn manual_refresh_does_not_call_unsigned_slots_current() {
         }
     }
 }
+
+/// A refused Codex refresh token stays refused, and the sweep sent it again
+/// every pass: nine requests in one morning for an account that needed a
+/// sign-in. Asking by name still re-checks it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_sweep_does_not_resend_a_refused_codex_refresh_token() {
+    let root = tempfile::tempdir().unwrap();
+    let _slot = seed_aged_codex(root.path(), "gone", 6, 4);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+    let sends = || std::fs::read(&count).unwrap_or_default().len();
+    let vars = [("FAKE_COUNT_PATH", count.to_str().unwrap())];
+
+    let first = run_with_curl(root.path(), &curl, &["refresh", "--keep-alive"], &vars);
+    assert_eq!(sends(), 1, "{}", combined(&first));
+    let second = run_with_curl(root.path(), &curl, &["refresh", "--keep-alive"], &vars);
+    assert_eq!(
+        sends(),
+        1,
+        "the sweep sent a refused refresh token again:\n{}",
+        combined(&second)
+    );
+    let by_name = run_with_curl(root.path(), &curl, &["refresh", "gone"], &vars);
+    assert_eq!(
+        sends(),
+        2,
+        "asking by name did not re-check it:\n{}",
+        combined(&by_name)
+    );
+}
+
+/// A refused login needs a sign-in, which its own row and `doctor` say. The
+/// footnote under `ls` read every warning that named a tool as a stale copy and
+/// told the same account to `add --update` - re-saving the refused login.
+#[test]
+fn a_refused_login_is_not_told_to_resave_its_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    // Another account's expired copy is what prints the footnote at all.
+    let dirs = seed_slots(
+        root.path(),
+        &[
+            ("refused", "slot-refused", "codex"),
+            ("lapsed", "slot-lapsed", "codex"),
+        ],
+    );
+    for (dir, who) in dirs.iter().zip(["refused", "lapsed"]) {
+        std::fs::write(
+            dir.join("auth.json"),
+            codex_auth(
+                &format!("account-{who}"),
+                &format!("refresh-{who}"),
+                &jwt(now_secs() - 60),
+            ),
+        )
+        .unwrap();
+    }
+    let curl = fake_curl(root.path());
+    run_with_curl(root.path(), &curl, &["refresh", "refused"], &[]);
+
+    let said = combined(&run(root.path(), &["ls"]));
+    assert!(
+        said.contains("swapdex add lapsed --tool codex --update"),
+        "{said}"
+    );
+    assert!(said.contains("codex refresh rejected"), "{said}");
+    assert!(
+        !said.contains("swapdex add refused --tool codex --update"),
+        "a refused login was told to re-save its snapshot:\n{said}"
+    );
+}
