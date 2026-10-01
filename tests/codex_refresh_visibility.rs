@@ -1692,3 +1692,66 @@ fn a_refused_login_is_not_told_to_resave_its_snapshot() {
         "a refused login was told to re-save its snapshot:\n{said}"
     );
 }
+
+/// Only a re-login code is the login server's verdict on the token. A 400 that
+/// names some other OAuth error - a request it could not parse - says nothing
+/// about the login, and recording it made the sweep stop renewing a live one.
+#[test]
+fn an_oauth_error_that_is_not_a_relogin_code_is_not_a_verdict() {
+    for (status, body) in [
+        ("400", r#"{"error":"invalid_request"}"#),
+        (
+            "403",
+            r#"{"error":{"code":"unsupported_country_region_territory"}}"#,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let slot = seed_codex(
+            root.path(),
+            "odd",
+            "account-odd",
+            "refresh-odd",
+            now_secs() - 60,
+        );
+        let curl = fake_curl(root.path());
+        let refresh = run_with_curl(
+            root.path(),
+            &curl,
+            &["refresh", "odd"],
+            &[("FAKE_STATUS", status), ("FAKE_BODY", body)],
+        );
+        assert!(
+            !slot.join(STATUS_FILE).exists(),
+            "HTTP {status} {body} was recorded as a rejection: {}",
+            combined(&refresh)
+        );
+    }
+}
+
+/// A recorded refusal is not forever: the sweep checks again a day later, so a
+/// verdict the server did not mean cannot leave a live login to age out.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_sweep_rechecks_a_refusal_a_day_later() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_aged_codex(root.path(), "old", 6, 4);
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+    let sends = || std::fs::read(&count).unwrap_or_default().len();
+    let vars = [("FAKE_COUNT_PATH", count.to_str().unwrap())];
+
+    run_with_curl(root.path(), &curl, &["refresh", "--keep-alive"], &vars);
+    assert_eq!(sends(), 1);
+    let path = slot.join(STATUS_FILE);
+    let mut status: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    status["rejected_at_ms"] = (now_secs() * 1000 - 25 * 3_600_000).into();
+    std::fs::write(&path, serde_json::to_vec(&status).unwrap()).unwrap();
+    let again = run_with_curl(root.path(), &curl, &["refresh", "--keep-alive"], &vars);
+    assert_eq!(
+        sends(),
+        2,
+        "a day-old refusal was never checked again:\n{}",
+        combined(&again)
+    );
+}

@@ -1029,3 +1029,46 @@ fn a_refused_claude_refresh_is_recorded_shown_and_not_swept_again() {
         "asking by name did not re-check the refused token: {said}"
     );
 }
+
+/// The token endpoint answers a request it cannot parse with the same 400 it
+/// gives a dead token; only `invalid_grant` is the verdict on the login.
+/// Recording any 400 made the sweep stop renewing a login that was fine.
+#[test]
+fn a_claude_400_without_invalid_grant_is_not_recorded_as_a_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "odd", "dddd4444");
+    let path = slot.join(".credentials.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    v["claudeAiOauth"]["refreshTokenExpiresAt"] = (now_ms + 86_400_000).into();
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = refusing_oauth(
+        asked.clone(),
+        400,
+        r#"{"error":"invalid_request","error_description":"malformed"}"#,
+    );
+    let sweep = || {
+        let out = Command::new(bin())
+            .args(["refresh", "--keep-alive"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_OAUTH_URL", &url)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+    sweep();
+    assert!(
+        !slot.join(".swapdex-claude-refresh-status.json").exists(),
+        "a 400 without invalid_grant was recorded as a refusal"
+    );
+    let said = sweep();
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        2,
+        "the sweep stopped renewing after a 400 that was no verdict: {said}"
+    );
+}

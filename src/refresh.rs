@@ -1179,7 +1179,7 @@ fn refresh_slot_inner(
             if status == 429 {
                 return Attempt::after_exchange(Err(RefreshError::Busy));
             }
-            if status == 401 || status == 400 {
+            if status == 401 || (matches!(status, 400 | 403) && is_relogin_error(&body)) {
                 // Bound to the token that was refused, so a later sign-in
                 // clears it without anyone deleting the record.
                 if let Some(fp) = crate::refresh_health::claude_refresh_fingerprint(current.bytes())
@@ -1699,7 +1699,7 @@ fn refresh_codex_slot_inner(
             if status == 429 {
                 return Attempt::after_exchange(Err(RefreshError::Busy));
             }
-            if status == 401 || (matches!(status, 400 | 403) && is_oauth_error(&body)) {
+            if status == 401 || (matches!(status, 400 | 403) && is_relogin_error(&body)) {
                 let _ =
                     crate::refresh_health::record_codex_rejection(dir, &health_fingerprint, now_ms);
                 return Attempt::after_exchange(Err(RefreshError::Expired));
@@ -1749,16 +1749,33 @@ fn refresh_codex_slot_inner(
     attempt.result
 }
 
-/// Does this body carry an OAuth error code? Only such an answer is the login
-/// server's verdict on the refresh token; a CDN challenge page or an empty
-/// body in front of it says nothing about the login.
-fn is_oauth_error(body: &str) -> bool {
+/// Does this body name a code that means "sign in again"? Only that is the
+/// login server's verdict on the refresh token. A CDN page, an empty body, or
+/// another OAuth error - the endpoint answers a request it cannot parse with
+/// the same 400 - says nothing about the login, and a wrong verdict stops the
+/// sweep from renewing a login that was fine.
+fn is_relogin_error(body: &str) -> bool {
+    const RELOGIN: [&str; 7] = [
+        "invalid_grant",
+        "refresh_token_reused",
+        "refresh_token_expired",
+        "refresh_token_invalidated",
+        "invalid_refresh_token",
+        "token_expired",
+        "revoked",
+    ];
     serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
-        v["error"].as_str().is_some_and(|c| !c.is_empty())
-            || v["error"]["code"].as_str().is_some_and(|c| !c.is_empty())
-            || v["code"].as_str().is_some_and(|c| !c.is_empty())
+        [&v["error"], &v["error"]["code"], &v["code"]]
+            .into_iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|code| RELOGIN.contains(&code))
     })
 }
+
+/// How long a recorded refusal keeps the sweep away. A day, not forever: a
+/// verdict the server did not mean must not leave a live login to age out,
+/// and re-sending a dead token once a day costs one request.
+pub const REFUSAL_RECHECK_MS: i64 = 24 * 60 * 60 * 1000;
 
 fn post_codex(refresh_token: &str) -> Result<(String, u32), RefreshError> {
     let body = codex_request_body(refresh_token);
@@ -2125,7 +2142,9 @@ pub(crate) fn keep_alive_sweep_codex_report(
             continue;
         }
         // Refused stays refused; `swapdex refresh <name>` still re-checks it.
-        if crate::refresh_health::codex_rejection(dir).is_some() {
+        if crate::refresh_health::codex_rejection(dir)
+            .is_some_and(|at| now_ms - at < REFUSAL_RECHECK_MS)
+        {
             continue;
         }
         match refresh_codex_slot(paths, dir, now_ms) {
@@ -2383,9 +2402,10 @@ pub(crate) fn keep_alive_sweep_report(
         }
         // A refused refresh token stays refused; retrying it every pass only
         // repeats the failure. `swapdex refresh <name>` still re-checks it.
-        if crate::refresh_health::claude_refresh_fingerprint(credential.bytes())
-            .is_some_and(|fp| crate::refresh_health::claude_rejection(dir, &fp).is_some())
-        {
+        if crate::refresh_health::claude_refresh_fingerprint(credential.bytes()).is_some_and(|fp| {
+            crate::refresh_health::claude_rejection(dir, &fp)
+                .is_some_and(|at| now_ms - at < REFUSAL_RECHECK_MS)
+        }) {
             continue;
         }
         match refresh_slot(paths, dir, now_ms) {
