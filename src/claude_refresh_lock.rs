@@ -474,9 +474,17 @@ mod tests {
         let first_custom = fs::metadata(&custom).unwrap().modified().unwrap();
         let first_legacy = fs::metadata(&legacy).unwrap().modified().unwrap();
 
-        thread::sleep(Duration::from_millis(100));
-        assert!(fs::metadata(&custom).unwrap().modified().unwrap() > first_custom);
-        assert!(fs::metadata(&legacy).unwrap().modified().unwrap() > first_legacy);
+        // Wait for the heartbeat rather than a fixed 100ms: a loaded CI runner
+        // can leave the 20ms heartbeat thread unscheduled that long.
+        let advanced = |path: &Path, first| fs::metadata(path).unwrap().modified().unwrap() > first;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(advanced(&custom, first_custom) && advanced(&legacy, first_legacy))
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(advanced(&custom, first_custom));
+        assert!(advanced(&legacy, first_legacy));
         assert!(guard.is_owned().unwrap());
     }
 
