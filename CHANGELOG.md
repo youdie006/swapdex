@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.9
 
 - **Only a re-login code counts as a refused login.** Claude recorded every
   HTTP 400 from the token endpoint as a refusal, and Codex any OAuth error
