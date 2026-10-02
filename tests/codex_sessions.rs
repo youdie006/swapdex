@@ -650,3 +650,57 @@ fn command_errors_exit_nonzero_even_when_quiet() {
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
 }
+
+/// A lock held for a moment is not a repair in progress. A process forked
+/// while the lock was open keeps a copy of it until it execs, so CI saw
+/// "another Codex session repair is running" between two back-to-back repairs
+/// in one test. Repair now waits briefly before it calls the lock taken.
+#[test]
+fn a_lock_held_for_a_moment_does_not_fail_the_repair() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(root.path());
+    rollout(paths.codex_dir(), false, ID_ONE, "swapdex", false);
+    fs::create_dir_all(paths.store_dir()).unwrap();
+    let held = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.store_dir().join(".codex-session-repair.lock"))
+        .unwrap();
+    held.try_lock_exclusive().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+    });
+
+    let result = repair_codex_sessions(&paths, RepairOptions::default());
+    release.join().unwrap();
+
+    assert_eq!(result.errors, 0, "{:#?}", result.issues);
+    assert_eq!(result.repaired, 1, "{:#?}", result.issues);
+}
+
+/// The over-correction: a lock that stays held is a repair in progress, and
+/// repair reports it after a bounded wait rather than hanging.
+#[test]
+fn a_lock_that_stays_held_still_fails_the_repair() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted(root.path());
+    rollout(paths.codex_dir(), false, ID_ONE, "swapdex", false);
+    fs::create_dir_all(paths.store_dir()).unwrap();
+    let held = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.store_dir().join(".codex-session-repair.lock"))
+        .unwrap();
+    held.try_lock_exclusive().unwrap();
+
+    let started = std::time::Instant::now();
+    let result = repair_codex_sessions(&paths, RepairOptions::default());
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(result.errors, 1, "{:#?}", result.issues);
+    assert_eq!(result.repaired, 0, "{:#?}", result.issues);
+    drop(held);
+}
