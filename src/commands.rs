@@ -7198,9 +7198,9 @@ pub fn active_slot_name(paths: &Paths, tool: &str) -> Option<String> {
             .map(|r| r.name)
     };
     pick_active(
-        slots.serving_dir().and_then(&name_of),
+        slots.serving_dir().and_then(name_of),
         crate::proxy::serving_account_for(paths, tool),
-        slots.default_dir().and_then(&name_of),
+        slots.default_dir().and_then(name_of),
         proxy_acted_since_ask(paths, tool),
     )
 }
