@@ -1152,6 +1152,21 @@ fn refresh_slot_inner(
             {
                 return Attempt::before_exchange(Err(RefreshError::AlreadyRefreshing));
             }
+            // A renewal the server made but we could not save: the token on
+            // disk is already spent, so adopt that answer instead of sending
+            // the spent token again.
+            let ours = crate::refresh_health::claude_refresh_fingerprint(current.bytes());
+            if let Some(successor) = take_unclaimed(paths, dir, ours.as_deref()) {
+                let result = authority
+                    .write(paths, current.source(), &successor)
+                    .map(|()| {
+                        forget_unclaimed(paths, dir);
+                        RefreshOutcome::Renewed
+                    })
+                    .map_err(|error| RefreshError::Refused(error.to_string()));
+                let result_generation = result.is_ok().then(|| fingerprint(&successor));
+                return Attempt::after_exchange_with_generation(result, result_generation);
+            }
             if refresh_token_expired(current.bytes(), now_ms) {
                 return Attempt::before_exchange(Err(RefreshError::Expired));
             }
@@ -1207,12 +1222,78 @@ fn refresh_slot_inner(
             let result = authority
                 .write(paths, current.source(), &merged)
                 .map(|()| RefreshOutcome::Renewed)
-                .map_err(|error| RefreshError::Refused(error.to_string()));
+                .map_err(|error| {
+                    // The server already retired the token we sent; this
+                    // answer is the only live one, so it must not be dropped.
+                    let spent = crate::refresh_health::claude_refresh_fingerprint(current.bytes());
+                    if keep_unclaimed(paths, dir, spent.as_deref(), &merged) {
+                        RefreshError::Refused(format!(
+                            "{error} - the renewed login is kept and the next renewal saves it"
+                        ))
+                    } else {
+                        RefreshError::Refused(error.to_string())
+                    }
+                });
             let result_generation = result.is_ok().then(|| fingerprint(&merged));
             Attempt::after_exchange_with_generation(result, result_generation)
         },
     )
     .result
+}
+
+/// Where a renewal that could not be saved is kept: in swapdex's own store,
+/// not the slot, since the slot is what refused the write.
+fn unclaimed_path(paths: &Paths, dir: &Path) -> std::path::PathBuf {
+    let key = fingerprint(dir.as_os_str().as_encoded_bytes());
+    paths
+        .store_dir()
+        .join("unclaimed")
+        .join(format!("{key}.json"))
+}
+
+/// Keep `successor`, the server's answer for the spent refresh token whose
+/// fingerprint is `predecessor`.
+fn keep_unclaimed(paths: &Paths, dir: &Path, predecessor: Option<&str>, successor: &[u8]) -> bool {
+    let (Some(predecessor), Ok(credential)) = (
+        predecessor,
+        serde_json::from_slice::<serde_json::Value>(successor),
+    ) else {
+        return false;
+    };
+    let path = unclaimed_path(paths, dir);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    let record = serde_json::json!({ "predecessor": predecessor, "credential": credential });
+    serde_json::to_vec(&record)
+        .ok()
+        .is_some_and(|bytes| crate::atomic::write_secret(&path, &bytes).is_ok())
+}
+
+/// The kept answer for the refresh token whose fingerprint is `current`, if
+/// there is one. A record for any other token is obsolete - a sign-in or
+/// another renewal replaced the spent one - and is removed.
+fn take_unclaimed(paths: &Paths, dir: &Path, current: Option<&str>) -> Option<Vec<u8>> {
+    let path = unclaimed_path(paths, dir);
+    let bytes = crate::atomic::read_regular(&path).ok()?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if current.is_none() || record["predecessor"].as_str() != current {
+        forget_unclaimed(paths, dir);
+        return None;
+    }
+    serde_json::to_vec(&record["credential"]).ok()
+}
+
+fn forget_unclaimed(paths: &Paths, dir: &Path) {
+    let _ = std::fs::remove_file(unclaimed_path(paths, dir));
 }
 
 /// One short clause from an error body, for a message a person reads. Never the
@@ -1687,6 +1768,18 @@ fn refresh_codex_slot_inner(
             if codex_holder_defers(paths, dir, now_ms / 1000) {
                 return Attempt::before_exchange(Err(RefreshError::InUse));
             }
+            // A renewal the server made but we could not save: adopt it rather
+            // than send the spent token again.
+            if let Some(successor) = take_unclaimed(paths, dir, Some(&health_fingerprint)) {
+                let result = crate::atomic::write_secret(&path, &successor)
+                    .map(|()| {
+                        forget_unclaimed(paths, dir);
+                        RefreshOutcome::Renewed
+                    })
+                    .map_err(|error| RefreshError::Refused(error.to_string()));
+                let result_generation = result.is_ok().then(|| fingerprint(&successor));
+                return Attempt::after_exchange_with_generation(result, result_generation);
+            }
 
             let response = post_codex(&token);
             if !std::fs::read(&path).is_ok_and(|current| current.as_slice() == blob.expose()) {
@@ -1721,7 +1814,15 @@ fn refresh_codex_slot_inner(
             }
             let result = crate::atomic::write_secret(&path, &merged)
                 .map(|()| RefreshOutcome::Renewed)
-                .map_err(|error| RefreshError::Refused(error.to_string()));
+                .map_err(|error| {
+                    if keep_unclaimed(paths, dir, Some(&health_fingerprint), &merged) {
+                        RefreshError::Refused(format!(
+                            "{error} - the renewed login is kept and the next renewal saves it"
+                        ))
+                    } else {
+                        RefreshError::Refused(error.to_string())
+                    }
+                });
             if result.is_ok() {
                 let _ = crate::refresh_health::clear_codex_rejection_before(
                     dir,

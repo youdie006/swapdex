@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A renewal that could not be saved is kept instead of lost.** Renewing a
+  login retires the refresh token that was sent, so the server's answer is
+  the only live copy. When saving it failed - a locked keychain, a full disk,
+  a slot that refused the write - swapdex dropped that answer, and the next
+  renewal sent the retired token and signed the account out. The answer is
+  now kept in swapdex's own store and saved by the next renewal without
+  asking the server again, for Claude and Codex alike. A kept answer is tied
+  to the token it renewed, so it never overwrites a newer sign-in. The same
+  safeguard claude-swap uses.
+
 ## 0.167.9
 
 - **Only a re-login code counts as a refused login.** Claude recorded every

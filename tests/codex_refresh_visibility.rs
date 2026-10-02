@@ -86,6 +86,10 @@ fi
 if [ -n "$FAKE_COUNT_PATH" ]; then
     printf x >> "$FAKE_COUNT_PATH"
 fi
+if [ -n "$FAKE_LOCK_DIR" ] && [ ! -e "$FAKE_LOCK_DIR.locked-once" ]; then
+    : > "$FAKE_LOCK_DIR.locked-once"
+    chmod 500 "$FAKE_LOCK_DIR"
+fi
 if [ "${FAKE_EXIT:-0}" -ne 0 ]; then
     printf '%s\n' 'synthetic transport failure' >&2
     exit "$FAKE_EXIT"
@@ -1753,5 +1757,57 @@ fn the_sweep_rechecks_a_refusal_a_day_later() {
         2,
         "a day-old refusal was never checked again:\n{}",
         combined(&again)
+    );
+}
+
+/// The login server rotated the Codex token, but saving the answer failed:
+/// the new token was dropped and the old one was already spent. The answer is
+/// now kept outside the slot and adopted on the next renewal without asking
+/// the server again.
+#[cfg(unix)]
+#[test]
+fn a_codex_renewal_that_could_not_be_saved_is_kept_and_adopted_next_time() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_codex(
+        root.path(),
+        "keep",
+        "account-keep",
+        "refresh-old",
+        now_secs() - 60,
+    );
+    let curl = fake_curl(root.path());
+    let count = root.path().join("curl-count");
+    let sends = || std::fs::read(&count).unwrap_or_default().len();
+    let body = format!(
+        r#"{{"access_token":"{}","refresh_token":"refresh-new","id_token":"header.synthetic-identity.signature"}}"#,
+        jwt(now_secs() + 864_000)
+    );
+    let vars = [
+        ("FAKE_COUNT_PATH", count.to_str().unwrap()),
+        ("FAKE_STATUS", "200"),
+        ("FAKE_BODY", body.as_str()),
+        ("FAKE_LOCK_DIR", slot.to_str().unwrap()),
+    ];
+
+    let first = run_with_curl(root.path(), &curl, &["refresh", "keep"], &vars);
+    std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(sends(), 1, "{}", combined(&first));
+    let auth = std::fs::read_to_string(slot.join("auth.json")).unwrap();
+    assert!(auth.contains("refresh-old"), "{}", combined(&first));
+
+    let second = run_with_curl(root.path(), &curl, &["refresh", "keep"], &vars);
+    let auth = std::fs::read_to_string(slot.join("auth.json")).unwrap();
+    assert!(
+        auth.contains("refresh-new"),
+        "the renewal the server already made was lost:\n{}\n{}",
+        combined(&first),
+        combined(&second)
+    );
+    assert_eq!(
+        sends(),
+        1,
+        "the spent token was sent again: {}",
+        combined(&second)
     );
 }
