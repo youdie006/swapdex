@@ -26,6 +26,8 @@ const MAX_HEADER_BYTES: u64 = 1024 * 1024;
 const JOURNAL_VERSION: u32 = 1;
 const JOURNAL_DIR: &str = "codex-session-repair";
 const REPAIR_LOCK: &str = ".codex-session-repair.lock";
+/// How long repair waits for the lock before calling it taken.
+const REPAIR_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const WRITER_LOCK_DIR: &str = "thread-writer-locks";
 const COORDINATION_LOCK: &str = ".coordination.lock";
 
@@ -336,9 +338,18 @@ fn acquire_repair_lock(paths: &Paths) -> Result<File, String> {
     let file = options
         .open(store.join(REPAIR_LOCK))
         .map_err(|error| format!("open repair lock: {error}"))?;
-    file.try_lock_exclusive()
-        .map_err(|error| format!("another Codex session repair is running: {error}"))?;
-    Ok(file)
+    // A lock held for a moment is not a repair in progress: a process forked
+    // while it was open keeps a copy until it execs. Wait briefly first.
+    let deadline = std::time::Instant::now() + REPAIR_LOCK_WAIT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("another Codex session repair is running: {error}")),
+        }
+    }
 }
 
 fn discover_homes(paths: &Paths, summary: &mut RepairSummary) -> Vec<CodexHome> {

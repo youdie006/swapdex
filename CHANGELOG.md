@@ -6,6 +6,11 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Codex session repair no longer fails on a lock held for a moment.** A
+  process forked while repair's lock file was open keeps a copy of it until
+  it execs, so a repair right after another one could report "another Codex
+  session repair is running" when none was. Repair now waits up to two
+  seconds for the lock before reporting it taken.
 - **A renewal that could not be saved is kept instead of lost.** Renewing a
   login retires the refresh token that was sent, so the server's answer is
   the only live copy. When saving it failed - a locked keychain, a full disk,
