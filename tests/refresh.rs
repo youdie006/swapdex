@@ -1072,3 +1072,133 @@ fn a_claude_400_without_invalid_grant_is_not_recorded_as_a_refusal() {
         "the sweep stopped renewing after a 400 that was no verdict: {said}"
     );
 }
+
+/// The login server answered with a new refresh token - and retired the old
+/// one - but saving it failed. The new token was dropped, the old one was
+/// already spent, and the account was signed out. The answer is now kept
+/// outside the slot and adopted on the next renewal, without asking the
+/// server again.
+#[cfg(unix)]
+#[test]
+fn a_renewal_that_could_not_be_saved_is_kept_and_adopted_next_time() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "keep", "eeee5555");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let (sink, locked) = (asked.clone(), slot.clone());
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let mut seen = String::new();
+            std::io::Read::read_to_string(rq.as_reader(), &mut seen).ok();
+            sink.lock().unwrap().push(seen);
+            // The server has rotated the token; now the save will fail.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let _ = rq.respond(tiny_http::Response::from_string(
+                r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":28800}"#,
+            ));
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/v1/oauth/token");
+    let refresh = || {
+        let out = Command::new(bin())
+            .args(["refresh", "keep"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_OAUTH_URL", &url)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+
+    let first = refresh();
+    std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The read-only slot that failed the save also kept the refresh lock from
+    // being released; a real failed save (a locked keychain, a full disk)
+    // releases it as usual.
+    let _ = std::fs::remove_dir(slot.join(".oauth_refresh.lock"));
+    assert_eq!(asked.lock().unwrap().len(), 1, "{first}");
+    let saved = std::fs::read_to_string(slot.join(".credentials.json")).unwrap();
+    assert!(
+        saved.contains("OLD-RT"),
+        "the failed save changed the file: {first}"
+    );
+
+    let second = refresh();
+    let saved = std::fs::read_to_string(slot.join(".credentials.json")).unwrap();
+    assert!(
+        saved.contains("NEW-RT"),
+        "the renewal the server already made was lost:\n{first}\n{second}"
+    );
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "the spent token was sent again instead of adopting the kept answer: {second}"
+    );
+}
+
+/// The over-correction: a kept answer belongs to the token it renewed. After
+/// a new sign-in it is obsolete and must not overwrite the new login.
+#[cfg(unix)]
+#[test]
+fn a_kept_renewal_never_overwrites_a_newer_sign_in() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "relog", "ffff6666");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let (sink, locked) = (asked.clone(), slot.clone());
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let mut seen = String::new();
+            std::io::Read::read_to_string(rq.as_reader(), &mut seen).ok();
+            let first = {
+                let mut sink = sink.lock().unwrap();
+                sink.push(seen);
+                sink.len() == 1
+            };
+            if first {
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            }
+            let body = if first {
+                r#"{"access_token":"KEPT-AT","refresh_token":"KEPT-RT","expires_in":28800}"#
+            } else {
+                r#"{"access_token":"FRESH-AT","refresh_token":"FRESH-RT","expires_in":28800}"#
+            };
+            let _ = rq.respond(tiny_http::Response::from_string(body));
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}/v1/oauth/token");
+    let refresh = || {
+        let out = Command::new(bin())
+            .args(["refresh", "relog"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_OAUTH_URL", &url)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+    refresh();
+    std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = std::fs::remove_dir(slot.join(".oauth_refresh.lock"));
+
+    // A new sign-in replaces the spent token before the next renewal.
+    let path = slot.join(".credentials.json");
+    let relogged = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("OLD-RT", "SIGNED-IN-RT");
+    std::fs::write(&path, relogged).unwrap();
+
+    let second = refresh();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !saved.contains("KEPT-RT"),
+        "an obsolete kept renewal overwrote a newer sign-in: {second}"
+    );
+    let asked = asked.lock().unwrap();
+    assert!(
+        asked.len() == 2 && asked[1].contains("SIGNED-IN-RT"),
+        "the new sign-in was not renewed with its own token: {second}"
+    );
+}
