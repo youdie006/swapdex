@@ -3516,7 +3516,10 @@ fn doctor_names_a_codex_window_started_without_the_usage_route() {
     let bin = root.join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let fake = bin.join("codex");
-    std::fs::copy("/bin/sh", &fake).unwrap();
+    // A link, not a copy: exec takes the link's basename as the process name,
+    // and nothing ever holds a writable descriptor to it - a just-copied file
+    // can fail with ETXTBSY while sibling tests fork.
+    std::os::unix::fs::symlink("/bin/sh", &fake).unwrap();
     let spawn = |extra: &[&str]| {
         let mut args = vec![
             "-c",

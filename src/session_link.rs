@@ -437,17 +437,26 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&fake, permissions).unwrap();
 
-        let started = std::time::Instant::now();
-        let output = run_sessionwiki(
-            fake.as_os_str(),
-            None,
-            std::time::Duration::from_millis(250),
-        );
-        assert!(output.is_none(), "a timed-out command has no usable output");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "the timeout is bounded"
-        );
+        // A run that never reached the fake's first line - exec refused with
+        // ETXTBSY while a sibling test forked, or a loaded runner too slow to
+        // start it within the timeout - says nothing about termination, so
+        // only those runs are tried again.
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            let output = run_sessionwiki(
+                fake.as_os_str(),
+                None,
+                std::time::Duration::from_millis(250),
+            );
+            assert!(output.is_none(), "a timed-out command has no usable output");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the timeout is bounded"
+            );
+            if pid_file.exists() {
+                break;
+            }
+        }
 
         let pids: Vec<i32> = std::fs::read_to_string(&pid_file)
             .expect("the fake started and recorded both processes")
