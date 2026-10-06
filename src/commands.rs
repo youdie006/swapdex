@@ -9946,6 +9946,19 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                          wait for the owning Claude session to refresh this login or exit"
                             .into()
                     }
+                    // Keep-alive renews by the refresh token's end, so an idle
+                    // login's access lapses between renewals while the login
+                    // is fine: the proxy renews it when the account is used.
+                    Some(dir)
+                        if !crate::refresh::claude_refresh_token_not_known_live(
+                            paths,
+                            &dir,
+                            now_ms(),
+                        ) && crate::refresh::claude_refresh_rejected_at(paths, &dir)
+                            .is_none() =>
+                    {
+                        IDLE_LOGIN_NOTE.into()
+                    }
                     Some(_) => "slot access expired - renewal has not completed; \
                         retry after background refresh or sign in to this slot"
                         .into(),
@@ -10076,7 +10089,14 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
                     "  unexpected response (HTTP {code}) - run `swapdex quota --json` to see it"
                 );
             }
-            Fetch::Offline(msg) => println!("  {msg}"),
+            Fetch::Offline(msg) => {
+                println!("  {msg}");
+                if msg == IDLE_LOGIN_NOTE {
+                    for line in last_reading(paths, &r.name, now) {
+                        println!("  {line}");
+                    }
+                }
+            }
             Fetch::Coordination(msg) => {
                 println!("  usage lookup coordination unavailable - {msg}")
             }
@@ -10098,6 +10118,12 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
 /// reading, but the one before it is still a fact with a time on it: `quota`
 /// showed nothing while the cache - and the proxy's own log - held numbers
 /// from minutes earlier. Readings whose window has since reset are not kept.
+/// An idle Claude slot: its access token lapsed between keep-alive renewals,
+/// its refresh token is live, and nothing is wrong. Its usage cannot be read
+/// until it renews, so the last reading stands in.
+const IDLE_LOGIN_NOTE: &str =
+    "idle - its access token expired and its login renews on next use; no new reading until then";
+
 fn last_reading(paths: &Paths, name: &str, now: i64) -> Vec<String> {
     let Some(e) = crate::quota_cache::load_for(paths, "claude-code").remove(name) else {
         return Vec::new();

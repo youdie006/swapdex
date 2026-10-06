@@ -6,6 +6,14 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **`quota` no longer calls an idle Claude login a failed renewal.** Since
+  0.167.7 keep-alive renews a Claude login near its refresh token's end, so an
+  idle account's eight-hour access token lapses between renewals while the
+  login stays good - the proxy renews it the moment the account is used.
+  `quota` reported that state as "slot access expired - renewal has not
+  completed ... sign in to this slot". It now says the account is idle and
+  renews on next use, and shows its last reading. A login whose refresh token
+  is past its end or was refused still gets the sign-in remedy.
 - **A refused renewal says why.** The login server names its reason -
   `refresh_token_reused` (used elsewhere), `refresh_token_invalidated`
   (revoked by a newer sign-in or a sign-out), `refresh_token_expired` - and
