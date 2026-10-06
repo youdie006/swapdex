@@ -1656,14 +1656,16 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
         // `exp` claim of its own JWT. Asking only "is a login there" sent turns
         // to a slot whose token had expired days earlier and reported the 401
         // that came back as a rejected account.
+        //
+        // A lapsed token with a refresh token nobody refused still counts: the
+        // slots idle long enough to lapse are the ones with quota left, and the
+        // serving path renews the one chosen. Renewing here renewed every such
+        // slot each time a turn looked for another account - chosen or not.
         "codex" => {
-            if codex::slot_token_expired(dir, now_secs()) {
-                // Same order as the Claude branch above: try to renew before
-                // ruling the account out, because the slots idle long enough to
-                // lapse are exactly the ones with quota left.
-                let _ = crate::refresh::refresh_codex_slot(paths, dir, now_ms());
-            }
-            codex::slot_auth(dir).is_some() && !codex::slot_token_expired(dir, now_secs())
+            codex::slot_auth(dir).is_some()
+                && (!codex::slot_token_expired(dir, now_secs())
+                    || (codex_refresh_token_present(dir)
+                        && crate::refresh_health::codex_rejection(dir).is_none()))
         }
         // Same per-tool question as has_login.
         "gemini" | "antigravity" => has_login(paths, tool, dir),
@@ -1678,6 +1680,19 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
                         && crate::refresh::claude_refresh_rejected_at(paths, dir).is_none()))
         }
     }
+}
+
+/// Whether a Codex slot holds a refresh token at all - what a lapsed slot
+/// needs to be renewed when it is chosen.
+fn codex_refresh_token_present(dir: &std::path::Path) -> bool {
+    std::fs::read(dir.join("auth.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| {
+            v["tokens"]["refresh_token"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty())
+        })
 }
 
 /// Unix seconds, for the rate-limit resets the API reports in that unit.
