@@ -1650,11 +1650,6 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
     if crate::live_login::resolve(paths, dir, tool, now_ms()).is_some() {
         return true;
     }
-    // A lapsed Claude token is renewable, so try before ruling the account out:
-    // the accounts idle long enough to lapse are the ones with quota left.
-    if tool != "codex" && creds::slot_token_expired_for(paths, dir, now_ms()) {
-        let _ = crate::refresh::refresh_slot(paths, dir, now_ms());
-    }
     match tool {
         // Codex renews its token when CODEX RUNS, so a slot nobody has opened
         // does not renew at all - and the token says when it lapses, in the
@@ -1672,9 +1667,15 @@ fn has_usable_login(paths: &Paths, tool: &str, dir: &std::path::Path) -> bool {
         }
         // Same per-tool question as has_login.
         "gemini" | "antigravity" => has_login(paths, tool, dir),
+        // A lapsed Claude token whose refresh token is live is usable: the
+        // accounts idle long enough to lapse are the ones with quota left, and
+        // the send path renews the one chosen. Renewing here renewed every idle
+        // account each time a turn looked for another one - chosen or not.
         _ => {
             creds::slot_token_for(paths, dir).is_some()
-                && !creds::slot_token_expired_for(paths, dir, now_ms())
+                && (!creds::slot_token_expired_for(paths, dir, now_ms())
+                    || (!crate::refresh::claude_refresh_token_not_known_live(paths, dir, now_ms())
+                        && crate::refresh::claude_refresh_rejected_at(paths, dir).is_none()))
         }
     }
 }

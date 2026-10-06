@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Looking for another account no longer renews every idle Claude login.**
+  When a turn was refused and the proxy checked which accounts could take
+  it, it renewed every idle Claude slot whose access token had lapsed - an
+  idle account's normal state since 0.167.7 - silently, and whether or not
+  that account was chosen, even one paused out of rotation. On the
+  workstation a single burst-limit 429 renewed two idle accounts that
+  served nothing. Every renewal rotates a refresh token and risks losing it
+  to a 5xx, so the check now treats a lapsed login with a live refresh token
+  as usable, and only the account that serves the turn is renewed, just
+  before its turn goes out.
+
 ## 0.167.10
 
 - **`quota` no longer calls an idle Claude login a failed renewal.** Since
