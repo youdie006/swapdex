@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.11
 
 - **Looking for another account no longer renews every idle Claude login.**
   When a turn was refused and the proxy checked which accounts could take
