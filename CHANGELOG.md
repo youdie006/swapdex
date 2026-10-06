@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.12
 
 - **Looking for another Codex account no longer renews the others.** 0.167.11
   stopped the proxy's account check from renewing every idle Claude login;
