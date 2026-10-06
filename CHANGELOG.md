@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.10
 
 - **`quota` no longer calls an idle Claude login a failed renewal.** Since
   0.167.7 keep-alive renews a Claude login near its refresh token's end, so an
