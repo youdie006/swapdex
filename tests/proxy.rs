@@ -6588,3 +6588,203 @@ mod streaming_delivery {
         }
     }
 }
+
+/// Choosing the next account must not renew the accounts it does not choose.
+/// The candidate check renewed every idle Claude slot whose access token had
+/// lapsed - an idle account's normal state since keep-alive renews by the
+/// refresh token's end - so each rotation rotated every idle account's
+/// refresh token, silently, even one paused out of rotation. Each renewal is
+/// a chance to strand the token on a 5xx; only the account that serves the
+/// turn needs one, and the send path renews it.
+#[test]
+fn choosing_the_next_account_does_not_renew_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "bsgong", "bbbb2222", "AT-BSGONG", false);
+    seed_slot(root.path(), "cold", "cccc3333", "AT-COLD", false);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/slots/cccc3333/.credentials.json"),
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"AT-COLD","refreshToken":"RT-COLD","expiresAt":{},"refreshTokenExpiresAt":{}}}}}"#,
+            now_ms - 3_600_000,
+            now_ms + 20 * 86_400_000
+        ),
+    )
+    .unwrap();
+    // Out of rotation: it can never be the one chosen.
+    std::fs::write(
+        root.path().join(".local/share/swapdex/settings.json"),
+        br#"{"disabled":["cold"]}"#,
+    )
+    .unwrap();
+    // Every renewal goes through curl; count the exchanges that send the
+    // paused account's refresh token, and answer like the login server.
+    let attempts = root.path().join("cold-renewals");
+    let curl = root.path().join("fakebin/curl");
+    std::fs::create_dir_all(curl.parent().unwrap()).unwrap();
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *RT-COLD*) printf x >> '{}';\n    printf '{{\"access_token\":\"AT-COLD-2\",\"refresh_token\":\"RT-COLD-2\",\"expires_in\":28800}}\\n200' ;;\n  *) exit 7 ;;\nesac\n",
+            attempts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The path from the journal: a turn refused with 429, so the proxy looks
+    // for another account to carry it.
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let upstream = format!(
+        "http://127.0.0.1:{}",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    let seen = sink.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            seen.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let resp = if std::mem::take(&mut first) {
+                tiny_http::Response::from_string(
+                    "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+                )
+                .with_status_code(tiny_http::StatusCode(429))
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}")
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    let (mut child, port) = start_proxy_with_env(
+        root.path(),
+        &upstream,
+        &["--auto"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+    child.wait().ok();
+
+    assert!(
+        auths(&sink).contains(&"Bearer AT-BSGONG".to_string()),
+        "the refused turn moved to the other account: {:?}",
+        auths(&sink)
+    );
+    let renewed = std::fs::read(&attempts).unwrap_or_default().len();
+    assert_eq!(
+        renewed, 0,
+        "an account that was not chosen had its login renewed {renewed} time(s)"
+    );
+}
+
+/// The over-correction: an idle account whose access lapsed is still a
+/// candidate, and when it is the one chosen it is renewed before its turn goes
+/// out - a lapsed token never reaches upstream.
+#[test]
+fn an_idle_account_that_is_chosen_is_renewed_before_it_serves() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "rnd", "aaaa1111", "AT-RND", true);
+    seed_slot(root.path(), "cold", "cccc3333", "AT-COLD", false);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/slots/cccc3333/.credentials.json"),
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"AT-COLD","refreshToken":"RT-COLD","expiresAt":{},"refreshTokenExpiresAt":{}}}}}"#,
+            now_ms - 3_600_000,
+            now_ms + 20 * 86_400_000
+        ),
+    )
+    .unwrap();
+    // Every renewal goes through curl; count the exchanges that send the
+    // paused account's refresh token, and answer like the login server.
+    let attempts = root.path().join("cold-renewals");
+    let curl = root.path().join("fakebin/curl");
+    std::fs::create_dir_all(curl.parent().unwrap()).unwrap();
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *RT-COLD*) printf x >> '{}';\n    printf '{{\"access_token\":\"AT-COLD-2\",\"refresh_token\":\"RT-COLD-2\",\"expires_in\":28800}}\\n200' ;;\n  *) exit 7 ;;\nesac\n",
+            attempts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The path from the journal: a turn refused with 429, so the proxy looks
+    // for another account to carry it.
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let upstream = format!(
+        "http://127.0.0.1:{}",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    let seen = sink.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            seen.lock().unwrap().push(Seen {
+                auth,
+                user_id: None,
+            });
+            let resp = if std::mem::take(&mut first) {
+                tiny_http::Response::from_string(
+                    "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+                )
+                .with_status_code(tiny_http::StatusCode(429))
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}")
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    let (mut child, port) = start_proxy_with_env(
+        root.path(),
+        &upstream,
+        &["--auto"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    post_through(port, "{\"turn\":1}");
+    post_through(port, "{\"turn\":2}");
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = auths(&sink);
+    assert!(
+        seen.contains(&"Bearer AT-COLD-2".to_string()),
+        "the idle account was chosen but did not serve on a renewed token: {seen:?}"
+    );
+    assert!(
+        !seen.contains(&"Bearer AT-COLD".to_string()),
+        "a lapsed token was sent upstream: {seen:?}"
+    );
+}
