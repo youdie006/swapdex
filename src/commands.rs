@@ -2128,6 +2128,11 @@ struct AccountHealth {
 
 /// When this slot's renewal was definitively refused, read from the same
 /// sources `ls` reads, so doctor and the listing cannot disagree about it.
+/// " (refresh_token_reused)", or nothing when the server gave no code.
+pub(crate) fn said(reason: Option<String>) -> String {
+    reason.map(|r| format!(" ({r})")).unwrap_or_default()
+}
+
 fn refresh_rejected_at(
     paths: &Paths,
     tool: &str,
@@ -2179,7 +2184,12 @@ fn account_health(
             "codex" => {
                 if let Some(rejected_at) = crate::refresh_health::codex_rejection(&slot.config_dir)
                 {
-                    warnings.push("codex refresh rejected - re-login required".to_string());
+                    warnings.push(format!(
+                        "codex refresh rejected{} - re-login required",
+                        said(crate::refresh_health::codex_rejection_reason(
+                            &slot.config_dir
+                        ))
+                    ));
                     refresh_rejected_at_ms.insert("codex".to_string(), rejected_at);
                 } else if crate::proxy::codex::slot_token_expired(&slot.config_dir, now_ms / 1000) {
                     warnings.push("codex expired - needs refresh".to_string());
@@ -2203,7 +2213,13 @@ fn account_health(
             {
                 let at = crate::refresh::claude_refresh_rejected_at(paths, &slot.config_dir)
                     .unwrap_or_default();
-                warnings.push("claude-code refresh rejected - re-login required".to_string());
+                warnings.push(format!(
+                    "claude-code refresh rejected{} - re-login required",
+                    said(crate::refresh::claude_refresh_rejection_reason(
+                        paths,
+                        &slot.config_dir
+                    ))
+                ));
                 refresh_rejected_at_ms.insert("claude-code".to_string(), at);
             }
             "claude-code"
@@ -5366,8 +5382,9 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     &key,
                     false,
                     format!(
-                        "the login server refused its renewal - it serves only until its \
+                        "the login server refused its renewal{} - it serves only until its \
                          current token lapses; `swapdex run {}{}` signs it in again",
+                        said(crate::refresh::refusal_reason(paths, tool, &r.config_dir)),
                         r.name,
                         tool_flag(tool)
                     ),

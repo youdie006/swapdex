@@ -692,7 +692,17 @@ fn spawn_keep_alive(paths: &Paths, tool: &str) {
             );
         }
         for (name, why) in &report.failed {
-            println!("keep-alive: {}", why.remedy(name, &tool));
+            // The server's code is what tells one cause of a refusal from
+            // another, so the log keeps it next to the time it happened.
+            let reason = crate::slots::Slots::open_for(&paths, &tool)
+                .ok()
+                .and_then(|slots| slots.get(name))
+                .and_then(|slot| crate::refresh::refusal_reason(&paths, &tool, &slot.config_dir));
+            println!(
+                "keep-alive: {}{}",
+                why.remedy(name, &tool),
+                crate::commands::said(reason)
+            );
         }
         if !report.renewed.is_empty()
             || !report.native_managed.is_empty()
