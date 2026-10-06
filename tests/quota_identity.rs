@@ -202,3 +202,87 @@ fn claude_rows_name_the_plan_and_its_max_tier() {
         "ls does not name the Max tier:\n{listing}"
     );
 }
+
+/// Keep-alive renews a Claude login near its refresh token's end, so an idle
+/// account's eight-hour access token lapses between renewals while the login
+/// stays good - the proxy renews it the moment it is used. `quota` called that
+/// state "slot access expired - renewal has not completed ... sign in",
+/// which reads as the login being lost.
+#[test]
+fn an_idle_claude_slot_is_not_reported_as_a_failed_renewal() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots/idle");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        slot.join(".claude.json"),
+        serde_json::json!({"oauthAccount":{"accountUuid":"u-idle","emailAddress":"idle@example.com"}})
+            .to_string(),
+    )
+    .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let credential = serde_json::json!({"claudeAiOauth":{
+        "accessToken":"IDLE-ACCESS", "refreshToken":"IDLE-RT", "expiresAt": now_ms - 3_600_000,
+        "refreshTokenExpiresAt": now_ms + 20 * 86_400_000i64, "subscriptionType":"max"}})
+    .to_string();
+    std::fs::write(slot.join(".credentials.json"), &credential).unwrap();
+    std::fs::set_permissions(
+        slot.join(".credentials.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::json!([{
+            "name":"idle", "id":"idle", "tool":"claude-code", "adopted":false, "config_dir":slot
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let curl = root.path().join("fake-curl");
+    std::fs::write(&curl, "#!/bin/sh\nexit 91\n").unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .arg("quota")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .env("SWAPDEX_CURL", &curl)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !said.contains("renewal has not completed") && !said.contains("sign in"),
+        "an idle login was reported as a failed renewal:\n{said}"
+    );
+    assert!(
+        said.contains("renews on next use"),
+        "quota does not say the idle login is fine:\n{said}"
+    );
+
+    // The over-correction: a refresh token past its end cannot renew, and
+    // must still be reported as needing a sign-in.
+    let dead = serde_json::json!({"claudeAiOauth":{
+        "accessToken":"IDLE-ACCESS", "refreshToken":"IDLE-RT", "expiresAt": now_ms - 3_600_000,
+        "refreshTokenExpiresAt": now_ms - 60_000, "subscriptionType":"max"}})
+    .to_string();
+    std::fs::write(slot.join(".credentials.json"), &dead).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_swapdex"))
+        .arg("quota")
+        .env("SWAPDEX_ROOT", root.path())
+        .env("HOME", root.path())
+        .env("SWAPDEX_CURL", &curl)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        !said.contains("renews on next use") && said.contains("sign in"),
+        "a login past its refresh token's end was called idle:\n{said}"
+    );
+}

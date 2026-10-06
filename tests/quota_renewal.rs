@@ -284,7 +284,8 @@ fn slot_only_quota_json_reports_expired_without_oauth_or_a_credential_write() {
 
     fixture.assert_expired_read_was_read_only(&value, &credential_before);
     let detail = fixture.row(&value)["detail"].as_str().unwrap();
-    assert!(detail.contains("slot access expired"), "{detail}");
+    // Its refresh token is live: idle, not a failed renewal.
+    assert!(detail.contains("renews on next use"), "{detail}");
     assert!(!detail.contains("renewal deferred"), "{detail}");
 }
 
