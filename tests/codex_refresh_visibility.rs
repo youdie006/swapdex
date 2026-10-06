@@ -1811,3 +1811,44 @@ fn a_codex_renewal_that_could_not_be_saved_is_kept_and_adopted_next_time() {
         combined(&second)
     );
 }
+
+/// The login server says why it refused: the token was used elsewhere
+/// (`refresh_token_reused`), revoked by a newer sign-in or a sign-out
+/// (`refresh_token_invalidated`), or expired. That code is what tells one
+/// cause from another, and swapdex dropped it, so every refusal read the same.
+#[test]
+fn a_refusal_keeps_the_reason_the_server_gave() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(
+        root.path(),
+        "why",
+        "account-why",
+        "refresh-why",
+        now_secs() - 60,
+    );
+    let curl = fake_curl(root.path());
+    run_with_curl(
+        root.path(),
+        &curl,
+        &["refresh", "why"],
+        &[
+            ("FAKE_STATUS", "401"),
+            (
+                "FAKE_BODY",
+                r#"{"error":{"code":"refresh_token_reused","message":"x"}}"#,
+            ),
+        ],
+    );
+    let listing = combined(&run(root.path(), &["ls"]));
+    assert!(
+        listing.contains("refresh_token_reused"),
+        "ls does not say why the refresh was refused:\n{listing}"
+    );
+    let doctor = combined(&run(root.path(), &["doctor"]));
+    assert!(
+        doctor
+            .lines()
+            .any(|l| l.starts_with("slot:why") && l.contains("refresh_token_reused")),
+        "doctor does not say why the refresh was refused:\n{doctor}"
+    );
+}

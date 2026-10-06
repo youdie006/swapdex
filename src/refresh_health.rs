@@ -62,6 +62,10 @@ struct StatusToWrite<'a> {
     provider: &'static str,
     rejected_at_ms: i64,
     credential_fingerprint: &'a str,
+    /// The OAuth code the server gave, when it was one of the re-login codes:
+    /// it is what tells "used elsewhere" from "revoked" from "expired".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +76,8 @@ struct StoredStatus {
     provider: String,
     rejected_at_ms: i64,
     credential_fingerprint: String,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Return a stable, non-secret digest of the Codex refresh credential in
@@ -128,6 +134,16 @@ pub fn codex_credential_fingerprint_from_blob(blob: &[u8]) -> Option<String> {
 /// successful no-op: a failed request using an old token must not mark a newer
 /// login as rejected.
 pub fn record_codex_rejection(dir: &Path, expected_fingerprint: &str, now_ms: i64) -> Result<()> {
+    record_codex_rejection_because(dir, expected_fingerprint, now_ms, None)
+}
+
+/// [`record_codex_rejection`], keeping the code the server gave.
+pub fn record_codex_rejection_because(
+    dir: &Path,
+    expected_fingerprint: &str,
+    now_ms: i64,
+    reason: Option<&str>,
+) -> Result<()> {
     let Some(_lock) =
         lock_directory(dir).map_err(|_| anyhow!("could not persist Codex refresh rejection"))?
     else {
@@ -153,6 +169,7 @@ pub fn record_codex_rejection(dir: &Path, expected_fingerprint: &str, now_ms: i6
         provider: PROVIDER,
         rejected_at_ms,
         credential_fingerprint: expected_fingerprint,
+        reason,
     };
     let bytes = serde_json::to_vec_pretty(&status)
         .map_err(|_| anyhow!("could not persist Codex refresh rejection"))?;
@@ -168,6 +185,14 @@ pub fn record_codex_rejection(dir: &Path, expected_fingerprint: &str, now_ms: i6
 pub fn codex_rejection(dir: &Path) -> Option<i64> {
     let current = codex_credential_fingerprint(dir)?;
     codex_rejection_for_fingerprint(dir, &current)
+}
+
+/// The code the server gave when it refused the current Codex refresh token.
+pub fn codex_rejection_reason(dir: &Path) -> Option<String> {
+    let current = codex_credential_fingerprint(dir)?;
+    read_status(dir)
+        .filter(|status| status.credential_fingerprint == current)
+        .and_then(|status| status.reason)
 }
 
 /// Read rejection evidence for a credential snapshot already held by a caller.
@@ -265,6 +290,16 @@ pub fn claude_refresh_fingerprint(blob: &[u8]) -> Option<String> {
 /// token. The caller holds the credential it sent, so the verdict is bound to
 /// that token and to no later login.
 pub fn record_claude_rejection(dir: &Path, fingerprint: &str, now_ms: i64) -> Result<()> {
+    record_claude_rejection_because(dir, fingerprint, now_ms, None)
+}
+
+/// [`record_claude_rejection`], keeping the code the server gave.
+pub fn record_claude_rejection_because(
+    dir: &Path,
+    fingerprint: &str,
+    now_ms: i64,
+    reason: Option<&str>,
+) -> Result<()> {
     let Some(_lock) =
         lock_directory(dir).map_err(|_| anyhow!("could not persist Claude refresh rejection"))?
     else {
@@ -276,6 +311,7 @@ pub fn record_claude_rejection(dir: &Path, fingerprint: &str, now_ms: i64) -> Re
         provider: CLAUDE_PROVIDER,
         rejected_at_ms: now_ms,
         credential_fingerprint: fingerprint,
+        reason,
     };
     let bytes = serde_json::to_vec_pretty(&status)
         .map_err(|_| anyhow!("could not persist Claude refresh rejection"))?;
@@ -293,6 +329,15 @@ pub fn claude_rejection(dir: &Path, fingerprint: &str) -> Option<i64> {
         && status.provider == CLAUDE_PROVIDER
         && status.credential_fingerprint == fingerprint)
         .then_some(status.rejected_at_ms)
+}
+
+/// The code the server gave when it refused this exact Claude refresh token.
+pub fn claude_rejection_reason(dir: &Path, fingerprint: &str) -> Option<String> {
+    let bytes = read_bounded_regular(&dir.join(CLAUDE_STATUS_FILE), MAX_STATUS_BYTES)?;
+    let status: StoredStatus = serde_json::from_slice(&bytes).ok()?;
+    (status.provider == CLAUDE_PROVIDER && status.credential_fingerprint == fingerprint)
+        .then_some(status.reason)
+        .flatten()
 }
 
 fn read_status(dir: &Path) -> Option<StoredStatus> {

@@ -1199,7 +1199,12 @@ fn refresh_slot_inner(
                 // clears it without anyone deleting the record.
                 if let Some(fp) = crate::refresh_health::claude_refresh_fingerprint(current.bytes())
                 {
-                    let _ = crate::refresh_health::record_claude_rejection(dir, &fp, now_ms);
+                    let _ = crate::refresh_health::record_claude_rejection_because(
+                        dir,
+                        &fp,
+                        now_ms,
+                        relogin_code(&body),
+                    );
                 }
                 return Attempt::after_exchange(Err(RefreshError::Refused(short_reason(&body))));
             }
@@ -1793,8 +1798,12 @@ fn refresh_codex_slot_inner(
                 return Attempt::after_exchange(Err(RefreshError::Busy));
             }
             if status == 401 || (matches!(status, 400 | 403) && is_relogin_error(&body)) {
-                let _ =
-                    crate::refresh_health::record_codex_rejection(dir, &health_fingerprint, now_ms);
+                let _ = crate::refresh_health::record_codex_rejection_because(
+                    dir,
+                    &health_fingerprint,
+                    now_ms,
+                    relogin_code(&body),
+                );
                 return Attempt::after_exchange(Err(RefreshError::Expired));
             }
             if !(200..300).contains(&status) {
@@ -1856,6 +1865,11 @@ fn refresh_codex_slot_inner(
 /// the same 400 - says nothing about the login, and a wrong verdict stops the
 /// sweep from renewing a login that was fine.
 fn is_relogin_error(body: &str) -> bool {
+    relogin_code(body).is_some()
+}
+
+/// The re-login code in this body, if it names one.
+fn relogin_code(body: &str) -> Option<&'static str> {
     const RELOGIN: [&str; 7] = [
         "invalid_grant",
         "refresh_token_reused",
@@ -1865,12 +1879,12 @@ fn is_relogin_error(body: &str) -> bool {
         "token_expired",
         "revoked",
     ];
-    serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
-        [&v["error"], &v["error"]["code"], &v["code"]]
-            .into_iter()
-            .filter_map(serde_json::Value::as_str)
-            .any(|code| RELOGIN.contains(&code))
-    })
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let code = [&v["error"], &v["error"]["code"], &v["code"]]
+        .into_iter()
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|code| RELOGIN.iter().copied().find(|known| *known == code));
+    code
 }
 
 /// How long a recorded refusal keeps the sweep away. A day, not forever: a
@@ -2011,6 +2025,24 @@ pub const KEEP_ALIVE_REFRESH_WINDOW_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 
 /// When the login server refused this Claude slot's current refresh token, if
 /// it did. Read from the same credential the renewal path would send.
+/// The code the server gave for a refused renewal of this slot, where swapdex
+/// recorded it: "used elsewhere" and "revoked" have different causes.
+pub(crate) fn refusal_reason(paths: &Paths, tool: &str, dir: &Path) -> Option<String> {
+    match tool {
+        "codex" => crate::refresh_health::codex_rejection_reason(dir),
+        "claude-code" => claude_refresh_rejection_reason(paths, dir),
+        _ => None,
+    }
+}
+
+/// The code the server gave when it refused this Claude slot's current token.
+pub(crate) fn claude_refresh_rejection_reason(paths: &Paths, dir: &Path) -> Option<String> {
+    let authority = crate::claude_authority::resolve(paths, dir).ok()?;
+    let credential = authority.read(paths).ok()?;
+    let fingerprint = crate::refresh_health::claude_refresh_fingerprint(credential.bytes())?;
+    crate::refresh_health::claude_rejection_reason(dir, &fingerprint)
+}
+
 pub(crate) fn claude_refresh_rejected_at(paths: &Paths, dir: &Path) -> Option<i64> {
     let authority = crate::claude_authority::resolve(paths, dir).ok()?;
     let credential = authority.read(paths).ok()?;

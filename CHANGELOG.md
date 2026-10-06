@@ -6,6 +6,14 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **A refused renewal says why.** The login server names its reason -
+  `refresh_token_reused` (used elsewhere), `refresh_token_invalidated`
+  (revoked by a newer sign-in or a sign-out), `refresh_token_expired` - and
+  that code is what tells one cause from another. swapdex dropped it, so
+  every refusal read the same and the cause of repeated Codex refusals could
+  not be told apart. It is now recorded with the refusal and shown by `ls`
+  (`codex refresh rejected (refresh_token_reused) - re-login required`),
+  `doctor`, and the keep-alive log line, for Codex and Claude.
 - **Codex session repair no longer fails on a lock held for a moment.** A
   process forked while repair's lock file was open keeps a copy of it until
   it execs, so a repair right after another one could report "another Codex

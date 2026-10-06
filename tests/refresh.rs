@@ -1013,8 +1013,8 @@ fn a_refused_claude_refresh_is_recorded_shown_and_not_swept_again() {
     assert_eq!(asked.lock().unwrap().len(), 1, "{said}");
     let listing = swapdex(&["ls"]);
     assert!(
-        listing.contains("refresh rejected - re-login required"),
-        "the refusal is not shown:\n{listing}"
+        listing.contains("claude-code refresh rejected (invalid_grant) - re-login required"),
+        "the refusal and its reason are not shown:\n{listing}"
     );
     let said = swapdex(&["refresh", "--keep-alive"]);
     assert_eq!(
