@@ -6788,3 +6788,166 @@ fn an_idle_account_that_is_chosen_is_renewed_before_it_serves() {
         "a lapsed token was sent upstream: {seen:?}"
     );
 }
+
+/// `start_codex_proxy` with both extra arguments and environment.
+fn start_codex_proxy_with(
+    root: &std::path::Path,
+    upstream: &str,
+    extra: &[&str],
+    envs: &[(&str, &str)],
+) -> (std::process::Child, u16) {
+    let mut args = vec!["proxy", "--port", "0", "--tool", "codex"];
+    args.extend_from_slice(extra);
+    let mut child = Command::new(bin())
+        .args(&args)
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_UPSTREAM_CODEX", upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .envs(envs.iter().copied())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.stdout.as_mut().unwrap();
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while out.read(&mut b).unwrap_or(0) == 1 {
+        if b[0] == b'\n' {
+            break;
+        }
+        line.push(b[0]);
+    }
+    let line = String::from_utf8_lossy(&line).to_string();
+    let port = parse_port(&line).unwrap_or_else(|| {
+        child.kill().ok();
+        child.wait().ok();
+        panic!("proxy did not announce a port: {line}")
+    });
+    (child, port)
+}
+
+/// The Codex half of `choosing_the_next_account_does_not_renew_the_others`:
+/// the candidate check renewed every Codex slot whose access token had
+/// lapsed, chosen or not, even one paused out of rotation. The serving path
+/// renews the slot it uses before forwarding.
+#[test]
+fn choosing_the_next_codex_account_does_not_renew_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "a", "codex-a-id", "AT-A", "acct-a", true);
+    seed_codex_slot(root.path(), "b", "codex-b-id", "AT-B", "acct-b", false);
+    seed_codex_slot(
+        root.path(),
+        "cold",
+        "codex-cold-id",
+        CODEX_JWT_LAPSED,
+        "acct-cold",
+        false,
+    );
+    let cold_auth = root
+        .path()
+        .join(".local/share/swapdex/slots/codex-cold-id/auth.json");
+    let auth = std::fs::read_to_string(&cold_auth)
+        .unwrap()
+        .replace("\"RT\"", "\"RT-COLD\"");
+    std::fs::write(&cold_auth, auth).unwrap();
+    std::fs::write(
+        root.path().join(".local/share/swapdex/settings.json"),
+        br#"{"disabled":["cold"]}"#,
+    )
+    .unwrap();
+    let attempts = root.path().join("cold-renewals");
+    let curl = root.path().join("fakebin/curl");
+    std::fs::create_dir_all(curl.parent().unwrap()).unwrap();
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *RT-COLD*) printf x >> '{}';\n    printf '{{\"access_token\":\"{CODEX_JWT_LIVE}\",\"refresh_token\":\"RT-COLD-2\"}}\\n200' ;;\n  *) exit 7 ;;\nesac\n",
+            attempts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(Arc::clone(&seen), "AT-A", 429);
+    let (proxy, port) = start_codex_proxy_with(
+        root.path(),
+        &upstream,
+        &["--auto"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(proxy);
+    post_codex_turn(port);
+    proxy.stop();
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|(auth, _)| auth == "Bearer AT-B"),
+        "the refused turn moved to b: {seen:?}"
+    );
+    let renewed = std::fs::read(&attempts).unwrap_or_default().len();
+    assert_eq!(
+        renewed, 0,
+        "a Codex account that was not chosen had its login renewed {renewed} time(s)"
+    );
+}
+
+/// The over-correction: a lapsed Codex slot is still a candidate, and when it
+/// is the one chosen it is renewed before its turn goes out.
+#[test]
+fn an_idle_codex_account_that_is_chosen_is_renewed_before_it_serves() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(root.path(), "a", "codex-a-id", "AT-A", "acct-a", true);
+    seed_codex_slot(
+        root.path(),
+        "cold",
+        "codex-cold-id",
+        CODEX_JWT_LAPSED,
+        "acct-cold",
+        false,
+    );
+    let cold_auth = root
+        .path()
+        .join(".local/share/swapdex/slots/codex-cold-id/auth.json");
+    let auth = std::fs::read_to_string(&cold_auth)
+        .unwrap()
+        .replace("\"RT\"", "\"RT-COLD\"");
+    std::fs::write(&cold_auth, auth).unwrap();
+    let attempts = root.path().join("cold-renewals");
+    let curl = root.path().join("fakebin/curl");
+    std::fs::create_dir_all(curl.parent().unwrap()).unwrap();
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *RT-COLD*) printf x >> '{}';\n    printf '{{\"access_token\":\"{CODEX_JWT_LIVE}\",\"refresh_token\":\"RT-COLD-2\"}}\\n200' ;;\n  *) exit 7 ;;\nesac\n",
+            attempts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(Arc::clone(&seen), "AT-A", 429);
+    let (proxy, port) = start_codex_proxy_with(
+        root.path(),
+        &upstream,
+        &["--auto"],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(proxy);
+    post_codex_turn(port);
+    proxy.stop();
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|(auth, _)| auth == &format!("Bearer {CODEX_JWT_LIVE}")),
+        "the idle account was chosen but did not serve on a renewed token: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|(auth, _)| auth == &format!("Bearer {CODEX_JWT_LAPSED}")),
+        "a lapsed token was sent upstream: {seen:?}"
+    );
+}

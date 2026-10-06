@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Looking for another Codex account no longer renews the others.** 0.167.11
+  stopped the proxy's account check from renewing every idle Claude login;
+  the Codex half did the same for every Codex slot whose access token had
+  lapsed, chosen or not, even one paused out of rotation. A lapsed Codex
+  login with a refresh token that was not refused now counts as usable, and
+  only the slot that serves the turn is renewed, just before it goes out.
+
 ## 0.167.11
 
 - **Looking for another account no longer renews every idle Claude login.**
