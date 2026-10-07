@@ -8,6 +8,7 @@
   "files": [
     "README.md",
     "bin/swapdex.js",
+    "bin/run.js",
     "bin/exit.js",
     "man/swapdex.1"
   ],

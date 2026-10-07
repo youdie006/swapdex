@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Stopping the npm-installed command stops swapdex.** The npm launcher ran
+  the binary with a blocking call that cannot pass a signal on, so a SIGTERM
+  or SIGHUP to the `swapdex` command - from a process manager or `kill` -
+  ended only the launcher. The binary kept running with no parent: a
+  `swapdex proxy` started that way kept its port, so the next start failed.
+  The launcher now forwards SIGINT, SIGTERM and SIGHUP to the binary and
+  exits with its status once it has stopped. The installed shims call the
+  binary directly and were not affected.
+
 ## 0.167.12
 
 - **Looking for another Codex account no longer renews the others.** 0.167.11
