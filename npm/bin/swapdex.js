@@ -5,8 +5,7 @@
 // machine (the esbuild / @biomejs distribution pattern), so nothing runs at
 // install time and there is no allow-scripts prompt.
 
-const { spawnSync } = require("child_process");
-const { describeExit } = require("./exit.js");
+const { run } = require("./run.js");
 
 // swapdex is a Unix tool (Linux, WSL, macOS) - it manages 0600 credential files.
 const PKGS = {
@@ -39,14 +38,4 @@ if (!bin) {
   process.exit(1);
 }
 
-const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
-if (result.error) {
-  console.error(
-    `swapdex: failed to run the prebuilt binary (${result.error.message}). ` +
-      "Try `cargo install swapdex`."
-  );
-  process.exit(1);
-}
-const { code, note } = describeExit(result);
-if (note) console.error(note);
-process.exit(code);
+run(bin, process.argv.slice(2));
