@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.13
 
 - **Stopping the npm-installed command stops swapdex.** The npm launcher ran
   the binary with a blocking call that cannot pass a signal on, so a SIGTERM
