@@ -342,7 +342,13 @@ fn codex_slot_identity_outranks_same_provider_snapshot_copy() {
 fn ls_uses_slot_identity_and_reports_a_conflicting_snapshot_in_json() {
     let t = fixture();
     seed_codex_snapshot(t.path(), "shared", "old-copy@example.com");
-    seed_codex_slot(t.path(), "shared", "live-slot@example.com");
+    let slot = seed_codex_slot(t.path(), "shared", "live-slot@example.com");
+    // A plan the saved copy does not have, so its own and a borrowed one differ.
+    let auth = slot.join("auth.json");
+    let mut login: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&auth).unwrap()).unwrap();
+    login["auth_mode"] = "apikey".into();
+    std::fs::write(&auth, serde_json::to_vec(&login).unwrap()).unwrap();
     let output = Command::new(bin())
         .args(["ls", "--json"])
         .env("SWAPDEX_ROOT", t.path())
@@ -359,9 +365,9 @@ fn ls_uses_slot_identity_and_reports_a_conflicting_snapshot_in_json() {
             .is_some_and(|w| w.contains("different accounts")),
         "JSON must expose the profile/slot conflict: {row}"
     );
-    assert!(
-        row["tier"].is_null(),
-        "cannot borrow the other account's tier: {row}"
+    assert_eq!(
+        row["tier"], "apikey",
+        "the slot's own plan, not the other account's: {row}"
     );
 }
 
