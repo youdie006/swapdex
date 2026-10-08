@@ -6,6 +6,16 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Codex rows name the ChatGPT plan, the same one `quota` shows.** `ls`,
+  `status` and `doctor` printed `[chatgpt]` - the kind of login, not its plan -
+  while `quota` printed `[pro]` for the same account. The plan is now read
+  from the login's own id token, and `chatgpt` is shown only when the token
+  names no plan.
+- **`quota` prints a Codex credit balance without its trailing zeros.** The
+  usage endpoint sends a fixed-scale decimal, and `quota` printed
+  `credits: 62500.0000000000`; it now prints `credits: 62500`. The value is
+  trimmed as text, so nothing is rounded.
+
 - **`status`, `doctor`, `use` and `add` name the same plan as `ls`.** 0.167.8
   taught `ls` and `quota` which Max a Claude login holds, but the other
   screens kept printing the bare `max`, and `status` showed no plan at all

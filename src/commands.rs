@@ -10579,7 +10579,10 @@ fn codex_quota_lines(a: &crate::codex_usage::Account, now: i64) -> Vec<String> {
                 "credits: spend limit reached - a full window is the end until it is raised".into()
             }
             _ if c.has_credits => match &c.balance {
-                Some(b) => format!("credits: {b} - a full window is not the end"),
+                Some(b) => format!(
+                    "credits: {} - a full window is not the end",
+                    crate::codex_usage::plain_balance(b)
+                ),
                 None => "credits available - a full window is not the end".into(),
             },
             _ => "no credits - a full window is the end of this account".to_string(),
@@ -11606,6 +11609,29 @@ mod tests {
         // Nothing wrong: nothing said.
         assert_eq!(stale_marker(&[("claude-code", None)]), None);
         assert_eq!(stale_marker(&[]), None);
+    }
+
+    #[test]
+    fn the_codex_report_prints_a_balance_without_its_scale() {
+        let a = crate::codex_usage::Account {
+            email: None,
+            plan: Some("pro".into()),
+            limits: crate::codex_limits::Limits {
+                short: None,
+                long: None,
+                observed_at: None,
+            },
+            scoped: vec![],
+            credits: Some(crate::codex_usage::Credits {
+                has_credits: true,
+                unlimited: false,
+                overage_limit_reached: false,
+                balance: Some("62500.0000000000".into()),
+            }),
+            refused: None,
+        };
+        let out = codex_quota_lines(&a, 1_786_600_000).join("\n");
+        assert!(out.contains("credits: 62500 - "), "{out}");
     }
 
     /// Everything the endpoint says that a one-line row has no room for: the
