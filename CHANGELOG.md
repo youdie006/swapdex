@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.14
 
 - **Codex rows name the ChatGPT plan, the same one `quota` shows.** `ls`,
   `status` and `doctor` printed `[chatgpt]` - the kind of login, not its plan -
