@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The proxy log records what Codex usage reads answered.** A Codex window
+  shows the usage the backend returns through the proxy, but the log kept
+  only the status code, so a number that stayed stale for hours after a
+  limit reset could not be traced to the backend or to the window. The proxy
+  now logs one line per account when the reported percentage or reset time
+  changes, for example `work: usage 7d 95% left, resets ... (was 7d 5% left,
+  ...)`. Repeated identical readings are not logged, and the window still
+  receives the backend's response unchanged.
+
 ## 0.167.13
 
 - **Stopping the npm-installed command stops swapdex.** The npm launcher ran

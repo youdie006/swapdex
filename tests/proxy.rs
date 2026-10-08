@@ -6951,3 +6951,123 @@ fn an_idle_codex_account_that_is_chosen_is_renewed_before_it_serves() {
         "a lapsed token was sent upstream: {seen:?}"
     );
 }
+
+/// The usage a Codex window shows is the answer to its usage read, which the
+/// proxy forwarded without keeping any of it. After a limit reset the
+/// windows read the old number for hours, and the journal could not say
+/// whether the backend had answered stale or a window had read elsewhere: it
+/// held "200" and nothing else. Each change of an account's usage is now one
+/// line - the first reading and every change, never a repeat - and the
+/// window still receives the backend's body byte for byte.
+#[test]
+fn a_change_in_codex_usage_is_logged_once() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    let body = |used: u32, reset_at: i64| {
+        format!(
+            r#"{{"plan_type":"pro","rate_limit":{{"allowed":true,"limit_reached":false,"primary_window":{{"used_percent":{used},"limit_window_seconds":604800,"reset_after_seconds":100,"reset_at":{reset_at}}},"secondary_window":null}}}}"#
+        )
+    };
+    let answers = vec![
+        body(95, 4_102_444_800),
+        body(95, 4_102_444_800),
+        body(5, 4_103_049_600),
+    ];
+    let served = Arc::new(Mutex::new(answers.clone()));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let upstream = format!(
+        "http://127.0.0.1:{}",
+        server.server_addr().to_ip().unwrap().port()
+    );
+    let next = served.clone();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            let text = {
+                let mut q = next.lock().unwrap();
+                if q.is_empty() {
+                    "{}".to_string()
+                } else {
+                    q.remove(0)
+                }
+            };
+            let _ = rq.respond(tiny_http::Response::from_string(text));
+        }
+    });
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM_CODEX", &upstream)
+        .env("SWAPDEX_CODEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let out = child.stdout.as_mut().unwrap();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 && b[0] != b'\n' {}
+    }
+    let usage = Command::new(bin())
+        .args(["proxy", "--usage-port", "--tool", "codex"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let usage_port: u16 = String::from_utf8_lossy(&usage.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("no usage port: {usage:?}"));
+    let ca = std::fs::read(root.path().join(".local/share/swapdex/codex-tls/ca.pem")).unwrap();
+    let ca = ureq::tls::Certificate::from_pem(&ca).unwrap();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&[ca]))
+                .build(),
+        )
+        .build()
+        .into();
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        let mut resp = agent
+            .get(format!(
+                "https://127.0.0.1:{usage_port}/backend-api/wham/usage"
+            ))
+            .header("authorization", "Bearer CLIENT-TOKEN")
+            .header("chatgpt-account-id", "acct-client")
+            .call()
+            .unwrap();
+        received.push(resp.body_mut().read_to_string().unwrap());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    child.kill().ok();
+    let mut log = String::new();
+    child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
+    child.wait().ok();
+
+    assert_eq!(
+        received, answers,
+        "the window must get the backend's body unchanged"
+    );
+    let usage_lines: Vec<&str> = log.lines().filter(|l| l.contains("work: usage")).collect();
+    assert_eq!(
+        usage_lines.len(),
+        2,
+        "first reading and the change, no repeat:\n{log}"
+    );
+    assert!(usage_lines[0].contains("7d 5% left"), "{}", usage_lines[0]);
+    assert!(
+        usage_lines[1].contains("7d 95% left") && usage_lines[1].contains("was 7d 5% left"),
+        "{}",
+        usage_lines[1]
+    );
+}
