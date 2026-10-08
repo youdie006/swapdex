@@ -1261,9 +1261,7 @@ impl AuthTool for Claude {
         let creds: Value = serde_json::from_slice(&cred_bytes)
             .context("the Claude credential is not valid JSON")?;
         let expires_at = creds["claudeAiOauth"]["expiresAt"].as_i64();
-        let tier = creds["claudeAiOauth"]["subscriptionType"]
-            .as_str()
-            .map(|s| s.to_string());
+        let tier = plan_label(&cred_bytes);
         let cfg_path = paths.claude_config_json();
         let cfg: Value = if cfg_path.exists() {
             crate::atomic::read_regular(&cfg_path)
