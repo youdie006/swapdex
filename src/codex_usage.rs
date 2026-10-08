@@ -50,6 +50,16 @@ pub struct Credits {
     pub balance: Option<String>,
 }
 
+/// A balance as a person reads it: the endpoint's decimal string without the
+/// trailing zeros of its fixed scale. Trimmed as text, so nothing is rounded.
+pub fn plain_balance(balance: &str) -> &str {
+    match balance.split_once('.') {
+        Some((whole, _)) if balance.trim_end_matches('0').ends_with('.') => whole,
+        Some(_) => balance.trim_end_matches('0'),
+        None => balance,
+    }
+}
+
 /// One window, converted to swapdex's units.
 ///
 /// The response measures a window in SECONDS and every other window in swapdex
@@ -493,6 +503,22 @@ fn workspace_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::plain_balance;
+
+    /// The endpoint sends `"62500.0000000000"`; `quota` printed all ten zeros.
+    #[test]
+    fn a_balance_is_printed_without_trailing_zeros() {
+        assert_eq!(plain_balance("62500.0000000000"), "62500");
+        assert_eq!(plain_balance("12.5000"), "12.5");
+        assert_eq!(plain_balance("0.000"), "0");
+        assert_eq!(plain_balance("100"), "100");
+        assert_eq!(
+            plain_balance("1050"),
+            "1050",
+            "zeros before any point are digits"
+        );
+    }
+
     use super::*;
 
     /// A recorded response, with the identifiers replaced. Every field this

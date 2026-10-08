@@ -52,7 +52,8 @@ impl AuthTool for Codex {
             account_id,
             display: email.clone().unwrap_or_else(|| "codex account".into()),
             email,
-            tier: v["auth_mode"].as_str().map(|s| s.to_string()),
+            tier: decode_plan_from_id_token(v["tokens"]["id_token"].as_str())
+                .or_else(|| v["auth_mode"].as_str().map(|s| s.to_string())),
             // The access token is a JWT and its `exp` claim says when it
             // lapses. Reporting None here is what left `swapdex status` silent
             // beside a Codex login that had been dead for three days. `exp` is
@@ -92,6 +93,20 @@ pub(crate) fn decode_email_from_id_token(id_token: Option<&str>) -> Option<Strin
     let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
     let v: Value = serde_json::from_slice(&json).ok()?;
     v["email"].as_str().map(|s| s.to_string())
+}
+
+/// The ChatGPT plan (`pro`, `plus`, ...) the id_token names, which is what
+/// the usage endpoint reports too. `auth_mode` says only that it is a ChatGPT
+/// login.
+fn decode_plan_from_id_token(id_token: Option<&str>) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let payload = id_token?.split('.').nth(1)?;
+    let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let v: Value = serde_json::from_slice(&json).ok()?;
+    v["https://api.openai.com/auth"]["chatgpt_plan_type"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -178,5 +193,37 @@ mod tests {
         assert_eq!(id.account_id, "acct-123");
         assert_eq!(id.tool, "codex");
         assert_eq!(id.email.as_deref(), Some("a@b.com"));
+    }
+
+    /// The id_token names the plan (`pro`, `plus`, ...); `auth_mode` only says
+    /// the login is a ChatGPT one. `quota` printed `[pro]` beside the `[chatgpt]`
+    /// that `ls` and `status` showed for the same account.
+    #[test]
+    fn identity_names_the_plan_the_id_token_carries() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let tier = |claims: serde_json::Value| {
+            let t = tempfile::tempdir().unwrap();
+            let p = Paths::rooted(t.path());
+            seed_codex(&p, "acct");
+            let mut body: Value =
+                serde_json::from_slice(&std::fs::read(p.codex_auth()).unwrap()).unwrap();
+            body["tokens"]["id_token"] = format!(
+                "hdr.{}.sig",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+            )
+            .into();
+            std::fs::write(p.codex_auth(), serde_json::to_vec(&body).unwrap()).unwrap();
+            Codex.identity(&p).unwrap().unwrap().tier
+        };
+        assert_eq!(
+            tier(serde_json::json!({"email": "a@b.com",
+                "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}})),
+            Some("pro".into())
+        );
+        assert_eq!(
+            tier(serde_json::json!({"email": "a@b.com"})),
+            Some("chatgpt".into()),
+            "without a plan claim the login kind is still something to show"
+        );
     }
 }
