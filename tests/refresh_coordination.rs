@@ -288,6 +288,19 @@ fn wait_for(path: &Path) {
     assert!(path.exists(), "fixture never reached {}", path.display());
 }
 
+/// Until a refresh has claimed its account, which it does after reading the
+/// credential and before taking Claude's native lock.
+fn wait_for_claim(claims: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read_dir(claims).map_or(true, |mut d| d.next().is_none()) {
+        assert!(
+            Instant::now() < deadline,
+            "the refresh never claimed the account"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn calls(root: &Path) -> usize {
     std::fs::read(root.join("refresh-count"))
         .map(|bytes| bytes.len())
@@ -855,8 +868,12 @@ fn native_refresh_lock_blocks_oauth_until_it_is_released() {
     std::fs::create_dir(&native_lock).unwrap();
 
     let worker_slot = slot.clone();
+    let claims = paths.store_dir().join(".refresh-locks");
     let refresh = std::thread::spawn(move || refresh_slot(&paths, &worker_slot, now_ms()));
-    std::thread::sleep(Duration::from_millis(150));
+    wait_for_claim(&claims);
+    // Long enough for the worker to reach the native lock after its process
+    // scan, which alone took 185ms on a busy machine.
+    std::thread::sleep(Duration::from_millis(1000));
     assert_eq!(calls(root.path()), 0, "OAuth bypassed Claude's native lock");
     std::fs::remove_dir(&native_lock).unwrap();
     assert_eq!(refresh.join().unwrap(), Ok(RefreshOutcome::Renewed));
@@ -875,8 +892,12 @@ fn changed_credential_under_native_lock_is_never_exchanged() {
     std::fs::create_dir(&native_lock).unwrap();
 
     let worker_slot = slot.clone();
+    let claims = paths.store_dir().join(".refresh-locks");
     let refresh = std::thread::spawn(move || refresh_slot(&paths, &worker_slot, now_ms()));
-    std::thread::sleep(Duration::from_millis(150));
+    // The claim file appears after the worker has read the credential, so the
+    // change below lands between that read and the native lock. A fixed sleep
+    // did not: on a machine with many processes the worker had not read yet.
+    wait_for_claim(&claims);
     let replacement = br#"{"claudeAiOauth":{"accessToken":"LOGIN-AT","refreshToken":"LOGIN-RT","expiresAt":9999999999999}}"#;
     std::fs::write(slot.join(".credentials.json"), replacement).unwrap();
     std::fs::remove_dir(&native_lock).unwrap();
