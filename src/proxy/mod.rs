@@ -127,6 +127,9 @@ struct Shared {
     /// here, so the first arrival is worth seeing - and its absence stays
     /// visible as the line never appearing.
     codex_headers_seen: std::sync::atomic::AtomicBool,
+    /// The last usage line logged per Codex account, so a change is logged
+    /// once and a repeat not at all.
+    codex_usage_seen: Mutex<HashMap<String, String>>,
     /// The last redirection announced, so a `serve` pointer stuck on a benched
     /// account does not print the same sentence on every turn.
     benched_note: Mutex<Option<(String, String)>>,
@@ -1369,6 +1372,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
     let server = Arc::new(server);
     let sh = Arc::new(Shared {
         codex_headers_seen: std::sync::atomic::AtomicBool::new(false),
+        codex_usage_seen: Mutex::new(HashMap::new()),
         refused_at: Mutex::new(HashMap::new()),
         ok_at: Mutex::new(HashMap::new()),
         replaced_at: Mutex::new(HashMap::new()),
@@ -1693,6 +1697,54 @@ fn codex_refresh_token_present(dir: &std::path::Path) -> bool {
                 .as_str()
                 .is_some_and(|t| !t.is_empty())
         })
+}
+
+/// Log what a Codex usage read answered for `name`, when it differs from the
+/// last answer logged. The window shows exactly this body, so when its number
+/// looks stale the journal can now say whether the backend answered it.
+/// The body is read up to a bound, then handed on whole and unchanged.
+fn note_codex_usage(sh: &Shared, name: &str, up: &mut upstream::Upstream) {
+    let mut head = Vec::new();
+    let mut rest = std::mem::replace(&mut up.reader, Box::new(std::io::empty()));
+    let _ = std::io::Read::read_to_end(&mut std::io::Read::take(&mut rest, 64 * 1024), &mut head);
+    let text = String::from_utf8_lossy(&head).into_owned();
+    up.reader = Box::new(std::io::Read::chain(std::io::Cursor::new(head), rest));
+    let Some(account) = crate::codex_usage::parse(&text) else {
+        return;
+    };
+    let (now, tz) = (now_secs(), tz_offset());
+    let line = [&account.limits.short, &account.limits.long]
+        .into_iter()
+        .flatten()
+        .map(|w| {
+            let label = match w.window_minutes {
+                300 => "5h".to_string(),
+                10080 => "7d".to_string(),
+                m => format!("{m}m"),
+            };
+            pick::window_left(
+                &label,
+                w.used_pct,
+                w.resets_at.map(|at| pick::reset_clock(at, now, tz)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if line.is_empty() {
+        return;
+    }
+    let was = {
+        let mut seen = sh.codex_usage_seen.held();
+        if seen.get(name) == Some(&line) {
+            return;
+        }
+        seen.insert(name.to_string(), line.clone())
+    };
+    match was {
+        Some(was) => println!("  {name}: usage {line} (was {was})"),
+        None => println!("  {name}: usage {line}"),
+    }
+    std::io::stdout().flush().ok();
 }
 
 /// Unix seconds, for the rate-limit resets the API reports in that unit.
@@ -2449,6 +2501,9 @@ fn forward_turn(
                     slot.name
                 );
                 std::io::stdout().flush().ok();
+            }
+            if codex::is_usage_read(&path) && up.status == 200 {
+                note_codex_usage(sh, &slot.name, &mut up);
             }
             // A 429 wears two meanings, exactly as it does on the Claude side. A
             // THROTTLE ("slow down", x-should-retry) is fixed by waiting and
