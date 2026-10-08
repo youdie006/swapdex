@@ -5203,3 +5203,60 @@ fn doctor_reports_a_slot_registry_that_will_not_parse() {
     );
     assert_ne!(code, 0, "doctor exited 0 with a damaged registry:\n{said}");
 }
+
+/// `ls` and `status` name the same plan for the same account.
+///
+/// `ls` read which Max a Claude slot holds and that a Codex slot is a ChatGPT
+/// login; `status` said `max` for the first and nothing for the second, and
+/// `doctor`, `use` and `add` printed the bare `max` too.
+#[test]
+fn status_and_ls_name_the_same_plan() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "work", "work@example.com");
+    let twenty_x = serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+        "accessToken":"AT","refreshToken":"RT","expiresAt":9999999999999i64,
+        "subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}))
+    .unwrap();
+    let slot_creds = root.join(".local/share/swapdex/slots/work/.credentials.json");
+    std::fs::write(&slot_creds, &twenty_x).unwrap();
+    seed_codex_slot(root, "cx", "cx@example.com");
+    for (name, tool) in [("work", "claude"), ("cx", "codex")] {
+        let (_, err, code) = run(root, &["use", name, "--tool", tool]);
+        assert_eq!(code, 0, "use {name} failed: {err}");
+    }
+
+    let (ls, _, _) = run(root, &["ls", "--json"]);
+    let ls: serde_json::Value = serde_json::from_str(&ls).unwrap();
+    let (st, _, _) = run(root, &["status", "--json"]);
+    let st: serde_json::Value = serde_json::from_str(&st).unwrap();
+    for (name, tool) in [("work", "claude-code"), ("cx", "codex")] {
+        let listed = ls
+            .as_array()
+            .and_then(|a| a.iter().find(|r| r["name"] == name))
+            .map(|r| r["tier"].clone())
+            .unwrap_or_else(|| panic!("no ls row for {name}: {ls}"));
+        let stated = st
+            .as_array()
+            .and_then(|a| a.iter().find(|r| r["tool"] == tool))
+            .map(|r| r["tier"].clone())
+            .unwrap_or_else(|| panic!("no status row for {tool}: {st}"));
+        assert!(listed.is_string(), "ls names no plan for {name}: {ls}");
+        assert_eq!(stated, listed, "status and ls disagree on {name}'s plan");
+    }
+    let (text, _, _) = run(root, &["status"]);
+    assert!(text.contains("[max 20x]"), "status text: {text}");
+    assert!(text.contains("[chatgpt]"), "status text: {text}");
+
+    // With no slot selected, `doctor` reads the tool's own login.
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-live", "live@example.com");
+    std::fs::write(root.join(".claude/.credentials.json"), &twenty_x).unwrap();
+    let (doctor, _, _) = run(root, &["doctor"]);
+    let line = doctor
+        .lines()
+        .find(|l| l.contains("live@example.com"))
+        .unwrap_or_else(|| panic!("doctor does not show the live login:\n{doctor}"));
+    assert!(line.contains("[max 20x]"), "doctor: {line}");
+}

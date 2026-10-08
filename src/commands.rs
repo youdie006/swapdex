@@ -2357,6 +2357,25 @@ pub(crate) fn slot_active_login(
     Some((rec.name, email, signed_in))
 }
 
+/// The plan the login in a slot's dir names.
+fn slot_plan(paths: &Paths, tool: &str, dir: &std::path::Path) -> Option<String> {
+    if tool == "claude-code" {
+        return crate::claude_authority::credential(paths, dir)
+            .ok()
+            .and_then(|c| adapters::claude::plan_label(c.bytes()));
+    }
+    let at = paths.try_with_tool_dir(tool, dir)?;
+    adapters::by_name(tool)?.identity(&at).ok().flatten()?.tier
+}
+
+/// The plan of the slot the pointer names.
+fn slot_active_plan(paths: &Paths, tool: &str) -> Option<String> {
+    let dir = crate::slots::Slots::open_for(paths, tool)
+        .ok()?
+        .default_dir()?;
+    slot_plan(paths, tool, &dir)
+}
+
 /// How a screen should describe the account a pointer names.
 ///
 /// Three states, not two: signed in with a readable email, signed in but the
@@ -2583,20 +2602,14 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 // The saved profile's plan describes a different account.
                 tier = None;
             }
-            // A Claude slot's own credential names its plan now; the saved
-            // copy's can be months old.
-            if tool == "claude-code" {
-                if let Some(slot) = crate::slots::Slots::open_for(paths, tool)
-                    .ok()
-                    .and_then(|slots| slots.get(&p.name))
-                {
-                    if let Some(plan) = crate::claude_authority::credential(paths, &slot.config_dir)
-                        .ok()
-                        .and_then(|c| adapters::claude::plan_label(c.bytes()))
-                    {
-                        tier = Some(plan);
-                    }
-                }
+            // A slot's own login names its plan now; the saved copy's can be
+            // months old, and a slot need not have a saved copy at all.
+            if let Some(plan) = crate::slots::Slots::open_for(paths, tool)
+                .ok()
+                .and_then(|slots| slots.get(&p.name))
+                .and_then(|slot| slot_plan(paths, tool, &slot.config_dir))
+            {
+                tier = Some(plan);
             }
         };
         if crossed_names.contains(&p.name) {
@@ -2954,13 +2967,12 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
                 // Stable shape: every key present on every row, null when
                 // unknown, so `jq .[].email` never needs guards.
                 if let Some((name, email, signed_in)) = slot_active_login(paths, tool) {
-                    // The slot carries the login; its tier is not recorded
-                    // anywhere the pointer can reach, and null already means
-                    // unknown here. `logged_in` follows the credential, not the
-                    // pointer - an empty slot is selected, not signed in.
+                    // `logged_in` follows the credential, not the pointer - an
+                    // empty slot is selected, not signed in.
+                    let tier = slot_active_plan(paths, tool);
                     return serde_json::json!({
                         "tool": tool, "logged_in": signed_in, "unreadable": false,
-                        "email": email, "tier": null, "profile": name, "expired": null,
+                        "email": email, "tier": tier, "profile": name, "expired": null,
                     });
                 }
                 match adapter.identity(paths) {
@@ -2990,7 +3002,7 @@ pub fn status(paths: &Paths, json: bool, short: bool) -> Result<i32> {
     for adapter in adapters::all() {
         let tool = adapter.name();
         if let Some((name, email, signed_in)) = slot_active_login(paths, tool) {
-            let who = slot_who(&name, email, signed_in, tool);
+            let who = with_plan(slot_who(&name, email, signed_in, tool), paths, tool);
             println!("{tool}: {who} (profile '{name}')");
             // The abandoned login is the one an unshimmed launch still uses, so
             // it belongs on the screen that claims to say who is active.
@@ -4973,7 +4985,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         // setup is sound, and reading the tool's own config dir made it print
         // "not logged in" four rows above its own "default -> 'work'".
         if let Some((name, email, signed_in)) = slot_active_login(paths, tool) {
-            let who = slot_who(&name, email, signed_in, tool);
+            let who = with_plan(slot_who(&name, email, signed_in, tool), paths, tool);
             report(tool, true, format!("{who} (profile '{name}')"));
             if let Some(live) = tool_dir_disagrees(&store, paths, tool, &name) {
                 report(
@@ -10701,6 +10713,14 @@ pub fn sessions(paths: &Paths, json: bool) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// `who` with the active slot's plan, as `identity_line` puts it.
+fn with_plan(who: String, paths: &Paths, tool: &str) -> String {
+    match slot_active_plan(paths, tool) {
+        Some(plan) => format!("{who} [{plan}]"),
+        None => who,
+    }
 }
 
 fn identity_line(id: &Account) -> String {

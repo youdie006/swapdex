@@ -6,6 +6,15 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **`status`, `doctor`, `use` and `add` name the same plan as `ls`.** 0.167.8
+  taught `ls` and `quota` which Max a Claude login holds, but the other
+  screens kept printing the bare `max`, and `status` showed no plan at all
+  for an account selected by its slot - its JSON said `"tier": null` where
+  `ls --json` said `"max 20x"` or `"chatgpt"`. Every screen now reads the
+  plan from the login itself, so `status --json`, `ls --json` and the MCP
+  `tier` field agree (a 20x Max login is `"max 20x"`, no longer `"max"`).
+  `ls` also names the plan of a Codex slot that has no saved copy.
+
 - **The proxy log records what Codex usage reads answered.** A Codex window
   shows the usage the backend returns through the proxy, but the log kept
   only the status code, so a number that stayed stale for hours after a
