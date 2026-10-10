@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.15
 
 - **The proxy no longer asks for usage with an expired token.** An idle
   Claude account's access token lapses between renewals, and the usage
