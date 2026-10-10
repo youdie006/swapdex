@@ -986,10 +986,20 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
         // wrapper, and "not readable" covers two different situations - a
         // keychain that will not release the secret to this process, and a slot
         // with nothing signed in - whose remedies are opposites.
+        // Lapsed means past its expiry, with the same minute of slack the
+        // serving path allows. The endpoint rejects such a token, and asking
+        // with it anyway earned a 401 and then a 429 every round.
+        let soon = now_ms().saturating_add(60_000);
         let reading = crate::live_login::resolve(paths, &r.config_dir, "claude-code", now_ms())
-            .map(|login| Ok(login.access_token))
-            .unwrap_or_else(|| creds::slot_token_detail_for(paths, &r.config_dir));
-        let tok = match reading {
+            .map(|login| Ok((login.access_token, login.expires_at_ms <= soon)))
+            .unwrap_or_else(|| {
+                creds::slot_token_detail_for(paths, &r.config_dir).map(|token| {
+                    let lapsed = crate::claude_authority::credential(paths, &r.config_dir)
+                        .is_ok_and(|c| crate::quota::credentials_expired(c.bytes(), soon));
+                    (token, lapsed)
+                })
+            });
+        let (tok, lapsed) = match reading {
             Ok(t) => t,
             Err(why) => {
                 unread.push((r.name.clone(), why.short().to_string()));
@@ -997,7 +1007,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
             }
         };
         let token = String::from_utf8_lossy(tok.expose()).to_string();
-        if !crate::quota::token_usable(&token) {
+        if lapsed || !crate::quota::token_usable(&token) {
             unread.push((
                 r.name.clone(),
                 "token lapsed - serving renews it, measuring does not".to_string(),

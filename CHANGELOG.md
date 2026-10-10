@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The proxy no longer asks for usage with an expired token.** An idle
+  Claude account's access token lapses between renewals, and the usage
+  endpoint rejects it. The proxy's "lapsed" check looked only at whether the
+  token could be quoted, so it sent the expired token for every idle account
+  on every round - about every two minutes, for days. Each round earned a 401
+  and then a 429, the log blamed the endpoint ("usage endpoint throttled"),
+  and the wasted requests count against the same endpoint the active account
+  is read from. The proxy now skips an expired token and says
+  `token lapsed - serving renews it, measuring does not`, as `quota` does.
+
 ## 0.167.14
 
 - **Codex rows name the ChatGPT plan, the same one `quota` shows.** `ls`,
