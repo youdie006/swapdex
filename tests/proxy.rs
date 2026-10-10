@@ -7071,3 +7071,78 @@ fn a_change_in_codex_usage_is_logged_once() {
         usage_lines[1]
     );
 }
+
+/// An idle account's access token lapses between renewals, and the usage
+/// endpoint rejects a lapsed one. The proxy sent it anyway on every round - for
+/// two days, every two minutes, for each idle account - because its "lapsed"
+/// check looked only at whether the token could be quoted. Each round earned a
+/// 401 and then a 429, and the log blamed the endpoint for throttling.
+#[test]
+fn a_lapsed_token_is_not_sent_to_the_usage_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "live", "aaaa1111", "AT-LIVE", true);
+    seed_slot(root.path(), "idle", "bbbb2222", "AT-IDLE", false);
+    std::fs::write(
+        root.path()
+            .join(".local/share/swapdex/slots/bbbb2222/.credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"AT-IDLE","refreshToken":"R","expiresAt":1000}}"#,
+    )
+    .unwrap();
+    let asked = root.path().join("usage-asked");
+    let dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let curl = dir.join("curl");
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncat >> '{}'\nprintf '{{\"five_hour\":{{\"utilization\":4.0}}}}\\n200'\n",
+            asked.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", &curl)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port = {
+        let out = child.stdout.as_mut().unwrap();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 && b[0] != b'\n' {
+            line.push(b[0]);
+        }
+        String::from_utf8_lossy(&line)
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .expect("port")
+    };
+    post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    let mut log = String::new();
+    child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
+    child.wait().ok();
+
+    let asked = std::fs::read_to_string(&asked).unwrap_or_default();
+    assert!(
+        asked.contains("AT-LIVE"),
+        "the live account was not measured:\n{log}"
+    );
+    assert!(
+        !asked.contains("AT-IDLE"),
+        "a lapsed token was sent to the usage endpoint:\n{log}"
+    );
+    assert!(
+        log.contains("token lapsed"),
+        "the log does not say why:\n{log}"
+    );
+}
