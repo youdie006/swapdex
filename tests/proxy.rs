@@ -7146,3 +7146,170 @@ fn a_lapsed_token_is_not_sent_to_the_usage_endpoint() {
         "the log does not say why:\n{log}"
     );
 }
+
+/// A burst throttle (429, x-should-retry, no window named) that outlasts the
+/// retries is not a spent fleet. With `hold_seconds` set the proxy said "every
+/// account is spent; holding 421s for the earliest window to reset" and held
+/// the turn for minutes - while the accounts had 97% and 100% left - waiting
+/// on a reset that had nothing to do with the throttle.
+#[test]
+fn a_burst_throttle_is_not_held_as_a_spent_fleet() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "solo", "aaaa1111", "AT-SOLO", true);
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::write(store.join("settings.json"), r#"{"hold_seconds": 3600}"#).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    std::fs::write(
+        store.join("quota-cache.json"),
+        format!(
+            r#"{{"solo": {{"five_h": 3.0, "five_h_reset": {}, "at": {now}}}}}"#,
+            now + 120
+        ),
+    )
+    .unwrap();
+
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port_up = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            let _ = rq.respond(
+                tiny_http::Response::from_string("{\"type\":\"error\"}")
+                    .with_status_code(tiny_http::StatusCode(429))
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"x-should-retry"[..], &b"true"[..])
+                            .unwrap(),
+                    ),
+            );
+        }
+    });
+
+    let (mut child, port) = start_proxy(root.path(), &format!("http://127.0.0.1:{port_up}"), &[]);
+    let started = std::time::Instant::now();
+    let body = post_through(port, "{\"turn\":1}");
+    let took = started.elapsed();
+    child.kill().ok();
+    let mut log = String::new();
+    child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
+    child.wait().ok();
+
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "the throttled turn was held for {took:?}:\n{log}"
+    );
+    assert!(
+        body.contains("error"),
+        "the client gets the throttle: {body}"
+    );
+    assert!(!log.contains("every account is spent"), "{log}");
+}
+
+/// A 429 naming a spent window, from upstream that answers `first` for the
+/// first bearer and 200 for every other.
+fn spent_then_ok_upstream(spent_bearer: &'static str, sink: Arc<Mutex<Vec<Seen>>>) -> String {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port_up = server.server_addr().to_ip().unwrap().port();
+    std::thread::spawn(move || {
+        for mut rq in server.incoming_requests() {
+            let auth = rq
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let mut b = Vec::new();
+            rq.as_reader().read_to_end(&mut b).ok();
+            sink.lock().unwrap().push(Seen {
+                auth: auth.clone(),
+                user_id: None,
+            });
+            let resp = if auth == spent_bearer {
+                tiny_http::Response::from_string("{\"type\":\"error\"}")
+                    .with_status_code(tiny_http::StatusCode(429))
+                    .with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"anthropic-ratelimit-unified-status"[..],
+                            &b"rejected"[..],
+                        )
+                        .unwrap(),
+                    )
+            } else {
+                tiny_http::Response::from_string("{\"ok\":true}")
+                    .with_status_code(tiny_http::StatusCode(200))
+            };
+            let _ = rq.respond(resp);
+        }
+    });
+    format!("http://127.0.0.1:{port_up}")
+}
+
+fn hold_settings(root: &std::path::Path, reset_in: i64) {
+    let store = root.join(".local/share/swapdex");
+    std::fs::write(store.join("settings.json"), r#"{"hold_seconds": 3600}"#).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    std::fs::write(
+        store.join("quota-cache.json"),
+        format!(
+            r#"{{"solo": {{"five_h": 3.0, "five_h_reset": {}, "at": {now}}}}}"#,
+            now + reset_in
+        ),
+    )
+    .unwrap();
+}
+
+/// With --auto and another account free, a spent account's turn moves over
+/// at once. The hold ran before rotation was considered, so a configured hold
+/// kept the turn waiting on the spent account's reset instead.
+#[test]
+fn a_spent_account_rotates_before_any_hold() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "solo", "aaaa1111", "AT-SOLO", true);
+    seed_slot(root.path(), "spare", "bbbb2222", "AT-SPARE", false);
+    hold_settings(root.path(), 120);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spent_then_ok_upstream("Bearer AT-SOLO", sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+    let started = std::time::Instant::now();
+    let body = post_through(port, "{\"turn\":1}");
+    let took = started.elapsed();
+    child.kill().ok();
+    child.wait().ok();
+
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "held for {took:?}"
+    );
+    assert!(body.contains("\"ok\":true"), "{body}");
+    assert_eq!(
+        auths(&sink).last().map(String::as_str),
+        Some("Bearer AT-SPARE"),
+        "the turn was not moved to the free account"
+    );
+}
+
+/// The hold itself still works: one account, its window spent, a reset due.
+#[test]
+fn a_spent_fleet_is_still_held_until_the_reset() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "solo", "aaaa1111", "AT-SOLO", true);
+    hold_settings(root.path(), 3);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spent_then_ok_upstream("Bearer AT-SOLO", sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    let _ = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    let mut log = String::new();
+    child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
+    child.wait().ok();
+
+    assert!(log.contains("every account is spent; holding"), "{log}");
+}
