@@ -6,6 +6,9 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **rustls 0.23.46.** Fixes RUSTSEC-2026-0346, -0347, -0348 and -0349 in the
+  TLS library the proxy's Codex usage listener and upstream connections use.
+
 - **A throttle is no longer held as if every account were spent.** With
   `hold_seconds` set, a burst 429 that outlasted its three retries - one that
   names no spent window - was logged as "every account is spent; holding
