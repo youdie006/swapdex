@@ -2760,7 +2760,22 @@ fn forward_turn(
                     // earliest reset lets it finish on its own. Off unless
                     // `hold_seconds` is set - a caller that would rather see
                     // the error than wait must be able to.
-                    let cap = crate::settings::load(paths).hold_seconds.unwrap_or(0);
+                    //
+                    // Only for a wall with no way around it: this 429 is the
+                    // account's wall, and no other account can take the turn. A
+                    // burst throttle that outlasted its retries is not a wall, and
+                    // with --auto another account may still have room; holding
+                    // either one waited minutes on a reset that had nothing to do
+                    // with the refusal.
+                    let wall = ratelimit::is_wall(&up.headers);
+                    let can_rotate = live(paths, opts).0
+                        && opts.account.is_none()
+                        && next_account(paths, sh, std::slice::from_ref(&slot.name)).is_some();
+                    let cap = if wall && !can_rotate {
+                        crate::settings::load(paths).hold_seconds.unwrap_or(0)
+                    } else {
+                        0
+                    };
                     // Reset times specifically, not readings: `load` drops an
                     // account pinned at 100%, which is exactly the account a
                     // hold is about, so the data vanished when it was needed.

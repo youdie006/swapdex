@@ -128,6 +128,16 @@ pub enum Throttle {
     Exhausted,
 }
 
+/// Is this 429 the account's wall rather than a passing throttle? A wall names
+/// a spent window or carries no retry hint; a throttle says `x-should-retry`
+/// and names nothing, even when it outlasts the retries.
+pub fn is_wall(headers: &[(String, String)]) -> bool {
+    from_headers(headers).is_some_and(|q| q.rejected)
+        || !headers.iter().any(|(n, v)| {
+            n.eq_ignore_ascii_case("x-should-retry") && v.trim().eq_ignore_ascii_case("true")
+        })
+}
+
 /// Classify a 429. `attempt` is how many retries have already been spent, so a
 /// throttled account cannot loop forever. Backoff is 1s, 2s, 4s.
 pub fn classify_429(headers: &[(String, String)], attempt: u32) -> Throttle {

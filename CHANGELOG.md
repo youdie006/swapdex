@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A throttle is no longer held as if every account were spent.** With
+  `hold_seconds` set, a burst 429 that outlasted its three retries - one that
+  names no spent window - was logged as "every account is spent; holding
+  421s for the earliest window to reset", and the turn waited minutes while
+  the accounts had 97% and 100% left. The hold also ran before rotation, so
+  with `--auto` a spent account's turn waited on its reset even when another
+  account was free. A turn is now held only when the refusal names a spent
+  window and no other account can take it.
+
 ## 0.167.15
 
 - **The proxy no longer asks for usage with an expired token.** An idle
