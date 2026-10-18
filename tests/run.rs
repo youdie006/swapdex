@@ -191,10 +191,14 @@ fn shim_makes_plain_claude_follow_use() {
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let shim = root.path().join(".local/share/swapdex/bin/claude");
+    // Run from inside a Claude Code session, the developer's own
+    // CLAUDE_CONFIG_DIR is inherited and the shim rightly honours it.
     let out = Command::new(&shim)
         .env("SWAPDEX_ROOT", root.path())
         .env("PATH", &path)
         .env("HOME", &home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
         .output()
         .unwrap();
     let o = String::from_utf8_lossy(&out.stdout);
