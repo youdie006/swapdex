@@ -6,6 +6,15 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **Usage numbers keep moving while dashboards are open.** Every open
+  `swapdex` dashboard re-read every Claude account's usage every 45 seconds,
+  and the proxy reads the same endpoint on its own schedule. With three
+  dashboards open, the endpoint throttled 189 of one day's 592 proxy
+  readings, and the paying account's numbers stayed unchanged for up to an
+  hour. A dashboard now uses a reading that another swapdex process took
+  within its refresh interval instead of asking again, so each account is
+  read about once per interval however many dashboards are open.
+
 - **`doctor` reads a bound slot's login from the login it is bound to.** A
   Claude slot bound to the native `~/.claude` login is served from that
   login, and its own copy stops being renewed on the day it is bound.

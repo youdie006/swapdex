@@ -4045,7 +4045,12 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
     /// Read every account's usage. A free function so the dashboard can run it
     /// on a thread: doing it on the loop froze the screen for seconds.
     fn read_quota_usage(paths: &Paths) -> Vec<(crate::tui::AccountKey, crate::tui::Usage)> {
-        let Ok(out) = crate::self_exe::output(&["quota", "--json"]) else {
+        // Every open dashboard refreshes on its own clock and the proxy reads on
+        // another; a reading one of them took within the refresh interval is
+        // the one this refresh would have got.
+        let fresh = crate::tui::QUOTA_REFRESH_SECS.to_string();
+        let Ok(out) = crate::self_exe::output(&["quota", "--json", "--fresh-within", &fresh])
+        else {
             return Vec::new();
         };
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
@@ -4105,8 +4110,8 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
                         five_h_reset,
                         seven_d,
                         seven_d_reset,
-                        // A live read has no age to disclose.
-                        observed_at: None,
+                        // A reused reading carries its age; a live one has none.
+                        observed_at: acc.get("observed_at").and_then(|v| v.as_i64()),
                         note,
                         on_credits: acc
                             .get("on_credits")
@@ -9651,7 +9656,7 @@ fn slot_dir_named(paths: &Paths, name: &str) -> Option<std::path::PathBuf> {
 /// running native Claude owner may supply its current token for the same account.
 /// Provider transport and response parsing live in the quota modules; this
 /// function selects each credential and renders.
-pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
+pub fn quota(paths: &Paths, json: bool, fresh_within: Option<u64>) -> Result<i32> {
     use crate::quota::{self as q, Fetch};
 
     struct Row {
@@ -9972,7 +9977,23 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     let mut results: Vec<(usize, Fetch)> = Vec::new();
     let mut to_fetch: Vec<(usize, String)> = Vec::new();
     let mut offline: Option<String> = None;
+    // Readings another swapdex took moments ago, by row: used as they are, with
+    // their age, so several open dashboards and the proxy do not each ask the
+    // endpoint for the same account.
+    let cached = crate::quota_cache::load(paths);
+    let mut reused: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     for (i, r) in rows.iter().enumerate() {
+        if let (Some(secs), Some(e)) = (fresh_within, cached.get(&r.name)) {
+            if r.token.is_some()
+                && !r.expired
+                && (e.five_h.is_some() || e.seven_d.is_some())
+                && now - e.at <= secs as i64
+            {
+                reused.insert(i, e.at);
+                results.push((i, Fetch::Ok(quota_from_cache(e))));
+                continue;
+            }
+        }
         match &r.token {
             None => results.push((
                 i,
@@ -10048,6 +10069,7 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
     // record a reading it never received.
     let remembered: Vec<(String, crate::quota_cache::Entry)> = results
         .iter()
+        .filter(|(i, _)| !reused.contains_key(i))
         .filter_map(|(i, f)| match f {
             Fetch::Ok(qd) => Some((
                 rows[*i].name.clone(),
@@ -10072,12 +10094,16 @@ pub fn quota(paths: &Paths, json: bool) -> Result<i32> {
         let accounts: Vec<Value> = results
             .iter()
             .map(|(i, f)| {
-                quota_json(
+                let mut row = quota_json(
                     &rows[*i].name,
                     rows[*i].email.as_deref(),
                     rows[*i].active,
                     f,
-                )
+                );
+                if let (Some(at), Some(o)) = (reused.get(i), row.as_object_mut()) {
+                    o.insert("observed_at".into(), Value::from(*at));
+                }
+                row
             })
             .collect();
         // The Codex rows point the reader at `--json` - a row with no windows
@@ -10656,6 +10682,29 @@ fn win_line(label: &str, w: &crate::quota::Window, now: i64) -> String {
 
 /// One account's quota as JSON (for `swapdex quota --json`). An unexpected shape
 /// carries the raw body so the exact endpoint schema is never lost.
+/// A remembered reading in the shape of a live one. The cache keeps the two
+/// windows and whether the account bills past them, which is what a reused
+/// reading is read for.
+fn quota_from_cache(e: &crate::quota_cache::Entry) -> crate::quota::Quota {
+    use crate::quota::{Extra, Quota, Window};
+    let window = |used: Option<f64>, resets_at| {
+        used.map(|used_pct| Window {
+            used_pct,
+            resets_at,
+        })
+    };
+    Quota {
+        five_hour: window(e.five_h, e.five_h_reset),
+        seven_day: window(e.seven_d, e.seven_d_reset),
+        scoped: Vec::new(),
+        extra: e.on_credits.then_some(Extra {
+            enabled: true,
+            limit_reached: false,
+            used_pct: None,
+        }),
+    }
+}
+
 fn quota_json(label: &str, email: Option<&str>, active: bool, f: &crate::quota::Fetch) -> Value {
     use crate::quota::{Fetch, Window};
     fn win(w: &Window) -> Value {

@@ -302,6 +302,10 @@ enum Cmd {
         /// Emit JSON (includes the raw response for any unexpected shape)
         #[arg(long)]
         json: bool,
+        /// Use a reading another swapdex took within this many seconds instead
+        /// of asking the usage endpoint again (the dashboard's refresh)
+        #[arg(long, value_name = "SECS", hide = true)]
+        fresh_within: Option<u64>,
     },
     /// Run as a read-only MCP server over stdio
     Mcp,
@@ -530,7 +534,7 @@ fn main() {
         Cmd::Threshold { value } => commands::threshold(&paths, value.as_deref()),
         Cmd::Doctor => commands::doctor(&paths),
         Cmd::Usage { json } => commands::usage(&paths, *json),
-        Cmd::Quota { json } => commands::quota(&paths, *json),
+        Cmd::Quota { json, fresh_within } => commands::quota(&paths, *json, *fresh_within),
         Cmd::Mcp => {
             swapdex::mcp::serve();
             return;
