@@ -7313,3 +7313,95 @@ fn a_spent_fleet_is_still_held_until_the_reset() {
 
     assert!(log.contains("every account is spent; holding"), "{log}");
 }
+
+/// A slot bound to the native `~/.claude` login is served from that login; its
+/// own copy stops being renewed the day it is bound. `doctor` read the copy, so
+/// a paying account serving every day was reported as "login idle ~31d" with
+/// advice to run it from the obsolete copy.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_reads_a_bound_slots_login_from_its_authority() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "id-work", "AT", true);
+    let slot = root.path().join(".local/share/swapdex/slots/id-work");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    std::fs::copy(
+        slot.join(".credentials.json"),
+        native.join(".credentials.json"),
+    )
+    .unwrap();
+    let holder = spawn_native_cli(
+        root.path(),
+        "claude",
+        &[
+            ("HOME", root.path()),
+            (
+                "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS",
+                std::path::Path::new("1"),
+            ),
+        ],
+    );
+    let paths = swapdex::paths::Paths::rooted(root.path());
+    let (_, failed) = swapdex::refresh::keep_alive_sweep(
+        &paths,
+        &[("work".into(), slot.clone())],
+        1_800_000_000_000,
+    );
+    assert!(failed.is_empty(), "{failed:?}");
+    holder.stop();
+    assert!(slot.join(".swapdex-claude-authority.json").is_file());
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let creds = |expires: i64| {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"AT","refreshToken":"R","expiresAt":{expires}}}}}"#
+        )
+    };
+    std::fs::write(
+        slot.join(".credentials.json"),
+        creds(now_ms - 40 * 86_400_000),
+    )
+    .unwrap();
+    std::fs::write(native.join(".credentials.json"), creds(now_ms + 3_600_000)).unwrap();
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("HOME", root.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let row = text
+        .lines()
+        .find(|l| l.starts_with("slot:work"))
+        .unwrap_or("");
+    assert!(!row.contains("idle"), "{text}");
+
+    // The native login itself gone idle is still reported.
+    std::fs::write(
+        native.join(".credentials.json"),
+        creds(now_ms - 40 * 86_400_000),
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("HOME", root.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("slot:work") && l.contains("login idle ~40d")),
+        "{text}"
+    );
+}
