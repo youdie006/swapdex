@@ -25,7 +25,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// a number does not sit still while the account is being spent, long enough
 /// that leaving the screen open is not a stream of requests - and the read is
 /// off the loop, so a refresh costs the user nothing.
-const QUOTA_REFRESH_SECS: u64 = 45;
+pub(crate) const QUOTA_REFRESH_SECS: u64 = 45;
 
 const VIOLET: Color = Color::Rgb(157, 107, 255); // the brand accent (#9d6bff)
 const DEXGRAY: Color = Color::Rgb(150, 150, 160); // the dimmed "dex" half

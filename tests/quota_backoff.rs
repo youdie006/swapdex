@@ -522,3 +522,72 @@ fn transport_failure_keeps_history_without_extending_the_deadline() {
     assert_eq!(fixture.calls(), 4);
     assert_eq!(std::fs::read(&fixture.credential).unwrap(), credentials);
 }
+
+/// Every open dashboard re-read every account's usage every 45 seconds, and
+/// the proxy reads the same endpoint on its own schedule. With three dashboards
+/// open, the endpoint throttled 189 of one day's 592 proxy readings and a
+/// payer's numbers sat unchanged for up to an hour. A reading another process
+/// took within `--fresh-within` seconds is used as it is, with its age.
+#[test]
+fn a_reading_taken_moments_ago_is_reused_instead_of_asking_again() {
+    let fixture = Fixture::new();
+    let cache_path = fixture
+        .root
+        .path()
+        .join(".local/share/swapdex/quota-cache.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let write_cache = |at: i64| {
+        std::fs::write(
+            &cache_path,
+            serde_json::json!({
+                "fixture": {"five_h": 21.0, "seven_d": 40.0, "at": at}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    fixture.set_response(r#"{"five_hour":{"utilization":33.0}}"#, 200);
+
+    write_cache(now - 10);
+    let reused = fixture.row(
+        fixture
+            .command()
+            .args(["--fresh-within", "45"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fixture.calls(), 0, "a reading 10s old is current enough");
+    assert_eq!(reused["status"], "ok", "{reused}");
+    assert_eq!(reused["five_hour"]["used_pct"], 21.0);
+    assert_eq!(reused["seven_day"]["used_pct"], 40.0);
+    assert_eq!(reused["observed_at"], now - 10, "its age goes with it");
+    let cache: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cache_path).unwrap()).unwrap();
+    assert_eq!(
+        cache["fixture"]["at"],
+        now - 10,
+        "reusing a reading does not make it newer"
+    );
+
+    write_cache(now - 120);
+    let live = fixture.row(
+        fixture
+            .command()
+            .args(["--fresh-within", "45"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fixture.calls(), 1, "a reading 2m old is asked again");
+    assert_eq!(live["five_hour"]["used_pct"], 33.0);
+    assert!(
+        live.get("observed_at").is_none_or(|v| v.is_null()),
+        "{live}"
+    );
+
+    write_cache(now - 10);
+    fixture.command().output().unwrap();
+    assert_eq!(fixture.calls(), 2, "plain `quota` always reads live");
+}
