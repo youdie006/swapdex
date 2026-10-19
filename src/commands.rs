@@ -6635,8 +6635,14 @@ pub fn migrate(paths: &Paths, sel: Option<MigrationToolSel>) -> Result<i32> {
 /// `mcpServers` block from the bare `~/.claude.json` into every slot's own
 /// `.claude.json`, preserving each slot's account identity and other keys. Run it
 /// after logging into your slots (a slot has no `.claude.json` until first login).
+///
+/// It merges: a server the bare config has is added or refreshed, and a server
+/// only a slot has is kept. Replacing the whole block deleted servers accounts
+/// had added for themselves. The source is always the bare `~/.claude.json`,
+/// not `claude_config_json()`, which follows CLAUDE_CONFIG_DIR: run from a
+/// session inside a slot, that copied the slot's own servers to every account.
 pub fn sync_mcp(paths: &Paths) -> Result<i32> {
-    let src_path = paths.claude_config_json();
+    let src_path = paths.home().join(".claude.json");
     let src: Value = if src_path.exists() {
         serde_json::from_slice(&crate::atomic::read_regular(&src_path)?).unwrap_or(Value::Null)
     } else {
@@ -6651,9 +6657,11 @@ pub fn sync_mcp(paths: &Paths) -> Result<i32> {
         println!("No MCP servers in ~/.claude.json to share.");
         return Ok(0);
     }
+    let shared = mcp.as_object().cloned().unwrap_or_default();
     let slots = crate::slots::Slots::open(paths)?;
     let mut synced = 0;
     let mut pending = 0;
+    let mut kept = 0;
     for r in slots.list() {
         let target = r.config_dir.join(".claude.json");
         if !target.exists() {
@@ -6665,11 +6673,30 @@ pub fn sync_mcp(paths: &Paths) -> Result<i32> {
         let Some(obj) = cfg.as_object_mut() else {
             continue;
         };
-        obj.insert("mcpServers".into(), mcp.clone());
-        crate::atomic::write_secret(&target, &serde_json::to_vec(&cfg)?)?;
+        let servers = obj
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::json!({}));
+        if !servers.is_object() {
+            *servers = serde_json::json!({});
+        }
+        let servers = servers.as_object_mut().expect("mcpServers is an object");
+        kept += servers.keys().filter(|k| !shared.contains_key(*k)).count();
+        let mut changed = false;
+        for (name, spec) in &shared {
+            if servers.get(name) != Some(spec) {
+                servers.insert(name.clone(), spec.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            crate::atomic::write_secret(&target, &serde_json::to_vec(&cfg)?)?;
+        }
         synced += 1;
     }
     println!("shared {n} MCP server(s) into {synced} account(s).");
+    if kept > 0 {
+        println!("  kept {kept} server(s) that only an account has (sync-mcp never removes one).");
+    }
     if pending > 0 {
         println!(
             "  {pending} account(s) have no login yet - sign them in from `swapdex ui` (the `l` key)."
@@ -12893,5 +12920,80 @@ mod shared_source_tests {
             paths.claude_dir(),
             "antigravity borrowed from Claude's dir"
         );
+    }
+}
+
+#[cfg(test)]
+mod sync_mcp_tests {
+    use super::sync_mcp;
+    use crate::paths::Paths;
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+
+    fn read(path: &Path) -> Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    fn write(path: &Path, value: Value) {
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn slot(paths: &Paths, name: &str, cfg: Value) -> PathBuf {
+        let dir = paths.home().join(format!("slot-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::slots::Slots::open_for_update(paths, "claude-code")
+            .unwrap()
+            .adopt(name, &dir)
+            .unwrap();
+        write(&dir.join(".claude.json"), cfg);
+        dir
+    }
+
+    // 2026-10-19: sync-mcp replaced each slot's whole `mcpServers`, so servers an
+    // account had added for itself (codex, real-estate, building-register) vanished.
+    #[test]
+    fn keeps_servers_only_the_slot_has_and_refreshes_shared_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        write(
+            &root.path().join(".claude.json"),
+            json!({"mcpServers": {"ctx7": {"command": "new"}}}),
+        );
+        let work = slot(
+            &paths,
+            "work",
+            json!({"oauthAccount": {"emailAddress": "work@x.com"},
+                   "mcpServers": {"ctx7": {"command": "old"}, "codex": {"command": "codex"}}}),
+        );
+        sync_mcp(&paths).unwrap();
+        let cfg = read(&work.join(".claude.json"));
+        assert_eq!(cfg["mcpServers"]["ctx7"]["command"], "new");
+        assert_eq!(cfg["mcpServers"]["codex"]["command"], "codex");
+        assert_eq!(cfg["oauthAccount"]["emailAddress"], "work@x.com");
+    }
+
+    // Run from a session launched inside a slot (CLAUDE_CONFIG_DIR set), the source
+    // was that slot's own config, so its private servers spread to every account.
+    #[test]
+    fn reads_the_bare_claude_json_even_from_inside_a_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        write(
+            &root.path().join(".claude.json"),
+            json!({"mcpServers": {"ctx7": {"command": "c"}}}),
+        );
+        let work = slot(
+            &paths,
+            "work",
+            json!({"mcpServers": {"work-only": {"command": "w"}}}),
+        );
+        let home = slot(&paths, "home", json!({"mcpServers": {}}));
+        sync_mcp(&paths.with_tool_dir("claude-code", &work)).unwrap();
+        let home_cfg = read(&home.join(".claude.json"));
+        assert!(home_cfg["mcpServers"]["ctx7"].is_object());
+        assert!(home_cfg["mcpServers"].get("work-only").is_none());
+        let work_cfg = read(&work.join(".claude.json"));
+        assert!(work_cfg["mcpServers"]["ctx7"].is_object());
+        assert!(work_cfg["mcpServers"]["work-only"].is_object());
     }
 }
