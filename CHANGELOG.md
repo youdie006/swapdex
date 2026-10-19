@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.18
 
 - **Usage numbers keep moving while dashboards are open.** Every open
   `swapdex` dashboard re-read every Claude account's usage every 45 seconds,
