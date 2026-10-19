@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.16
 
 - **rustls 0.23.46.** Fixes RUSTSEC-2026-0346, -0347, -0348 and -0349 in the
   TLS library the proxy's Codex usage listener and upstream connections use.
