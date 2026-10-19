@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.17
 
 - **`sync-mcp` no longer deletes an account's own MCP servers.** It replaced
   each slot's whole `mcpServers` block with the one in `~/.claude.json`, so a
