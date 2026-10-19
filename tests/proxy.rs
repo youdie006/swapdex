@@ -7318,6 +7318,7 @@ fn a_spent_fleet_is_still_held_until_the_reset() {
 /// own copy stops being renewed the day it is bound. `doctor` read the copy, so
 /// a paying account serving every day was reported as "login idle ~31d" with
 /// advice to run it from the obsolete copy.
+#[cfg(target_os = "linux")]
 #[test]
 fn doctor_reads_a_bound_slots_login_from_its_authority() {
     let root = tempfile::tempdir().unwrap();
