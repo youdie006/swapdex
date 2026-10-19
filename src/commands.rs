@@ -1600,6 +1600,16 @@ fn slot_login_of(
     use crate::adapters::claude::SlotLogin;
     // Claude's own reader also consults the Keychain, which no other tool uses.
     if tool == "claude-code" {
+        // A slot bound to a native login is served from that login; its own
+        // copy stopped being renewed when it was bound.
+        if dir.join(crate::claude_authority::RECORD).exists() {
+            if let Ok(credential) = crate::claude_authority::credential(paths, dir) {
+                let expires = serde_json::from_slice::<Value>(credential.bytes())
+                    .ok()
+                    .and_then(|v| v["claudeAiOauth"]["expiresAt"].as_i64());
+                return SlotLogin::Present(expires);
+            }
+        }
         return crate::adapters::claude::slot_login(dir);
     }
     let Some(p) = paths.try_with_tool_dir(tool, dir) else {

@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`doctor` reads a bound slot's login from the login it is bound to.** A
+  Claude slot bound to the native `~/.claude` login is served from that
+  login, and its own copy stops being renewed on the day it is bound.
+  `doctor` read the copy, so the paying account, serving every day, was
+  reported as `login idle ~31d` with advice to run it once from that copy.
+  It now reads the bound login, and still reports it when that login is idle.
+
 ## 0.167.17
 
 - **`sync-mcp` no longer deletes an account's own MCP servers.** It replaced
