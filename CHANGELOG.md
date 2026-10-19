@@ -4,6 +4,20 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`sync-mcp` no longer deletes an account's own MCP servers.** It replaced
+  each slot's whole `mcpServers` block with the one in `~/.claude.json`, so a
+  server an account had added for itself was removed; on 2026-10-19 one run
+  dropped codex, real-estate and building-register from two slots. It now
+  merges: a server `~/.claude.json` has is added or refreshed, a server only
+  the slot has is kept and counted in the output. Removing a server from every
+  slot is no longer something `sync-mcp` does.
+- **`sync-mcp` reads `~/.claude.json` even when run from inside a slot.** With
+  `CLAUDE_CONFIG_DIR` set - any session launched through a slot - its source
+  was that slot's own config, so one account's private servers were copied to
+  every other account.
+
 ## 0.167.16
 
 - **rustls 0.23.46.** Fixes RUSTSEC-2026-0346, -0347, -0348 and -0349 in the
