@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.22
 
 - **A Claude account bound to the native `~/.claude` login no longer dies when
   `claude` is run directly in its slot directory.** Such a run (for example
