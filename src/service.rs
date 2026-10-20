@@ -63,6 +63,7 @@ pub fn launchd_plist(exe: &Path, tool: &str, log_dir: &Path) -> String {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
+  <key>ExitTimeOut</key><integer>{stop_wait}</integer>
   <key>StandardOutPath</key><string>{log}/{label}.log</string>
   <key>StandardErrorPath</key><string>{log}/{label}.log</string>
 </dict>
@@ -71,8 +72,13 @@ pub fn launchd_plist(exe: &Path, tool: &str, log_dir: &Path) -> String {
         exe = xml_text(&exe.to_string_lossy()),
         log = xml_text(&log_dir.to_string_lossy()),
         tool = xml_text(tool),
+        stop_wait = STOP_WAIT_SECS,
     )
 }
+
+/// How long the supervisor lets a stopping proxy finish the responses it is
+/// streaming before killing it: the proxy's own wait, plus room to exit.
+const STOP_WAIT_SECS: u64 = crate::proxy::DRAIN_SECS + 30;
 
 /// A systemd USER unit - not a system one. The proxy holds one person's
 /// credentials and must run as that person, never as root.
@@ -87,10 +93,12 @@ pub fn systemd_service(exe: &Path, tool: &str) -> String {
          ExecStart={exe} proxy --tool {tool} --port {port}\n\
          Restart=always\n\
          RestartSec=5\n\
+         TimeoutStopSec={stop_wait}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         exe = systemd_executable(&exe.to_string_lossy()),
+        stop_wait = STOP_WAIT_SECS,
     )
 }
 
@@ -681,6 +689,21 @@ mod tests {
         assert!(codex.contains("<string>8788</string>"), "{codex}");
         let u = systemd_service(Path::new("/x/swapdex"), "codex");
         assert!(u.contains("--port 8788"), "{u}");
+    }
+
+    /// A stopping proxy finishes the responses already streaming, for up to
+    /// `DRAIN_SECS`. launchd kills a job 20 seconds after asking it to stop
+    /// unless told otherwise, which would cut those responses anyway.
+    #[test]
+    fn the_supervisor_waits_for_a_stopping_proxy() {
+        let want = crate::proxy::DRAIN_SECS + 30;
+        let p = launchd_plist(Path::new("/x/swapdex"), "claude-code", Path::new("/l"));
+        assert!(
+            p.contains(&format!("<key>ExitTimeOut</key><integer>{want}</integer>")),
+            "{p}"
+        );
+        let u = systemd_service(Path::new("/x/swapdex"), "claude-code");
+        assert!(u.contains(&format!("TimeoutStopSec={want}\n")), "{u}");
     }
 
     #[test]

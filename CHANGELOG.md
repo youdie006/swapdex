@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Restarting the proxy no longer cuts the responses it is streaming.** The
+  proxy exited the moment it was asked to stop, and every release restarts
+  it, so each running Claude session's response was cut and showed
+  "API Error: Connection lost mid-response". On one machine that error
+  followed almost every release for two months. A stopping proxy now
+  finishes the responses already streaming (for up to 60 seconds), answers
+  any request that arrives meanwhile with a retryable 503, and then exits; a
+  second Ctrl-C still exits at once. The launchd job and systemd unit give it
+  90 seconds before killing it - run `swapdex service install` once to
+  rewrite them.
+
 ## 0.167.18
 
 - **Usage numbers keep moving while dashboards are open.** Every open

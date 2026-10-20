@@ -7405,3 +7405,107 @@ fn doctor_reads_a_bound_slots_login_from_its_authority() {
         "{text}"
     );
 }
+
+/// Every swapdex release restarts the proxy, and the proxy exited on SIGTERM at
+/// once: every response still streaming through it was cut, and each running
+/// Claude session showed "API Error: Connection lost mid-response". On one
+/// machine the error appeared minutes after almost every release for two months.
+/// Stopping now finishes the responses already streaming, and a request that
+/// arrives meanwhile is told to retry instead of being started.
+#[test]
+fn stopping_the_proxy_finishes_the_responses_already_streaming() {
+    use std::io::Write as _;
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "aaaa1111", "AT-SLOT", true);
+
+    // An upstream whose response arrives in two parts, a second apart.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let _ = read_http_request(&mut stream);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                );
+                let _ = stream.write_all(b"6\r\nfirst \r\n");
+                let _ = stream.flush();
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let _ = stream.write_all(b"6\r\nsecond\r\n0\r\n\r\n");
+                let _ = stream.flush();
+            });
+        }
+    });
+
+    let (child, port) = start_proxy(root.path(), &upstream, &[]);
+    let pid = child.id() as libc::pid_t;
+    let child = ReapedChild::new(child);
+
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let body = "{\"model\":\"x\"}";
+    write!(
+        client,
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&got).contains("first") {
+        let n = std::io::Read::read(&mut client, &mut buf).unwrap();
+        assert!(n > 0, "the stream closed before its first part");
+        got.extend_from_slice(&buf[..n]);
+    }
+
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // A request that arrives while the proxy stops is turned away, retryably.
+    let mut late = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    late.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        late,
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    let _ = std::io::Read::read_to_string(&mut late, &mut answer);
+    assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    assert!(
+        answer.to_ascii_lowercase().contains("retry-after: 1"),
+        "{answer}"
+    );
+
+    loop {
+        match std::io::Read::read(&mut client, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(error) => panic!("the stream broke: {error}"),
+        }
+        if String::from_utf8_lossy(&got).contains("0\r\n\r\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&got);
+    assert!(text.contains("second"), "the response was cut: {text}");
+
+    let mut child = child;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.0.as_mut().unwrap().try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the proxy kept running after its last response"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(!status.success(), "it still exits as a stopped process");
+}

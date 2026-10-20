@@ -1212,26 +1212,55 @@ fn usable_under_threshold(
     })
 }
 
-/// Run `f` on SIGINT/SIGTERM, then exit. Used to drop the proxy marker when the
-/// user Ctrl-Cs a foreground proxy. Best-effort: a hard kill still leaves the
-/// marker, which the shim's pid check then ignores.
+/// How long a stopping proxy waits for the responses already streaming: under
+/// systemd's default 90-second stop timeout, and the launchd job's ExitTimeOut.
+pub(crate) const DRAIN_SECS: u64 = 60;
+
+/// Run `f` on SIGINT/SIGTERM, then exit once the responses already streaming
+/// are finished. Every release restarts the proxy, and exiting at once cut each
+/// running session's response mid-stream ("Connection lost mid-response").
+/// Requests that arrive meanwhile are refused with a retryable 503 (see
+/// `server::STOPPING`). A second signal exits at once. Best-effort: a hard kill
+/// still leaves the marker, which the shim's pid check then ignores.
 fn ctrl_c_cleanup<F: Fn() + Send + Sync + 'static>(f: F) -> Result<()> {
+    use std::sync::atomic::{AtomicI32, Ordering};
     use std::sync::OnceLock;
     static HOOK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+    static SIGNAL: AtomicI32 = AtomicI32::new(0);
     let boxed: Box<dyn Fn() + Send + Sync> = Box::new(f);
     if HOOK.set(boxed).is_err() {
         return Ok(());
     }
     extern "C" fn on_signal(sig: libc::c_int) {
-        if let Some(f) = HOOK.get() {
-            f();
+        if server::STOPPING.swap(true, Ordering::SeqCst) {
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
         }
-        // Re-raise with the default handler so the exit status is honest.
-        unsafe {
-            libc::signal(sig, libc::SIG_DFL);
-            libc::raise(sig);
-        }
+        SIGNAL.store(sig, Ordering::SeqCst);
     }
+    std::thread::Builder::new()
+        .name("swapdex-stop".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let sig = SIGNAL.load(Ordering::SeqCst);
+            if sig == 0 {
+                continue;
+            }
+            if let Some(f) = HOOK.get() {
+                f();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DRAIN_SECS);
+            while server::in_flight() > 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // Re-raise with the default handler so the exit status is honest.
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+        })?;
     let handler = on_signal as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t;
     unsafe {
         libc::signal(libc::SIGINT, handler);
