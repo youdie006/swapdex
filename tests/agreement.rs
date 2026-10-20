@@ -5345,3 +5345,95 @@ fn status_and_ls_name_the_same_plan() {
         .unwrap_or_else(|| panic!("doctor does not show the live login:\n{doctor}"));
     assert!(line.contains("[max 20x]"), "doctor: {line}");
 }
+
+/// A saved copy cannot be switched to while the tool runs from a slot.
+///
+/// The copy switch writes the tool's own directory, but with a slot as the
+/// default a plain `codex` and the proxy both use that slot. `use` said
+/// "switched codex -> other" and exited 0 while `ls`, the next launch and
+/// the payer all stayed on the slot's account.
+#[test]
+fn a_saved_copy_is_not_reported_switched_while_a_slot_is_the_default() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "live@example.com", "acct-live", "RT-L");
+    let (o, e, c) = run(root, &["use", "live", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    seed_codex_snapshot(root, "other", "other@example.com", "acct-other", "RT-O");
+
+    let (o, e, c) = run(root, &["use", "other", "--tool", "codex"]);
+    let said = format!("{o}{e}");
+    assert_ne!(c, 0, "a switch that changes nothing exited 0:\n{said}");
+    assert!(
+        !said.contains("switched codex") && said.contains("swapdex migrate --tool codex"),
+        "the copy switch claimed success under a slot default:\n{said}"
+    );
+    let (o, _, _) = run(root, &["ls"]);
+    assert!(
+        o.lines().any(|l| l.starts_with("* live")),
+        "the slot stays the default:\n{o}"
+    );
+}
+
+/// When the default slot IS the tool's own dir (an adopted `~/.codex`), the
+/// copy switch would overwrite that slot's login, which the slot model exists
+/// to prevent. It is refused too, and says that is what it would have done.
+#[test]
+fn a_saved_copy_is_not_copied_over_an_adopted_default_slot() {
+    let t = fixture();
+    let root = t.path();
+    seed_live_codex(root, "mine@example.com");
+    let own = root.join(".codex");
+    let (o, e, c) = run(
+        root,
+        &["adopt", "mine", own.to_str().unwrap(), "--tool", "codex"],
+    );
+    assert_eq!(c, 0, "{o}{e}");
+    let (o, e, c) = run(root, &["use", "mine", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    let before = std::fs::read(own.join("auth.json")).unwrap();
+    seed_codex_snapshot(root, "other", "other@example.com", "acct-other", "RT-O");
+
+    let (o, e, c) = run(root, &["use", "other", "--tool", "codex"]);
+    let said = format!("{o}{e}");
+    assert_ne!(c, 0, "{said}");
+    assert!(
+        said.contains("would copy a credential over that slot"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read(own.join("auth.json")).unwrap(),
+        before,
+        "the adopted slot's login was overwritten:\n{said}"
+    );
+}
+
+/// A copy of a slotted account is pointed at its slot, not at `migrate`,
+/// which has nothing to do for it. When that slot is already the default,
+/// it says so instead of telling the user to switch to where they are.
+#[test]
+fn a_copy_of_a_slotted_account_points_at_its_slot() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
+    seed_codex_slot_as(root, "spare", "spare@example.com", "acct-spare", "RT-S");
+    let (o, e, c) = run(root, &["use", "live", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    seed_codex_snapshot(root, "stale", "shared@example.com", "acct-shared", "RT-OLD");
+    seed_codex_snapshot(root, "spcopy", "spare@example.com", "acct-spare", "RT-S0");
+
+    let (o, e, c) = run(root, &["use", "stale", "--tool", "codex"]);
+    let said = format!("{o}{e}");
+    assert_ne!(c, 0, "{said}");
+    assert!(
+        said.contains("which codex already uses") && !said.contains("migrate"),
+        "{said}"
+    );
+    let (o, e, c) = run(root, &["use", "spcopy", "--tool", "codex"]);
+    let said = format!("{o}{e}");
+    assert_ne!(c, 0, "{said}");
+    assert!(
+        said.contains("swapdex use spare --tool codex") && !said.contains("migrate"),
+        "{said}"
+    );
+}

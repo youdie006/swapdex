@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`use` no longer reports switching to a saved copy that cannot take
+  effect.** With a slot as the tool's default, a plain launch and the proxy
+  both run from that slot, but `use <saved-copy> --tool codex` wrote the copy
+  into the tool's own folder, said "switched codex -> ...", and exited 0,
+  while `ls`, the next launch and the payer all stayed on the slot. Where
+  the default slot is that folder itself, it overwrote the slot's login. It
+  now refuses and says what to do instead: switch to the slot that holds
+  that account, or `swapdex migrate --tool <tool>` to give the copy a slot.
+
 ## 0.167.22
 
 - **A Claude account bound to the native `~/.claude` login no longer dies when
