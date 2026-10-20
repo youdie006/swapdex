@@ -3168,9 +3168,11 @@ fn take_the_port(paths: &Paths, tool: &str, port: u16) -> Option<server::Server>
     println!("  another swapdex {tool} proxy (pid {pid}) holds {port} - taking it over");
     std::io::stdout().flush().ok();
     unsafe { libc::kill(pid, libc::SIGTERM) };
-    // Give it a moment to release, then the one retry. Looping here would just
-    // be the supervisor's restart loop moved inside the process.
-    for _ in 0..40 {
+    // It finishes the responses it is streaming before it lets go of the port,
+    // for up to DRAIN_SECS. Waiting longer would just be the supervisor's
+    // restart loop moved inside the process.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DRAIN_SECS + 5);
+    while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(50));
         if let Ok(s) = server::Server::http(("127.0.0.1", port)) {
             return Some(s);

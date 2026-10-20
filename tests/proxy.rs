@@ -7509,3 +7509,104 @@ fn stopping_the_proxy_finishes_the_responses_already_streaming() {
     };
     assert!(!status.success(), "it still exits as a stopped process");
 }
+
+/// A proxy that finds the port held by another swapdex proxy for its tool asks
+/// that one to stop and takes the port. The stopping one now finishes the
+/// responses it is streaming first, which outlasted the taker's two-second
+/// retry: the taker gave up, and under a supervisor kept restarting into it.
+#[test]
+fn taking_over_the_port_waits_for_the_holder_to_finish_streaming() {
+    use std::io::{BufRead as _, Write as _};
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "aaaa1111", "AT-SLOT", true);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let _ = read_http_request(&mut stream);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n6\r\nfirst \r\n",
+                );
+                let _ = stream.flush();
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                let _ = stream.write_all(b"6\r\nsecond\r\n0\r\n\r\n");
+            });
+        }
+    });
+    let (mut holder, port) = start_proxy(root.path(), &upstream, &[]);
+    // Reaped as soon as it exits, as a supervisor would: an unreaped child stays
+    // a zombie, and a zombie still answers "alive" to the taker's check.
+    std::thread::spawn(move || {
+        let _ = holder.wait();
+    });
+
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+        .unwrap();
+    let body = "{\"model\":\"x\"}";
+    write!(
+        client,
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&got).contains("first") {
+        let n = std::io::Read::read(&mut client, &mut buf).unwrap();
+        assert!(n > 0);
+        got.extend_from_slice(&buf[..n]);
+    }
+
+    let taker = Command::new(bin())
+        .args(["proxy", "--port", &port.to_string()])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", "/bin/false")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut taker = ReapedChild::new(taker);
+    let stdout = taker.0.as_mut().unwrap().stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = tx.send(line);
+        }
+    });
+
+    loop {
+        match std::io::Read::read(&mut client, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(error) => panic!("the stream broke: {error}"),
+        }
+        if String::from_utf8_lossy(&got).contains("0\r\n\r\n") {
+            break;
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&got).contains("second"),
+        "the holder's response was cut: {}",
+        String::from_utf8_lossy(&got)
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut said = Vec::new();
+    while std::time::Instant::now() < deadline {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(line) if line.contains("listening on") => return,
+            Ok(line) => said.push(line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => break,
+        }
+    }
+    panic!("the taker never took the port: {said:?}");
+}

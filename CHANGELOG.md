@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`swapdex service install` no longer cuts the responses 0.167.19 lets the
+  proxy finish.** It stopped the running proxy and moved on as soon as the
+  proxy withdrew its marker, which a stopping proxy now does first; the
+  supervisor's restart then signalled it a second time, and a second signal
+  makes it exit at once. It now waits for the proxy to exit. A proxy taking
+  the port over from another swapdex proxy likewise waits for that one to
+  finish and release it, instead of giving up after two seconds and being
+  restarted by its supervisor into the same failure.
+
 ## 0.167.19
 
 - **Restarting the proxy no longer cuts the responses it is streaming.** The

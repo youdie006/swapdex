@@ -570,9 +570,17 @@ fn stop_running(paths: &Paths, tool: &str) {
         return;
     };
     unsafe { libc::kill(pid, libc::SIGTERM) };
-    for _ in 0..40 {
-        if crate::proxy::running_proxy_for(paths, tool).is_none() {
-            return;
+    // A stopping proxy withdraws its marker at once and then finishes the
+    // responses it is streaming, so wait for the process rather than the marker:
+    // a supervisor restart during that wait signals it again, and a second
+    // signal makes it leave at once.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(STOP_WAIT_SECS);
+    let started = std::time::Instant::now();
+    let mut said = false;
+    while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
+        if !said && started.elapsed() >= std::time::Duration::from_secs(1) {
+            println!("  waiting for the running proxy to finish the responses it is streaming");
+            said = true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -704,6 +712,45 @@ mod tests {
         );
         let u = systemd_service(Path::new("/x/swapdex"), "claude-code");
         assert!(u.contains(&format!("TimeoutStopSec={want}\n")), "{u}");
+    }
+
+    /// A stopping proxy withdraws its marker at once and then finishes the
+    /// responses it is streaming. Waiting for the marker let `install` restart
+    /// the service while it was still finishing, and that second signal makes
+    /// it leave at once - cutting the responses after all.
+    #[test]
+    fn stopping_waits_for_the_proxy_to_exit_not_for_its_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let marker = crate::shim::proxy_marker_for(&paths, "claude-code");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let ready = root.path().join("trap-set");
+        // Detached, like a supervised proxy: its exit is reaped by someone else,
+        // so it leaves no zombie that would look alive.
+        let script = format!(
+            "trap 'rm -f {m}; sleep 1; exit 0' TERM; echo \\$\\$ 8787 x > {m}; : > {r}; \
+             while :; do sleep 0.05; done",
+            m = marker.display(),
+            r = ready.display()
+        );
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("sh -c \"{script}\" >/dev/null 2>&1 &"))
+            .status()
+            .unwrap();
+        while !ready.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (pid, _, _) = crate::proxy::running_proxy_for(&paths, "claude-code").unwrap();
+        stop_running(&paths, "claude-code");
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(
+            !alive,
+            "stop_running returned while the proxy was still finishing"
+        );
     }
 
     #[test]
