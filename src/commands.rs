@@ -5427,6 +5427,22 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
         };
         for r in slots.list() {
             let key = format!("slot:{}", r.name);
+            // A bound slot is served from its authority. When that no longer
+            // resolves the proxy refuses the account, whatever the old copy says.
+            if tool == "claude-code"
+                && r.config_dir.join(crate::claude_authority::RECORD).exists()
+                && matches!(
+                    crate::proxy::creds::slot_token_detail_for(paths, &r.config_dir),
+                    Err(crate::proxy::creds::TokenUnavailable::NoLogin)
+                )
+            {
+                report(
+                    &key,
+                    false,
+                    crate::proxy::creds::TokenUnavailable::NoLogin.remedy(&r.name, tool),
+                );
+                continue;
+            }
             match slot_login_of(paths, tool, &r.config_dir) {
                 SlotLogin::Absent => report(
                     &key,
@@ -10367,8 +10383,8 @@ fn codex_no_number(
         // about a row directly above a healthy one condemns a working account.
         CodexSource::Snapshot { twin: Some(t) } => format!(
             "saved copy of the account signed in as '{t}' - this copy's token lapsed, \
-             which says nothing about that account; `swapdex add {name} --tool codex --update` \
-             saves a fresh copy, or leave it"
+             which says nothing about that account; re-saving it makes another copy to go \
+             stale, so `swapdex rm {name} --tool codex` drops it, or leave it"
         ),
         // A copy cannot renew itself: only the live login rotates the token,
         // and `swapdex run` on a name with no slot would build an empty one and
