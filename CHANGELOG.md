@@ -19,6 +19,9 @@ All notable changes to swapdex are documented here. This project follows
   wrote another copy of the slot's login, which the slot's next renewal
   retired again, so the warning came back. They now name the slot and give
   `swapdex rm <name> --tool <tool>` to drop the copy, as `migrate` already did.
+- **A refused switch to a saved login whose token was retired now names the
+  slot that holds the current one** (`swapdex use <slot> --tool <tool>`),
+  instead of "switch to the slot that holds the current token".
 
 ## 0.167.20
 

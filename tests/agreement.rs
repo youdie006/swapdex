@@ -3762,6 +3762,10 @@ fn use_refuses_a_codex_snapshot_whose_refresh_token_was_rotated_away() {
         said.contains("rotated") || said.contains("retired") || said.contains("revoked"),
         "nothing said the refresh token was retired by another holder:\n{said}"
     );
+    assert!(
+        said.contains("swapdex use live --tool codex"),
+        "the refusal did not name the slot that holds the current token:\n{said}"
+    );
 }
 
 /// A switch that switched nothing must not send the user to `restore`.
