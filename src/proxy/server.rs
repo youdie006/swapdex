@@ -12,6 +12,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use std::io::{self, Read};
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::task::{Context, Poll};
 use std::thread::JoinHandle;
@@ -20,6 +21,44 @@ use tokio::sync::{mpsc as body_channel, oneshot};
 
 #[cfg(test)]
 mod tests;
+
+/// Set once the process has been asked to stop. The responses already
+/// streaming are finished; a request that arrives meanwhile is told to retry,
+/// which reaches the proxy that replaces this one.
+pub(super) static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Requests handed to a handler and not yet fully answered.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) fn in_flight() -> usize {
+    IN_FLIGHT.load(Ordering::SeqCst)
+}
+
+/// A retryable refusal for a request that arrives while the proxy stops. The
+/// connection is closed so the client's retry opens a new one.
+fn restarting() -> hyper::Response<Body> {
+    let text = br#"{"type":"error","error":{"type":"overloaded_error","message":"swapdex proxy is restarting - retry"}}"#;
+    let (sender, receiver) = body_channel::channel(1);
+    let _ = sender.try_send(BodyEvent::Data(Bytes::from_static(text)));
+    let mut response = hyper::Response::new(Body {
+        receiver,
+        remaining: Some(text.len() as u64),
+        complete: false,
+        flush_pending: false,
+    });
+    *response.status_mut() = hyper::StatusCode::SERVICE_UNAVAILABLE;
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-type",
+        hyper::header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert("retry-after", hyper::header::HeaderValue::from_static("1"));
+    headers.insert(
+        "connection",
+        hyper::header::HeaderValue::from_static("close"),
+    );
+    response
+}
 
 pub(super) struct Server {
     addr: SocketAddr,
@@ -164,6 +203,9 @@ async fn receive(
     requests: mpsc::Sender<io::Result<Request>>,
     secure: bool,
 ) -> io::Result<hyper::Response<Body>> {
+    if STOPPING.load(Ordering::SeqCst) {
+        return Ok(restarting());
+    }
     let (parts, body) = request.into_parts();
     let body = body.collect().await.map_err(io::Error::other)?.to_bytes();
     let (response, received) = oneshot::channel();
@@ -189,6 +231,7 @@ async fn receive(
         response: Some(response),
         secure,
     };
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     requests
         .send(Ok(request))
         .map_err(|_| io::Error::other("HTTP handler stopped"))?;
@@ -283,6 +326,8 @@ impl Request {
 
 impl Drop for Request {
     fn drop(&mut self) {
+        // Every Request is built by `receive`, which counted it.
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         if let Some(sender) = self.response.take() {
             let (_, receiver) = body_channel::channel(1);
             let mut response = hyper::Response::new(Body {
