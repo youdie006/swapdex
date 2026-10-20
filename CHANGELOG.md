@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A switch that changed nothing no longer tells you to run `swapdex
+  restore`.** When every selected tool was refused (for example a saved login
+  whose refresh token another holder had already renewed), or on a
+  `--dry-run`, `use` still said "the tools above did switch - `swapdex
+  restore` undoes this switch entirely". Nothing had switched, and `restore`
+  would have undone an earlier, unrelated switch. It now says nothing was
+  changed. The undo is still offered when another tool did switch.
+
 ## 0.167.20
 
 - **`swapdex service install` no longer cuts the responses 0.167.19 lets the

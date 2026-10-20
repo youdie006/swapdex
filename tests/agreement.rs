@@ -3764,6 +3764,56 @@ fn use_refuses_a_codex_snapshot_whose_refresh_token_was_rotated_away() {
     );
 }
 
+/// A switch that switched nothing must not send the user to `restore`.
+///
+/// `restore` puts back the login from before the last switch that wrote one.
+/// When every selected tool was refused, this switch wrote nothing, so the
+/// suggested undo would roll back an earlier, unrelated switch.
+#[test]
+fn a_refused_switch_that_changed_nothing_does_not_offer_restore() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
+    seed_codex_snapshot(root, "stale", "shared@example.com", "acct-shared", "RT-OLD");
+
+    for args in [
+        &["use", "stale", "--tool", "codex"][..],
+        &["use", "stale", "--tool", "codex", "--dry-run"][..],
+    ] {
+        let (out, err, code) = run(root, args);
+        let said = format!("{out}{err}");
+        assert_ne!(code, 0, "{args:?} reported success:\n{said}");
+        assert!(
+            !said.contains("did switch") && !said.contains("restore"),
+            "{args:?} switched nothing but offered an undo:\n{said}"
+        );
+    }
+}
+
+/// When another tool did switch, the undo is still offered.
+#[test]
+fn a_partly_refused_switch_still_offers_restore() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-s", "s@example.com");
+    let (o, e, c) = run(root, &["add", "stale", "--tool", "claude-code"]);
+    assert_eq!(c, 0, "add failed:\n{o}{e}");
+    seed_claude(root, "uuid-o", "o@example.com");
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
+    seed_codex_snapshot(root, "stale", "shared@example.com", "acct-shared", "RT-OLD");
+
+    let (out, err, code) = run(root, &["use", "stale"]);
+    let said = format!("{out}{err}");
+    assert_ne!(
+        code, 0,
+        "the refused codex switch reported success:\n{said}"
+    );
+    assert!(
+        said.contains("switched claude-code") && said.contains("did switch - `swapdex restore`"),
+        "claude-code switched but no undo was offered:\n{said}"
+    );
+}
+
 /// The rotation check must not fire on the copy that IS current.
 ///
 /// Two holders of one account are normal - a slot and the snapshot it was

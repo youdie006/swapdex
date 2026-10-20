@@ -1060,12 +1060,22 @@ fn use_account_inner(
         println!("(takes effect on your next message)");
     }
     if !failed.is_empty() {
-        eprintln!(
-            "swapdex: {} tool(s) failed to switch ({}); the tools above did switch - \
-             `swapdex restore` undoes this switch entirely",
-            failed.len(),
-            failed.join(", ")
-        );
+        // `restore` undoes the last switch that wrote a login. With nothing
+        // written here, that is an earlier switch, not this one.
+        if changed > 0 {
+            eprintln!(
+                "swapdex: {} tool(s) failed to switch ({}); the tools above did switch - \
+                 `swapdex restore` undoes this switch entirely",
+                failed.len(),
+                failed.join(", ")
+            );
+        } else {
+            eprintln!(
+                "swapdex: {} tool(s) failed to switch ({}); nothing was changed",
+                failed.len(),
+                failed.join(", ")
+            );
+        }
         return Ok(1);
     }
     Ok(0)
