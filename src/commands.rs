@@ -862,6 +862,59 @@ fn use_account_inner(
             }
         };
         matched += 1;
+        // With a slot as the default, a plain launch and the proxy use that
+        // slot, so writing this copy into the tool's own dir changes nothing.
+        if crate::slots::home_var(tool).is_some() {
+            if let Some(slot) = crate::slots::Slots::open_for(paths, tool)
+                .ok()
+                .and_then(|s| {
+                    let d = s.default_dir()?;
+                    s.list().into_iter().find(|r| r.config_dir == d)
+                })
+            {
+                let own = match tool {
+                    "claude-code" => Some(paths.claude_dir()),
+                    "codex" => Some(paths.codex_dir()),
+                    _ => None,
+                };
+                let same = |a: &std::path::Path, b: &std::path::Path| {
+                    a == b
+                        || matches!(
+                            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                            (Ok(x), Ok(y)) if x == y
+                        )
+                };
+                let effect = if own.is_some_and(|d| same(d, &slot.config_dir)) {
+                    "would copy a credential over that slot"
+                } else {
+                    "would change nothing"
+                };
+                // A copy of an account a slot already holds needs no slot of its
+                // own; `migrate` would say "nothing to do" about it.
+                let next = match copies_of_slots(paths, &store)
+                    .remove(&(name.to_string(), tool.to_string()))
+                {
+                    Some(holder) if holder == slot.name => {
+                        format!("It is a copy of that slot's account, which {tool} already uses.")
+                    }
+                    Some(holder) => format!(
+                        "It is a copy of slot '{holder}': `swapdex use {holder} --tool {}`.",
+                        pretty_tool_flag(tool)
+                    ),
+                    None => format!(
+                        "`swapdex migrate --tool {}` gives it a slot of its own.",
+                        pretty_tool_flag(tool)
+                    ),
+                };
+                eprintln!(
+                    "swapdex: {tool} runs from slot '{}', so switching to the saved copy \
+                     '{name}' {effect}. {next}",
+                    slot.name
+                );
+                failed.push(tool);
+                continue;
+            }
+        }
         // Already-active is a no-op success. Ignore EMPTY ids: two accounts with
         // no account_id must never compare equal, or the switch would be skipped
         // and the WRONG account silently kept active. An UNREADABLE live file is
