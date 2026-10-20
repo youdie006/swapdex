@@ -4,7 +4,28 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A Claude account bound to the native `~/.claude` login no longer dies when
+  `claude` is run directly in its slot directory.** Such a run (for example
+  `CLAUDE_CONFIG_DIR=<slot> claude mcp remove ...`) tries to renew with the
+  slot's retired token, is refused, and writes the slot's copy back with no
+  refresh token. swapdex then treated the account as signed in again: the
+  proxy answered every turn with 403 "has no usable login", and the suggested
+  `swapdex run <name>` refused with "credential authority needs
+  reconciliation", which nothing could do. A copy with no refresh token holds
+  no login of its own, so the account keeps using the native login. A copy
+  signed in to a different token is still refused.
+- **`doctor` no longer calls a bound Claude account healthy while the proxy
+  refuses it.** It read the slot's old copy and printed "login idle ~20746d"
+  as ok, then "everything looks healthy". It now asks the same reader the
+  proxy uses and reports the account as a problem.
+- **`quota` no longer tells you to re-save a Codex copy of an account a slot
+  holds.** It now gives `swapdex rm <name> --tool codex`, as `ls` and
+  `doctor` do since 0.167.21.
+
 ## 0.167.21
+
 
 - **A switch that changed nothing no longer tells you to run `swapdex
   restore`.** When every selected tool was refused (for example a saved login

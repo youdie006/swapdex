@@ -7314,38 +7314,71 @@ fn a_spent_fleet_is_still_held_until_the_reset() {
     assert!(log.contains("every account is spent; holding"), "{log}");
 }
 
-/// A slot bound to the native `~/.claude` login is served from that login; its
-/// own copy stops being renewed the day it is bound. `doctor` read the copy, so
-/// a paying account serving every day was reported as "login idle ~31d" with
-/// advice to run it from the obsolete copy.
+/// The proxy refuses a bound slot whose authority no longer resolves, so
+/// `doctor` must not call that slot healthy. It read the obsolete copy instead
+/// and reported a paying account the proxy was refusing every turn as fine.
 #[cfg(target_os = "linux")]
 #[test]
-fn doctor_reads_a_bound_slots_login_from_its_authority() {
+fn doctor_reports_a_bound_slot_the_proxy_cannot_use() {
     let root = tempfile::tempdir().unwrap();
-    seed_slot(root.path(), "work", "id-work", "AT", true);
-    let slot = root.path().join(".local/share/swapdex/slots/id-work");
-    let native = root.path().join(".claude");
+    let (slot, native) = bound_claude_slot(root.path());
+    std::fs::write(
+        slot.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"AT2","refreshToken":"signed-in-again","expiresAt":4102444800000}}"#,
+    )
+    .unwrap();
+    // Only the slot may be at fault here.
+    use std::os::unix::fs::PermissionsExt;
+    for f in [
+        slot.join(".credentials.json"),
+        native.join(".credentials.json"),
+        root.path().join(".claude.json"),
+    ] {
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let out = Command::new(bin())
+        .arg("doctor")
+        .env("HOME", root.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("has no usable login") && !text.contains("everything looks healthy"),
+        "{text}"
+    );
+}
+
+/// A `work` slot bound to the native `~/.claude` login, as the keep-alive
+/// sweep binds it. Returns (slot dir, native dir).
+#[cfg(target_os = "linux")]
+fn bound_claude_slot(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    seed_slot(root, "work", "id-work", "AT", true);
+    let slot = root.join(".local/share/swapdex/slots/id-work");
+    let native = root.join(".claude");
     std::fs::create_dir_all(&native).unwrap();
     let identity = br#"{"oauthAccount":{"accountUuid":"same-user","organizationUuid":"same-org"}}"#;
     std::fs::write(slot.join(".claude.json"), identity).unwrap();
-    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    std::fs::write(root.join(".claude.json"), identity).unwrap();
     std::fs::copy(
         slot.join(".credentials.json"),
         native.join(".credentials.json"),
     )
     .unwrap();
     let holder = spawn_native_cli(
-        root.path(),
+        root,
         "claude",
         &[
-            ("HOME", root.path()),
+            ("HOME", root),
             (
                 "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS",
                 std::path::Path::new("1"),
             ),
         ],
     );
-    let paths = swapdex::paths::Paths::rooted(root.path());
+    let paths = swapdex::paths::Paths::rooted(root);
     let (_, failed) = swapdex::refresh::keep_alive_sweep(
         &paths,
         &[("work".into(), slot.clone())],
@@ -7354,6 +7387,18 @@ fn doctor_reads_a_bound_slots_login_from_its_authority() {
     assert!(failed.is_empty(), "{failed:?}");
     holder.stop();
     assert!(slot.join(".swapdex-claude-authority.json").is_file());
+    (slot, native)
+}
+
+/// A slot bound to the native `~/.claude` login is served from that login; its
+/// own copy stops being renewed the day it is bound. `doctor` read the copy, so
+/// a paying account serving every day was reported as "login idle ~31d" with
+/// advice to run it from the obsolete copy.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_reads_a_bound_slots_login_from_its_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let (slot, native) = bound_claude_slot(root.path());
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

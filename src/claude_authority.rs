@@ -177,8 +177,10 @@ fn resolve_inner(paths: &Paths, slot: &Path, authentication: bool) -> anyhow::Re
     }
     let old_copy = crate::adapters::claude::slot_credential(slot)
         .map_err(|_| anyhow::anyhow!("cannot verify the linked Claude slot"))?;
-    if refresh_fingerprint(old_copy.bytes()).as_deref()
-        != Some(binding.linked_refresh_fingerprint.as_str())
+    // A copy with no refresh token holds no login of its own: a `claude` run
+    // straight in the slot dir renewed with the retired copy and was refused.
+    if refresh_fingerprint(old_copy.bytes())
+        .is_some_and(|f| f != binding.linked_refresh_fingerprint)
     {
         bail!("Claude slot was signed in again; credential authority needs reconciliation");
     }
@@ -690,6 +692,26 @@ mod tests {
             std::os::unix::fs::symlink("missing-identity", &f.native.identity_path).unwrap();
             assert!(resolve_for_authentication(&f.paths, &f.slot).is_err());
         }
+    }
+
+    /// A `claude` run straight in the slot dir renews with the retired copy, is
+    /// refused, and writes the copy back with no refresh token. The slot holds
+    /// no login of its own then, so the native one still serves it.
+    #[test]
+    fn a_slot_copy_emptied_by_a_direct_run_keeps_native_authority() {
+        let f = Fixture::new();
+        assert!(bind_to_native(&f.paths, &f.slot, &f.native).unwrap());
+        std::fs::write(
+            f.slot.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(&f.paths, &f.slot).unwrap().storage_dir,
+            f.native.source_dir
+        );
+        credential(&f.slot, "signed-in-again");
+        assert!(resolve(&f.paths, &f.slot).is_err());
     }
 
     #[test]

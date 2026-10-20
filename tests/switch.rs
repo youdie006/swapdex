@@ -3627,6 +3627,13 @@ fn a_stale_codex_copy_does_not_condemn_the_login_it_is_a_copy_of() {
         !o.contains("swapdex run copy"),
         "a copy is not renewed by running it: {o}"
     );
+    // Same advice as `ls` and `doctor`: re-saving only writes another copy for
+    // the slot's next renewal to retire.
+    assert!(
+        o.contains("swapdex rm copy --tool codex")
+            && !o.contains("swapdex add copy --tool codex --update"),
+        "quota still says to re-save a copy of a slot's account: {o}"
+    );
 }
 
 /// `--json` is where the Codex rows send the reader, and it had no Codex in it.
