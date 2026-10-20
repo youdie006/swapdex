@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.23
 
 - **`use` no longer reports switching to a saved copy that cannot take
   effect.** With a slot as the tool's default, a plain launch and the proxy
