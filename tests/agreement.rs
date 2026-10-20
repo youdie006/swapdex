@@ -3814,6 +3814,37 @@ fn a_partly_refused_switch_still_offers_restore() {
     );
 }
 
+/// A stale saved copy of an account a slot holds is not refreshed by re-saving.
+///
+/// The slot keeps that account's login current, so `add --update` only writes
+/// another copy, which the slot's next renewal retires again. `ls` must say
+/// what `migrate` says about such a copy: it can be dropped.
+#[test]
+fn ls_offers_to_drop_a_stale_copy_of_a_slot_not_to_resave_it() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
+    seed_codex_snapshot(root, "stale", "shared@example.com", "acct-shared", "RT-OLD");
+
+    let (out, err, _) = run(root, &["ls"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("slot 'live'") && said.contains("swapdex rm stale --tool codex"),
+        "the copy of slot 'live' was not offered for removal:\n{said}"
+    );
+    assert!(
+        !said.contains("swapdex add stale --tool codex --update"),
+        "ls told the user to re-save a copy the slot keeps retiring:\n{said}"
+    );
+    let (out, err, _) = run(root, &["doctor"]);
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("swapdex rm stale --tool codex")
+            && !said.contains("swapdex add stale --tool codex --update"),
+        "doctor and ls disagree about the copy of slot 'live':\n{said}"
+    );
+}
+
 /// The rotation check must not fire on the copy that IS current.
 ///
 /// Two holders of one account are normal - a slot and the snapshot it was

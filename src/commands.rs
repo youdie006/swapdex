@@ -268,6 +268,28 @@ fn classify_migrations(
         .collect()
 }
 
+/// Saved profile copies of an account a slot holds, keyed by (profile, tool),
+/// valued by the slot's name.
+fn copies_of_slots(
+    paths: &Paths,
+    store: &Store,
+) -> std::collections::HashMap<(String, String), String> {
+    let mut out = std::collections::HashMap::new();
+    for tool in crate::adapters::names() {
+        if crate::slots::home_var(tool).is_none() {
+            continue;
+        }
+        if let Ok(slots) = crate::slots::Slots::open_for(paths, tool) {
+            for p in classify_migrations(store, &slots, tool) {
+                if let MigrationClass::CopyOfSlot(slot) = p.class {
+                    out.insert((p.name, tool.to_string()), slot);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Find the stored profile name whose snapshot matches this live account_id.
 pub(crate) fn matched_profile_name(store: &Store, tool: &str, live_id: &str) -> Option<String> {
     if live_id.is_empty() {
@@ -2765,6 +2787,10 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     let mut healthy_tools: Vec<String> = Vec::new();
     // Each stale copy by account, so the note can name the command for it.
     let mut resave: Vec<(String, String)> = Vec::new();
+    // A stale copy of an account a slot holds: re-saving only mints another
+    // copy for the slot's next renewal to retire.
+    let copy_of = copies_of_slots(paths, &store);
+    let mut drop_copies: Vec<(String, String, String)> = Vec::new();
     // Who the user has taken out of rotation; the proxy reads the same file.
     let cfg = crate::settings::load(paths);
     for r in &rows {
@@ -2797,6 +2823,14 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
                 let lapsed = notes
                     .iter()
                     .any(|note| note.contains("expired") || note.contains("stale"));
+                if lapsed {
+                    if let Some(slot) = copy_of.get(&(r.name.clone(), t.to_string())) {
+                        if !drop_copies.iter().any(|(n, x, _)| n == &r.name && x == t) {
+                            drop_copies.push((r.name.clone(), t.to_string(), slot.clone()));
+                        }
+                        continue;
+                    }
+                }
                 if lapsed && !resave.iter().any(|(n, x)| n == &r.name && x == t) {
                     resave.push((r.name.clone(), t.to_string()));
                 }
@@ -2855,7 +2889,14 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
             r.tools
         );
     }
-    if saw_refreshable {
+    for (name, tool, slot) in &drop_copies {
+        println!(
+            "  ({name}'s {tool} copy is the account slot '{slot}' keeps current - re-saving \
+             it makes another copy to go stale; `swapdex rm {name} --tool {}` drops it)",
+            pretty_tool_flag(tool)
+        );
+    }
+    if saw_refreshable && !(stale_tools.is_empty() && !drop_copies.is_empty()) {
         let stale: Vec<&str> = stale_tools.iter().map(String::as_str).collect();
         let healthy: Vec<&str> = healthy_tools.iter().map(String::as_str).collect();
         let pairs: Vec<(&str, &str)> = resave
@@ -5532,6 +5573,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     }
 
     // Every saved snapshot must parse.
+    let copy_of = copies_of_slots(paths, &store);
     for p in &profiles {
         for tool in &p.tools {
             match profile_detail(&store, &p.name, tool) {
@@ -5547,15 +5589,27 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 // The precondition matters: `add --update` snapshots whatever
                 // is LIVE, so without "log in to that account first" the
                 // remedy would overwrite this profile with the wrong account.
-                Some((_, _, Some(m))) => report(
-                    &format!("profile:{}", p.name),
-                    true,
-                    format!(
-                        "{tool} snapshot {m} - log in to that account and run \
-                         `swapdex add {} --tool {tool} --update`",
-                        p.name
+                Some((_, _, Some(m))) => match copy_of.get(&(p.name.clone(), tool.clone())) {
+                    Some(slot) => report(
+                        &format!("profile:{}", p.name),
+                        true,
+                        format!(
+                            "{tool} snapshot {m}, a copy of the account slot '{slot}' keeps \
+                             current - `swapdex rm {} --tool {}` drops it",
+                            p.name,
+                            pretty_tool_flag(tool)
+                        ),
                     ),
-                ),
+                    None => report(
+                        &format!("profile:{}", p.name),
+                        true,
+                        format!(
+                            "{tool} snapshot {m} - log in to that account and run \
+                             `swapdex add {} --tool {tool} --update`",
+                            p.name
+                        ),
+                    ),
+                },
                 _ => {}
             }
         }

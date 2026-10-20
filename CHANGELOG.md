@@ -13,6 +13,12 @@ All notable changes to swapdex are documented here. This project follows
   restore` undoes this switch entirely". Nothing had switched, and `restore`
   would have undone an earlier, unrelated switch. It now says nothing was
   changed. The undo is still offered when another tool did switch.
+- **`ls` and `doctor` no longer tell you to re-save a saved copy of an
+  account a slot already holds.** When such a copy went stale, both said to
+  sign in and run `swapdex add <name> --tool <tool> --update`. That only
+  wrote another copy of the slot's login, which the slot's next renewal
+  retired again, so the warning came back. They now name the slot and give
+  `swapdex rm <name> --tool <tool>` to drop the copy, as `migrate` already did.
 
 ## 0.167.20
 
