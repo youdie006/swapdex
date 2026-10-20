@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.20
 
 - **`swapdex service install` no longer cuts the responses 0.167.19 lets the
   proxy finish.** It stopped the running proxy and moved on as soon as the
