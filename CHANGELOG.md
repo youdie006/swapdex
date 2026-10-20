@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.21
 
 - **A switch that changed nothing no longer tells you to run `swapdex
   restore`.** When every selected tool was refused (for example a saved login
