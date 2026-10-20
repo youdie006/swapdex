@@ -896,13 +896,12 @@ fn use_account_inner(
         // A retired token is not a stale one: restoring it does not give a
         // worse login, it gives a dead one, and the tool discovers that only
         // when its next renewal is refused.
-        if snapshot_rotated_away(paths, &target, tool) {
+        if let Some(slot) = snapshot_rotated_away(paths, &target, tool) {
             eprintln!(
                 "swapdex: {tool}: this saved login's refresh token was retired when another \
                  holder of the same account renewed it - these tokens are single-use, so the \
                  copy that missed a renewal is dead. Restoring it would leave {tool} unable to \
-                 renew. Switch to the slot that holds the current token, or sign in again and \
-                 re-save with `swapdex add {name} --tool {} --update`.",
+                 renew. Slot '{slot}' holds the current token: `swapdex use {slot} --tool {}`.",
                 pretty_tool_flag(tool)
             );
             failed.push(tool);
@@ -1283,7 +1282,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         // is the part that is not acceptable: it replaces a working login with
         // one that cannot renew, and reports success.
         warn_if_expired(&target, tool);
-        if snapshot_rotated_away(paths, &target, tool) {
+        if snapshot_rotated_away(paths, &target, tool).is_some() {
             eprintln!(
                 "swapdex: {tool}: this backup's refresh token was retired when another holder \
                  of the same account renewed it - these tokens are single-use. The account is \
@@ -10939,16 +10938,21 @@ fn codex_cred_pair(bytes: &[u8]) -> Option<(String, String)> {
 /// Claude and Codex both rotate, so both are checked. An unreadable file on
 /// either side is not a verdict - a switch must never be blocked by something
 /// that could not be parsed.
-fn snapshot_rotated_away(paths: &Paths, target: &crate::adapters::Snapshot, tool: &str) -> bool {
-    let Some((account, refresh)) = snapshot_cred_pair(target, tool) else {
-        return false;
-    };
-    let Ok(slots) = crate::slots::Slots::open_for(paths, tool) else {
-        return false;
-    };
-    slots.list().into_iter().any(|r| {
-        slot_cred_pair(&r.config_dir, tool).is_some_and(|(a, rt)| a == account && rt != refresh)
-    })
+/// The slot whose renewal retired this snapshot's refresh token, if any.
+fn snapshot_rotated_away(
+    paths: &Paths,
+    target: &crate::adapters::Snapshot,
+    tool: &str,
+) -> Option<String> {
+    let (account, refresh) = snapshot_cred_pair(target, tool)?;
+    let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+    slots
+        .list()
+        .into_iter()
+        .find(|r| {
+            slot_cred_pair(&r.config_dir, tool).is_some_and(|(a, rt)| a == account && rt != refresh)
+        })
+        .map(|r| r.name)
 }
 
 /// The (account, refresh token) a SNAPSHOT carries. Codex keeps both in one
