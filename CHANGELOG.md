@@ -25,6 +25,10 @@ All notable changes to swapdex are documented here. This project follows
   After the clock was set back (a WSL resume, a time correction), every
   dashboard refresh reused the same stored reading until the clock caught up,
   possibly for hours rather than 45 seconds.
+- **Security:** `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10, for
+  RUSTSEC-2026-0382 (certificate verification could accept distrusted
+  intermediates) and RUSTSEC-2026-0381 (bundled roots trusted distrusted
+  emSign intermediates).
 
 ## 0.167.23
 
