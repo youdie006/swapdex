@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.25
 
 - **Codex no longer shows "unexpected status 503 ... swapdex proxy is
   restarting" while the proxy restarts.** Since 0.167.19 a stopping proxy
