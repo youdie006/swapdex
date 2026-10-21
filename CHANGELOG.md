@@ -21,6 +21,10 @@ All notable changes to swapdex are documented here. This project follows
   account. It is not offered either when the slot holding the account was
   made by `migrate` and has not been signed into yet, so the copy is still
   the only login.
+- **A usage reading stamped in the future is no longer reused as current.**
+  After the clock was set back (a WSL resume, a time correction), every
+  dashboard refresh reused the same stored reading until the clock caught up,
+  possibly for hours rather than 45 seconds.
 
 ## 0.167.23
 

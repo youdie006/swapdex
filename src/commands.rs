@@ -10148,7 +10148,8 @@ pub fn quota(paths: &Paths, json: bool, fresh_within: Option<u64>) -> Result<i32
             if r.token.is_some()
                 && !r.expired
                 && (e.five_h.is_some() || e.seven_d.is_some())
-                && now - e.at <= secs as i64
+                // A stamp from the future (a clock set back) has no known age.
+                && (0..=secs as i64).contains(&(now - e.at))
             {
                 reused.insert(i, e.at);
                 results.push((i, Fetch::Ok(quota_from_cache(e))));
