@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.24
 
 - **The 0.167.23 refusal no longer blocks copy switches that do take effect.**
   It refused whenever a slot was the default, but a plain launch follows the
