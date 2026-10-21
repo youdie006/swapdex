@@ -27,6 +27,11 @@ mod tests;
 /// which reaches the proxy that replaces this one.
 pub(super) static STOPPING: AtomicBool = AtomicBool::new(false);
 
+/// Whether a stopping proxy turns new requests away. Claude Code retries the
+/// 503 until the replacement answers; Codex gives up within seconds and shows
+/// the refusal, so the Codex proxy keeps serving until it exits.
+pub(super) static REFUSE_WHILE_STOPPING: AtomicBool = AtomicBool::new(true);
+
 /// Requests handed to a handler and not yet fully answered.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
@@ -203,7 +208,7 @@ async fn receive(
     requests: mpsc::Sender<io::Result<Request>>,
     secure: bool,
 ) -> io::Result<hyper::Response<Body>> {
-    if STOPPING.load(Ordering::SeqCst) {
+    if STOPPING.load(Ordering::SeqCst) && REFUSE_WHILE_STOPPING.load(Ordering::SeqCst) {
         return Ok(restarting());
     }
     let (parts, body) = request.into_parts();

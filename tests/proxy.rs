@@ -7555,6 +7555,77 @@ fn stopping_the_proxy_finishes_the_responses_already_streaming() {
     assert!(!status.success(), "it still exits as a stopped process");
 }
 
+/// Codex does not ride out a refusal the way Claude Code does: it retries a
+/// 503 a few times within seconds and then shows "unexpected status 503 ...
+/// swapdex proxy is restarting", while the drain lasts up to a minute. So the
+/// Codex proxy keeps answering new requests while it stops; only Claude's
+/// are turned away to be retried.
+#[test]
+fn a_stopping_codex_proxy_still_answers_new_requests() {
+    use std::io::Write as _;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "codex-work",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let _ = read_http_request(&mut stream);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                );
+                let _ = stream.write_all(b"6\r\nfirst \r\n");
+                let _ = stream.flush();
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let _ = stream.write_all(b"6\r\nsecond\r\n0\r\n\r\n");
+                let _ = stream.flush();
+            });
+        }
+    });
+
+    let (child, port) = start_codex_proxy(root.path(), &upstream, &[]);
+    let pid = child.id() as libc::pid_t;
+    let _child = ReapedChild::new(child);
+
+    // One turn streaming, so the proxy has something to finish.
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let body = "{\"input\":[]}";
+    write!(
+        client,
+        "POST /v1/responses HTTP/1.1\r\nhost: x\r\nauthorization: Bearer CLIENT-TOKEN\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&got).contains("first") {
+        let n = std::io::Read::read(&mut client, &mut buf).unwrap();
+        assert!(n > 0, "the stream closed before its first part");
+        got.extend_from_slice(&buf[..n]);
+    }
+
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let (status, answer) = post_codex_turn(port);
+    assert_eq!(
+        status, 200,
+        "a Codex turn during the stop was refused: {answer}"
+    );
+}
+
 /// A proxy that finds the port held by another swapdex proxy for its tool asks
 /// that one to stop and takes the port. The stopping one now finishes the
 /// responses it is streaming first, which outlasted the taker's two-second
