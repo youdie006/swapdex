@@ -1219,8 +1219,8 @@ pub(crate) const DRAIN_SECS: u64 = 60;
 /// Run `f` on SIGINT/SIGTERM, then exit once the responses already streaming
 /// are finished. Every release restarts the proxy, and exiting at once cut each
 /// running session's response mid-stream ("Connection lost mid-response").
-/// Requests that arrive meanwhile are refused with a retryable 503 (see
-/// `server::STOPPING`). A second signal exits at once. Best-effort: a hard kill
+/// Claude requests that arrive meanwhile are refused with a retryable 503 (see
+/// `server::STOPPING`); Codex ones are still served. A second signal exits at once. Best-effort: a hard kill
 /// still leaves the marker, which the shim's pid check then ignores.
 fn ctrl_c_cleanup<F: Fn() + Send + Sync + 'static>(f: F) -> Result<()> {
     use std::sync::atomic::{AtomicI32, Ordering};
@@ -1375,6 +1375,7 @@ pub fn serve(paths: &Paths, opts: &Opts) -> Result<()> {
         });
     }
     let is_codex = opts.tool == "codex";
+    server::REFUSE_WHILE_STOPPING.store(!is_codex, std::sync::atomic::Ordering::SeqCst);
     let bin = if is_codex { "codex" } else { "claude" };
     // The port ends this line: it is how the tests read it back, and anything
     // appended after it turns the port into an unparseable token.

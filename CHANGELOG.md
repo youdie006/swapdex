@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Codex no longer shows "unexpected status 503 ... swapdex proxy is
+  restarting" while the proxy restarts.** Since 0.167.19 a stopping proxy
+  finishes the responses it is streaming, for up to a minute, and turns new
+  requests away with a retryable 503. Claude Code retries until the new proxy
+  answers; Codex gives up within seconds, so every Codex request in that
+  minute failed. The Codex proxy now keeps answering new requests until it
+  exits. Claude's are still refused for Claude Code to retry.
+
 ## 0.167.24
 
 - **The 0.167.23 refusal no longer blocks copy switches that do take effect.**
