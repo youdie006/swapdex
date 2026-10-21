@@ -281,7 +281,20 @@ fn copies_of_slots(
         }
         if let Ok(slots) = crate::slots::Slots::open_for(paths, tool) {
             for p in classify_migrations(store, &slots, tool) {
-                if let MigrationClass::CopyOfSlot(slot) = p.class {
+                let MigrationClass::CopyOfSlot(slot) = p.class else {
+                    continue;
+                };
+                // `rm <name> --tool` also unregisters a slot of that name, and
+                // a migrated slot nobody signed into yet holds no login: in
+                // either case dropping the copy is not safe advice.
+                let holder_signed_in = slots.get(&slot).is_some_and(|r| {
+                    match tool {
+                        "claude-code" => crate::proxy::creds::slot_account_uuid(&r.config_dir),
+                        _ => crate::proxy::codex::slot_account_id(&r.config_dir),
+                    }
+                    .is_some_and(|id| !id.is_empty())
+                });
+                if slots.get(&p.name).is_none() && holder_signed_in {
                     out.insert((p.name, tool.to_string()), slot);
                 }
             }
@@ -673,10 +686,20 @@ fn use_account_switch(
     if held.is_empty() {
         // A legacy copy-model profile (in no slot registry) falls through to
         // the old guarded switch.
-        code = use_account_inner(paths, name, sel, dry_run, force, &[])?;
+        code = use_account_inner(paths, name, sel, dry_run, force, &[], false)?;
     }
+    // Whether a slot switch actually moved a default, so a refused copy-model
+    // half does not report the whole switch as having changed nothing.
+    let mut moved = false;
     for tool in &held {
+        let pointer = |t: &str| {
+            crate::slots::Slots::open_for(paths, t)
+                .ok()
+                .and_then(|s| s.default_dir())
+        };
+        let before = pointer(tool);
         let c = use_slot_default(paths, name, tool, dry_run)?;
+        moved |= pointer(tool) != before;
         if c != 0 {
             code = c;
         }
@@ -697,7 +720,7 @@ fn use_account_switch(
             .iter()
             .any(|p| p.name == name && p.tools.iter().any(|t| rest.contains(&t.as_str())));
         if spans_more {
-            let c = use_account_inner(paths, name, sel, dry_run, force, &held)?;
+            let c = use_account_inner(paths, name, sel, dry_run, force, &held, moved)?;
             if c != 0 {
                 code = c;
             }
@@ -747,6 +770,7 @@ fn use_account_inner(
     dry_run: bool,
     force: bool,
     skip: &[&str],
+    moved: bool,
 ) -> Result<i32> {
     crate::atomic::ensure_not_root()?;
     let store = Store::open(paths)?;
@@ -862,9 +886,14 @@ fn use_account_inner(
             }
         };
         matched += 1;
-        // With a slot as the default, a plain launch and the proxy use that
-        // slot, so writing this copy into the tool's own dir changes nothing.
-        if crate::slots::home_var(tool).is_some() {
+        // With a slot as the default and the shim installed, a plain launch
+        // runs from that slot, so writing this copy into the tool's own dir
+        // changes nothing. Without the shim, or with the tool's home set
+        // explicitly (the shim honors it), the copy still takes effect.
+        let slot_controls_launch = crate::slots::home_var(tool)
+            .is_some_and(|var| std::env::var_os(var).is_none())
+            && crate::shim::shim_path_for(paths, tool).exists();
+        if slot_controls_launch {
             if let Some(slot) = crate::slots::Slots::open_for(paths, tool)
                 .ok()
                 .and_then(|s| {
@@ -1136,7 +1165,7 @@ fn use_account_inner(
     if !failed.is_empty() {
         // `restore` undoes the last switch that wrote a login. With nothing
         // written here, that is an earlier switch, not this one.
-        if changed > 0 {
+        if changed > 0 || moved {
             eprintln!(
                 "swapdex: {} tool(s) failed to switch ({}); the tools above did switch - \
                  `swapdex restore` undoes this switch entirely",
