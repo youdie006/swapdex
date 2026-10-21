@@ -48,6 +48,26 @@ fn run_unshimmed(root: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
+/// `run` with the tools' home variables cleared or set as given. The shim
+/// honors CODEX_HOME / CLAUDE_CONFIG_DIR over the slot pointer, so an inherited
+/// one changes what `use` may do.
+fn run_homes(root: &Path, args: &[&str], homes: &[(&str, &Path)]) -> (String, String, i32) {
+    let mut cmd = Command::new(bin());
+    cmd.args(args)
+        .env("SWAPDEX_ROOT", root)
+        .env_remove("CODEX_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR");
+    for (k, v) in homes {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
 fn chmod600(p: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
@@ -5356,12 +5376,14 @@ fn status_and_ls_name_the_same_plan() {
 fn a_saved_copy_is_not_reported_switched_while_a_slot_is_the_default() {
     let t = fixture();
     let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
     seed_codex_slot_as(root, "live", "live@example.com", "acct-live", "RT-L");
     let (o, e, c) = run(root, &["use", "live", "--tool", "codex"]);
     assert_eq!(c, 0, "{o}{e}");
     seed_codex_snapshot(root, "other", "other@example.com", "acct-other", "RT-O");
 
-    let (o, e, c) = run(root, &["use", "other", "--tool", "codex"]);
+    let (o, e, c) = run_homes(root, &["use", "other", "--tool", "codex"], &[]);
     let said = format!("{o}{e}");
     assert_ne!(c, 0, "a switch that changes nothing exited 0:\n{said}");
     assert!(
@@ -5382,6 +5404,8 @@ fn a_saved_copy_is_not_reported_switched_while_a_slot_is_the_default() {
 fn a_saved_copy_is_not_copied_over_an_adopted_default_slot() {
     let t = fixture();
     let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
     seed_live_codex(root, "mine@example.com");
     let own = root.join(".codex");
     let (o, e, c) = run(
@@ -5394,7 +5418,7 @@ fn a_saved_copy_is_not_copied_over_an_adopted_default_slot() {
     let before = std::fs::read(own.join("auth.json")).unwrap();
     seed_codex_snapshot(root, "other", "other@example.com", "acct-other", "RT-O");
 
-    let (o, e, c) = run(root, &["use", "other", "--tool", "codex"]);
+    let (o, e, c) = run_homes(root, &["use", "other", "--tool", "codex"], &[]);
     let said = format!("{o}{e}");
     assert_ne!(c, 0, "{said}");
     assert!(
@@ -5415,6 +5439,8 @@ fn a_saved_copy_is_not_copied_over_an_adopted_default_slot() {
 fn a_copy_of_a_slotted_account_points_at_its_slot() {
     let t = fixture();
     let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
     seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
     seed_codex_slot_as(root, "spare", "spare@example.com", "acct-spare", "RT-S");
     let (o, e, c) = run(root, &["use", "live", "--tool", "codex"]);
@@ -5422,18 +5448,108 @@ fn a_copy_of_a_slotted_account_points_at_its_slot() {
     seed_codex_snapshot(root, "stale", "shared@example.com", "acct-shared", "RT-OLD");
     seed_codex_snapshot(root, "spcopy", "spare@example.com", "acct-spare", "RT-S0");
 
-    let (o, e, c) = run(root, &["use", "stale", "--tool", "codex"]);
+    let (o, e, c) = run_homes(root, &["use", "stale", "--tool", "codex"], &[]);
     let said = format!("{o}{e}");
     assert_ne!(c, 0, "{said}");
     assert!(
         said.contains("which codex already uses") && !said.contains("migrate"),
         "{said}"
     );
-    let (o, e, c) = run(root, &["use", "spcopy", "--tool", "codex"]);
+    let (o, e, c) = run_homes(root, &["use", "spcopy", "--tool", "codex"], &[]);
     let said = format!("{o}{e}");
     assert_ne!(c, 0, "{said}");
     assert!(
         said.contains("swapdex use spare --tool codex") && !said.contains("migrate"),
         "{said}"
+    );
+}
+
+/// Without the shim a plain `codex` reads its own folder, so the copy switch
+/// does take effect and must not be refused. The same goes for an explicit
+/// CODEX_HOME, which the shim honors over the slot pointer.
+#[test]
+fn a_saved_copy_still_switches_when_the_slot_pointer_does_not_control_launch() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "live", "live@example.com", "acct-live", "RT-L");
+    let (o, e, c) = run(root, &["use", "live", "--tool", "codex"]);
+    assert_eq!(c, 0, "{o}{e}");
+    seed_codex_snapshot(root, "other", "other@example.com", "acct-other", "RT-O");
+
+    let (o, e, c) = run_homes(root, &["use", "other", "--tool", "codex", "--dry-run"], &[]);
+    assert_eq!(c, 0, "refused with no shim installed:\n{o}{e}");
+    assert!(o.contains("would switch codex"), "{o}{e}");
+
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
+    let home = root.join(".codex");
+    let (o, e, c) = run_homes(
+        root,
+        &["use", "other", "--tool", "codex", "--dry-run"],
+        &[("CODEX_HOME", home.as_path())],
+    );
+    assert_eq!(c, 0, "refused with CODEX_HOME set:\n{o}{e}");
+}
+
+/// A name can be a slot for one tool and a saved copy for another. When the
+/// slot switch went through and only the copy was refused, the summary said
+/// "nothing was changed" and dropped the undo, though the default had moved.
+#[test]
+fn a_slot_switch_counts_when_the_copy_half_is_refused() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "before", "before@example.com");
+    seed_slot(root, "acct", "acct@example.com");
+    let (o, e, c) = run_homes(root, &["use", "before", "--tool", "claude"], &[]);
+    assert_eq!(c, 0, "{o}{e}");
+    seed_codex_slot_as(root, "live", "shared@example.com", "acct-shared", "RT-NEW");
+    seed_codex_snapshot(root, "acct", "shared@example.com", "acct-shared", "RT-OLD");
+
+    // A dry run moves nothing, so it must not claim the slot half switched.
+    let (o, e, _) = run_homes(root, &["use", "acct", "--dry-run"], &[]);
+    assert!(!format!("{o}{e}").contains("did switch"), "{o}{e}");
+
+    let (o, e, c) = run_homes(root, &["use", "acct"], &[]);
+    let said = format!("{o}{e}");
+    assert_ne!(c, 0, "the refused codex half reported success:\n{said}");
+    assert!(
+        !said.contains("nothing was changed") && said.contains("did switch - `swapdex restore`"),
+        "the claude slot moved but the summary denied it:\n{said}"
+    );
+}
+
+/// Dropping a copy is advised only when it is safe. `rm <name> --tool` also
+/// unregisters a slot of that name, so a copy named like a slot holding a
+/// different account must not be offered for removal; nor may a copy whose
+/// "holder" is a migrated slot nobody has signed into yet, for which the copy
+/// is the only login there is.
+#[test]
+fn ls_offers_to_drop_a_copy_only_when_that_is_safe() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "other", "a@example.com", "acct-a", "RT-A");
+    seed_codex_slot_as(root, "work", "b@example.com", "acct-b", "RT-B");
+    seed_codex_snapshot(root, "work", "a@example.com", "acct-a", "RT-A0");
+    for args in [&["ls"][..], &["doctor"][..]] {
+        let (o, e, _) = run_homes(root, args, &[]);
+        assert!(
+            !format!("{o}{e}").contains("swapdex rm work --tool codex"),
+            "{args:?} advised an rm that would unregister slot 'work' (another account):\n{o}{e}"
+        );
+    }
+
+    let t = fixture();
+    let root = t.path();
+    seed_empty_codex_slot(root, "fresh");
+    std::fs::write(
+        root.join(".local/share/swapdex/slots/fresh/.swapdex-migrated-account"),
+        "acct-a",
+    )
+    .unwrap();
+    seed_codex_snapshot(root, "codex", "a@example.com", "acct-a", "RT-A0");
+    let (o, e, _) = run_homes(root, &["ls"], &[]);
+    assert!(
+        !format!("{o}{e}").contains("swapdex rm codex --tool codex"),
+        "advised dropping the only login of an account whose slot is not signed in:\n{o}{e}"
     );
 }

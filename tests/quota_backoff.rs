@@ -590,4 +590,18 @@ fn a_reading_taken_moments_ago_is_reused_instead_of_asking_again() {
     write_cache(now - 10);
     fixture.command().output().unwrap();
     assert_eq!(fixture.calls(), 2, "plain `quota` always reads live");
+
+    // A clock set back after the reading was stored makes it look as if it
+    // came from the future; its age is unknown, so it is not current.
+    write_cache(now + 3600);
+    fixture
+        .command()
+        .args(["--fresh-within", "45"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        fixture.calls(),
+        3,
+        "a reading stamped in the future was reused"
+    );
 }

@@ -4,6 +4,32 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The 0.167.23 refusal no longer blocks copy switches that do take effect.**
+  It refused whenever a slot was the default, but a plain launch follows the
+  slot only through the shim, and the shim honors an explicit `CODEX_HOME` /
+  `CLAUDE_CONFIG_DIR` over it. Without the shim, or with that variable set,
+  the copy switch works again.
+- **A partly refused `use` no longer says "nothing was changed" when a slot
+  half did switch.** A name that is a slot for one tool and a saved copy for
+  another moved the slot's default, then printed that nothing changed and
+  hid `swapdex restore`.
+- **`ls` and `doctor` offer `swapdex rm <name> --tool <tool>` for a copy only
+  when that is safe.** That command also unregisters a slot of the same name,
+  so it is no longer offered when a slot by that name holds a different
+  account. It is not offered either when the slot holding the account was
+  made by `migrate` and has not been signed into yet, so the copy is still
+  the only login.
+- **A usage reading stamped in the future is no longer reused as current.**
+  After the clock was set back (a WSL resume, a time correction), every
+  dashboard refresh reused the same stored reading until the clock caught up,
+  possibly for hours rather than 45 seconds.
+- **Security:** `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10, for
+  RUSTSEC-2026-0382 (certificate verification could accept distrusted
+  intermediates) and RUSTSEC-2026-0381 (bundled roots trusted distrusted
+  emSign intermediates).
+
 ## 0.167.23
 
 - **`use` no longer reports switching to a saved copy that cannot take
