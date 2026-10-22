@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The copy-switch refusal follows where a plain launch really reads.** An
+  empty `CODEX_HOME` / `CLAUDE_CONFIG_DIR` counts as unset, as the shim
+  treats it. One that names a slot is refused, because the copy would be
+  written over that slot's login (0.167.24 let it through). An installed shim
+  that another binary outranks on PATH no longer counts as controlling the
+  launch.
+- **A stopping proxy no longer exits while a request is still uploading.** The
+  request was counted only once its body had arrived, so a stop with nothing
+  else running cut it.
+
 ## 0.167.25
 
 - **Codex no longer shows "unexpected status 503 ... swapdex proxy is
