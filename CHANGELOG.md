@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.26
 
 - **The copy-switch refusal follows where a plain launch really reads.** An
   empty `CODEX_HOME` / `CLAUDE_CONFIG_DIR` counts as unset, as the shim
