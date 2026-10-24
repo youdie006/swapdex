@@ -7626,6 +7626,65 @@ fn a_stopping_codex_proxy_still_answers_new_requests() {
     );
 }
 
+/// A request still uploading its body counts as in flight. The counter went up
+/// only once the body had arrived, so a stop that found nothing else running
+/// exited while the request was being read and cut it.
+#[test]
+fn a_request_still_uploading_keeps_a_stopping_proxy_alive() {
+    use std::io::Write as _;
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "codex-work",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = read_http_request(&mut stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+            );
+        }
+    });
+
+    let (child, port) = start_codex_proxy(root.path(), &upstream, &[]);
+    let pid = child.id() as libc::pid_t;
+    let mut child = ReapedChild::new(child);
+
+    let body = "{\"input\":[],\"x\":1}";
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        client,
+        "POST /v1/responses HTTP/1.1\r\nhost: x\r\nauthorization: Bearer CLIENT-TOKEN\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        &body[..5]
+    )
+    .unwrap();
+    client.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(
+        child.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "the proxy exited while a request was still uploading"
+    );
+
+    client.write_all(&body.as_bytes()[5..]).unwrap();
+    let mut answer = String::new();
+    let _ = std::io::Read::read_to_string(&mut client, &mut answer);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
 /// A proxy that finds the port held by another swapdex proxy for its tool asks
 /// that one to stop and takes the port. The stopping one now finishes the
 /// responses it is streaming first, which outlasted the taker's two-second

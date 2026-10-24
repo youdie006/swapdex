@@ -203,6 +203,22 @@ pub(super) struct Request {
     secure: bool,
 }
 
+/// One in-flight count for a request whose body is still arriving.
+struct Uploading;
+
+impl Uploading {
+    fn enter() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Uploading
+    }
+}
+
+impl Drop for Uploading {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 async fn receive(
     request: hyper::Request<Incoming>,
     requests: mpsc::Sender<io::Result<Request>>,
@@ -211,6 +227,9 @@ async fn receive(
     if STOPPING.load(Ordering::SeqCst) && REFUSE_WHILE_STOPPING.load(Ordering::SeqCst) {
         return Ok(restarting());
     }
+    // Counted from here, not once the body has arrived: a stop that sees
+    // nothing in flight exits, and would cut a request still uploading.
+    let counted = Uploading::enter();
     let (parts, body) = request.into_parts();
     let body = body.collect().await.map_err(io::Error::other)?.to_bytes();
     let (response, received) = oneshot::channel();
@@ -236,7 +255,8 @@ async fn receive(
         response: Some(response),
         secure,
     };
-    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    // The Request now holds this count; its Drop releases it.
+    std::mem::forget(counted);
     requests
         .send(Ok(request))
         .map_err(|_| io::Error::other("HTTP handler stopped"))?;

@@ -886,38 +886,49 @@ fn use_account_inner(
             }
         };
         matched += 1;
-        // With a slot as the default and the shim installed, a plain launch
-        // runs from that slot, so writing this copy into the tool's own dir
-        // changes nothing. Without the shim, or with the tool's home set
-        // explicitly (the shim honors it), the copy still takes effect.
-        let slot_controls_launch = crate::slots::home_var(tool)
-            .is_some_and(|var| std::env::var_os(var).is_none())
-            && crate::shim::shim_path_for(paths, tool).exists();
-        if slot_controls_launch {
-            if let Some(slot) = crate::slots::Slots::open_for(paths, tool)
-                .ok()
-                .and_then(|s| {
-                    let d = s.default_dir()?;
-                    s.list().into_iter().find(|r| r.config_dir == d)
-                })
+        // Refuse when a slot is what the launch reads: an explicit home (which
+        // the shim honors, and which is also where this copy would be written)
+        // naming a slot, or else the default slot when the shim answers first
+        // on PATH. Otherwise the copy takes effect. An empty home is unset.
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            a == b
+                || matches!(
+                    (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                    (Ok(x), Ok(y)) if x == y
+                )
+        };
+        let explicit_home = crate::slots::home_var(tool)
+            .and_then(std::env::var_os)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from);
+        let launch_slot = crate::slots::home_var(tool).and_then(|_| {
+            let slots = crate::slots::Slots::open_for(paths, tool).ok()?;
+            match &explicit_home {
+                Some(home) => slots.list().into_iter().find(|r| same(home, &r.config_dir)),
+                None if matches!(
+                    crate::shim::resolved_on_path(tool_binary(tool)),
+                    Some((_, true))
+                ) =>
+                {
+                    let d = slots.default_dir()?;
+                    slots.list().into_iter().find(|r| r.config_dir == d)
+                }
+                None => None,
+            }
+        });
+        if let Some(slot) = launch_slot {
             {
                 let own = match tool {
                     "claude-code" => Some(paths.claude_dir()),
                     "codex" => Some(paths.codex_dir()),
                     _ => None,
                 };
-                let same = |a: &std::path::Path, b: &std::path::Path| {
-                    a == b
-                        || matches!(
-                            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-                            (Ok(x), Ok(y)) if x == y
-                        )
-                };
-                let effect = if own.is_some_and(|d| same(d, &slot.config_dir)) {
-                    "would copy a credential over that slot"
-                } else {
-                    "would change nothing"
-                };
+                let effect =
+                    if explicit_home.is_some() || own.is_some_and(|d| same(d, &slot.config_dir)) {
+                        "would copy a credential over that slot"
+                    } else {
+                        "would change nothing"
+                    };
                 // A copy of an account a slot already holds needs no slot of its
                 // own; `migrate` would say "nothing to do" about it.
                 let next = match copies_of_slots(paths, &store)

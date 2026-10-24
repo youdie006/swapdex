@@ -52,9 +52,14 @@ fn run_unshimmed(root: &Path, args: &[&str]) -> (String, String, i32) {
 /// honors CODEX_HOME / CLAUDE_CONFIG_DIR over the slot pointer, so an inherited
 /// one changes what `use` may do.
 fn run_homes(root: &Path, args: &[&str], homes: &[(&str, &Path)]) -> (String, String, i32) {
+    // A shim swapdex wrote is engaged the way a user's would be: first on PATH.
+    let shims = root.join(".local/share/swapdex/bin");
+    // Nothing from the developer's own PATH, whose real shim would answer.
+    let path = format!("{}:/usr/bin:/bin", shims.display());
     let mut cmd = Command::new(bin());
     cmd.args(args)
         .env("SWAPDEX_ROOT", root)
+        .env("PATH", path)
         .env_remove("CODEX_HOME")
         .env_remove("CLAUDE_CONFIG_DIR");
     for (k, v) in homes {
@@ -5489,6 +5494,42 @@ fn a_saved_copy_still_switches_when_the_slot_pointer_does_not_control_launch() {
         &[("CODEX_HOME", home.as_path())],
     );
     assert_eq!(c, 0, "refused with CODEX_HOME set:\n{o}{e}");
+}
+
+/// Where a plain launch really reads from decides the refusal. An empty
+/// CODEX_HOME is unset (the shim treats it so); a CODEX_HOME naming a slot
+/// makes that slot the very folder the copy would be written over; and a shim
+/// that is installed but not first on PATH does not control the launch.
+#[test]
+fn the_copy_switch_refusal_follows_what_the_launch_really_reads() {
+    let t = fixture();
+    let root = t.path();
+    let (out, code) = run_with_native_codex(root, &["shim"]);
+    assert_eq!(code, 0, "shim failed: {out}");
+    seed_codex_slot_as(root, "live", "live@example.com", "acct-live", "RT-L");
+    let (o, e, c) = run_homes(root, &["use", "live", "--tool", "codex"], &[]);
+    assert_eq!(c, 0, "{o}{e}");
+    seed_codex_snapshot(root, "other", "other@example.com", "acct-other", "RT-O");
+    let use_other = ["use", "other", "--tool", "codex", "--dry-run"];
+
+    let (o, e, c) = run_homes(root, &use_other, &[("CODEX_HOME", Path::new(""))]);
+    assert_ne!(c, 0, "an empty CODEX_HOME disabled the refusal:\n{o}{e}");
+
+    let slot = root.join(".local/share/swapdex/slots/live");
+    let (o, e, c) = run_homes(root, &use_other, &[("CODEX_HOME", slot.as_path())]);
+    let said = format!("{o}{e}");
+    assert_ne!(c, 0, "a copy would be written over slot 'live':\n{said}");
+    assert!(
+        said.contains("would copy a credential over that slot"),
+        "{said}"
+    );
+
+    // Installed, but another `codex` answers first on PATH.
+    let (o, e, c) = run_unshimmed(root, &use_other);
+    assert_eq!(
+        c, 0,
+        "refused though the shim does not control the launch:\n{o}{e}"
+    );
 }
 
 /// A name can be a slot for one tool and a saved copy for another. When the
