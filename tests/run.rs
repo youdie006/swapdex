@@ -141,7 +141,8 @@ fn run_in(root: &Path, args: &[&str], path_env: &str) -> String {
     // HOME must point inside the temp root. `swapdex shim` offers to put itself
     // on PATH by editing the shell profile of $HOME, and without this a test run
     // appended an export line - naming a temp dir that is deleted moments later -
-    // to the developer's own ~/.bashrc.
+    // to the developer's own ~/.bashrc. SHELL picks that profile, so it is
+    // pinned too: on a zsh login the edit went to .zshrc instead.
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
     let out = Command::new(bin())
@@ -149,6 +150,7 @@ fn run_in(root: &Path, args: &[&str], path_env: &str) -> String {
         .env("SWAPDEX_ROOT", root)
         .env("PATH", path_env)
         .env("HOME", &home)
+        .env("SHELL", "/bin/bash")
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
