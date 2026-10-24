@@ -830,6 +830,9 @@ pub(crate) fn managed_present(paths: &Paths) -> bool {
     if paths.claude_credentials().exists() {
         return true;
     }
+    if !keychain_enabled_for_paths(paths) {
+        return false;
+    }
     let computed = effective_computed_service();
     managed_item_may_remain(&computed, keychain_item_exists(&computed))
 }
