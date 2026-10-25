@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.27
 
 - **Your own subagents, slash commands and skills work in every account.**
   An account's config dir shared settings, `CLAUDE.md` and conversations,
@@ -15,7 +15,9 @@ All notable changes to swapdex are documented here. This project follows
   upgrade runs). A directory an account already has of its own is left
   alone. A new account made from inside a running session also linked its
   shared files from that session's account rather than from `~/.claude`, so
-  it got only what that account had; it links from `~/.claude` now.
+  it got only what that account had. It now links from the directory that
+  account's own links come from (`~/.claude` unless you keep your config
+  elsewhere).
 
 ## 0.167.26
 
