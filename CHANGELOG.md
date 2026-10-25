@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Your own subagents, slash commands and skills work in every account.**
+  An account's config dir shared settings, `CLAUDE.md` and conversations,
+  but not `~/.claude/agents`, `commands` or `skills`. A session in that
+  account could call none of your subagents, and `/swap` was missing. These
+  three are shared now. Accounts made earlier get them on the next
+  `swapdex run <name>`, `share-history`, or `service install` (which every
+  upgrade runs). A directory an account already has of its own is left
+  alone. A new account made from inside a running session also linked its
+  shared files from that session's account rather than from `~/.claude`, so
+  it got only what that account had; it links from `~/.claude` now.
+
 ## 0.167.26
 
 - **The copy-switch refusal follows where a plain launch really reads.** An

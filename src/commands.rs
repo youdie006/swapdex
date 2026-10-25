@@ -3625,10 +3625,7 @@ fn share_codex_thread_store(
 }
 
 pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
-    let bare = match tool {
-        "codex" => paths.codex_dir().to_path_buf(),
-        _ => paths.claude_dir().to_path_buf(),
-    };
+    let bare = shared_source(paths, tool);
     let dir_name = if tool == "codex" {
         "sessions"
     } else {
@@ -3640,6 +3637,11 @@ pub fn share_history(paths: &Paths, tool: &str, dry_run: bool) -> Result<i32> {
         .map(|s| s.list())
         .unwrap_or_default();
     let mut touched = 0;
+    if !dry_run {
+        let linked = link_missing_shared(paths, tool);
+        report_linked(&linked);
+        touched += linked.len();
+    }
     for r in slots {
         // Before the transcript directory, because a slot whose `sessions` is
         // already a link exits below - and that is exactly the slot whose
@@ -7027,12 +7029,9 @@ pub fn run_account(
     let mut slots = crate::slots::Slots::open_for_update(paths, tool)?;
     let rec = match slots.get(name) {
         Some(r) => r,
-        None => {
-            let r = slots.create(name)?;
-            crate::slots::link_shared_config(&r.config_dir, &shared_source(paths, tool), tool);
-            r
-        }
+        None => slots.create(name)?,
     };
+    crate::slots::link_shared_config(&rec.config_dir, &shared_source(paths, tool), tool);
     // The registry write is done. What follows launches the tool and never
     // returns, so the lock must be given back here rather than at a scope end
     // that `exec` will not reach.
@@ -7338,13 +7337,103 @@ pub(crate) fn tool_binary(tool: &str) -> &'static str {
 /// The bare config dir a new slot borrows its shared, account-agnostic files
 /// from.
 fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
-    match tool {
-        "codex" => paths.codex_dir().to_path_buf(),
+    let (configured, bare) = match tool {
+        "codex" => (paths.codex_dir(), ".codex"),
         // Their own tree, not Claude's. Nothing is linked from here for these
         // two today, but pointing the source at the wrong tool is how an empty
         // list becomes a wrong one the moment somebody fills it in.
-        "gemini" | "antigravity" => paths.gemini_dir().to_path_buf(),
-        _ => paths.claude_dir().to_path_buf(),
+        "gemini" | "antigravity" => return paths.gemini_dir().to_path_buf(),
+        _ => (paths.claude_dir(), ".claude"),
+    };
+    // Run from a session swapdex launched, the configured dir is that
+    // account's slot, which holds links at best and lacks whatever was never
+    // linked into it. Its links name the dir they came from - which is not
+    // `~/.claude` when the user keeps their config elsewhere.
+    let slots = paths.store_dir().join("slots");
+    if configured.starts_with(&slots) {
+        return crate::slots::shared_files(tool)
+            .iter()
+            .filter_map(|name| {
+                let target = std::fs::read_link(configured.join(name)).ok()?;
+                let from = target.parent()?;
+                (target.file_name()? == *name && !from.starts_with(&slots))
+                    .then(|| from.to_path_buf())
+            })
+            .next()
+            .unwrap_or_else(|| paths.home().join(bare));
+    }
+    configured.to_path_buf()
+}
+
+/// Link whatever shared files each of `tool`'s accounts is missing - what a
+/// slot made by an older swapdex never got. Never over a file or directory the
+/// slot already has. Returns each account that gained links, with their names.
+fn link_missing_shared(paths: &Paths, tool: &str) -> Vec<(String, Vec<String>)> {
+    let source = shared_source(paths, tool);
+    crate::slots::Slots::open_for(paths, tool)
+        .map(|s| s.list())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| {
+            let linked = crate::slots::link_shared_config(&r.config_dir, &source, tool);
+            (!linked.is_empty()).then_some((r.name, linked))
+        })
+        .collect()
+}
+
+fn report_linked(linked: &[(String, Vec<String>)]) {
+    for (name, files) in linked {
+        println!("  {name} - now shares {}", files.join(", "));
+    }
+}
+
+#[cfg(test)]
+mod shared_source_in_slot_tests {
+    use super::*;
+
+    /// Every session swapdex launches carries its slot in CLAUDE_CONFIG_DIR /
+    /// CODEX_HOME, so the configured dir there is an account's slot. Linking
+    /// from it gave a new or repaired slot only what that slot happened to
+    /// have - which never included `agents/`.
+    #[test]
+    fn a_session_inside_a_slot_still_links_from_the_bare_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let slot = paths.store_dir().join("slots").join("8c84ee906652a79b");
+        for (tool, bare) in [("claude-code", ".claude"), ("codex", ".codex")] {
+            let inside = paths.with_tool_dir(tool, &slot);
+            assert_eq!(
+                shared_source(&inside, tool),
+                root.path().join(bare),
+                "{tool}"
+            );
+        }
+        assert_eq!(
+            shared_source(&paths, "claude-code"),
+            root.path().join(".claude")
+        );
+        let own = root.path().join("my-claude");
+        assert_eq!(
+            shared_source(&paths.with_tool_dir("claude-code", &own), "claude-code"),
+            own,
+            "a config dir of the user's own is still honoured"
+        );
+        // A slot made from that custom dir links into it; a session in that
+        // slot keeps linking from there rather than from ~/.claude.
+        let custom_slot = paths.store_dir().join("slots").join("c076c1a5be746992");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&custom_slot).unwrap();
+        std::fs::write(own.join("settings.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(own.join("settings.json"), custom_slot.join("settings.json"))
+            .unwrap();
+        assert_eq!(
+            shared_source(
+                &paths.with_tool_dir("claude-code", &custom_slot),
+                "claude-code"
+            ),
+            own,
+            "the source a slot's own links name"
+        );
     }
 }
 
@@ -8290,6 +8379,9 @@ pub fn service_install(paths: &Paths, sel: Option<ToolSel>) -> Result<i32> {
         eprintln!("{}", crate::proxy::cannot_carry(tool));
         return Ok(2);
     }
+    // Every upgrade passes through here, so slots an older swapdex made pick
+    // up the files shared since.
+    report_linked(&link_missing_shared(paths, tool));
     let path = crate::service::install(paths, tool)?;
     println!(
         "the {} proxy is now a service: {}",

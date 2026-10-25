@@ -779,7 +779,20 @@ impl Slots {
 /// happened to pay for those turns. Kept per-slot, `swapdex use B` made every
 /// conversation started on A vanish from `claude --resume`: not lost, but
 /// invisible, which for a resume list is the same thing.
-pub const SHARED_CONFIG_FILES: &[&str] = &["settings.json", "CLAUDE.md", "projects"];
+///
+/// `agents/`, `commands/` and `skills/` hold the user's own subagents, slash
+/// commands and skills - definitions, like settings. Left out, a session in a
+/// slot could call none of the agents in `~/.claude/agents`, and `/swap` was
+/// missing from every slot. `plugins/` stays per-slot: its manifests record
+/// where each plugin was installed.
+pub const SHARED_CONFIG_FILES: &[&str] = &[
+    "settings.json",
+    "CLAUDE.md",
+    "projects",
+    "agents",
+    "commands",
+    "skills",
+];
 
 /// Codex keeps its settings in `config.toml` and its project instructions in
 /// `AGENTS.md`; its credential lives apart in `auth.json`, which is what makes
