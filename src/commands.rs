@@ -7347,9 +7347,20 @@ fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
     };
     // Run from a session swapdex launched, the configured dir is that
     // account's slot, which holds links at best and lacks whatever was never
-    // linked into it.
-    if configured.starts_with(paths.store_dir().join("slots")) {
-        return paths.home().join(bare);
+    // linked into it. Its links name the dir they came from - which is not
+    // `~/.claude` when the user keeps their config elsewhere.
+    let slots = paths.store_dir().join("slots");
+    if configured.starts_with(&slots) {
+        return crate::slots::shared_files(tool)
+            .iter()
+            .filter_map(|name| {
+                let target = std::fs::read_link(configured.join(name)).ok()?;
+                let from = target.parent()?;
+                (target.file_name()? == *name && !from.starts_with(&slots))
+                    .then(|| from.to_path_buf())
+            })
+            .next()
+            .unwrap_or_else(|| paths.home().join(bare));
     }
     configured.to_path_buf()
 }
@@ -7406,6 +7417,22 @@ mod shared_source_in_slot_tests {
             shared_source(&paths.with_tool_dir("claude-code", &own), "claude-code"),
             own,
             "a config dir of the user's own is still honoured"
+        );
+        // A slot made from that custom dir links into it; a session in that
+        // slot keeps linking from there rather than from ~/.claude.
+        let custom_slot = paths.store_dir().join("slots").join("c076c1a5be746992");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&custom_slot).unwrap();
+        std::fs::write(own.join("settings.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(own.join("settings.json"), custom_slot.join("settings.json"))
+            .unwrap();
+        assert_eq!(
+            shared_source(
+                &paths.with_tool_dir("claude-code", &custom_slot),
+                "claude-code"
+            ),
+            own,
+            "the source a slot's own links name"
         );
     }
 }
