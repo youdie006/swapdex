@@ -478,6 +478,88 @@ fn new_slot_symlinks_shared_config_from_bare_claude() {
     );
 }
 
+// User-level subagents, slash commands and skills are definitions, not
+// account state: a session in a slot that lacked them could not call any agent
+// defined in ~/.claude/agents, and `/swap` (installed into ~/.claude/commands)
+// was missing from every slot.
+fn bare_with_definitions(root: &Path) -> std::path::PathBuf {
+    let bare = root.join(".claude");
+    for dir in ["agents", "commands", "skills/review"] {
+        std::fs::create_dir_all(bare.join(dir)).unwrap();
+    }
+    std::fs::write(bare.join("agents/auditor.md"), b"---\nname: auditor\n---\n").unwrap();
+    std::fs::write(bare.join("commands/swap.md"), b"/swap").unwrap();
+    std::fs::write(bare.join("skills/review/SKILL.md"), b"# review").unwrap();
+    bare
+}
+
+fn only_slot(root: &Path) -> std::path::PathBuf {
+    let slots = root.join(".local/share/swapdex/slots");
+    std::fs::read_dir(&slots)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+}
+
+fn is_link_to(path: &Path, target: &Path) -> bool {
+    std::fs::read_link(path).is_ok_and(|t| t == target)
+}
+
+#[test]
+fn new_slot_shares_agents_commands_and_skills() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = bare_with_definitions(root.path());
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "work", "--no-launch"], &path);
+    let slot = only_slot(root.path());
+    for dir in ["agents", "commands", "skills"] {
+        assert!(
+            is_link_to(&slot.join(dir), &bare.join(dir)),
+            "{dir} is linked from the bare config dir"
+        );
+    }
+}
+
+#[test]
+fn a_slot_made_before_sharing_definitions_gets_them_and_keeps_its_own() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = bare_with_definitions(root.path());
+    let bin_dir = fake_claude(root.path());
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    run_in(root.path(), &["run", "work", "--no-launch"], &path);
+    let slot = only_slot(root.path());
+    // What a slot from an older swapdex looks like: no agents or skills link,
+    // and a commands directory of its own.
+    for dir in ["agents", "commands", "skills"] {
+        let _ = std::fs::remove_file(slot.join(dir));
+    }
+    std::fs::create_dir_all(slot.join("commands")).unwrap();
+    std::fs::write(slot.join("commands/mine.md"), b"mine").unwrap();
+
+    run_in(root.path(), &["run", "work", "--no-launch"], &path);
+    assert!(is_link_to(&slot.join("agents"), &bare.join("agents")));
+    assert!(is_link_to(&slot.join("skills"), &bare.join("skills")));
+    assert!(
+        slot.join("commands/mine.md").is_file()
+            && !std::fs::symlink_metadata(slot.join("commands"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+        "a directory of the slot's own is never replaced"
+    );
+}
+
 #[test]
 fn onboard_registers_config_dirs_and_migrates_profiles() {
     let root = tempfile::tempdir().unwrap();
