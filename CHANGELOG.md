@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.28
 
 - **`doctor` says when a plain `codex` would open the sign-in screen.** With
   no Codex default, a plain `codex` runs in `~/.codex`. When that dir held an
