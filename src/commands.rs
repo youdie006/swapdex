@@ -5157,6 +5157,20 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             continue;
         }
         match adapter.identity(paths) {
+            Ok(Some(_)) if tool == "codex" && stale_codex_copy(paths).is_some() => {
+                let name = stale_codex_copy(paths).unwrap_or_default();
+                report(
+                    tool,
+                    false,
+                    format!(
+                        "{} holds an older copy of the login account '{name}' has - that \
+                         account has refreshed in its own space since, so Codex cannot renew \
+                         this copy and a plain `codex` asks to sign in. `swapdex use {name} \
+                         --tool codex` points it at the account.",
+                        crate::util::redact_path(&paths.codex_dir().display().to_string())
+                    ),
+                );
+            }
             Ok(Some(id)) => {
                 let saved = matched_profile_name(&store, tool, &id.account_id)
                     .map(|n| format!("profile '{n}'"))
@@ -6025,6 +6039,18 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
             let Some(dir) = slots.get(name).map(|r| r.config_dir) else {
                 continue;
             };
+            // The removal takes the default pointer with it; a plain launch then
+            // runs in the tool's own dir, on whatever login is left there.
+            if slots.default_dir().as_deref() == Some(dir.as_path()) {
+                warnings.push(format!(
+                    "  '{name}' was the default for a plain `{bin}` - there is no default now, \
+                     so it runs in {home} on whatever login is there. \
+                     `swapdex use <name> --tool {bin}` picks one.",
+                    bin = tool_binary(tool),
+                    home =
+                        crate::util::redact_path(&shared_source(paths, tool).display().to_string()),
+                ));
+            }
             slots.remove(name)?;
             if !dirs.contains(&dir) {
                 dirs.push(dir);
@@ -7435,6 +7461,38 @@ mod shared_source_in_slot_tests {
             "the source a slot's own links name"
         );
     }
+}
+
+/// The Codex account whose own slot holds a newer login than the copy of it
+/// in the Codex dir. Refresh tokens rotate, so the older copy cannot be
+/// renewed: a launch there ends at the sign-in screen.
+fn stale_codex_copy(paths: &Paths) -> Option<String> {
+    let bare = paths.codex_dir();
+    let live_fp = crate::refresh_health::codex_credential_fingerprint(bare)?;
+    let read = |dir: &std::path::Path| std::fs::read(dir.join("auth.json")).ok();
+    let refreshed = |bytes: &[u8]| {
+        let v: Value = serde_json::from_slice(bytes).ok()?;
+        crate::session_link::rfc3339_to_secs(v.get("last_refresh")?.as_str()?)
+    };
+    let live = read(bare)?;
+    // The whole identity, not the workspace id: users of one workspace share
+    // that id and hold separate logins.
+    let who = crate::refresh::credential_identity(&live, "codex")?;
+    let live_at = refreshed(&live)?;
+    crate::slots::Slots::open_for(paths, "codex")
+        .ok()?
+        .list()
+        .into_iter()
+        .filter(|r| r.config_dir != bare)
+        .find(|r| {
+            read(&r.config_dir).is_some_and(|bytes| {
+                crate::refresh::credential_identity(&bytes, "codex").as_ref() == Some(&who)
+                    && refreshed(&bytes).is_some_and(|at| at > live_at)
+                    && crate::refresh_health::codex_credential_fingerprint(&r.config_dir)
+                        .is_some_and(|fp| fp != live_fp)
+            })
+        })
+        .map(|r| r.name)
 }
 
 /// `swapdex whereis [project]` - which account's store holds a conversation.

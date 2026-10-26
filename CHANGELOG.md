@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`doctor` says when a plain `codex` would open the sign-in screen.** With
+  no Codex default, a plain `codex` runs in `~/.codex`. When that dir held an
+  older copy of an account's login - the account had refreshed in its own
+  space since, so the copy could not be renewed - `doctor` called it a live
+  login and every row passed, while `codex` asked to sign in. It is a
+  problem row now, naming `swapdex use <name> --tool codex`.
+- **`rm` says when it removes the default.** Removing the account a plain
+  `claude` or `codex` launches on also removes the default, and the next
+  launch runs in the tool's own dir on whatever login is left there. `rm`
+  now says so and how to pick another default.
+
 ## 0.167.27
 
 - **Your own subagents, slash commands and skills work in every account.**
