@@ -3187,6 +3187,91 @@ fn a_shimmed_codex_is_not_said_to_launch_on_the_leftover_login() {
     );
 }
 
+/// With no Codex default, a plain `codex` runs in `~/.codex`. Here that dir
+/// holds an older copy of an account's login: the account's own slot has
+/// refreshed since, so Codex cannot renew the copy and opens its sign-in
+/// screen. doctor called it "live login ... (profile 'work')" and every row
+/// passed, on the machine where that happened (2026-10-26).
+#[test]
+fn doctor_flags_an_older_copy_of_a_slot_login_in_the_codex_dir() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "work", "work@example.com", "acct-work", "rt-current");
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    let stale = std::fs::read_to_string(root.join(".local/share/swapdex/slots/work/auth.json"))
+        .unwrap()
+        .replace("rt-current", "rt-rotated-away")
+        .replace("2026-09-03T02:56:06Z", "2026-08-30T02:04:06Z");
+    std::fs::write(root.join(".codex/auth.json"), stale).unwrap();
+    chmod600(&root.join(".codex/auth.json"));
+
+    let out = doctor_with_path(root, "/usr/bin:/bin");
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("codex "))
+        .unwrap_or_else(|| panic!("no codex row:\n{out}"));
+    assert!(
+        row.contains("problem"),
+        "an unrenewable copy is a fault: {row}"
+    );
+    assert!(
+        row.contains("swapdex use work --tool codex"),
+        "names the fix: {row}"
+    );
+
+    // The same account with the slot's current token is a sound login, even
+    // when the slot's copy was stamped later.
+    let same_token =
+        std::fs::read_to_string(root.join(".local/share/swapdex/slots/work/auth.json"))
+            .unwrap()
+            .replace("2026-09-03T02:56:06Z", "2026-08-30T02:04:06Z");
+    std::fs::write(root.join(".codex/auth.json"), same_token).unwrap();
+    let out = doctor_with_path(root, "/usr/bin:/bin");
+    let row = out.lines().find(|l| l.starts_with("codex ")).unwrap();
+    assert!(!row.contains("problem"), "{row}");
+
+    // A copy refreshed after the slot's is the newer one: the slot is what
+    // lags, and a plain `codex` here works.
+    let newer = std::fs::read_to_string(root.join(".local/share/swapdex/slots/work/auth.json"))
+        .unwrap()
+        .replace("rt-current", "rt-renewed-here")
+        .replace("2026-09-03T02:56:06Z", "2026-09-04T00:00:00Z");
+    std::fs::write(root.join(".codex/auth.json"), newer).unwrap();
+    let out = doctor_with_path(root, "/usr/bin:/bin");
+    let row = out.lines().find(|l| l.starts_with("codex ")).unwrap();
+    assert!(!row.contains("problem"), "{row}");
+}
+
+/// Removing the account a plain `codex` launches on also removes the default
+/// pointer, and a plain `codex` then runs in `~/.codex` - on the machine where
+/// this happened, a two-month-old login that opened the sign-in screen. `rm`
+/// said only "stopped managing".
+#[test]
+fn removing_the_default_codex_account_says_there_is_no_default_now() {
+    let t = fixture();
+    let root = t.path();
+    seed_codex_slot_as(root, "youdie", "y@example.com", "acct-y", "rt-y");
+    seed_codex_slot_as(root, "work", "w@example.com", "acct-w", "rt-w");
+    std::fs::write(
+        root.join(".local/share/swapdex/active-codex"),
+        root.join(".local/share/swapdex/slots/youdie")
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    let (out, err, code) = run(root, &["rm", "youdie", "--yes"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("no default") && said.contains("swapdex use <name> --tool codex"),
+        "{said}"
+    );
+
+    // Removing an account that is not the default says nothing of the kind.
+    let (out, err, _) = run(root, &["rm", "work", "--yes"]);
+    assert!(!format!("{out}{err}").contains("no default"), "{out}{err}");
+}
+
 fn doctor_with_path(root: &Path, path: &str) -> String {
     let out = Command::new(bin())
         .arg("doctor")
