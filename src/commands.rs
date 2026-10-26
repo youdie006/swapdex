@@ -5157,8 +5157,8 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             continue;
         }
         match adapter.identity(paths) {
-            Ok(Some(id)) if tool == "codex" && stale_codex_copy(paths, &id).is_some() => {
-                let name = stale_codex_copy(paths, &id).unwrap_or_default();
+            Ok(Some(_)) if tool == "codex" && stale_codex_copy(paths).is_some() => {
+                let name = stale_codex_copy(paths).unwrap_or_default();
                 report(
                     tool,
                     false,
@@ -7466,31 +7466,31 @@ mod shared_source_in_slot_tests {
 /// The Codex account whose own slot holds a newer login than the copy of it
 /// in the Codex dir. Refresh tokens rotate, so the older copy cannot be
 /// renewed: a launch there ends at the sign-in screen.
-fn stale_codex_copy(paths: &Paths, live: &crate::adapters::Account) -> Option<String> {
+fn stale_codex_copy(paths: &Paths) -> Option<String> {
     let bare = paths.codex_dir();
     let live_fp = crate::refresh_health::codex_credential_fingerprint(bare)?;
-    let refreshed = |dir: &std::path::Path| {
-        let bytes = std::fs::read(dir.join("auth.json")).ok()?;
-        let v: Value = serde_json::from_slice(&bytes).ok()?;
+    let read = |dir: &std::path::Path| std::fs::read(dir.join("auth.json")).ok();
+    let refreshed = |bytes: &[u8]| {
+        let v: Value = serde_json::from_slice(bytes).ok()?;
         crate::session_link::rfc3339_to_secs(v.get("last_refresh")?.as_str()?)
     };
-    let live_at = refreshed(bare)?;
-    let adapter = adapters::by_name("codex")?;
+    let live = read(bare)?;
+    // The whole identity, not the workspace id: users of one workspace share
+    // that id and hold separate logins.
+    let who = crate::refresh::credential_identity(&live, "codex")?;
+    let live_at = refreshed(&live)?;
     crate::slots::Slots::open_for(paths, "codex")
         .ok()?
         .list()
         .into_iter()
         .filter(|r| r.config_dir != bare)
         .find(|r| {
-            let same_account = adapter
-                .identity(&paths.with_tool_dir("codex", &r.config_dir))
-                .ok()
-                .flatten()
-                .is_some_and(|id| id.account_id == live.account_id);
-            same_account
-                && crate::refresh_health::codex_credential_fingerprint(&r.config_dir)
-                    .is_some_and(|fp| fp != live_fp)
-                && refreshed(&r.config_dir).is_some_and(|at| at > live_at)
+            read(&r.config_dir).is_some_and(|bytes| {
+                crate::refresh::credential_identity(&bytes, "codex").as_ref() == Some(&who)
+                    && refreshed(&bytes).is_some_and(|at| at > live_at)
+                    && crate::refresh_health::codex_credential_fingerprint(&r.config_dir)
+                        .is_some_and(|fp| fp != live_fp)
+            })
         })
         .map(|r| r.name)
 }

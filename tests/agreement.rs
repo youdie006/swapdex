@@ -610,7 +610,10 @@ fn a_slot_without_a_credential_is_not_reported_as_active() {
 
 /// A minimal id_token whose payload carries the email, the way Codex stores it.
 fn codex_id_token(email: &str) -> String {
-    let payload = serde_json::json!({"email": email});
+    codex_id_token_claims(serde_json::json!({"email": email}))
+}
+
+fn codex_id_token_claims(payload: serde_json::Value) -> String {
     let b64 = |b: &[u8]| {
         const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let mut o = String::new();
@@ -3237,6 +3240,38 @@ fn doctor_flags_an_older_copy_of_a_slot_login_in_the_codex_dir() {
         .replace("rt-current", "rt-renewed-here")
         .replace("2026-09-03T02:56:06Z", "2026-09-04T00:00:00Z");
     std::fs::write(root.join(".codex/auth.json"), newer).unwrap();
+    let out = doctor_with_path(root, "/usr/bin:/bin");
+    let row = out.lines().find(|l| l.starts_with("codex ")).unwrap();
+    assert!(!row.contains("problem"), "{row}");
+}
+
+/// Two users of one ChatGPT workspace share its account id but hold separate
+/// logins. A teammate's slot refreshing later says nothing about this one.
+#[test]
+fn doctor_does_not_take_a_workspace_teammate_for_a_newer_copy() {
+    let t = fixture();
+    let root = t.path();
+    let auth = |sub: &str, email: &str, refresh: &str, at: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": at,
+            "tokens": {"id_token": codex_id_token_claims(serde_json::json!({"email": email, "sub": sub})),
+                       "access_token": "AT", "refresh_token": refresh, "account_id": "acct-team"}}))
+        .unwrap()
+    };
+    seed_codex_slot_as(root, "teammate", "b@example.com", "acct-team", "rt-b");
+    std::fs::write(
+        root.join(".local/share/swapdex/slots/teammate/auth.json"),
+        auth("user-b", "b@example.com", "rt-b", "2026-10-23T10:10:28Z"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    std::fs::write(
+        root.join(".codex/auth.json"),
+        auth("user-a", "a@example.com", "rt-a", "2026-08-30T02:04:06Z"),
+    )
+    .unwrap();
+    chmod600(&root.join(".codex/auth.json"));
     let out = doctor_with_path(root, "/usr/bin:/bin");
     let row = out.lines().find(|l| l.starts_with("codex ")).unwrap();
     assert!(!row.contains("problem"), "{row}");
