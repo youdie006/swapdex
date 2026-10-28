@@ -1273,6 +1273,7 @@ mod tests {
     /// with `Stdio::piped()`) until it is killed or the test exits. A child
     /// sleep would outlive a kill holding the same environment, and read as a
     /// session still on the slot.
+    #[cfg(target_os = "linux")]
     const STUB_ARGS: [&str; 2] = ["-c", "read _"];
 
     /// The guard sees a real bare session, not just a synthetic one.
