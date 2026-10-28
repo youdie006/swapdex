@@ -7,8 +7,6 @@
 //! of our own: the request swapdex builds, the answer it merges, and the
 //! credential it writes back.
 
-#[cfg(target_os = "linux")]
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -380,12 +378,11 @@ fn running_tool(root: &std::path::Path, tool: &str, config_dir: &std::path::Path
     // exec preserves this link's basename as the process name. Reusing the
     // system executable avoids ETXTBSY from executing a just-copied fixture
     // while other test threads are spawning children.
-    let sleep = if std::path::Path::new("/bin/sleep").exists() {
-        "/bin/sleep"
-    } else {
-        "/usr/bin/sleep"
-    };
-    std::os::unix::fs::symlink(sleep, &bin).unwrap();
+    // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+    // run under another name, so the named link goes to the shell, which
+    // blocks reading a stdin pipe the test holds open: no child process.
+    let shell = "/bin/sh";
+    std::os::unix::fs::symlink(shell, &bin).unwrap();
 
     let config_var = if tool == "claude" {
         "CLAUDE_CONFIG_DIR"
@@ -393,8 +390,8 @@ fn running_tool(root: &std::path::Path, tool: &str, config_dir: &std::path::Path
         "CODEX_HOME"
     };
     let mut child = std::process::Command::new(&bin)
-        .arg0("sleep")
-        .arg("30")
+        .args(["-c", "read _"])
+        .stdin(std::process::Stdio::piped())
         .env("HOME", root)
         .env(config_var, config_dir)
         .spawn()

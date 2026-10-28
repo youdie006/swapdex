@@ -1,6 +1,4 @@
 use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "linux")]
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -205,17 +203,16 @@ impl ReapedChild {
 fn running_codex(root: &Path, config_dir: &Path) -> ReapedChild {
     let bin = root.join("fake-codex/codex");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    let sleep = if Path::new("/bin/sleep").exists() {
-        "/bin/sleep"
-    } else {
-        "/usr/bin/sleep"
-    };
+    // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+    // run under another name, so the named link goes to the shell, which
+    // blocks reading a stdin pipe the test holds open: no child process.
+    let shell = "/bin/sh";
     if !bin.exists() {
-        std::os::unix::fs::symlink(sleep, &bin).unwrap();
+        std::os::unix::fs::symlink(shell, &bin).unwrap();
     }
     let mut child = Command::new(&bin)
-        .arg0("sleep")
-        .arg("30")
+        .args(["-c", "read _"])
+        .stdin(std::process::Stdio::piped())
         .env_clear()
         .env("HOME", root)
         .env("CODEX_HOME", config_dir)
