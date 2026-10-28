@@ -642,10 +642,14 @@ fn opaque_codex_copy_defers_to_a_known_native_holder_of_the_same_token() {
 
     let process_path = root.path().join("native-bin/codex");
     std::fs::create_dir_all(process_path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    // To the shell, blocked reading a stdin pipe the test holds open:
+    // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+    // run under another name. comm still comes from the link.
+    std::os::unix::fs::symlink("/bin/sh", &process_path).unwrap();
     let mut held = ReapedChild(
         Command::new(&process_path)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env_clear()
             .env("HOME", root.path())
             .env("CODEX_HOME", &native)
@@ -761,10 +765,11 @@ fn an_in_use_preflight_does_not_poison_the_next_attempt() {
     let paths = Paths::rooted(root.path());
 
     let process_path = root.path().join("inherited-child");
-    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &process_path).unwrap();
     let mut held = ReapedChild(
         Command::new(&process_path)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env("CLAUDE_CONFIG_DIR", &slot)
             .spawn()
             .unwrap(),
@@ -795,10 +800,11 @@ fn one_native_claude_session_survives_two_same_store_refreshes() {
     let paths = Paths::rooted(root.path());
 
     let process_path = root.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &process_path).unwrap();
     let held = ReapedChild(
         Command::new(&process_path)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env("HOME", root.path())
             .env("CLAUDE_CONFIG_DIR", &slot)
             .env("SWAPDEX_TEST_NATIVE_REFRESH_LOCKS", "1")
@@ -838,10 +844,11 @@ fn unproved_native_version_still_defers_same_store_refresh() {
     let paths = Paths::rooted(root.path());
 
     let process_path = root.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &process_path).unwrap();
     let held = ReapedChild(
         Command::new(&process_path)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env("HOME", root.path())
             .env("CLAUDE_CONFIG_DIR", &slot)
             .spawn()
@@ -936,10 +943,11 @@ fn default_native_authority_survives_holder_exit_without_using_stale_slot() {
 
     let process_path = root.path().join("native-bin/claude");
     std::fs::create_dir_all(process_path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &process_path).unwrap();
     let mut held = ReapedChild(
         Command::new(&process_path)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env_clear()
             .env("HOME", root.path())
             .env("SWAPDEX_TEST_NATIVE_REFRESH_LOCKS", "1")
@@ -1024,10 +1032,11 @@ fn a_slot_without_identity_cannot_spend_a_native_holders_refresh_generation() {
     std::fs::copy(slot.join(".claude.json"), root.path().join(".claude.json")).unwrap();
     std::fs::remove_file(slot.join(".claude.json")).unwrap();
     let process = root.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &process).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &process).unwrap();
     let _held = ReapedChild(
         Command::new(process)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env_clear()
             .env("HOME", root.path())
             .spawn()
@@ -1067,10 +1076,11 @@ fn an_expired_default_native_holder_still_blocks_a_twin_refresh() {
     .unwrap();
     let process_path = root.path().join("native-bin/claude");
     std::fs::create_dir_all(process_path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink("/bin/sleep", &process_path).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &process_path).unwrap();
     let _held = ReapedChild(
         Command::new(&process_path)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env_clear()
             .env("HOME", root.path())
             .spawn()

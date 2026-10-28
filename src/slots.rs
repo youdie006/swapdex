@@ -940,6 +940,24 @@ pub fn link_shared_config(
     linked
 }
 
+/// Shared names a slot keeps as its own files or directories. A link already
+/// opts into sharing; checking its target belongs to a different check.
+pub fn unshared_config(
+    slot: &std::path::Path,
+    source: &std::path::Path,
+    tool: &str,
+) -> Vec<String> {
+    shared_files(tool)
+        .iter()
+        .filter(|name| {
+            source.join(name).exists()
+                && std::fs::symlink_metadata(slot.join(name))
+                    .is_ok_and(|m| !m.file_type().is_symlink())
+        })
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod shared_history_tests {
     use super::*;
@@ -1693,6 +1711,46 @@ mod registry_durability_tests {
 #[cfg(test)]
 mod shared_files_per_tool_tests {
     use super::*;
+
+    #[test]
+    fn unshared_config_reports_regular_files_and_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let slot = root.path().join("slot");
+        for dir in [&source, &slot] {
+            std::fs::create_dir_all(dir.join("agents")).unwrap();
+            std::fs::write(dir.join("settings.json"), b"{}").unwrap();
+        }
+        assert_eq!(
+            unshared_config(&slot, &source, "claude-code"),
+            vec!["settings.json", "agents"]
+        );
+    }
+
+    #[test]
+    fn unshared_config_ignores_symlinks_even_when_the_target_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let slot = root.path().join("slot");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(source.join("settings.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(root.path().join("missing"), slot.join("settings.json"))
+            .unwrap();
+        assert!(unshared_config(&slot, &source, "claude-code").is_empty());
+    }
+
+    #[test]
+    fn unshared_config_ignores_names_absent_from_the_source_or_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let slot = root.path().join("slot");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir_all(source.join("agents")).unwrap();
+        assert!(unshared_config(&slot, &source, "claude-code").is_empty());
+    }
 
     /// Claude's list is Claude's. gemini and antigravity fell through to it, so
     /// creating a slot for either symlinked `settings.json`, `CLAUDE.md` and

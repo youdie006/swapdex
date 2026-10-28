@@ -2808,15 +2808,15 @@ mod codex_in_use_tests {
         let bin = root.join("codex");
         // Keep the requested comm without executing a freshly written file,
         // which can produce ETXTBSY while concurrent tests spawn children.
-        let sleep = if std::path::Path::new("/bin/sleep").exists() {
-            "/bin/sleep"
-        } else {
-            "/usr/bin/sleep"
-        };
-        std::os::unix::fs::symlink(sleep, &bin).unwrap();
+        // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+        // run under another name, so the named link goes to the shell, which
+        // blocks reading a stdin pipe the test holds open: no child process.
+        let shell = "/bin/sh";
+        std::os::unix::fs::symlink(shell, &bin).unwrap();
 
         let mut child = std::process::Command::new(&bin)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env("CODEX_HOME", &slot)
             .spawn()
             .unwrap();

@@ -6,6 +6,13 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **`doctor` names an account that no longer shares `~/.claude/settings.json`.**
+  Each Claude account is meant to link the shared settings, but an account
+  can end up with its own copy - on one machine both accounts in use had one,
+  holding the proxy address the default file lacks. An edit to
+  `~/.claude/settings.json` (hooks, permissions, the status line) then never
+  reaches that account's sessions, while `doctor` said everything was healthy.
+  A new `sharing` row names each such account and file and the copies to edit.
 - **README: a Claude Code status line that shows usage, and keeps it current.**
   `swapdex serve --quiet` prints the paying account and what it has left, and
   the example sets `refreshInterval`: Claude Code re-runs a status line only
