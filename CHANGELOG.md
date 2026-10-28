@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.29
 
 - **`doctor` names an account that no longer shares `~/.claude/settings.json`.**
   Each Claude account is meant to link the shared settings, but an account
