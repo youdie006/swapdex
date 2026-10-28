@@ -330,10 +330,14 @@ fn slot_only_human_quota_reports_expired_without_oauth_or_a_credential_write() {
 fn doctor_says_the_native_claude_session_renews_the_login_itself() {
     let fixture = Fixture::new(false);
     let claude = fixture.root.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &claude).unwrap();
+    // To the shell, blocked reading a stdin pipe the test holds open:
+    // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+    // run under another name. comm still comes from the link.
+    std::os::unix::fs::symlink("/bin/sh", &claude).unwrap();
     let held = ReapedChild(Some(
         Command::new(&claude)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env("CLAUDE_CONFIG_DIR", &fixture.slot)
             .spawn()
             .unwrap(),
@@ -378,10 +382,11 @@ fn an_expired_slot_owned_by_native_claude_is_still_only_reported() {
     let fixture = Fixture::new(false);
     let credential_before = fixture.credential_bytes();
     let claude = fixture.root.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &claude).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &claude).unwrap();
     let mut held = ReapedChild(Some(
         Command::new(&claude)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env("CLAUDE_CONFIG_DIR", &fixture.slot)
             .spawn()
             .unwrap(),
@@ -454,10 +459,11 @@ fn a_current_native_owner_supplies_only_the_same_accounts_credential() {
     .unwrap();
     let claude = fixture.root.path().join("native-bin/claude");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink("/bin/sleep", &claude).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &claude).unwrap();
     let mut held = ReapedChild(Some(
         Command::new(&claude)
-            .arg("30")
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .env_clear()
             .env("HOME", fixture.root.path())
             .spawn()
