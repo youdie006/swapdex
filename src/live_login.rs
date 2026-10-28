@@ -310,6 +310,7 @@ pub fn resolve(paths: &Paths, dir: &Path, tool: &str, now_ms: i64) -> Option<Liv
 mod tests {
     use crate::paths::Paths;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
 
@@ -336,7 +337,11 @@ mod tests {
             };
             std::os::unix::fs::symlink(sleep, &bin).unwrap();
             let mut command = Command::new(&bin);
-            command.arg("30").env_clear().env("HOME", home);
+            command
+                .arg0("sleep")
+                .arg("30")
+                .env_clear()
+                .env("HOME", home);
             for (key, value) in env {
                 command.env(key, value);
             }

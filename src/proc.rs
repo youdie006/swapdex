@@ -973,6 +973,8 @@ pub fn config_dir_in_use(dir: &std::path::Path, tool: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::proxied_without_usage_route;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::CommandExt;
 
     /// Only a window paying through the proxy without the usage route reads the
     /// wrong account: one with the route reads the payer, one launched without
@@ -1256,6 +1258,11 @@ mod tests {
 
     /// Link `sleep` under `name` so the spawned process's `comm` is that name.
     #[cfg(target_os = "linux")]
+    /// A link named `name` to `sleep`. Spawn it with `.arg0("sleep")`: Ubuntu
+    /// 26.04's sleep is a uutils multicall binary that refuses an argv[0]
+    /// naming another utility ("Requested utility `claude` does not match
+    /// executable name"), while /proc/<pid>/comm still comes from the link's
+    /// name.
     fn stub_binary(root: &std::path::Path, name: &str) -> std::path::PathBuf {
         std::fs::create_dir_all(root).unwrap();
         let bin = root.join(name);
@@ -1286,6 +1293,7 @@ mod tests {
         // proves we found OUR child.
         let home = dir.join("home").to_string_lossy().into_owned();
         let mut child = std::process::Command::new(&bin)
+            .arg0("sleep")
             .arg("30")
             .env("HOME", &home)
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -1339,6 +1347,7 @@ mod tests {
         let bin = stub_binary(&dir, "claude");
 
         let mut child = std::process::Command::new(&bin)
+            .arg0("sleep")
             .arg("30")
             .env("CLAUDE_CONFIG_DIR", "/home/tester/.claude-company")
             .spawn()
@@ -1413,6 +1422,7 @@ mod tests {
         // A slot dir no other process on this machine can be holding.
         let slot = root.join("slot");
         let mut child = std::process::Command::new(&bin)
+            .arg0("sleep")
             .arg("30")
             .env("CODEX_HOME", &slot)
             .spawn()
@@ -1450,6 +1460,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("swapdex_bare_use_{}", std::process::id()));
         let bin = stub_binary(&root, "claude");
         let mut child = std::process::Command::new(&bin)
+            .arg0("sleep")
             .arg("30")
             .env("HOME", &root)
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -1486,6 +1497,7 @@ mod tests {
         let bin = stub_binary(&root, "claude");
         let slot = root.join("slot");
         let mut child = std::process::Command::new(&bin)
+            .arg0("sleep")
             .arg("30")
             .env("CLAUDE_CONFIG_DIR", format!("{}//", slot.display()))
             .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")

@@ -1,5 +1,7 @@
 //! Execute the installed Claude shell launcher with isolated tools and homes.
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -154,6 +156,7 @@ fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
         std::os::unix::fs::symlink("/bin/sleep", &sleeping_claude).unwrap();
         let holder = ReapedNative(
             Command::new(&sleeping_claude)
+                .arg0("sleep")
                 .arg("120")
                 .env_clear()
                 .env("HOME", root.path())

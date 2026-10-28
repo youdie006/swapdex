@@ -7,6 +7,8 @@
 //! of our own: the request swapdex builds, the answer it merges, and the
 //! credential it writes back.
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -391,6 +393,7 @@ fn running_tool(root: &std::path::Path, tool: &str, config_dir: &std::path::Path
         "CODEX_HOME"
     };
     let mut child = std::process::Command::new(&bin)
+        .arg0("sleep")
         .arg("30")
         .env("HOME", root)
         .env(config_var, config_dir)

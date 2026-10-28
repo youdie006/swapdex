@@ -2786,6 +2786,7 @@ mod point_of_effect_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod codex_in_use_tests {
     use super::*;
+    use std::os::unix::process::CommandExt;
 
     /// The Codex renewal refuses a slot a live session is on.
     ///
@@ -2816,6 +2817,7 @@ mod codex_in_use_tests {
         std::os::unix::fs::symlink(sleep, &bin).unwrap();
 
         let mut child = std::process::Command::new(&bin)
+            .arg0("sleep")
             .arg("30")
             .env("CODEX_HOME", &slot)
             .spawn()

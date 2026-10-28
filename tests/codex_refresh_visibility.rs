@@ -1,4 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -212,6 +214,7 @@ fn running_codex(root: &Path, config_dir: &Path) -> ReapedChild {
         std::os::unix::fs::symlink(sleep, &bin).unwrap();
     }
     let mut child = Command::new(&bin)
+        .arg0("sleep")
         .arg("30")
         .env_clear()
         .env("HOME", root)
