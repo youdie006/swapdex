@@ -329,14 +329,17 @@ mod tests {
             let bin_dir = root.join(instance);
             std::fs::create_dir_all(&bin_dir).unwrap();
             let bin = bin_dir.join(comm);
-            let sleep = if Path::new("/bin/sleep").exists() {
-                "/bin/sleep"
-            } else {
-                "/usr/bin/sleep"
-            };
-            std::os::unix::fs::symlink(sleep, &bin).unwrap();
+            // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+            // run under another name, so the named link goes to the shell, which
+            // blocks reading a stdin pipe the test holds open: no child process.
+            let shell = "/bin/sh";
+            std::os::unix::fs::symlink(shell, &bin).unwrap();
             let mut command = Command::new(&bin);
-            command.arg("30").env_clear().env("HOME", home);
+            command
+                .args(["-c", "read _"])
+                .stdin(std::process::Stdio::piped())
+                .env_clear()
+                .env("HOME", home);
             for (key, value) in env {
                 command.env(key, value);
             }

@@ -151,10 +151,13 @@ fn unbound_shared_login_waits_for_slot_refresh_before_shim_or_run_exec() {
         std::fs::write(store.join("serving-claude"), "off").unwrap();
 
         let sleeping_claude = root.path().join("claude");
-        std::os::unix::fs::symlink("/bin/sleep", &sleeping_claude).unwrap();
+        // To the shell, not to sleep: Ubuntu 26.04's sleep is a uutils
+        // multicall binary that refuses to run under another name.
+        std::os::unix::fs::symlink("/bin/sh", &sleeping_claude).unwrap();
         let holder = ReapedNative(
             Command::new(&sleeping_claude)
-                .arg("120")
+                .args(["-c", "read _"])
+                .stdin(std::process::Stdio::piped())
                 .env_clear()
                 .env("HOME", root.path())
                 .env("SWAPDEX_TEST_NATIVE_REFRESH_LOCKS", "1")

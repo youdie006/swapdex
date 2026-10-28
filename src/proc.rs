@@ -1260,15 +1260,21 @@ mod tests {
         std::fs::create_dir_all(root).unwrap();
         let bin = root.join(name);
         // Keep the requested comm without executing a freshly written file,
-        // which can produce ETXTBSY while concurrent tests spawn children.
-        let sleep = if std::path::Path::new("/bin/sleep").exists() {
-            "/bin/sleep"
-        } else {
-            "/usr/bin/sleep"
-        };
-        std::os::unix::fs::symlink(sleep, &bin).unwrap();
+        // which can produce ETXTBSY while concurrent tests spawn children. The
+        // link goes to the shell, not to sleep: Ubuntu 26.04's sleep is a
+        // uutils multicall binary that refuses to run under another name
+        // ("Requested utility `claude` does not match executable name").
+        std::os::unix::fs::symlink("/bin/sh", &bin).unwrap();
         bin
     }
+
+    /// Arguments that keep a `stub_binary` process alive under its own name,
+    /// with no child process: the shell blocks reading a stdin pipe (spawn it
+    /// with `Stdio::piped()`) until it is killed or the test exits. A child
+    /// sleep would outlive a kill holding the same environment, and read as a
+    /// session still on the slot.
+    #[cfg(target_os = "linux")]
+    const STUB_ARGS: [&str; 2] = ["-c", "read _"];
 
     /// The guard sees a real bare session, not just a synthetic one.
     ///
@@ -1286,7 +1292,8 @@ mod tests {
         // proves we found OUR child.
         let home = dir.join("home").to_string_lossy().into_owned();
         let mut child = std::process::Command::new(&bin)
-            .arg("30")
+            .args(STUB_ARGS)
+            .stdin(std::process::Stdio::piped())
             .env("HOME", &home)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
@@ -1339,7 +1346,8 @@ mod tests {
         let bin = stub_binary(&dir, "claude");
 
         let mut child = std::process::Command::new(&bin)
-            .arg("30")
+            .args(STUB_ARGS)
+            .stdin(std::process::Stdio::piped())
             .env("CLAUDE_CONFIG_DIR", "/home/tester/.claude-company")
             .spawn()
             .unwrap();
@@ -1413,7 +1421,8 @@ mod tests {
         // A slot dir no other process on this machine can be holding.
         let slot = root.join("slot");
         let mut child = std::process::Command::new(&bin)
-            .arg("30")
+            .args(STUB_ARGS)
+            .stdin(std::process::Stdio::piped())
             .env("CODEX_HOME", &slot)
             .spawn()
             .unwrap();
@@ -1450,7 +1459,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("swapdex_bare_use_{}", std::process::id()));
         let bin = stub_binary(&root, "claude");
         let mut child = std::process::Command::new(&bin)
-            .arg("30")
+            .args(STUB_ARGS)
+            .stdin(std::process::Stdio::piped())
             .env("HOME", &root)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
@@ -1486,7 +1496,8 @@ mod tests {
         let bin = stub_binary(&root, "claude");
         let slot = root.join("slot");
         let mut child = std::process::Command::new(&bin)
-            .arg("30")
+            .args(STUB_ARGS)
+            .stdin(std::process::Stdio::piped())
             .env("CLAUDE_CONFIG_DIR", format!("{}//", slot.display()))
             .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
             .spawn()

@@ -74,9 +74,15 @@ fn spawn_native_cli(
     env: &[(&str, &std::path::Path)],
 ) -> ReapedChild {
     let binary = root.join(comm);
-    std::os::unix::fs::symlink("/bin/sleep", &binary).unwrap();
+    // To the shell, blocked reading a stdin pipe the test holds open:
+    // Ubuntu 26.04's sleep is a uutils multicall binary that refuses to
+    // run under another name. comm still comes from the link.
+    std::os::unix::fs::symlink("/bin/sh", &binary).unwrap();
     let mut command = Command::new(&binary);
-    command.arg("120").env_clear();
+    command
+        .args(["-c", "read _"])
+        .stdin(std::process::Stdio::piped())
+        .env_clear();
     for (key, value) in env {
         command.env(key, value);
     }
@@ -1720,9 +1726,10 @@ fn a_stale_claude_slot_uses_its_verified_native_login_without_copying_or_refresh
     std::fs::write(native.join(".credentials.json"), live).unwrap();
 
     let fake_cli = root.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &fake_cli).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &fake_cli).unwrap();
     let cli = Command::new(&fake_cli)
-        .arg("120")
+        .args(["-c", "read _"])
+        .stdin(std::process::Stdio::piped())
         .env("HOME", root.path())
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
