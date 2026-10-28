@@ -6259,6 +6259,9 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
         eprintln!("swapdex: a profile named '{new}' already exists");
         return Ok(6);
     }
+    if old_exists {
+        crate::store::claim_ledger_name(&paths.store_dir(), new);
+    }
     let mut slot_renamed = false;
     for tool in adapters::all().iter().map(|a| a.name()) {
         if let Ok(mut slots) = crate::slots::Slots::open_for_update(paths, tool) {

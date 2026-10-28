@@ -59,6 +59,16 @@ fn latest_event<'a>(
         .map(|(_, event)| event)
 }
 
+/// The names an account answers to now: every profile, and every slot of any
+/// tool. None when a slot registry cannot be read, so no name is called gone.
+fn account_names(paths: &Paths) -> Option<std::collections::BTreeSet<String>> {
+    let store = crate::store::Store::open(paths).ok()?;
+    let (accounts, _, unreadable) = crate::commands::merged_accounts(paths, &store);
+    unreadable
+        .is_empty()
+        .then(|| accounts.into_iter().map(|a| a.name).collect())
+}
+
 pub fn read_timeline(paths: &Paths) -> Vec<Event> {
     let path = paths.store_dir().join("timeline.jsonl");
     let mut out = Vec::new();
@@ -74,6 +84,20 @@ pub fn read_timeline(paths: &Paths) -> Vec<Event> {
                         account: account.to_string(),
                         action: v["action"].as_str().unwrap_or_default().to_string(),
                     });
+                }
+            }
+        }
+    }
+    // A version before 0.156.0 removed and renamed accounts without retiring
+    // their names here, so a name no account answers to is a gone account's.
+    if !out.is_empty() {
+        if let Some(names) = account_names(paths) {
+            for event in &mut out {
+                if !event.account.is_empty()
+                    && !event.account.starts_with('(')
+                    && !names.contains(&event.account)
+                {
+                    event.account = retired(&event.account);
                 }
             }
         }
@@ -157,16 +181,29 @@ pub fn status_line(paths: &Paths) -> Option<String> {
         // the cure instead of claiming "0 sessions" on a full disk.
         return Some("sessions: index empty - run `sessionwiki sync` once".into());
     }
+    Some(sessions_summary(&counts))
+}
+
+/// The status line's count. A parenthesised name is a bucket - unattributed,
+/// or a removed account's - and not an account, so it is told apart rather
+/// than counted as one.
+fn sessions_summary(counts: &BTreeMap<String, usize>) -> String {
+    let total: usize = counts.values().sum();
     let unattributed = counts.get(UNATTRIBUTED).copied().unwrap_or(0);
-    let accounts = counts.keys().filter(|k| *k != UNATTRIBUTED).count();
-    let tail = if unattributed > 0 {
-        format!(", {unattributed} unattributed")
-    } else {
-        String::new()
-    };
-    Some(format!(
-        "sessions: {total} across {accounts} account(s){tail} (sessionwiki)"
-    ))
+    let removed: usize = counts
+        .iter()
+        .filter(|(k, _)| k.starts_with('(') && *k != UNATTRIBUTED)
+        .map(|(_, n)| n)
+        .sum();
+    let accounts = counts.keys().filter(|k| !k.starts_with('(')).count();
+    let mut tail = String::new();
+    if removed > 0 {
+        tail.push_str(&format!(", {removed} from removed accounts"));
+    }
+    if unattributed > 0 {
+        tail.push_str(&format!(", {unattributed} unattributed"));
+    }
+    format!("sessions: {total} across {accounts} account(s){tail} (sessionwiki)")
 }
 
 /// A session row for the post-switch continuity hint in `ui`.
@@ -647,6 +684,21 @@ mod tests {
             attribute(&only_serves, "claude-code", 300),
             None,
             "which the switch-only reader could not see"
+        );
+    }
+
+    #[test]
+    fn a_removed_account_is_not_counted_as_an_account() {
+        let counts: BTreeMap<String, usize> = [
+            ("work".to_string(), 3),
+            (retired("codex"), 5),
+            (UNATTRIBUTED.to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            sessions_summary(&counts),
+            "sessions: 10 across 1 account(s), 5 from removed accounts, 2 unattributed (sessionwiki)"
         );
     }
 
