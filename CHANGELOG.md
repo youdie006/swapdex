@@ -4,6 +4,14 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **README: a Claude Code status line that shows usage, and keeps it current.**
+  `swapdex serve --quiet` prints the paying account and what it has left, and
+  the example sets `refreshInterval`: Claude Code re-runs a status line only
+  when the conversation changes, so during a long tool call the numbers sat
+  unchanged while swapdex's readings moved on.
+
 ## 0.167.28
 
 - **`doctor` says when a plain `codex` would open the sign-in screen.** With
