@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`doctor` names an account that no longer shares `~/.claude/settings.json`.**
+  Each Claude account is meant to link the shared settings, but an account
+  can end up with its own copy - on one machine both accounts in use had one,
+  holding the proxy address the default file lacks. An edit to
+  `~/.claude/settings.json` (hooks, permissions, the status line) then never
+  reaches that account's sessions, while `doctor` said everything was healthy.
+  A new `sharing` row names each such account and file and the copies to edit.
+
 ## 0.167.28
 
 - **`doctor` says when a plain `codex` would open the sign-in screen.** With

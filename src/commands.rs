@@ -5252,6 +5252,45 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
     }
     if let Ok(slots) = crate::slots::Slots::open(paths) {
         let list = slots.list();
+        // An account whose copy of a shared file is its own file no longer
+        // follows ~/.claude: an edit there (hooks, permissions, the status
+        // line) never reaches that account's sessions, and nothing said so.
+        let source = shared_source(paths, "claude-code");
+        let mut private = Vec::new();
+        let mut copies = Vec::new();
+        for slot in &list {
+            if slot.config_dir == source {
+                continue;
+            }
+            let files = crate::slots::unshared_config(&slot.config_dir, &source, "claude-code");
+            if files.is_empty() {
+                continue;
+            }
+            private.push(format!(
+                "'{}' keeps its own {}",
+                slot.name,
+                files.join(", ")
+            ));
+            for file in files {
+                copies.push(crate::util::redact_path(
+                    &slot.config_dir.join(file).display().to_string(),
+                ));
+            }
+        }
+        report(
+            "sharing",
+            private.is_empty(),
+            if private.is_empty() {
+                "Claude accounts share their settings and history".to_string()
+            } else {
+                format!(
+                    "{}, so a change in {} does not reach those sessions - edit these too: {}",
+                    private.join("; "),
+                    crate::util::redact_path(&source.display().to_string()),
+                    copies.join(", ")
+                )
+            },
+        );
         // Which swapdex the shims actually call. A shim embeds an ABSOLUTE
         // path to whichever swapdex wrote it, so with two copies installed -
         // npm and brew, say - updating one leaves the shims calling the
