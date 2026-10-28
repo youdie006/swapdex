@@ -13,6 +13,11 @@ All notable changes to swapdex are documented here. This project follows
   `~/.claude/settings.json` (hooks, permissions, the status line) then never
   reaches that account's sessions, while `doctor` said everything was healthy.
   A new `sharing` row names each such account and file and the copies to edit.
+- **README: a Claude Code status line that shows usage, and keeps it current.**
+  `swapdex serve --quiet` prints the paying account and what it has left, and
+  the example sets `refreshInterval`: Claude Code re-runs a status line only
+  when the conversation changes, so during a long tool call the numbers sat
+  unchanged while swapdex's readings moved on.
 
 ## 0.167.28
 
