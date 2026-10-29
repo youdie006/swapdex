@@ -4738,3 +4738,52 @@ fn ls_json_reports_whether_an_account_is_paused() {
         "`resume` is invisible to `ls --json`"
     );
 }
+
+/// A name may hold spaces and quotes, and the hints paste it into commands the
+/// user is meant to run as printed. Unquoted, `swapdex run my work --tool codex`
+/// made a Claude account called "my" and launched Claude with "work" as its
+/// prompt; `use` and `serve` stopped at "unexpected argument".
+#[test]
+fn a_hint_hands_a_name_with_spaces_and_quotes_back_whole() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    let name = "bob's work";
+    let mut said = String::new();
+    for args in [
+        vec!["add", name, "--tool", "codex"],
+        vec!["pause", name],
+        vec!["serve", name, "--tool", "codex"],
+        vec!["ls"],
+    ] {
+        let (o, e, _) = run(root.path(), &args);
+        said.push_str(&o);
+        said.push_str(&e);
+    }
+    let commands: Vec<&str> = said
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|c| c.starts_with("swapdex ") && c.contains("work"))
+        .collect();
+    assert!(
+        commands.len() >= 5,
+        "expected the add, pause, serve and ls hints: {said}"
+    );
+    for cmd in commands {
+        // Split it the way the shell will when the user pastes it.
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\n' {cmd}"))
+            .output()
+            .unwrap();
+        let words: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            words.get(2).map(String::as_str),
+            Some(name),
+            "`{cmd}` reaches swapdex as {words:?}"
+        );
+    }
+}

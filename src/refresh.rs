@@ -91,9 +91,10 @@ impl RefreshError {
             "claude-code" | "claude" => String::new(),
             other => format!(" --tool {other}"),
         };
+        let arg = crate::util::shell_word(name);
         match self {
             Self::NoCredential => {
-                format!("'{name}' has no login yet - `swapdex run {name}{flag}` signs it in")
+                format!("'{name}' has no login yet - `swapdex run {arg}{flag}` signs it in")
             }
             Self::InUse => format!(
                 "'{name}' {tool} renewal deferred - refresh unverified while a {tool} session \
@@ -105,11 +106,11 @@ impl RefreshError {
             // in use all day was told it had been idle.
             Self::Expired if flag.is_empty() => format!(
                 "'{name}' has been idle too long to renew - \
-                 `swapdex run {name}{flag}` signs it in again"
+                 `swapdex run {arg}{flag}` signs it in again"
             ),
             Self::Expired => format!(
                 "the login server refused to renew '{name}' - \
-                 `swapdex run {name}{flag}` signs it in again"
+                 `swapdex run {arg}{flag}` signs it in again"
             ),
             Self::Busy => format!(
                 "the login server is busy - '{name}' is fine, renewing again shortly will work"

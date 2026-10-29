@@ -63,7 +63,8 @@ impl TokenUnavailable {
         match self {
             Self::NoLogin => format!(
                 "account '{name}' has no usable login - \
-                 `swapdex run {name}{flag}` once signs it in"
+                 `swapdex run {}{flag}` once signs it in",
+                crate::util::shell_word(name)
             ),
             Self::KeychainLocked => format!(
                 "account '{name}' is signed in, but macOS will not release its login here: \

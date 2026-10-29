@@ -2892,7 +2892,8 @@ fn forward_turn(
         if up.status == 401 {
             println!(
                 "{}: login no longer accepted - run `swapdex run {}` once to sign it in again",
-                slot.name, slot.name
+                slot.name,
+                crate::util::shell_word(&slot.name)
             );
             sh.unusable
                 .held()
@@ -2977,7 +2978,10 @@ fn forward_turn(
                     .unwrap_or_default();
                 let held_out = sh.unusable.held().active(std::time::Instant::now());
                 if held_out > 0 && held_out >= names.len().max(1) {
-                    let first = names.first().cloned().unwrap_or_else(|| "<name>".into());
+                    let first = names
+                        .first()
+                        .map(|n| crate::util::shell_word(n).into_owned())
+                        .unwrap_or_else(|| "<name>".into());
                     return Err(not_retryable(format!(
                         "the managed accounts' credentials were rejected. Check `swapdex refresh {first}` \
                          and the selected account's login before retrying."

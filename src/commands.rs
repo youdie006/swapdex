@@ -608,10 +608,9 @@ pub fn add(paths: &Paths, name: Option<&str>, sel: Option<ToolSel>, update: bool
             capture_failed.join(", ")
         );
     }
-    if name.contains(char::is_whitespace) {
-        println!(
-            "note: the name has spaces - quote it in later commands (`swapdex use \"{name}\"`)"
-        );
+    let arg = crate::util::shell_word(name);
+    if arg != name {
+        println!("note: a shell needs this name quoted - type it as in `swapdex use {arg}`");
     }
     Ok(if capture_failed.is_empty() { 0 } else { 1 })
 }
@@ -938,7 +937,8 @@ fn use_account_inner(
                         format!("It is a copy of that slot's account, which {tool} already uses.")
                     }
                     Some(holder) => format!(
-                        "It is a copy of slot '{holder}': `swapdex use {holder} --tool {}`.",
+                        "It is a copy of slot '{holder}': `swapdex use {} --tool {}`.",
+                        crate::util::shell_word(&holder),
                         pretty_tool_flag(tool)
                     ),
                     None => format!(
@@ -994,7 +994,8 @@ fn use_account_inner(
                 "swapdex: {tool}: this saved login's refresh token was retired when another \
                  holder of the same account renewed it - these tokens are single-use, so the \
                  copy that missed a renewal is dead. Restoring it would leave {tool} unable to \
-                 renew. Slot '{slot}' holds the current token: `swapdex use {slot} --tool {}`.",
+                 renew. Slot '{slot}' holds the current token: `swapdex use {} --tool {}`.",
+                crate::util::shell_word(&slot),
                 pretty_tool_flag(tool)
             );
             failed.push(tool);
@@ -1019,8 +1020,9 @@ fn use_account_inner(
                         "swapdex: {tool}: a Claude session is running on THIS login slot. \
                          Switching now would log that account out on its next token refresh \
                          (the refresh token rotates and the saved copy is revoked). Quit that \
-                         `claude` and retry, or `swapdex use {name} --tool claude --force` to \
-                         switch anyway."
+                         `claude` and retry, or `swapdex use {} --tool claude --force` to \
+                         switch anyway.",
+                        crate::util::shell_word(name)
                     );
                     failed.push(tool);
                     continue;
@@ -1052,8 +1054,9 @@ fn use_account_inner(
             eprintln!(
                 "swapdex: {tool}: a running {tool} session was detected. {tool} rotates its \
                  OAuth token on refresh, so switching now can log that account out on the \
-                 session's next refresh. Quit it and retry, or `swapdex use {name} --tool \
+                 session's next refresh. Quit it and retry, or `swapdex use {} --tool \
                  {} --force` to switch anyway.",
+                crate::util::shell_word(name),
                 pretty_tool_flag(tool)
             );
             failed.push(tool);
@@ -1143,9 +1146,10 @@ fn use_account_inner(
             // still switch; a summary at the end says what failed.
             eprintln!(
                 "swapdex: {tool}: switch failed - {:#}\n  (if the error is about the \
-                 SNAPSHOT: log in to that account and re-save with `swapdex add {name} \
+                 SNAPSHOT: log in to that account and re-save with `swapdex add {} \
                  --tool {} --update`)",
                 e,
+                crate::util::shell_word(name),
                 pretty_tool_flag(tool)
             );
             failed.push(tool);
@@ -1887,7 +1891,8 @@ pub fn stale_hint(stale: &[&str], healthy: &[&str], resave: &[(&str, &str)]) -> 
         .iter()
         .map(|(name, tool)| {
             format!(
-                "`swapdex add {name} --tool {} --update`",
+                "`swapdex add {} --tool {} --update`",
+                crate::util::shell_word(name),
                 add_tool_value(tool)
             )
         })
@@ -2006,7 +2011,10 @@ pub fn sign_in_remedy(name: &str, tool: &str) -> String {
         "claude-code" | "claude" => String::new(),
         other => format!(" --tool {other}"),
     };
-    format!("`swapdex run {name}{flag}` signs it in once")
+    format!(
+        "`swapdex run {}{flag}` signs it in once",
+        crate::util::shell_word(name)
+    )
 }
 
 /// What to say when a name matches no account.
@@ -2086,9 +2094,10 @@ pub fn pause_rotation(paths: &Paths, name: &str, pause: bool) -> Result<i32> {
         .map(|t| format!(" --tool {t}"))
         .unwrap_or_default();
     if pause {
+        let arg = crate::util::shell_word(name);
         println!(
-            "{name} paused - the proxy will not pick it (`swapdex use {name}` and \
-             `swapdex serve {name}{serve_flag}` still work)"
+            "{name} paused - the proxy will not pick it (`swapdex use {arg}` and \
+             `swapdex serve {arg}{serve_flag}` still work)"
         );
     } else {
         println!("{name} back in rotation");
@@ -2521,7 +2530,8 @@ fn slot_who(name: &str, email: Option<String>, signed_in: bool, tool: &str) -> S
         (true, Some(e)) => e,
         (true, None) => "signed in, email unreadable in the slot".into(),
         (false, _) => format!(
-            "selected but not signed in - `swapdex run {name}{}` signs it in",
+            "selected but not signed in - `swapdex run {}{}` signs it in",
+            crate::util::shell_word(name),
             tool_flag(tool)
         ),
     }
@@ -2984,7 +2994,8 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     for (name, tool, slot) in &drop_copies {
         println!(
             "  ({name}'s {tool} copy is the account slot '{slot}' keeps current - re-saving \
-             it makes another copy to go stale; `swapdex rm {name} --tool {}` drops it)",
+             it makes another copy to go stale; `swapdex rm {} --tool {}` drops it)",
+            crate::util::shell_word(name),
             pretty_tool_flag(tool)
         );
     }
@@ -5165,9 +5176,10 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     format!(
                         "{} holds an older copy of the login account '{name}' has - that \
                          account has refreshed in its own space since, so Codex cannot renew \
-                         this copy and a plain `codex` asks to sign in. `swapdex use {name} \
+                         this copy and a plain `codex` asks to sign in. `swapdex use {} \
                          --tool codex` points it at the account.",
-                        crate::util::redact_path(&paths.codex_dir().display().to_string())
+                        crate::util::redact_path(&paths.codex_dir().display().to_string()),
+                        crate::util::shell_word(&name)
                     ),
                 );
             }
@@ -5541,7 +5553,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                              somewhere else - rename it so the two are not confused: \
                              `swapdex rename {} <name>` (the folder and login are untouched)",
                             colliding.join("', '"),
-                            colliding[0]
+                            crate::util::shell_word(&colliding[0])
                         ),
                     );
                 }
@@ -5597,7 +5609,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     true,
                     format!(
                         "no login yet - `swapdex run {}{}` once signs it in",
-                        r.name,
+                        crate::util::shell_word(&r.name),
                         tool_flag(tool)
                     ),
                 ),
@@ -5609,7 +5621,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         format!(
                             "login idle ~{days}d - `swapdex run {}{}` once refreshes \
                              it (re-login if it asks)",
-                            r.name,
+                            crate::util::shell_word(&r.name),
                             tool_flag(tool)
                         ),
                     );
@@ -5626,7 +5638,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         "the login server refused its renewal{} - it serves only until its \
                          current token lapses; `swapdex run {}{}` signs it in again",
                         said(crate::refresh::refusal_reason(paths, tool, &r.config_dir)),
-                        r.name,
+                        crate::util::shell_word(&r.name),
                         tool_flag(tool)
                     ),
                 );
@@ -5746,7 +5758,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     format!(
                         "{tool} snapshot unreadable; log in to that account and run \
                          `swapdex add {} --tool {tool} --update`",
-                        p.name
+                        crate::util::shell_word(&p.name)
                     ),
                 ),
                 // The precondition matters: `add --update` snapshots whatever
@@ -5759,7 +5771,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         format!(
                             "{tool} snapshot {m}, a copy of the account slot '{slot}' keeps \
                              current - `swapdex rm {} --tool {}` drops it",
-                            p.name,
+                            crate::util::shell_word(&p.name),
                             pretty_tool_flag(tool)
                         ),
                     ),
@@ -5769,7 +5781,7 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         format!(
                             "{tool} snapshot {m} - log in to that account and run \
                              `swapdex add {} --tool {tool} --update`",
-                            p.name
+                            crate::util::shell_word(&p.name)
                         ),
                     ),
                 },
@@ -6051,8 +6063,9 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
                 std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
             if !tty {
                 eprintln!(
-                    "swapdex: `rm {name}` unregisters that account (its login and folder \
-                     stay). Re-run with --yes to confirm."
+                    "swapdex: `rm {}` unregisters that account (its login and folder \
+                     stay). Re-run with --yes to confirm.",
+                    crate::util::shell_word(name)
                 );
                 return Ok(7);
             }
@@ -6118,8 +6131,9 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
         // say so, or the name stays listed and the removal reads as failed.
         if is_profile {
             println!(
-                "  a saved profile named '{name}' is still here - `swapdex rm {name} --yes` \
-                 again removes it"
+                "  a saved profile named '{name}' is still here - `swapdex rm {} --yes` \
+                 again removes it",
+                crate::util::shell_word(name)
             );
         }
         // The preferences belong to whatever still answers to the name.
@@ -6136,7 +6150,8 @@ pub fn rm(paths: &Paths, name: &str, yes: bool, sel: Option<ToolSel>) -> Result<
             std::io::stdin().is_terminal() || std::env::var_os("SWAPDEX_ASSUME_TTY").is_some();
         if !tty {
             eprintln!(
-                "swapdex: `rm {name}` deletes the saved profile. Re-run with --yes to confirm."
+                "swapdex: `rm {}` deletes the saved profile. Re-run with --yes to confirm.",
+                crate::util::shell_word(name)
             );
             return Ok(7);
         }
@@ -6456,7 +6471,8 @@ fn use_slot_default(paths: &Paths, name: &str, tool: &str, dry_run: bool) -> Res
     if crate::slots::home_var(tool).is_some() && !crate::shim::shim_path_for(paths, tool).exists() {
         println!(
             "  tip: run `swapdex shim` once so a plain `{bin}` follows your switches\n\
-             \x20      (or launch directly with `swapdex run {name}{}`)",
+             \x20      (or launch directly with `swapdex run {}{}`)",
+            crate::util::shell_word(name),
             tool_flag(tool)
         );
     }
@@ -6870,7 +6886,8 @@ pub fn migrate(paths: &Paths, sel: Option<MigrationToolSel>) -> Result<i32> {
         for (profile, slot_name) in &copies {
             println!(
                 "  Saved profile '{profile}' is a saved copy of slot '{slot_name}' - nothing to \
-                 do; leave it alone or remove it with `swapdex rm {profile} --tool {}`.",
+                 do; leave it alone or remove it with `swapdex rm {} --tool {}`.",
+                crate::util::shell_word(profile),
                 pretty_tool_flag(tool)
             );
         }
@@ -7950,7 +7967,8 @@ pub fn serve(
             "swapdex: '{name}' has no {bin} login, so it cannot pay for turns - your own account would, while every screen named '{name}'"
         );
         eprintln!(
-            "  sign it in first: `swapdex run {name}{}`",
+            "  sign it in first: `swapdex run {}{}`",
+            crate::util::shell_word(name),
             tool_flag(tool)
         );
         return Ok(6);
@@ -8831,8 +8849,9 @@ fn already_renewed(account: &Option<String>, done: &[String], name: &str) -> Opt
     done.contains(a).then(|| {
         format!(
             "{name} holds the login just renewed - left alone rather than spending \
-             the token that renewal retired; `swapdex run {name}` signs this \
-             directory in again if you want its own copy current"
+             the token that renewal retired; `swapdex run {}` signs this \
+             directory in again if you want its own copy current",
+            crate::util::shell_word(name)
         )
     })
 }
@@ -9154,8 +9173,9 @@ pub fn login(paths: &Paths, name: &str, sel: Option<ToolSel>) -> Result<i32> {
                 );
                 eprintln!("  {}", same_account_hint(tool));
                 eprintln!(
-                    "  (to just save THIS account under a name, use `swapdex add {name} \
+                    "  (to just save THIS account under a name, use `swapdex add {} \
                      --tool {}`.)",
+                    crate::util::shell_word(name),
                     pretty_tool_flag(tool)
                 );
                 // 0, not 8: the login flow DID complete, it just landed on the
@@ -10670,19 +10690,22 @@ fn codex_no_number(
         CodexSource::Snapshot { twin: Some(t) } => format!(
             "saved copy of the account signed in as '{t}' - this copy's token lapsed, \
              which says nothing about that account; re-saving it makes another copy to go \
-             stale, so `swapdex rm {name} --tool codex` drops it, or leave it"
+             stale, so `swapdex rm {} --tool codex` drops it, or leave it",
+            crate::util::shell_word(name)
         ),
         // A copy cannot renew itself: only the live login rotates the token,
         // and `swapdex run` on a name with no slot would build an empty one and
         // ask for a fresh sign-in rather than renewing anything.
         CodexSource::Snapshot { twin: None } if expired => format!(
             "saved login expired - log in to that account and \
-             `swapdex add {name} --tool codex --update` saves it again \
-             (a saved copy cannot renew itself; only the live login does)"
+             `swapdex add {} --tool codex --update` saves it again \
+             (a saved copy cannot renew itself; only the live login does)",
+            crate::util::shell_word(name)
         ),
         CodexSource::Slot if expired => format!(
-            "login expired - `swapdex run {name} --tool codex` once renews it \
-             (Codex renews its token when it runs, and this slot has not been opened since)"
+            "login expired - `swapdex run {} --tool codex` once renews it \
+             (Codex renews its token when it runs, and this slot has not been opened since)",
+            crate::util::shell_word(name)
         ),
         _ => f.why_no_number().unwrap_or("no reading").to_string(),
     }
@@ -10789,7 +10812,8 @@ fn print_codex_quota(paths: &Paths, now: i64) {
             (None, _) | (_, None) => {
                 println!("{name}");
                 println!(
-                    "  no readable Codex login - `swapdex run {name} --tool codex` once signs it in"
+                    "  no readable Codex login - `swapdex run {} --tool codex` once signs it in",
+                    crate::util::shell_word(name)
                 );
             }
             (Some(_), Some(crate::codex_usage::Fetch::Ok(a))) => {

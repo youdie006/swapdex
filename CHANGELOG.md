@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A command hint for an account whose name has spaces or quotes now runs
+  as printed.** An account name may hold spaces and quotes, but the hints put
+  it into commands bare: for an account `my work`, `serve` answered "`swapdex
+  run my work --tool codex` signs it in once", and running that made a new
+  Claude account called `my` and launched Claude with `work --tool codex` as
+  its arguments; the `use`, `serve`, `add --update` and `rm` hints stopped
+  at "unexpected argument". Every hint that names an account now quotes the
+  name when a shell needs it (`swapdex run 'my work' --tool codex`), and
+  `add` says so for any such name, not only one with spaces.
+
 ## 0.167.30
 
 - **An account removed or renamed before 0.156.0 no longer reads as a live
