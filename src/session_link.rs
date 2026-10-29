@@ -16,6 +16,16 @@ pub fn retired(name: &str) -> String {
     format!("(removed: {name})")
 }
 
+/// Whether `name` is the ledger's marker for a removed account, as [`retired`]
+/// writes it. Only that: a profile name may start with `(` as well.
+pub fn is_retired(name: &str) -> bool {
+    name.starts_with("(removed: ") && name.ends_with(')')
+}
+
+/// What `restore` records for a backup that matches no saved profile: no
+/// account, and so no name to retire.
+pub const BACKUP: &str = "(backup)";
+
 pub struct Event {
     pub ts: i64,
     pub tool: String,
@@ -94,7 +104,8 @@ pub fn read_timeline(paths: &Paths) -> Vec<Event> {
         if let Some(names) = account_names(paths) {
             for event in &mut out {
                 if !event.account.is_empty()
-                    && !event.account.starts_with('(')
+                    && event.account != BACKUP
+                    && !is_retired(&event.account)
                     && !names.contains(&event.account)
                 {
                     event.account = retired(&event.account);
@@ -184,18 +195,20 @@ pub fn status_line(paths: &Paths) -> Option<String> {
     Some(sessions_summary(&counts))
 }
 
-/// The status line's count. A parenthesised name is a bucket - unattributed,
-/// or a removed account's - and not an account, so it is told apart rather
-/// than counted as one.
+/// The status line's count. A removed account's bucket is not an account, so
+/// it is told apart rather than counted as one.
 fn sessions_summary(counts: &BTreeMap<String, usize>) -> String {
     let total: usize = counts.values().sum();
     let unattributed = counts.get(UNATTRIBUTED).copied().unwrap_or(0);
     let removed: usize = counts
         .iter()
-        .filter(|(k, _)| k.starts_with('(') && *k != UNATTRIBUTED)
+        .filter(|(k, _)| is_retired(k))
         .map(|(_, n)| n)
         .sum();
-    let accounts = counts.keys().filter(|k| !k.starts_with('(')).count();
+    let accounts = counts
+        .keys()
+        .filter(|k| *k != UNATTRIBUTED && !is_retired(k))
+        .count();
     let mut tail = String::new();
     if removed > 0 {
         tail.push_str(&format!(", {removed} from removed accounts"));
@@ -689,8 +702,12 @@ mod tests {
 
     #[test]
     fn a_removed_account_is_not_counted_as_an_account() {
+        // `(backup)` is what `restore` records for a backup that matches no
+        // profile, and `(paren)` a live account: neither is a removed one.
         let counts: BTreeMap<String, usize> = [
             ("work".to_string(), 3),
+            ("(paren)".to_string(), 1),
+            ("(backup)".to_string(), 4),
             (retired("codex"), 5),
             (UNATTRIBUTED.to_string(), 2),
         ]
@@ -698,7 +715,34 @@ mod tests {
         .collect();
         assert_eq!(
             sessions_summary(&counts),
-            "sessions: 10 across 1 account(s), 5 from removed accounts, 2 unattributed (sessionwiki)"
+            "sessions: 15 across 3 account(s), 5 from removed accounts, 2 unattributed (sessionwiki)"
+        );
+    }
+
+    #[test]
+    fn only_a_name_no_account_holds_reads_as_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let store = paths.store_dir();
+        std::fs::create_dir_all(store.join("accounts/(paren)/claude-code")).unwrap();
+        let ledger: String = ["(backup)", "(paren)", "(gone)", "gone", &retired("old")]
+            .iter()
+            .map(|a| format!("{{\"ts\":1,\"tool\":\"claude-code\",\"account\":\"{a}\"}}\n"))
+            .collect();
+        std::fs::write(store.join("timeline.jsonl"), ledger).unwrap();
+        let names: Vec<String> = read_timeline(&paths)
+            .into_iter()
+            .map(|e| e.account)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "(backup)",
+                "(paren)",
+                "(removed: (gone))",
+                "(removed: gone)",
+                "(removed: old)"
+            ]
         );
     }
 

@@ -20,17 +20,21 @@ pub struct Store {
 /// it. A version before 0.156.0 removed and renamed accounts without retiring
 /// their names there, so the next account of that name was credited with the
 /// gone one's sessions and tokens. A name that is an account already - a
-/// profile, or a slot of any tool - is left alone, and so is every name when
-/// the slot registry cannot be read. Best-effort, like the other ledger moves:
-/// it never fails what registers the account.
+/// profile as `ls` lists it, or a slot of any tool - is left alone, and so is
+/// every name when the slot registry cannot be read, and so are the ledger's
+/// own markers. Best-effort, like the other ledger moves: it never fails what
+/// registers the account.
 pub(crate) fn claim_ledger_name(dir: &Path, name: &str) {
-    let held = dir.join("accounts").join(name).exists()
+    if name == crate::session_link::BACKUP || crate::session_link::is_retired(name) {
+        return;
+    }
+    let store = Store {
+        dir: dir.to_path_buf(),
+    };
+    let held = store.list().iter().any(|p| p.name == name)
         || crate::slots::names_in(dir).is_none_or(|names| names.iter().any(|n| n == name));
     if !held {
-        let _ = Store {
-            dir: dir.to_path_buf(),
-        }
-        .retire_timeline_account(name);
+        let _ = store.retire_timeline_account(name);
     }
 }
 
@@ -656,7 +660,11 @@ mod tests {
     fn claiming_a_name_retires_it_only_where_no_account_holds_it() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        std::fs::create_dir_all(d.join("accounts/profiled")).unwrap();
+        std::fs::create_dir_all(d.join("accounts/profiled/codex")).unwrap();
+        // Not profiles, as `list` and `ls` see them: an empty dir, and one
+        // holding only debris.
+        std::fs::create_dir_all(d.join("accounts/empty")).unwrap();
+        std::fs::create_dir_all(d.join("accounts/debris/stray")).unwrap();
         std::fs::write(
             d.join("slots.json"),
             r#"[{"name":"slotted","id":"s","config_dir":"/s","tool":"codex"}]"#,
@@ -669,8 +677,9 @@ mod tests {
                 .collect()
         };
         let timeline = d.join("timeline.jsonl");
-        std::fs::write(&timeline, ledger(&["profiled", "slotted", "gone"])).unwrap();
-        for name in ["profiled", "slotted", "gone"] {
+        let names = ["profiled", "slotted", "gone", "empty", "debris", "(backup)"];
+        std::fs::write(&timeline, ledger(&names)).unwrap();
+        for name in names {
             claim_ledger_name(d, name);
         }
         let after = std::fs::read_to_string(&timeline).unwrap();
@@ -678,7 +687,11 @@ mod tests {
             after.contains("\"profiled\"") && after.contains("\"slotted\""),
             "{after}"
         );
-        assert!(after.contains("(removed: gone)"), "{after}");
+        for gone in ["gone", "empty", "debris"] {
+            assert!(after.contains(&format!("(removed: {gone})")), "{after}");
+        }
+        // `restore`'s bucket for a backup that matches no profile is not a name.
+        assert!(after.contains("\"(backup)\""), "{after}");
 
         std::fs::write(d.join("slots.json"), "not json").unwrap();
         std::fs::write(&timeline, ledger(&["unknown"])).unwrap();
