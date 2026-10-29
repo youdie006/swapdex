@@ -400,10 +400,11 @@ fn rotating_upstream(
         let spent = auth == "Bearer AT-A" && reject_next_a.swap(false, Ordering::SeqCst);
         let mut response = tiny_http::Response::from_string("{\"ok\":true}");
         if spent {
-            let reset = std::time::SystemTime::now()
+            let reset = (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs()
+                - 30)
                 .to_string();
             response = response
                 .with_status_code(429)
@@ -415,8 +416,9 @@ fn rotating_upstream(
                     .unwrap(),
                 )
                 // This fake refuses A once, then accepts its next turn. Give the
-                // proxy the matching reset boundary so this fixture exercises a
-                // stale rotation rather than a still-live quota bench.
+                // proxy a reset already past, with room for a clock stepped back,
+                // so this fixture exercises a stale rotation rather than a
+                // still-live quota bench.
                 .with_header(
                     tiny_http::Header::from_bytes(
                         &b"anthropic-ratelimit-unified-reset"[..],
@@ -4750,9 +4752,9 @@ fn hold_seconds_actually_delays_a_spent_turn() {
     let d = root.join(".local/share/swapdex");
     std::fs::write(
         d.join("settings.json"),
-        // A ceiling of 5s: enough to prove the wait happens, short enough that
+        // A ceiling of 10s: enough to prove the wait happens, short enough that
         // a wrong reset cannot hold the suite for a quarter of an hour.
-        serde_json::to_vec(&serde_json::json!({"hold_seconds": 5})).unwrap(),
+        serde_json::to_vec(&serde_json::json!({"hold_seconds": 10})).unwrap(),
     )
     .unwrap();
     // An upstream that is always out of quota.
@@ -4772,7 +4774,7 @@ fn hold_seconds_actually_delays_a_spent_turn() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let reset = now + 3;
+    let reset = now + 5;
     let reset_deadline = std::time::UNIX_EPOCH + std::time::Duration::from_secs(reset as u64);
     std::fs::write(
         d.join("quota-cache.json"),
@@ -4790,8 +4792,10 @@ fn hold_seconds_actually_delays_a_spent_turn() {
     child.stop();
     upstream.close();
 
+    // A clock stepped back during the hold reads the return early by that
+    // much; a turn that was never held is still seconds short.
     assert!(
-        returned_at >= reset_deadline,
+        returned_at + std::time::Duration::from_millis(2500) >= reset_deadline,
         "the turn came back in {waited:?}, before reset deadline {reset}"
     );
     assert!(
@@ -7411,16 +7415,15 @@ fn doctor_reads_a_bound_slots_login_from_its_authority() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    // Half a day past 40 days: a clock stepped back between this read and
+    // doctor's would otherwise make it 39.
+    let forty_days_ago = now_ms - 40 * 86_400_000 - 12 * 3_600_000;
     let creds = |expires: i64| {
         format!(
             r#"{{"claudeAiOauth":{{"accessToken":"AT","refreshToken":"R","expiresAt":{expires}}}}}"#
         )
     };
-    std::fs::write(
-        slot.join(".credentials.json"),
-        creds(now_ms - 40 * 86_400_000),
-    )
-    .unwrap();
+    std::fs::write(slot.join(".credentials.json"), creds(forty_days_ago)).unwrap();
     std::fs::write(native.join(".credentials.json"), creds(now_ms + 3_600_000)).unwrap();
 
     let out = Command::new(bin())
@@ -7438,11 +7441,7 @@ fn doctor_reads_a_bound_slots_login_from_its_authority() {
     assert!(!row.contains("idle"), "{text}");
 
     // The native login itself gone idle is still reported.
-    std::fs::write(
-        native.join(".credentials.json"),
-        creds(now_ms - 40 * 86_400_000),
-    )
-    .unwrap();
+    std::fs::write(native.join(".credentials.json"), creds(forty_days_ago)).unwrap();
     let out = Command::new(bin())
         .arg("doctor")
         .env("HOME", root.path())

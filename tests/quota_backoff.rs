@@ -173,8 +173,10 @@ printf '{"type":"error","error":{"type":"rate_limit_error"}}\n429'
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        state["throttled_at"] = (now - 61).into();
-        state["retry_at"] = (now - 1).into();
+        // Past by half a minute, not a second, so a clock stepped back before
+        // `quota` reads it does not put the retry back in the future.
+        state["throttled_at"] = (now - 90).into();
+        state["retry_at"] = (now - 30).into();
         std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
         path
     }
@@ -234,7 +236,8 @@ fn a_throttled_quota_row_shows_the_last_reading_with_its_age() {
         serde_json::json!({"fixture": {
             "five_h": 14.0, "five_h_reset": now + 3600,
             "seven_d": 17.0, "seven_d_reset": now + 86400,
-            "at": now - 600
+            // Half a minute of margin for a clock stepped back before `quota` reads it.
+            "at": now - 630
         }})
         .to_string(),
     )
