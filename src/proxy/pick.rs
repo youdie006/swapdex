@@ -510,6 +510,10 @@ pub fn reset_clock(at: i64, now: i64, tz_offset: i64) -> String {
     if at <= now {
         return "now".into();
     }
+    // Up to the minute, not down: the endpoint gives the same reset as 06:59:59
+    // on one read and 07:00:00 on the next, and a time shown should be one by
+    // which the window has reset.
+    let at = (at + 59).div_euclid(60) * 60;
     let l = at + tz_offset;
     let (h24, mins) = ((l % 86400) / 3600, (l % 3600) / 60);
     let ampm = if h24 < 12 { "am" } else { "pm" };
@@ -880,6 +884,22 @@ mod reset_clock_tests {
         let out = reset_clock(3 * 86400 + 15 * 3600, 9 * 3600, 0);
         assert!(out.contains("3:00pm"), "{out}");
         assert!(out.len() > "3:00pm".len(), "it names the day too: {out}");
+    }
+
+    /// The usage endpoint gives one reset as 06:59:59 on one read and 07:00:00
+    /// on the next, so `quota` showed an account's 7d and Fable windows, which
+    /// reset together, as "Mon 3:59pm" and "Mon 4:00pm", and the proxy's log
+    /// changed between the two every few minutes.
+    #[test]
+    fn a_reset_a_second_short_of_the_minute_reads_as_that_minute() {
+        assert_eq!(reset_clock(15 * 3600 - 1, 9 * 3600, 0), "3:00pm");
+        // Never a minute before the reset: by the time shown, it has happened.
+        assert_eq!(reset_clock(15 * 3600 + 1, 9 * 3600, 0), "3:01pm");
+        // Including across midnight, where the day changes with it.
+        assert_eq!(
+            reset_clock(4 * 86400 - 1, 9 * 3600, 0),
+            reset_clock(4 * 86400, 9 * 3600, 0)
+        );
     }
 }
 

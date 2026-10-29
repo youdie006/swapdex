@@ -15,6 +15,13 @@ All notable changes to swapdex are documented here. This project follows
   at "unexpected argument". Every hint that names an account now quotes the
   name when a shell needs it (`swapdex run 'my work' --tool codex`), and
   `add` says so for any such name, not only one with spaces.
+- **A reset time no longer reads a minute early, or differently for two
+  windows that reset together.** The usage endpoint gives the same reset as
+  06:59:59 on one read and 07:00:00 on the next, and times were cut down to
+  the minute: `quota` showed one account's 7d and Fable windows as "Mon
+  3:59pm" and "Mon 4:00pm", and the proxy's usage log changed between the
+  two every few minutes. A reset time is now rounded up to the minute, so it
+  is never earlier than the reset itself.
 
 ## 0.167.30
 
