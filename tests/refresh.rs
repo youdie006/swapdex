@@ -134,8 +134,9 @@ fn a_lapsed_account_is_renewed_in_place() {
         .unwrap()
         .as_millis() as i64;
     let exp = o["expiresAt"].as_i64().expect("an expiry");
+    // A minute of slack for a clock stepped back since swapdex read it.
     assert!(
-        exp > now_ms && exp <= now_ms + 3_600_000,
+        exp > now_ms && exp <= now_ms + 3_660_000,
         "an hour ahead, not 3600: {exp}"
     );
 

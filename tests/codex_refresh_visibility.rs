@@ -1076,7 +1076,9 @@ fn refresh_by_name_rechecks_a_refused_login_that_still_serves() {
     assert!(!count.exists(), "a healthy login was renewed for nothing");
 
     let fingerprint = swapdex::refresh_health::codex_credential_fingerprint(&slot).unwrap();
-    swapdex::refresh_health::record_codex_rejection(&slot, &fingerprint, now_secs() * 1000)
+    // Recorded a little earlier: a success only clears a refusal no newer than
+    // itself, and a clock stepped back would otherwise make this one newer.
+    swapdex::refresh_health::record_codex_rejection(&slot, &fingerprint, (now_secs() - 30) * 1000)
         .unwrap();
     let response = serde_json::json!({
         "access_token": jwt(now_secs() + 20 * 86_400),
