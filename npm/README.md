@@ -249,6 +249,19 @@ account is always visible inside the tool you are switching
 }
 ```
 
+To show who is paying and what that account has left, use
+`swapdex serve --quiet` instead. It prints one line from swapdex's cache, e.g.
+`work (you@example.com) - 5h 95% | 7d 24%`. Claude Code re-runs a status line
+command only when the conversation changes, so also set `refreshInterval` (in
+seconds); without it the numbers stay where they were while a session waits on
+a long tool call:
+
+```json
+{
+  "statusLine": { "type": "command", "command": "swapdex serve --quiet", "refreshInterval": 60 }
+}
+```
+
 `usage` reads your local session logs (no network) to gauge how heavily you've
 been using each tool lately, so you know when to switch to a fresher account:
 

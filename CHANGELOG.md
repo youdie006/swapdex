@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.30
 
 - **An account removed or renamed before 0.156.0 no longer reads as a live
   one, or passes its sessions to the next account of that name.** Since
