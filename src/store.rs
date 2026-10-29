@@ -20,7 +20,7 @@ pub struct Store {
 /// it. A version before 0.156.0 removed and renamed accounts without retiring
 /// their names there, so the next account of that name was credited with the
 /// gone one's sessions and tokens. A name that is an account already - a
-/// profile as `ls` lists it, or a slot of any tool - is left alone, and so is
+/// profile, even one mid-save, or a slot of any tool - is left alone, and so is
 /// every name when the slot registry cannot be read, and so are the ledger's
 /// own markers. Best-effort, like the other ledger moves: it never fails what
 /// registers the account.
@@ -31,7 +31,7 @@ pub(crate) fn claim_ledger_name(dir: &Path, name: &str) {
     let store = Store {
         dir: dir.to_path_buf(),
     };
-    let held = store.list().iter().any(|p| p.name == name)
+    let held = store.holds_profile(name)
         || crate::slots::names_in(dir).is_none_or(|names| names.iter().any(|n| n == name));
     if !held {
         let _ = store.retire_timeline_account(name);
@@ -153,6 +153,34 @@ impl Store {
             .map_err(|e| LockError::Unwritable(format!("{e}")))?;
         f.try_lock_exclusive().map_err(|_| LockError::Busy)?;
         Ok(LockGuard(f))
+    }
+
+    /// Hold the ledger across a read-modify-write. Every writer replaces the
+    /// whole file, and they run under different locks - a switch under the
+    /// store's, a slot registration under the registry's - so without this two
+    /// of them could each write back a copy missing the other's change. It
+    /// waits rather than failing: what it guards is one small file rewrite.
+    fn lock_timeline(&self) -> Result<LockGuard> {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(self.dir.join(".timeline.lock"))
+            .context("open the ledger lock")?;
+        f.lock_exclusive().context("lock the ledger")?;
+        Ok(LockGuard(f))
+    }
+
+    /// Whether `name` has a profile for some tool: a finished generation, or
+    /// one an interrupted save left staged or set aside, which `save` turns
+    /// back into the profile. An empty directory or debris is not one.
+    fn holds_profile(&self, name: &str) -> bool {
+        KNOWN_TOOLS.iter().any(|tool| {
+            self.account_tool_dir(name, tool).is_dir()
+                || self.staging_dir(name, tool).is_dir()
+                || self.old_dir(name, tool).is_dir()
+        })
     }
 
     /// A per-tool credential lock, distinct from the whole-store [`lock`](Self::lock).
@@ -380,6 +408,7 @@ impl Store {
     /// name there makes `usage`/`sessions` report an account that no longer
     /// exists, forever. Rewrite events in place (atomic).
     pub fn rename_timeline_account(&self, old: &str, new: &str) -> Result<()> {
+        let _ledger = self.lock_timeline()?;
         let tl = self.dir.join("timeline.jsonl");
         if let Ok(text) = fs::read_to_string(&tl) {
             let mut changed = false;
@@ -554,6 +583,7 @@ impl Store {
         ts: u64,
         inv: u128,
     ) -> Result<()> {
+        let _ledger = self.lock_timeline()?;
         let path = self.dir.join("timeline.jsonl");
         // Who asked. Without this, a paying account that changed without anyone
         // meaning to gave no way to tell which of twenty live sessions did it -
@@ -665,6 +695,10 @@ mod tests {
         // holding only debris.
         std::fs::create_dir_all(d.join("accounts/empty")).unwrap();
         std::fs::create_dir_all(d.join("accounts/debris/stray")).unwrap();
+        // Profiles an interrupted save left mid-way: `save` heals them, so
+        // they are accounts, though `list` skips them until it does.
+        std::fs::create_dir_all(d.join("accounts/interrupted/.codex.old")).unwrap();
+        std::fs::create_dir_all(d.join("accounts/staged/.claude-code.staging")).unwrap();
         std::fs::write(
             d.join("slots.json"),
             r#"[{"name":"slotted","id":"s","config_dir":"/s","tool":"codex"}]"#,
@@ -677,16 +711,24 @@ mod tests {
                 .collect()
         };
         let timeline = d.join("timeline.jsonl");
-        let names = ["profiled", "slotted", "gone", "empty", "debris", "(backup)"];
+        let names = [
+            "profiled",
+            "slotted",
+            "interrupted",
+            "staged",
+            "gone",
+            "empty",
+            "debris",
+            "(backup)",
+        ];
         std::fs::write(&timeline, ledger(&names)).unwrap();
         for name in names {
             claim_ledger_name(d, name);
         }
         let after = std::fs::read_to_string(&timeline).unwrap();
-        assert!(
-            after.contains("\"profiled\"") && after.contains("\"slotted\""),
-            "{after}"
-        );
+        for held in ["profiled", "slotted", "interrupted", "staged"] {
+            assert!(after.contains(&format!("\"{held}\"")), "{after}");
+        }
         for gone in ["gone", "empty", "debris"] {
             assert!(after.contains(&format!("(removed: {gone})")), "{after}");
         }
@@ -698,6 +740,44 @@ mod tests {
         claim_ledger_name(d, "unknown");
         let after = std::fs::read_to_string(&timeline).unwrap();
         assert!(after.contains("\"unknown\""), "{after}");
+    }
+
+    /// Every ledger writer replaces the whole file, under different locks: a
+    /// switch under the store's, a slot registration under the registry's. Run
+    /// side by side, appends and a retirement must all land.
+    #[test]
+    fn concurrent_ledger_writes_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_path_buf();
+        std::fs::write(
+            d.join("timeline.jsonl"),
+            "{\"ts\":1,\"tool\":\"codex\",\"account\":\"ghost\"}\n",
+        )
+        .unwrap();
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let d = d.clone();
+                std::thread::spawn(move || {
+                    let st = Store { dir: d };
+                    for i in 0..40 {
+                        st.append_timeline_at("codex", &format!("w{w}"), "use", i)
+                            .unwrap();
+                        if w == 0 && i == 20 {
+                            st.retire_timeline_account("ghost").unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let after = std::fs::read_to_string(d.join("timeline.jsonl")).unwrap();
+        assert_eq!(after.lines().count(), 1 + 8 * 40, "an append was lost");
+        assert!(
+            after.contains("(removed: ghost)"),
+            "the retirement was lost"
+        );
     }
 
     fn snap() -> Snapshot {
