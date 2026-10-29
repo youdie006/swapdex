@@ -339,6 +339,18 @@ fn reject_reserved_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Every slot name in the registry under `store`, of any tool, or None when it
+/// cannot be read.
+pub(crate) fn names_in(store: &std::path::Path) -> Option<Vec<String>> {
+    match std::fs::read(store.join("slots.json")) {
+        Ok(bytes) => serde_json::from_slice::<Vec<SlotRecord>>(&bytes)
+            .ok()
+            .map(|all| all.into_iter().map(|r| r.name).collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
 impl Slots {
     /// Claude's registry - the established caller, kept so every existing call
     /// site keeps meaning what it meant.
@@ -435,6 +447,9 @@ impl Slots {
         reject_tool_home_name(name)?;
         reject_invalid_name(name)?;
         reject_reserved_name(name)?;
+        if let Some(store) = self.file.parent() {
+            crate::store::claim_ledger_name(store, name);
+        }
         let id = new_id(name);
         let config_dir = self.slots_dir.join(&id);
         std::fs::create_dir_all(&config_dir).context("create slot dir")?;
@@ -570,6 +585,9 @@ impl Slots {
         // nothing. Registering is what would turn such a pointer from inert back
         // into a live instruction to pay, and nobody asked for that.
         self.prune_serving();
+        if let Some(store) = self.file.parent() {
+            crate::store::claim_ledger_name(store, name);
+        }
         let rec = SlotRecord {
             name: name.to_string(),
             id: new_id(name),
@@ -970,6 +988,28 @@ mod shared_history_tests {
     /// Left per-slot, `swapdex use B` made every conversation started on A
     /// vanish from `claude --resume`. They were not lost, but they were
     /// invisible, which for a resume list is the same thing.
+    /// A slot created under a name an older version left in the ledger does not
+    /// take over the gone account's switches.
+    #[test]
+    fn a_new_slot_does_not_take_over_a_gone_accounts_ledger_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let store = paths.store_dir();
+        std::fs::create_dir_all(&store).unwrap();
+        let timeline = store.join("timeline.jsonl");
+        std::fs::write(
+            &timeline,
+            "{\"ts\":1,\"tool\":\"claude-code\",\"account\":\"ghost\"}\n",
+        )
+        .unwrap();
+        Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .create("ghost")
+            .unwrap();
+        let after = std::fs::read_to_string(&timeline).unwrap();
+        assert!(after.contains("(removed: ghost)"), "{after}");
+    }
+
     #[test]
     fn a_conversation_is_reachable_from_every_account() {
         assert!(

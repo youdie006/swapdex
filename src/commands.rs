@@ -1326,7 +1326,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
                 let event_name = backup_id
                     .as_deref()
                     .and_then(|id| matched_profile_name(&store, tool, id))
-                    .unwrap_or_else(|| "(backup)".into());
+                    .unwrap_or_else(|| crate::session_link::BACKUP.into());
                 store.append_timeline_inv(tool, &event_name, "restore", restore_ts, restore_inv)?;
                 changed += 1;
             }
@@ -1402,7 +1402,7 @@ pub fn restore(paths: &Paths, sel: Option<ToolSel>, dry_run: bool) -> Result<i32
         let event_name = restored
             .as_ref()
             .and_then(|id| matched_profile_name(&store, tool, &id.account_id))
-            .unwrap_or_else(|| "(backup)".into());
+            .unwrap_or_else(|| crate::session_link::BACKUP.into());
         store.append_timeline_inv(tool, &event_name, "restore", restore_ts, restore_inv)?;
         match restored {
             Some(id) => println!("restored {tool} -> {} (backup {age})", identity_line(&id)),
@@ -6258,6 +6258,9 @@ pub fn rename(paths: &Paths, old: &str, new: &str) -> Result<i32> {
     if old_exists && Store::open(paths).is_ok_and(|st| st.profile_dir_exists(new)) {
         eprintln!("swapdex: a profile named '{new}' already exists");
         return Ok(6);
+    }
+    if old_exists {
+        crate::store::claim_ledger_name(&paths.store_dir(), new);
     }
     let mut slot_renamed = false;
     for tool in adapters::all().iter().map(|a| a.name()) {

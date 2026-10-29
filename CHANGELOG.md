@@ -4,6 +4,29 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **An account removed or renamed before 0.156.0 no longer reads as a live
+  one, or passes its sessions to the next account of that name.** Since
+  0.156.0 `rm` and `rename` move an account's name in the switch ledger, but
+  entries written before stayed under the bare name: `sessions` and `usage`
+  listed accounts that no longer exist (on one machine `codex` with 506
+  sessions and `work-codex` with 48, on another `work2` and `work3`), and
+  adding, adopting or renaming into one of those names credited the new
+  account with the old one's sessions and tokens. A name no account holds is
+  now shown as `(removed: <name>)`, and an account that takes such a name
+  retires the old entries first.
+- **Two swapdex commands writing the switch ledger at once no longer drop
+  each other's entries.** Each write rewrote the whole of `timeline.jsonl`
+  under a different lock, or none (`use` under the store lock, a new slot
+  under the registry's, `rm` and `rename` after letting go of it), so one
+  could write back a copy missing the other's switch. In a test, 8 writers
+  of 40 switches each lost some on every run. Ledger writes now take a lock
+  of their own.
+- **The status line counts accounts, not removed ones.** "4491 across 7
+  account(s)" counted each removed account's bucket as an account; it now
+  says "across 3 account(s), 888 from removed accounts".
+
 ## 0.167.29
 
 - **`doctor` names an account that no longer shares `~/.claude/settings.json`.**

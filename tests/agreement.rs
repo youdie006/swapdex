@@ -1860,6 +1860,76 @@ fn a_removed_account_does_not_hand_its_usage_to_the_next_account_of_that_name() 
     );
 }
 
+/// A version before 0.156.0 removed or renamed an account without touching the
+/// ledger, so its switches are still there under the bare name. `usage` and
+/// `sessions` then reported an account that no longer exists, and the next
+/// account given that name - by `adopt`, `rename` or `add` - was credited with
+/// its sessions and tokens: the hand-over `rm` has prevented since by retiring
+/// the name.
+#[test]
+fn a_name_an_older_version_left_in_the_ledger_belongs_to_no_account() {
+    for take in ["adopt", "rename", "add"] {
+        let t = fixture();
+        let root = t.path();
+        let timeline = root.join(".local/share/swapdex/timeline.jsonl");
+
+        seed_claude(root, "uuid-live", "live@example.com");
+        seed_slot(root, "keeper", "keeper@example.com");
+        seed_slot(root, "other", "other@example.com");
+        let (_, err, code) = run(root, &["use", "keeper"]);
+        assert_eq!(code, 0, "switching to keeper failed: {err}");
+
+        // What the older version left: a switch to `ghost`, an account since gone.
+        let ledger = std::fs::read_to_string(&timeline).unwrap();
+        let last: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+        let switched_at = last["ts"].as_i64().unwrap() + 60;
+        std::fs::write(
+            &timeline,
+            format!(
+                "{ledger}{}\n",
+                serde_json::json!({"ts": switched_at, "tool": "claude-code", "account": "ghost"})
+            ),
+        )
+        .unwrap();
+        let proj = root.join(".claude/projects/p");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("s.jsonl"),
+            serde_json::to_vec(&serde_json::json!({
+                "timestamp": swapdex::refresh::rfc3339_utc(switched_at + 60),
+                "message": {"usage": {"input_tokens": 12000, "output_tokens": 3000}}}))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (out, _, _) = run(root, &["usage"]);
+        assert!(
+            !out.contains("@ghost"),
+            "a gone account reads as a live one:\n{out}"
+        );
+        assert!(
+            !out.contains("@keeper"),
+            "the gone account's tokens moved onto the account before it:\n{out}"
+        );
+
+        // A new account takes the name.
+        let dir = root.join("home/.claude-ghost");
+        std::fs::create_dir_all(&dir).unwrap();
+        let args: &[&str] = match take {
+            "adopt" => &["adopt", "ghost", dir.to_str().unwrap()],
+            "rename" => &["rename", "other", "ghost"],
+            _ => &["add", "ghost"],
+        };
+        let (_, err, code) = run(root, args);
+        assert_eq!(code, 0, "{take} failed: {err}");
+        let (out, _, _) = run(root, &["usage"]);
+        assert!(
+            !out.contains("@ghost"),
+            "after `{take}`, the next account of that name inherited the gone one's tokens:\n{out}"
+        );
+    }
+}
+
 /// One directory is one account, or a pointer cannot name a payer.
 ///
 /// `Slots::payer` resolves a pointer back to a name with `.find` - the pointer
