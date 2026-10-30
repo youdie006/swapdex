@@ -1930,6 +1930,80 @@ fn a_name_an_older_version_left_in_the_ledger_belongs_to_no_account() {
     }
 }
 
+/// The account column fits its longest name. `usage` gave names 11 characters
+/// and `sessions` 20, and the `(removed: <name>)` label 0.167.30 introduced is
+/// longer than either, so on a real machine `@(removed: youdie)` and
+/// `(removed: work-codex)` pushed their numbers out of line.
+#[test]
+fn a_long_account_name_keeps_the_usage_and_sessions_columns_in_line() {
+    let t = fixture();
+    let root = t.path();
+    let timeline = root.join(".local/share/swapdex/timeline.jsonl");
+    seed_claude(root, "uuid-live", "live@example.com");
+    seed_slot(root, "keeper", "keeper@example.com");
+    let (_, err, code) = run(root, &["use", "keeper"]);
+    assert_eq!(code, 0, "switching to keeper failed: {err}");
+
+    // Then a switch to an account since gone, as an older version left it.
+    let ledger = std::fs::read_to_string(&timeline).unwrap();
+    let last: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+    let kept_at = last["ts"].as_i64().unwrap();
+    let gone_at = kept_at + 120;
+    std::fs::write(
+        &timeline,
+        format!(
+            "{ledger}{}\n",
+            serde_json::json!({"ts": gone_at, "tool": "claude-code", "account": "an-old-work-account"})
+        ),
+    )
+    .unwrap();
+    let proj = root.join(".claude/projects/p");
+    std::fs::create_dir_all(&proj).unwrap();
+    for (file, at) in [("a.jsonl", kept_at + 60), ("b.jsonl", gone_at + 60)] {
+        std::fs::write(
+            proj.join(file),
+            serde_json::to_vec(&serde_json::json!({
+                "timestamp": swapdex::refresh::rfc3339_utc(at),
+                "message": {"usage": {"input_tokens": 12000, "output_tokens": 3000}}}))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    let (out, _, _) = run(root, &["usage"]);
+    let at: Vec<usize> = out
+        .lines()
+        .filter(|l| l.starts_with("    @"))
+        .filter_map(|l| l.find(" 5h:"))
+        .collect();
+    assert_eq!(at.len(), 2, "one row per account:\n{out}");
+    assert_eq!(at[0], at[1], "the usage columns are out of line:\n{out}");
+
+    let sessions = root.join("sessions.json");
+    std::fs::write(
+        &sessions,
+        serde_json::to_vec(&serde_json::json!([
+            {"id": "s1", "tool": "claude-code", "started": swapdex::refresh::rfc3339_utc(kept_at + 60)},
+            {"id": "s2", "tool": "claude-code", "started": swapdex::refresh::rfc3339_utc(gone_at + 60)}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .arg("sessions")
+        .env("SWAPDEX_ROOT", root)
+        .env("SWAPDEX_SESSIONWIKI_JSON", &sessions)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    let at: Vec<usize> = out
+        .lines()
+        .filter_map(|l| l.trim_end().rfind(' '))
+        .collect();
+    assert_eq!(at.len(), 2, "one row per account:\n{out}");
+    assert_eq!(at[0], at[1], "the sessions columns are out of line:\n{out}");
+}
+
 /// One directory is one account, or a pointer cannot name a payer.
 ///
 /// `Slots::payer` resolves a pointer back to a name with `.find` - the pointer

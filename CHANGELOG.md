@@ -40,6 +40,11 @@ All notable changes to swapdex are documented here. This project follows
   `hold_seconds`; the log says the turn cannot move, rather than "every
   account is spent". With `auto` on it still waits for the earliest reset
   of any account, which frees somewhere to move to.
+- **`usage` and `sessions` keep their columns in line with a long account
+  name.** The name column was a fixed 11 and 20 characters, and the
+  `(removed: <name>)` label from 0.167.30 is longer: `@(removed: youdie)`
+  and `(removed: work-codex)` pushed their numbers out of line. The column is
+  now as wide as the longest name.
 
 ## 0.167.31
 

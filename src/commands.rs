@@ -9963,6 +9963,14 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
         return Ok(0);
     }
     println!("Local usage - this machine, approximate (not the billed quota):");
+    // As wide as the longest name: "(removed: <name>)" outgrew a fixed 11.
+    let width = rows
+        .iter()
+        .flat_map(|r| r.accounts.keys())
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(11);
     for r in &rows {
         if r.w7d.sessions == 0 {
             continue;
@@ -9979,7 +9987,7 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
         // whatever predates the first switch.
         for (name, (t5, t7)) in &r.accounts {
             println!(
-                "    @{:<11} 5h: {:>7} tok           7d: {:>8} tok",
+                "    @{:<width$} 5h: {:>7} tok           7d: {:>8} tok",
                 name,
                 crate::usage::human(*t5),
                 crate::usage::human(*t7),
@@ -9989,9 +9997,10 @@ pub fn usage(paths: &Paths, json: bool) -> Result<i32> {
         let rest = r.w7d.tokens.saturating_sub(attributed7);
         if !r.accounts.is_empty() && rest > 0 {
             println!(
-                "    {:<12} 5h:                       7d: {:>8} tok (before your first switch)",
+                "    {:<w$} 5h:                       7d: {:>8} tok (before your first switch)",
                 "(untagged)",
                 crate::usage::human(rest),
+                w = width + 1,
             );
         }
     }
@@ -11185,8 +11194,14 @@ pub fn sessions(paths: &Paths, json: bool) -> Result<i32> {
             println!("no sessions found (sessionwiki index empty - run `sessionwiki sync` once)");
         }
         Some(counts) => {
+            let width = counts
+                .keys()
+                .map(|a| a.chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(20);
             for (account, n) in &counts {
-                println!("{:<20} {n}", account);
+                println!("{:<width$} {n}", account);
             }
         }
     }
