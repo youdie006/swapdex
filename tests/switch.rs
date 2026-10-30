@@ -2631,6 +2631,28 @@ fn rename_treats_ghost_dirs_consistently() {
     assert_eq!(c, 6, "hidden target collision is a clean 'exists' (6): {e}");
 }
 
+// `rm --tool` on an account's last tool left its directory behind, empty: `ls`
+// and `rm` no longer knew the name, and `rename` refused it as taken.
+#[test]
+fn a_name_freed_by_dropping_its_last_tool_can_be_taken_again() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex(root.path(), "acct-A");
+    run(root.path(), &["add", "old", "--tool", "codex"]);
+    seed_codex(root.path(), "acct-B");
+    run(root.path(), &["add", "keep", "--tool", "codex"]);
+    let (_o, e, c) = run(root.path(), &["rm", "old", "--tool", "codex"]);
+    assert_eq!(c, 0, "{e}");
+    let (_o, e, c) = run(root.path(), &["rename", "keep", "old"]);
+    assert_eq!(c, 0, "nothing holds 'old' any more: {e}");
+
+    // What an older version left behind: the same empty directory.
+    std::fs::create_dir_all(root.path().join(".local/share/swapdex/accounts/stale")).unwrap();
+    let (_o, e, c) = run(root.path(), &["rename", "old", "stale"]);
+    assert_eq!(c, 0, "an empty directory holds no account: {e}");
+    let (names, _e, _c) = run(root.path(), &["ls", "--names"]);
+    assert_eq!(names.split_whitespace().collect::<Vec<_>>(), ["stale"]);
+}
+
 // F5: SIGQUIT (Ctrl+backslash) must be ridden out like SIGINT.
 #[test]
 fn login_survives_sigquit_and_restores() {

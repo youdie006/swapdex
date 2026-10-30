@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A name whose last tool was removed can be used again.** `rm <name>
+  --tool <tool>` on an account's only tool left its folder behind, empty:
+  `ls` no longer showed the name and `rm` answered "no account named", yet
+  `rename` refused it with "a profile named '<name>' already exists", so
+  the name could not be taken by any command. One machine had two such
+  names. Removing the last tool now removes the folder, and `rename` treats
+  an empty folder an older version left as free. A folder with anything in
+  it is still refused.
+
 ## 0.167.31
 
 - **A command hint for an account whose name has spaces or quotes now runs

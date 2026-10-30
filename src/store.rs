@@ -380,13 +380,18 @@ impl Store {
         // Same treatment as `remove`: these are credential bytes.
         overwrite_tree(&d);
         fs::remove_dir_all(&d).with_context(|| format!("drop {tool} from profile {name}"))?;
+        // The last tool takes the account's directory with it. remove_dir
+        // removes only an empty one.
+        let _ = fs::remove_dir(self.dir.join("accounts").join(name));
         Ok(true)
     }
 
     /// Whether ANY directory (even a ghost one hidden from `list()`) claims
-    /// this name - the collision test for rename targets.
+    /// this name - the collision test for rename targets. An empty one holds
+    /// nothing and claims nothing: `rm --tool` used to leave one behind.
     pub fn profile_dir_exists(&self, name: &str) -> bool {
-        self.dir.join("accounts").join(name).exists()
+        let d = self.dir.join("accounts").join(name);
+        d.exists() && !is_empty_dir(&d)
     }
 
     pub fn rename(&self, old: &str, new: &str) -> Result<bool> {
@@ -394,6 +399,9 @@ impl Store {
         let to = self.dir.join("accounts").join(new);
         if !from.exists() {
             return Ok(false);
+        }
+        if is_empty_dir(&to) {
+            let _ = fs::remove_dir(&to);
         }
         if to.exists() {
             anyhow::bail!("a profile named '{new}' already exists");
@@ -655,6 +663,11 @@ pub fn valid_profile_name(name: &str) -> bool {
         && !name.starts_with('.')
         && !name.contains(['/', '\\'])
         && !name.chars().any(|c| c.is_control())
+}
+
+/// A directory with nothing in it.
+fn is_empty_dir(p: &Path) -> bool {
+    fs::read_dir(p).is_ok_and(|mut rd| rd.next().is_none())
 }
 
 fn overwrite_tree(dir: &std::path::Path) {
@@ -1177,6 +1190,16 @@ mod drop_tool_tests {
         assert!(!store.drop_tool("kong", "gemini").unwrap());
         // The other tools are untouched, so the profile is plainly still there.
         assert!(base.exists());
+
+        // The last one takes the directory with it. Left behind empty, it held
+        // no account, yet `rename` refused the name as taken.
+        assert!(store.drop_tool("kong", "claude-code").unwrap());
+        assert!(base.exists());
+        assert!(store.drop_tool("kong", "antigravity").unwrap());
+        assert!(
+            !base.exists(),
+            "an account with no tools left keeps no directory"
+        );
     }
 }
 
