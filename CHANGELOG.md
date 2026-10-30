@@ -24,6 +24,12 @@ All notable changes to swapdex are documented here. This project follows
   the threshold - staying on" the one about to run out. A window is now
   dropped from a reading once its reset passes, as the quota cache already
   did on load.
+- **A refused Codex turn goes to the account with Codex quota left.** With
+  `auto` on, a Codex turn an account refused was handed to the next account
+  in order of room left, but the room came from Claude's usage readings,
+  matched by account name: of three Codex accounts, the turn could go to
+  one with 2% of its Codex week left because the Claude account of that
+  name was nearly unused. The order now comes from Codex's own readings.
 
 ## 0.167.31
 

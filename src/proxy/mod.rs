@@ -1598,15 +1598,23 @@ fn next_account_in(
     // then most room left - handing the session to whichever account happened to
     // be listed next tends to land on one that is nearly spent too.
     {
+        // Codex's readings are in its own cache, kept current by `measure_codex`
+        // and by the quota a response states. `measured` is only ever filled for
+        // Claude: on a Codex proxy it held Claude's cache, by account name, and
+        // ordered a refused Codex turn by the Claude account of that name.
+        let codex = (tool == "codex").then(|| crate::quota_cache::load_for(paths, tool));
         let measured = sh.measured.held();
         pick::by_headroom(
             &mut slots,
             |r| cfg.rank(&r.name),
-            |r| {
-                measured
+            |r| match &codex {
+                Some(c) => c
+                    .get(&r.name)
+                    .and_then(|e| pick::headroom(e.five_h, e.seven_d)),
+                None => measured
                     .1
                     .get(&r.name)
-                    .and_then(|m| pick::headroom(m.five_h, m.seven_d))
+                    .and_then(|m| pick::headroom(m.five_h, m.seven_d)),
             },
         );
     }

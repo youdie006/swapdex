@@ -3267,6 +3267,78 @@ fn a_refused_codex_turn_is_re_served_on_another_account() {
     assert!(body.contains("ok"), "body relayed from the serving account");
 }
 
+/// A refused Codex turn goes to the account with the most Codex quota left. The
+/// order came from the proxy's own measurements, which on a Codex proxy are
+/// Claude's - seeded from Claude's cache by account name, since nothing
+/// measures Codex that way - so the turn went to whichever account had the
+/// roomiest Claude window, here one with 2% of its Codex week left.
+#[test]
+fn a_refused_codex_turn_goes_to_the_account_with_codex_quota_left() {
+    let root = tempfile::tempdir().unwrap();
+    seed_codex_slot(
+        root.path(),
+        "work",
+        "cccc1111",
+        "AT-WORK",
+        "acct-work",
+        true,
+    );
+    seed_codex_slot(
+        root.path(),
+        "near",
+        "dddd2222",
+        "AT-NEAR",
+        "acct-near",
+        false,
+    );
+    seed_codex_slot(
+        root.path(),
+        "fresh",
+        "eeee3333",
+        "AT-FRESH",
+        "acct-fresh",
+        false,
+    );
+    let store = root.path().join(".local/share/swapdex");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (hour, week) = (now + 3600, now + 5 * 86400);
+    // The Claude accounts of the same names, the other way round.
+    std::fs::write(
+        store.join("quota-cache.json"),
+        format!(
+            r#"{{"near": {{"five_h": 1.0, "five_h_reset": {hour}, "at": {now}}},
+                "fresh": {{"five_h": 99.0, "five_h_reset": {hour}, "at": {now}}}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        store.join("codex-quota-cache.json"),
+        format!(
+            r#"{{"near": {{"seven_d": 98.0, "seven_d_reset": {week}, "at": {now}}},
+                "fresh": {{"seven_d": 10.0, "seven_d_reset": {week}, "at": {now}}}}}"#
+        ),
+    )
+    .unwrap();
+    let sink: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_codex_upstream_refusing(sink.clone(), "AT-WORK", 429);
+
+    let (mut child, port) = start_codex_proxy(root.path(), &upstream, &["--auto"]);
+    let (status, _body) = post_codex_turn(port);
+    child.kill().ok();
+    child.wait().ok();
+
+    let seen = sink.lock().unwrap().clone();
+    assert_eq!(status, 200, "{seen:?}");
+    assert_eq!(
+        seen.get(1).map(|s| s.0.as_str()),
+        Some("Bearer AT-FRESH"),
+        "the refused turn went past the account with Codex quota left: {seen:?}"
+    );
+}
+
 // Without --auto the refusal is the answer. Moving a session on by itself is a
 // decision the user opts into, and a proxy that quietly reached for another
 // account would spend quota nobody asked it to spend.
@@ -7390,6 +7462,54 @@ fn a_spent_account_rotates_before_any_hold() {
         auths(&sink).last().map(String::as_str),
         Some("Bearer AT-SPARE"),
         "the turn was not moved to the free account"
+    );
+}
+
+/// The Claude half of `a_refused_codex_turn_goes_to_the_account_with_codex_quota_left`:
+/// a refused Claude turn is ordered by Claude's readings, never by the Codex
+/// account of the same name.
+#[test]
+fn a_refused_claude_turn_goes_to_the_account_with_claude_quota_left() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "aaaa1111", "AT-WORK", true);
+    seed_slot(root.path(), "near", "bbbb2222", "AT-NEAR", false);
+    seed_slot(root.path(), "fresh", "cccc3333", "AT-FRESH", false);
+    let store = root.path().join(".local/share/swapdex");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (hour, week) = (now + 3600, now + 5 * 86400);
+    std::fs::write(
+        store.join("quota-cache.json"),
+        format!(
+            r#"{{"near": {{"five_h": 98.0, "five_h_reset": {hour}, "at": {now}}},
+                "fresh": {{"five_h": 10.0, "five_h_reset": {hour}, "at": {now}}}}}"#
+        ),
+    )
+    .unwrap();
+    // The Codex accounts of the same names, the other way round.
+    std::fs::write(
+        store.join("codex-quota-cache.json"),
+        format!(
+            r#"{{"near": {{"seven_d": 1.0, "seven_d_reset": {week}, "at": {now}}},
+                "fresh": {{"seven_d": 99.0, "seven_d_reset": {week}, "at": {now}}}}}"#
+        ),
+    )
+    .unwrap();
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spent_then_ok_upstream("Bearer AT-WORK", sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &["--auto"]);
+    let body = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    child.wait().ok();
+
+    assert!(body.contains("\"ok\":true"), "{body}");
+    assert_eq!(
+        auths(&sink).last().map(String::as_str),
+        Some("Bearer AT-FRESH"),
+        "the refused turn went past the account with Claude quota left"
     );
 }
 
