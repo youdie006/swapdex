@@ -7158,6 +7158,93 @@ fn a_lapsed_token_is_not_sent_to_the_usage_endpoint() {
     );
 }
 
+/// A reading is about a window, and once the window resets the number is about
+/// nothing. When an account could not be re-read - its token had lapsed, or the
+/// endpoint throttled - the proxy kept its last reading as it was, so an idle
+/// account whose 5h window reset at 99% stayed over the threshold and the
+/// rotation would not step onto it, though an idle account is the one with
+/// quota left. A real machine logged "5h 69% left, resets now".
+#[test]
+fn a_reading_whose_window_has_reset_does_not_hold_an_account_out() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "live", "aaaa1111", "AT-LIVE", true);
+    seed_slot(root.path(), "idle", "bbbb2222", "AT-IDLE", false);
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::write(
+        store.join("slots/bbbb2222/.credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"AT-IDLE","refreshToken":"R","expiresAt":1000}}"#,
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let week = now + 5 * 86400;
+    // What idle read before it went quiet: its 5h window all but spent, and
+    // about to reset.
+    std::fs::write(
+        store.join("quota-cache.json"),
+        format!(
+            r#"{{"idle": {{"five_h": 99.5, "five_h_reset": {}, "seven_d": 10.0, "seven_d_reset": {week}, "at": {now}}}}}"#,
+            now + 2
+        ),
+    )
+    .unwrap();
+    let dir = root.path().join("fakebin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let curl = dir.join("curl");
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nprintf '{{\"five_hour\":{{\"utilization\":99.0,\"resets_at\":{}}},\"seven_day\":{{\"utilization\":10.0,\"resets_at\":{week}}}}}\\n200'\n",
+            now + 3600
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+
+    let mut child = Command::new(bin())
+        .args(["proxy", "--port", "0", "--auto", "--threshold", "0.98"])
+        .env("SWAPDEX_ROOT", root.path())
+        .env("SWAPDEX_UPSTREAM", &upstream)
+        .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/oauth/token")
+        .env("SWAPDEX_CURL", &curl)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port = {
+        let out = child.stdout.as_mut().unwrap();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while out.read(&mut b).unwrap_or(0) == 1 && b[0] != b'\n' {
+            line.push(b[0]);
+        }
+        String::from_utf8_lossy(&line)
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .expect("port")
+    };
+    // Past idle's reset, so the first turn's reading round finds it outlived.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    let mut log = String::new();
+    child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
+    child.wait().ok();
+
+    assert!(
+        log.contains("live is near its limit - starting this turn on idle"),
+        "idle's 5h window has reset, so it is not over the threshold:\n{log}"
+    );
+    assert!(
+        !log.contains("resets now"),
+        "a window that has reset is still shown:\n{log}"
+    );
+}
+
 /// A burst throttle (429, x-should-retry, no window named) that outlasts the
 /// retries is not a spent fleet. With `hold_seconds` set the proxy said "every
 /// account is spent; holding 421s for the earliest window to reset" and held

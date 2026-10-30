@@ -71,6 +71,19 @@ impl Measurement {
             .min()
             .map(|r| r - now)
     }
+
+    /// Take out each window whose reset has passed: its number is about a
+    /// window that no longer exists, which is why `quota_cache` drops it on load.
+    fn expire_windows(&mut self, now: i64) {
+        if self.five_h_reset.is_some_and(|r| now >= r) {
+            self.five_h = None;
+            self.five_h_reset = None;
+        }
+        if self.seven_d_reset.is_some_and(|r| now >= r) {
+            self.seven_d = None;
+            self.seven_d_reset = None;
+        }
+    }
 }
 
 type Utilization = Measurement;
@@ -1046,6 +1059,13 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                 },
             );
         }
+    }
+    // A reading this round could not renew is carried forward only while its
+    // window lasts. Kept past the reset, an idle account's spent 5h held it over
+    // the threshold - and an idle account is the one with quota left.
+    let now_s = now_secs();
+    for m in out.values_mut() {
+        m.expire_windows(now_s);
     }
     // Say what came back. A threshold that never fires because nothing could be
     // measured is indistinguishable from one that is working, and this read is

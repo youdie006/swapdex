@@ -14,6 +14,16 @@ All notable changes to swapdex are documented here. This project follows
   names. Removing the last tool now removes the folder, and `rename` treats
   an empty folder an older version left as free. A folder with anything in
   it is still refused.
+- **A usage window that has reset no longer keeps its old number in the
+  proxy.** When the proxy could not re-read an account - its token had
+  lapsed while idle, or the usage endpoint throttled - it kept the last
+  reading as it was, past the reset of the window it described. The usage
+  log showed "5h 69% left, resets now" on one machine, and with `auto` and
+  a threshold on, an idle account whose 5h window had reset while nearly
+  spent stayed "past the threshold": the proxy said "every account is past
+  the threshold - staying on" the one about to run out. A window is now
+  dropped from a reading once its reset passes, as the quota cache already
+  did on load.
 
 ## 0.167.31
 
