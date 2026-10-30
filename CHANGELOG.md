@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.31
 
 - **A command hint for an account whose name has spaces or quotes now runs
   as printed.** An account name may hold spaces and quotes, but the hints put
