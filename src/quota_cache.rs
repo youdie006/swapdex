@@ -114,11 +114,22 @@ pub fn load(paths: &Paths) -> Cache {
 pub fn resets_for(paths: &Paths, tool: &str) -> Vec<Option<i64>> {
     load_file_at(&file_for(paths, tool), now_secs(), false)
         .values()
-        .map(|e| match (e.five_h_reset, e.seven_d_reset) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        })
+        .map(soonest_reset)
         .collect()
+}
+
+/// The same, for one account.
+pub fn reset_for(paths: &Paths, tool: &str, name: &str) -> Option<i64> {
+    load_file_at(&file_for(paths, tool), now_secs(), false)
+        .get(name)
+        .and_then(soonest_reset)
+}
+
+fn soonest_reset(e: &Entry) -> Option<i64> {
+    match (e.five_h_reset, e.seven_d_reset) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// The same, for one tool.

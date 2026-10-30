@@ -30,6 +30,16 @@ All notable changes to swapdex are documented here. This project follows
   matched by account name: of three Codex accounts, the turn could go to
   one with 2% of its Codex week left because the Claude account of that
   name was nearly unused. The order now comes from Codex's own readings.
+- **With `auto` off, `hold_seconds` waits only for the spent account's own
+  reset.** When an account hit its limit and `hold_seconds` was set, the
+  proxy held the turn until the earliest reset of any account, then retried
+  it on the same spent account - with `auto` off (or `--account` set) the
+  turn cannot move anywhere else. On one machine a turn was held 18 minutes
+  for another account's 7-day reset and then got the same 429. The hold
+  now waits for the account's own reset, and only if that falls within
+  `hold_seconds`; the log says the turn cannot move, rather than "every
+  account is spent". With `auto` on it still waits for the earliest reset
+  of any account, which frees somewhere to move to.
 
 ## 0.167.31
 

@@ -7529,7 +7529,61 @@ fn a_spent_fleet_is_still_held_until_the_reset() {
     child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
     child.wait().ok();
 
-    assert!(log.contains("every account is spent; holding"), "{log}");
+    // Rotation is off, so the hold is for solo's own window.
+    assert!(
+        log.contains("solo /v1/messages -> spent, and this turn cannot move")
+            && log.contains("for its window to reset"),
+        "{log}"
+    );
+}
+
+/// With rotation off, the retry after a hold goes back to the same account, so
+/// only that account's reset can end the wall. The hold waited for the earliest
+/// reset of ANY account: on a real machine it held a turn 18 minutes for
+/// another account's 7d reset, sent it back to the spent one, and returned the
+/// same 429.
+#[test]
+fn without_auto_a_hold_waits_only_for_the_spent_accounts_own_reset() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "solo", "aaaa1111", "AT-SOLO", true);
+    seed_slot(root.path(), "spare", "bbbb2222", "AT-SPARE", false);
+    let store = root.path().join(".local/share/swapdex");
+    std::fs::write(store.join("settings.json"), r#"{"hold_seconds": 3600}"#).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // solo is out for two hours, past the hour a hold may last; spare's window
+    // turns over in a moment, which does nothing for a turn that cannot move.
+    std::fs::write(
+        store.join("quota-cache.json"),
+        format!(
+            r#"{{"solo": {{"five_h": 99.0, "five_h_reset": {}, "at": {now}}},
+                "spare": {{"five_h": 99.0, "five_h_reset": {}, "at": {now}}}}}"#,
+            now + 7200,
+            now + 3
+        ),
+    )
+    .unwrap();
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spent_then_ok_upstream("Bearer AT-SOLO", sink.clone());
+
+    let (mut child, port) = start_proxy(root.path(), &upstream, &[]);
+    let _ = post_through(port, "{\"turn\":1}");
+    child.kill().ok();
+    let mut log = String::new();
+    child.stdout.as_mut().unwrap().read_to_string(&mut log).ok();
+    child.wait().ok();
+
+    assert!(
+        !log.contains("holding"),
+        "held for a reset that cannot free this turn:\n{log}"
+    );
+    assert_eq!(
+        auths(&sink),
+        ["Bearer AT-SOLO"],
+        "rotation is off, so the turn stays on solo"
+    );
 }
 
 /// The proxy refuses a bound slot whose authority no longer resolves, so

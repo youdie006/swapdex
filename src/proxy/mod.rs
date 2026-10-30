@@ -2826,8 +2826,8 @@ fn forward_turn(
                     // either one waited minutes on a reset that had nothing to do
                     // with the refusal.
                     let wall = ratelimit::is_wall(&up.headers);
-                    let can_rotate = live(paths, opts).0
-                        && opts.account.is_none()
+                    let rotating = live(paths, opts).0 && opts.account.is_none();
+                    let can_rotate = rotating
                         && next_account(paths, sh, std::slice::from_ref(&slot.name)).is_some();
                     let cap = if wall && !can_rotate {
                         crate::settings::load(paths).hold_seconds.unwrap_or(0)
@@ -2837,16 +2837,31 @@ fn forward_turn(
                     // Reset times specifically, not readings: `load` drops an
                     // account pinned at 100%, which is exactly the account a
                     // hold is about, so the data vanished when it was needed.
-                    let resets = crate::quota_cache::resets_for(paths, &opts.tool);
+                    //
+                    // Without rotation the retry comes back to this account, so
+                    // only its own reset can end the wall. Waiting on the
+                    // earliest of every account's held a turn 18 minutes for
+                    // another account's reset, then returned the same 429.
+                    let resets = if rotating {
+                        crate::quota_cache::resets_for(paths, &opts.tool)
+                    } else {
+                        vec![crate::quota_cache::reset_for(paths, &opts.tool, &slot.name)]
+                    };
                     match pick::hold_for(&resets, now_secs(), cap) {
                         Some(wait) => {
-                            println!(
-                                "[{}] {} {path} -> every account is spent; holding {}s for the \
-                                 earliest window to reset",
-                                stamp(),
-                                slot.name,
-                                wait.as_secs()
-                            );
+                            let secs = wait.as_secs();
+                            let what = if rotating {
+                                format!(
+                                    "every account is spent; holding {secs}s for the \
+                                     earliest window to reset"
+                                )
+                            } else {
+                                format!(
+                                    "spent, and this turn cannot move to another account; \
+                                     holding {secs}s for its window to reset"
+                                )
+                            };
+                            println!("[{}] {} {path} -> {what}", stamp(), slot.name);
                             std::io::stdout().flush().ok();
                             drop(up);
                             std::thread::sleep(wait);
