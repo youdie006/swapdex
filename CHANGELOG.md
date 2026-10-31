@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.32
 
 - **A name whose last tool was removed can be used again.** `rm <name>
   --tool <tool>` on an account's only tool left its folder behind, empty:
