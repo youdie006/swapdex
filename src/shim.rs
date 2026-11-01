@@ -562,7 +562,7 @@ pub fn shadowed_in_profile(
                 .into_iter()
                 .filter(|d| d != shim_dir)
                 .map(|d| d.join(bin))
-                .find(|candidate| candidate.is_file())
+                .find(|candidate| is_executable_file(candidate))
                 .map(|found| (i + 1, l.to_string(), found))
         })
 }
@@ -584,20 +584,44 @@ fn prepended_dirs(line: &str, home: Option<&Path>) -> Vec<PathBuf> {
     {
         return Vec::new();
     }
-    let rest = &l[at + "PATH=".len()..];
-    let (value, quoted) = match rest.chars().next() {
-        Some(q @ ('"' | '\'')) => (rest[1..].split(q).next().unwrap_or(""), true),
-        _ => (rest.split_whitespace().next().unwrap_or(""), false),
-    };
-    let parts: Vec<&str> = value.split(':').collect();
+    // The whole shell word: quoted and unquoted runs join into one value, as
+    // in `PATH="$HOME/.local/bin":$PATH`. Each character keeps the quote it
+    // sat in: a quoted `~` is not expanded, nor anything in single quotes.
+    let mut value: Vec<(char, Option<char>)> = Vec::new();
+    let mut quote: Option<char> = None;
+    for c in l[at + "PATH=".len()..].chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(q) => value.push((c, Some(q))),
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c.is_whitespace() || c == ';' => break,
+            None => value.push((c, None)),
+        }
+    }
+    let parts: Vec<(String, Option<char>)> = value
+        .split(|(c, _)| *c == ':')
+        .map(|part| {
+            (
+                part.iter().map(|(c, _)| c).collect(),
+                part.first().and_then(|(_, q)| *q),
+            )
+        })
+        .collect();
     // Without `$PATH` the line replaces PATH rather than putting anything in
     // front of it - a different finding, and not this one.
-    let Some(end) = parts.iter().position(|p| *p == "$PATH" || *p == "${PATH}") else {
+    let Some(end) = parts
+        .iter()
+        .position(|(p, q)| *q != Some('\'') && (p == "$PATH" || p == "${PATH}"))
+    else {
         return Vec::new();
     };
     parts[..end]
         .iter()
-        .filter_map(|p| expand_home(p, home, quoted))
+        .filter_map(|(p, q)| match q {
+            Some('\'') => (p.starts_with('/') && !p.contains('$')).then(|| PathBuf::from(p)),
+            Some(_) => expand_home(p, home, true),
+            None => expand_home(p, home, false),
+        })
         .collect()
 }
 
@@ -1074,6 +1098,13 @@ fn make_executable(p: &Path) -> Result<()> {
 mod reach_tests {
     use super::*;
 
+    fn executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     /// The case that sent me chasing a non-existent bug: doctor run over ssh
     /// reported the shim inactive, because `ssh host cmd` starts a shell that
     /// never reads .zshrc. The machine was configured correctly the whole time.
@@ -1117,8 +1148,7 @@ mod reach_tests {
     fn a_later_profile_line_that_puts_the_real_binary_first_is_a_finding() {
         let home = tempfile::tempdir().unwrap();
         let local = home.path().join(".local/bin");
-        std::fs::create_dir_all(&local).unwrap();
-        std::fs::write(local.join("claude"), "").unwrap();
+        executable(&local.join("claude"));
         let shim = home.path().join("Library/Application Support/swapdex/bin");
         let zshrc = format!(
             "# added by swapdex (claude shim)\nexport PATH=\"{}:$PATH\"\n\n\
@@ -1143,8 +1173,10 @@ mod reach_tests {
     fn a_profile_line_that_cannot_reach_ahead_of_the_shim_is_no_finding() {
         let home = tempfile::tempdir().unwrap();
         let local = home.path().join(".local/bin");
-        std::fs::create_dir_all(&local).unwrap();
-        std::fs::write(local.join("claude"), "").unwrap();
+        executable(&local.join("claude"));
+        let not_runnable = home.path().join("plain");
+        std::fs::create_dir_all(&not_runnable).unwrap();
+        std::fs::write(not_runnable.join("claude"), "").unwrap();
         let shim = home.path().join("swapdex/bin");
         let adds = format!("export PATH=\"{}:$PATH\"\n", shim.display());
         for (case, profile) in [
@@ -1172,6 +1204,14 @@ mod reach_tests {
                 "a directory without claude",
                 format!("{adds}export PATH=\"$HOME/other:$PATH\"\n"),
             ),
+            (
+                "a claude that is not executable, which PATH lookup skips",
+                format!("{adds}export PATH=\"$HOME/plain:$PATH\"\n"),
+            ),
+            (
+                "$HOME in single quotes, which the shell keeps literal",
+                format!("{adds}export PATH='$HOME/.local/bin':$PATH\n"),
+            ),
         ] {
             assert_eq!(
                 shim_reach_in(false, Some(&profile), &shim, Some(home.path()), "claude"),
@@ -1179,14 +1219,29 @@ mod reach_tests {
                 "{case}"
             );
         }
-        let unquoted = format!("{adds}export PATH=~/.local/bin:$PATH\n");
-        assert!(
-            matches!(
-                shim_reach_in(false, Some(&unquoted), &shim, Some(home.path()), "claude"),
-                ShimReach::Shadowed { .. }
+        for (case, line) in [
+            (
+                "an unquoted tilde is expanded",
+                "export PATH=~/.local/bin:$PATH",
             ),
-            "an unquoted tilde is expanded"
-        );
+            (
+                "a value quoted only in part is read whole",
+                "export PATH=\"$HOME/.local/bin\":$PATH",
+            ),
+            (
+                "single quotes",
+                "PATH='/nowhere':\"$HOME/.local/bin\":$PATH",
+            ),
+        ] {
+            let profile = format!("{adds}{line}\n");
+            assert!(
+                matches!(
+                    shim_reach_in(false, Some(&profile), &shim, Some(home.path()), "claude"),
+                    ShimReach::Shadowed { .. }
+                ),
+                "{case}"
+            );
+        }
     }
 
     #[test]
