@@ -45,6 +45,9 @@ pub struct LiveLogin {
     pub(crate) claude_credential_fingerprint: Option<String>,
     /// Its source is also the selected slot's durable renewal authority.
     pub(crate) claude_renewal_authority: bool,
+    /// Where this Claude sign-in stands against its fixed end, read from the
+    /// same blob as the bearer.
+    pub claude_login_end: Option<crate::refresh::LoginEnd>,
 }
 
 fn regular_file(path: &Path) -> Option<Vec<u8>> {
@@ -148,6 +151,7 @@ fn login_from_credential(
                     crate::refresh::claude_credential_fingerprint_from_blob(credential),
                 ),
                 claude_renewal_authority: false,
+                claude_login_end: crate::refresh::login_end(credential, now_ms),
             })
         }
         "codex" => {
@@ -180,6 +184,7 @@ fn login_from_credential(
                 refresh_rejected_at_ms,
                 claude_credential_fingerprint: None,
                 claude_renewal_authority: false,
+                claude_login_end: None,
             })
         }
         _ => None,

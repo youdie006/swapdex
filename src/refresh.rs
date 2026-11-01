@@ -2056,9 +2056,18 @@ pub fn login_end(blob: &[u8], now_ms: i64) -> Option<LoginEnd> {
     }
 }
 
-/// `login_end` for a Claude slot, read from the credential its renewals and
-/// the proxy use - for a slot bound to a native login, that login.
+/// `login_end` for a Claude slot, read from the login that serves it: a
+/// verified native login when one resolves, as the proxy's bearer does, and
+/// otherwise the slot's credential authority.
 pub(crate) fn claude_login_end(paths: &Paths, dir: &Path, now_ms: i64) -> Option<LoginEnd> {
+    if let Some(live) = crate::live_login::resolve(paths, dir, "claude-code", now_ms) {
+        return live.claude_login_end;
+    }
+    claude_slot_login_end(paths, dir, now_ms)
+}
+
+/// `login_end` from the slot's credential authority alone.
+pub(crate) fn claude_slot_login_end(paths: &Paths, dir: &Path, now_ms: i64) -> Option<LoginEnd> {
     let authority = crate::claude_authority::resolve(paths, dir).ok()?;
     let credential = authority.read(paths).ok()?;
     login_end(credential.bytes(), now_ms)

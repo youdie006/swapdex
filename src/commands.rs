@@ -2315,10 +2315,6 @@ fn account_health(
         // A registered live slot supersedes its historical snapshot's status.
         // In particular an unreadable Mac Keychain is not an expired snapshot.
         warnings.retain(|warning| !warning.starts_with(&format!("{tool} ")));
-        // A sign-in's fixed end: the one deadline nothing but a sign-in moves.
-        let login_end = (tool == "claude-code")
-            .then(|| crate::refresh::claude_login_end(paths, &slot.config_dir, now_ms))
-            .flatten();
         let login_end_note = |end: &crate::refresh::LoginEnd| {
             format!(
                 "{tool} {}",
@@ -2330,11 +2326,17 @@ fn account_health(
             if let Some(rejected_at) = login.refresh_rejected_at_ms {
                 warnings.push(format!("{tool} refresh rejected - re-login required"));
                 refresh_rejected_at_ms.insert(tool.clone(), rejected_at);
-            } else if let Some(end) = &login_end {
+            } else if let Some(end) = &login.claude_login_end {
+                // The native login serves this slot, so its end is the one
+                // that matters - not the slot's own copy.
                 warnings.push(login_end_note(end));
             }
             continue;
         }
+        // A sign-in's fixed end: the one deadline nothing but a sign-in moves.
+        let login_end = (tool == "claude-code")
+            .then(|| crate::refresh::claude_slot_login_end(paths, &slot.config_dir, now_ms))
+            .flatten();
         match tool.as_str() {
             "codex" => {
                 if let Some(rejected_at) = crate::refresh_health::codex_rejection(&slot.config_dir)

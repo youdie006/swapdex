@@ -1821,6 +1821,128 @@ printf '%s\n' '{}' '400'
     upstream.close();
 }
 
+/// A slot served by a verified native login is that login, for its deadline as
+/// for its bearer. `ls` read the end from the slot's own stale copy: it said
+/// "login ended" while the native sign-in serving every turn had weeks left,
+/// and would have missed that sign-in's own end.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_slot_served_by_its_native_login_is_given_that_logins_end() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "selected", "selected-slot", "OLD-ACCESS", true);
+    let slot = root.path().join(".local/share/swapdex/slots/selected-slot");
+    let native = root.path().join(".claude");
+    std::fs::create_dir_all(&native).unwrap();
+    // An account no other test here uses, since native logins are matched by
+    // identity across every running process.
+    let identity =
+        br#"{"oauthAccount":{"accountUuid":"login-end-user","organizationUuid":"login-end-org"}}"#;
+    std::fs::write(slot.join(".claude.json"), identity).unwrap();
+    std::fs::write(root.path().join(".claude.json"), identity).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000i64;
+    let credential = |access: &str, expires: i64, end: i64| {
+        serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+            "accessToken": access, "refreshToken": "R", "expiresAt": expires,
+            "refreshTokenExpiresAt": end}}))
+        .unwrap()
+    };
+    // The slot's copy is past its end; the native login is the one in use.
+    std::fs::write(
+        slot.join(".credentials.json"),
+        credential("OLD-ACCESS", 1, now_ms - 3_600_000),
+    )
+    .unwrap();
+    let native_ending = |end: i64| {
+        std::fs::write(
+            native.join(".credentials.json"),
+            credential("NATIVE-ACCESS", now_ms + 6 * 3_600_000, end),
+        )
+        .unwrap();
+    };
+
+    let fake_cli = root.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sh", &fake_cli).unwrap();
+    let cli = Command::new(&fake_cli)
+        .args(["-c", "read _"])
+        .stdin(std::process::Stdio::piped())
+        .env("HOME", root.path())
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .spawn()
+        .unwrap();
+    let pid = cli.id();
+    let _cli = ReapedChild::new(cli);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        != "claude"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake native process did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let row = || -> serde_json::Value {
+        let list = Command::new(bin())
+            .args(["ls", "--json"])
+            .env("SWAPDEX_ROOT", root.path())
+            .output()
+            .unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "selected")
+            .unwrap()
+            .clone()
+    };
+
+    native_ending(now_ms + 20 * day);
+    let healthy = row();
+    assert_eq!(
+        healthy["renewal_owner"]["claude-code"], "native",
+        "{healthy}"
+    );
+    assert!(
+        !healthy["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("login end"),
+        "the stale copy's end was reported for a native login with weeks left: {healthy}"
+    );
+    let doctor = Command::new(bin())
+        .args(["doctor"])
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        !said
+            .lines()
+            .any(|l| l.starts_with("slot:selected") && l.contains("login end")),
+        "doctor reports the stale copy's end:\n{said}"
+    );
+
+    native_ending(now_ms + 2 * day);
+    let ending = row();
+    assert!(
+        ending["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("login ends"),
+        "the native login's own end is not named: {ending}"
+    );
+}
+
 /// Exhausting the managed accounts must surface failure without silently billing
 /// the unrelated login the client supplied.
 #[test]
