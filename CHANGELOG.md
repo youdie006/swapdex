@@ -27,6 +27,17 @@ All notable changes to swapdex are documented here. This project follows
   "'<name>' has been idle too long to renew", but an account in use all day
   reaches its end too. It now says the sign-in reached its end, which
   renewing cannot move.
+- **A shell profile line that puts the real `claude` back ahead of the shim
+  is found and fixed.** On one Mac the profile added swapdex's shim, and a
+  line another installer added later put `~/.local/bin` - where the real
+  `claude` lives - in front of it again. Every new terminal then ran the
+  real binary on a login swapdex was no longer renewing, so every session
+  said "Login expired" right after a sign-in that had gone to swapdex's
+  slot. `doctor`, run over ssh, called the shim "set up ... open a new
+  terminal", and `swapdex shim` found its line present and changed nothing.
+  `doctor` now names the line ("line 162 comes after it and puts
+  ~/.local/bin/claude first"), and `swapdex shim` adds its line again at the
+  end of the profile, once.
 
 ## 0.167.32
 

@@ -5046,15 +5046,19 @@ fn shim_engagement(paths: &Paths, tool: &str) -> (bool, String) {
     let shadowed = !active
         && std::env::var_os("PATH")
             .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir == shim_dir_path));
-    let reach = if shadowed {
-        crate::shim::ShimReach::Missing
-    } else {
-        crate::shim::shim_reach_for(
-            paths,
-            active,
-            profile.as_ref().map(|(_, t)| t.as_str()),
-            &shim_dir_path,
-        )
+    let reach = crate::shim::shim_reach_in(
+        active,
+        profile.as_ref().map(|(_, t)| t.as_str()),
+        &shim_dir_path,
+        Some(paths.home()),
+        bin,
+    );
+    // Shadowed in this shell: say which profile line does it when one does,
+    // since that is the line a new terminal would repeat.
+    let reach = match reach {
+        crate::shim::ShimReach::Shadowed { .. } => reach,
+        _ if shadowed => crate::shim::ShimReach::Missing,
+        _ => reach,
     };
     match reach {
         crate::shim::ShimReach::Active => (
@@ -5078,6 +5082,25 @@ fn shim_engagement(paths: &Paths, tool: &str) -> (bool, String) {
                      open a new terminal (or `source {p}`); a shell that does \
                      not read that file, like a script or `ssh host cmd`, \
                      never will"
+                ),
+            )
+        }
+        // The profile is right up to a later line that undoes it. A new
+        // terminal repeats that order, so "open a new terminal" sends people
+        // nowhere, and `export PATH=...` in this shell fixes only this shell.
+        crate::shim::ShimReach::Shadowed { line, text, found } => {
+            let p = profile
+                .as_ref()
+                .map(|(p, _)| crate::util::redact_path(&p.display().to_string()))
+                .unwrap_or_else(|| "your shell profile".to_string());
+            (
+                false,
+                format!(
+                    "{bin} shim set up in {p}, but line {line} comes after it and puts {} \
+                     first (`{}`), so a new terminal runs that {bin}, not the shim - \
+                     `swapdex shim` adds swapdex's line again at the end of {p}",
+                    crate::util::redact_path(&found.display().to_string()),
+                    crate::util::redact_path(text.trim())
                 ),
             )
         }
@@ -6628,6 +6651,18 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
                     .map(|binary| format!("`{binary}`"))
                     .collect::<Vec<_>>()
                     .join(" or ")
+            );
+        }
+        crate::shim::PathSetup::AddedAgain(profile) => {
+            println!(
+                "  a later line in {p} put another {} ahead of the shim, so swapdex's line \
+                 was added again at the end of {p} - open a new terminal",
+                installed
+                    .iter()
+                    .map(|binary| format!("`{binary}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or "),
+                p = crate::util::redact_path(&profile.display().to_string()),
             );
         }
         crate::shim::PathSetup::Manual => {

@@ -1218,6 +1218,82 @@ fn shim_puts_itself_on_path_via_the_shell_profile() {
     );
 }
 
+/// The profile added the shim, then a later installer line put `~/.local/bin`,
+/// where the real `claude` lives, back in front of it. On one Mac every new
+/// terminal ran the real binary on a login swapdex no longer renewed, so every
+/// session said "Login expired"; `doctor` over ssh called the shim set up, and
+/// `swapdex shim` found its line present and changed nothing. Doctor now names
+/// the line, and `swapdex shim` adds its own again at the end - once.
+#[test]
+fn shim_moves_back_ahead_of_a_later_profile_line_that_shadows_it() {
+    let root = tempfile::tempdir().unwrap();
+    let local = root.path().join(".local/bin");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("claude"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(local.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim_dir = root.path().join(".local/share/swapdex/bin");
+    std::fs::write(
+        root.path().join(".zshrc"),
+        format!(
+            "# added by swapdex (claude shim)\nexport PATH=\"{}:$PATH\"\n\n\
+             # Added by another installer\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+            shim_dir.display()
+        ),
+    )
+    .unwrap();
+    // A shell that never read the profile, as over ssh: no shim on PATH.
+    let swapdex = |args: &[&str]| {
+        let out = Command::new(bin())
+            .args(args)
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", local.display()))
+            .env("HOME", root.path())
+            .env("SHELL", "/bin/zsh")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+
+    swapdex(&["shim"]);
+    let zshrc = std::fs::read_to_string(root.path().join(".zshrc")).unwrap();
+    let last_path_line = zshrc.lines().rev().find(|l| l.contains("PATH=")).unwrap();
+    assert!(
+        last_path_line.contains(&shim_dir.display().to_string()),
+        "the shim's line is not last again:\n{zshrc}"
+    );
+    swapdex(&["shim"]);
+    let again = std::fs::read_to_string(root.path().join(".zshrc")).unwrap();
+    assert_eq!(again, zshrc, "a second run changed the profile again");
+
+    std::fs::write(
+        root.path().join(".zshrc"),
+        format!(
+            "export PATH=\"{}:$PATH\"\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+            shim_dir.display()
+        ),
+    )
+    .unwrap();
+    // Doctor checks the shim once there is an account for it to serve.
+    let store = root.path().join(".local/share/swapdex");
+    let slot = store.join("slots/aaaa1111");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        store.join("slots.json"),
+        serde_json::to_vec(&serde_json::json!([{
+            "name": "work", "id": "aaaa1111", "config_dir": slot,
+            "adopted": false, "tool": "claude-code"
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    let said = swapdex(&["doctor"]);
+    let shim = said
+        .lines()
+        .find(|l| l.starts_with("shim ") && l.contains("line 2"))
+        .unwrap_or_else(|| panic!("doctor does not name the shadowing line:\n{said}"));
+    assert!(shim.contains("problem"), "{shim}");
+}
+
 /// PATH entries may be relative to the shell that installs the shim. The shim
 /// runs later from arbitrary project directories, so the persisted client path
 /// must be anchored at installation time while leaving a stable symlink intact.

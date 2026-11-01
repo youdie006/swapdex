@@ -505,6 +505,13 @@ pub enum ShimReach {
     ConfiguredElsewhere,
     /// Nothing puts it on PATH. This one is a real finding.
     Missing,
+    /// The profile adds it, and a later line of the same profile puts another
+    /// directory holding the binary in front of it.
+    Shadowed {
+        line: usize,
+        text: String,
+        found: PathBuf,
+    },
 }
 
 /// Decide between those three from facts the caller has already gathered.
@@ -513,14 +520,102 @@ pub fn shim_reach(active: bool, profile_text: Option<&str>, shim_dir: &Path) -> 
     shim_reach_at_home(active, profile_text, shim_dir, dirs::home_dir().as_deref())
 }
 
-/// The same decision using the home supplied by the caller's resolved Paths.
-pub fn shim_reach_for(
-    paths: &Paths,
+/// The same decision for one binary, which is what a later profile line can
+/// put back in front of the shim.
+pub fn shim_reach_in(
     active: bool,
     profile_text: Option<&str>,
     shim_dir: &Path,
+    home: Option<&Path>,
+    bin: &str,
 ) -> ShimReach {
-    shim_reach_at_home(active, profile_text, shim_dir, Some(paths.home()))
+    let reach = shim_reach_at_home(active, profile_text, shim_dir, home);
+    if reach != ShimReach::ConfiguredElsewhere {
+        return reach;
+    }
+    match profile_text.and_then(|t| shadowed_in_profile(t, shim_dir, home, bin)) {
+        Some((line, text, found)) => ShimReach::Shadowed { line, text, found },
+        None => reach,
+    }
+}
+
+/// The first line after the profile's last shim line that puts a directory
+/// holding `bin` ahead of everything before it: its 1-based number, its text,
+/// and the binary a new shell would run. Only `PATH=` assignments that keep
+/// `$PATH` are read; a directory that holds no `bin` cannot shadow the shim.
+pub fn shadowed_in_profile(
+    profile_text: &str,
+    shim_dir: &Path,
+    home: Option<&Path>,
+    bin: &str,
+) -> Option<(usize, String, PathBuf)> {
+    let lines: Vec<&str> = profile_text.lines().collect();
+    let last_shim = lines
+        .iter()
+        .rposition(|l| line_adds_dir(l, shim_dir, home))?;
+    lines
+        .iter()
+        .enumerate()
+        .skip(last_shim + 1)
+        .find_map(|(i, l)| {
+            prepended_dirs(l, home)
+                .into_iter()
+                .filter(|d| d != shim_dir)
+                .map(|d| d.join(bin))
+                .find(|candidate| candidate.is_file())
+                .map(|found| (i + 1, l.to_string(), found))
+        })
+}
+
+/// The directories a `PATH=` line puts in front of the existing `$PATH`.
+fn prepended_dirs(line: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    let l = line.trim();
+    if l.starts_with('#') {
+        return Vec::new();
+    }
+    let Some(at) = l.find("PATH=") else {
+        return Vec::new();
+    };
+    // `MANPATH=` and the like are other variables.
+    if l[..at]
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Vec::new();
+    }
+    let rest = &l[at + "PATH=".len()..];
+    let (value, quoted) = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => (rest[1..].split(q).next().unwrap_or(""), true),
+        _ => (rest.split_whitespace().next().unwrap_or(""), false),
+    };
+    let parts: Vec<&str> = value.split(':').collect();
+    // Without `$PATH` the line replaces PATH rather than putting anything in
+    // front of it - a different finding, and not this one.
+    let Some(end) = parts.iter().position(|p| *p == "$PATH" || *p == "${PATH}") else {
+        return Vec::new();
+    };
+    parts[..end]
+        .iter()
+        .filter_map(|p| expand_home(p, home, quoted))
+        .collect()
+}
+
+/// `$HOME`, `${HOME}`, and - unquoted only, as the shell does - `~`.
+fn expand_home(part: &str, home: Option<&Path>, quoted: bool) -> Option<PathBuf> {
+    let home = || home.map(Path::to_path_buf);
+    for var in ["$HOME", "${HOME}"] {
+        if let Some(rest) = part.strip_prefix(var) {
+            return Some(home()?.join(rest.trim_start_matches('/')));
+        }
+    }
+    if let Some(rest) = part.strip_prefix('~') {
+        if quoted || !(rest.is_empty() || rest.starts_with('/')) {
+            return None;
+        }
+        return Some(home()?.join(rest.trim_start_matches('/')));
+    }
+    (part.starts_with('/') && !part.contains('$')).then(|| PathBuf::from(part))
 }
 
 fn shim_reach_at_home(
@@ -558,21 +653,29 @@ pub fn shell_profile_text_for(paths: &Paths) -> Option<(PathBuf, String)> {
 }
 
 fn profile_already_adds_at_home(profile_text: &str, shim_dir: &Path, home: Option<&Path>) -> bool {
+    profile_text
+        .lines()
+        .any(|l| line_adds_dir(l, shim_dir, home))
+}
+
+/// Whether one profile line adds `shim_dir` to PATH.
+fn line_adds_dir(line: &str, shim_dir: &Path, home: Option<&Path>) -> bool {
     let full = shim_dir.to_string_lossy().to_string();
     let home = home.map(|h| h.to_string_lossy().to_string());
-    // The same dir with the home prefix written the other two ways.
     let alts: Vec<String> = home
         .iter()
         .filter_map(|h| full.strip_prefix(h.as_str()))
         .flat_map(|rest| [format!("$HOME{rest}"), format!("~{rest}")])
         .collect();
-    profile_text.lines().any(|l| {
-        let l = l.trim();
-        if !l.contains("PATH") || l.starts_with('#') {
-            return false;
-        }
-        l.contains(&full) || alts.iter().any(|a| l.contains(a))
-    })
+    line_adds(line, &full, &alts)
+}
+
+fn line_adds(line: &str, full: &str, alts: &[String]) -> bool {
+    let l = line.trim();
+    if !l.contains("PATH") || l.starts_with('#') {
+        return false;
+    }
+    l.contains(full) || alts.iter().any(|a| l.contains(a.as_str()))
 }
 
 /// The line a shell profile needs so the shim is found first.
@@ -619,6 +722,9 @@ pub enum PathSetup {
     AlreadyThere,
     /// The line was appended to this profile; a new shell will pick it up.
     Added(PathBuf),
+    /// The profile had the line, but a later one put a real binary ahead of
+    /// it; the line was appended again so it comes last.
+    AddedAgain(PathBuf),
     /// We will not guess for this shell - the caller prints the line to add.
     Manual,
 }
@@ -655,10 +761,33 @@ pub fn ensure_on_path(shim_dir: &Path) -> Result<PathSetup> {
 /// Put the shim on PATH using the home selected by `paths`, including a rooted
 /// library call that has no matching process-wide HOME or SWAPDEX_ROOT.
 pub fn ensure_on_path_for(paths: &Paths, shim_dir: &Path) -> Result<PathSetup> {
+    let profile = shell_profile_at(paths.home());
+    // A later profile line that puts a real binary back in front undoes the
+    // shim in every new shell, whatever this one's PATH says. Adding the line
+    // again at the end puts it last, so a second run finds nothing to do.
+    if let Some(profile) = &profile {
+        if profile.exists() {
+            let existing = read_profile_for_edit(profile)?;
+            let shadowed = ["claude", "codex"].iter().any(|bin| {
+                shim_dir.join(bin).exists()
+                    && shadowed_in_profile(&existing, shim_dir, Some(paths.home()), bin).is_some()
+            });
+            if shadowed {
+                let mut out = existing;
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&format!("\n{PROFILE_MARKER}\n{}\n", path_line(shim_dir)));
+                std::fs::write(profile, out)
+                    .with_context(|| format!("edit {}", profile.display()))?;
+                return Ok(PathSetup::AddedAgain(profile.clone()));
+            }
+        }
+    }
     if already_on_path(shim_dir) {
         return Ok(PathSetup::AlreadyThere);
     }
-    let Some(profile) = shell_profile_at(paths.home()) else {
+    let Some(profile) = profile else {
         return Ok(PathSetup::Manual);
     };
     let existing = read_profile_for_edit(&profile)?;
@@ -977,6 +1106,87 @@ mod reach_tests {
         let mine = Path::new("/tmp/store-a/bin");
         let theirs = "# added by swapdex\nexport PATH=\"/tmp/store-b/bin:$PATH\"\n";
         assert_eq!(shim_reach(false, Some(theirs), mine), ShimReach::Missing);
+    }
+
+    /// On one Mac the profile added the shim, and a later installer line put
+    /// `~/.local/bin` - where the real `claude` lives - back in front of it.
+    /// Every new terminal ran the real binary on a login swapdex no longer
+    /// renewed, so every session said "Login expired", while doctor, run over
+    /// ssh, said the shim was set up and only needed a new terminal.
+    #[test]
+    fn a_later_profile_line_that_puts_the_real_binary_first_is_a_finding() {
+        let home = tempfile::tempdir().unwrap();
+        let local = home.path().join(".local/bin");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("claude"), "").unwrap();
+        let shim = home.path().join("Library/Application Support/swapdex/bin");
+        let zshrc = format!(
+            "# added by swapdex (claude shim)\nexport PATH=\"{}:$PATH\"\n\n\
+             # Added by Antigravity CLI installer\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+            shim.display()
+        );
+        match shim_reach_in(false, Some(&zshrc), &shim, Some(home.path()), "claude") {
+            ShimReach::Shadowed { line, found, .. } => {
+                assert_eq!(line, 5);
+                assert_eq!(found, local.join("claude"));
+            }
+            other => panic!("a shadowed shim was called {other:?}"),
+        }
+        assert_eq!(
+            shim_reach_in(false, Some(&zshrc), &shim, Some(home.path()), "codex"),
+            ShimReach::ConfiguredElsewhere,
+            "that directory holds no codex"
+        );
+    }
+
+    #[test]
+    fn a_profile_line_that_cannot_reach_ahead_of_the_shim_is_no_finding() {
+        let home = tempfile::tempdir().unwrap();
+        let local = home.path().join(".local/bin");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("claude"), "").unwrap();
+        let shim = home.path().join("swapdex/bin");
+        let adds = format!("export PATH=\"{}:$PATH\"\n", shim.display());
+        for (case, profile) in [
+            (
+                "before the shim's line",
+                format!("export PATH=\"$HOME/.local/bin:$PATH\"\n{adds}"),
+            ),
+            (
+                "appended after PATH",
+                format!("{adds}export PATH=\"$PATH:$HOME/.local/bin\"\n"),
+            ),
+            (
+                "commented out",
+                format!("{adds}# export PATH=\"$HOME/.local/bin:$PATH\"\n"),
+            ),
+            (
+                "another variable",
+                format!("{adds}export MANPATH=\"$HOME/.local/bin:$MANPATH\"\n"),
+            ),
+            (
+                "a quoted tilde, which the shell keeps literal",
+                format!("{adds}export PATH=\"~/.local/bin:$PATH\"\n"),
+            ),
+            (
+                "a directory without claude",
+                format!("{adds}export PATH=\"$HOME/other:$PATH\"\n"),
+            ),
+        ] {
+            assert_eq!(
+                shim_reach_in(false, Some(&profile), &shim, Some(home.path()), "claude"),
+                ShimReach::ConfiguredElsewhere,
+                "{case}"
+            );
+        }
+        let unquoted = format!("{adds}export PATH=~/.local/bin:$PATH\n");
+        assert!(
+            matches!(
+                shim_reach_in(false, Some(&unquoted), &shim, Some(home.path()), "claude"),
+                ShimReach::Shadowed { .. }
+            ),
+            "an unquoted tilde is expanded"
+        );
     }
 
     #[test]
