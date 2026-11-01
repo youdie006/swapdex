@@ -100,13 +100,13 @@ impl RefreshError {
                 "'{name}' {tool} renewal deferred - refresh unverified while a {tool} session \
                  is using this account; retry after the session exits"
             ),
-            // Claude's credential states when its refresh token lapses, so an
-            // expired one really did sit idle. Codex's says nothing of the kind:
-            // there this is the login server refusing the token, and an account
-            // in use all day was told it had been idle.
+            // Claude's credential states when its sign-in ends, and that end is
+            // fixed: an account in use all day reaches it too, so this is not
+            // idleness. Codex's states nothing of the kind: there this is the
+            // login server refusing the token.
             Self::Expired if flag.is_empty() => format!(
-                "'{name}' has been idle too long to renew - \
-                 `swapdex run {arg}{flag}` signs it in again"
+                "'{name}' reached the end of its sign-in, which renewing cannot move - \
+                 /login in a `swapdex run {arg}{flag}` session signs it in again"
             ),
             Self::Expired => format!(
                 "the login server refused to renew '{name}' - \
@@ -1519,7 +1519,7 @@ mod claude_credential_source_tests {
     }
 
     #[test]
-    fn keep_alive_uses_the_selected_keychain_expiry() {
+    fn the_login_end_is_read_from_the_selected_keychain_credential() {
         let now: i64 = 1_800_000_000_000;
         let day: i64 = 24 * 60 * 60 * 1000;
         let with_refresh_end = |refresh: &str, refresh_end: i64| {
@@ -1533,15 +1533,19 @@ mod claude_credential_source_tests {
             }))
             .unwrap()
         };
-        // The file's refresh token is far from its end; the selected Keychain
-        // one is a day from it, and only reading the Keychain says so.
+        // The file's sign-in is far from its end; the selected Keychain one is
+        // a day from it, and only reading the Keychain says so.
         let selected = choose_slot_credential(
             Some(with_refresh_end("OLD-RT", now + 20 * day)),
             Ok(with_refresh_end("NEW-RT", now + day)),
         )
         .expect("Keychain credential");
         assert_eq!(selected.source(), SlotCredentialSource::Keychain);
-        assert!(wants_keep_alive(selected.bytes(), now));
+        assert_eq!(
+            login_end(selected.bytes(), now),
+            Some(LoginEnd::Ends(now + day)),
+            "the file copy would have said nothing"
+        );
     }
 }
 
@@ -1966,7 +1970,10 @@ mod tests {
         assert!(refresh_token_expired(blob.as_bytes(), now));
         let msg = RefreshError::Expired.remedy("work", "claude-code");
         assert!(msg.contains("swapdex run work"), "names the way out: {msg}");
-        assert!(msg.contains("idle too long"), "names why: {msg}");
+        // The end is fixed at sign-in; an account in use all day reaches it
+        // too, so "idle" would send the reader looking for the wrong cause.
+        assert!(!msg.contains("idle"), "does not blame idleness: {msg}");
+        assert!(msg.contains("sign-in"), "names why: {msg}");
         // Unknown is not expired.
         assert!(!refresh_token_expired(br#"{"claudeAiOauth":{}}"#, now));
     }
@@ -2010,19 +2017,69 @@ mod tests {
     }
 }
 
-/// How long before a refresh token's stated end a keep-alive sweep renews it.
+/// How long before a Claude sign-in's end swapdex starts naming it.
 ///
-/// The sweep exists so an idle account keeps a live refresh token: that is
-/// what a sign-in would otherwise be needed for. It used to renew any account
-/// whose ACCESS token was within six hours of lapsing, written when that token
-/// lived an hour. With eight-hour tokens it renewed every account every two
-/// hours - and every renewal rotates the refresh token, so each one was a
-/// chance for a server that processes a renewal but answers 5xx to strand the
-/// new token and retire the old. One account died exactly so, two hours after
-/// its previous renewal. The server states each refresh token's lifetime
-/// (about three weeks); renewing inside its last three days keeps it alive
-/// with a renewal every couple of weeks.
-pub const KEEP_ALIVE_REFRESH_WINDOW_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+/// The server states each refresh token's lifetime, and the end it states is
+/// the sign-in's, not the token's: renewing returns the same moment. On one
+/// machine an account signed in on 10-21 was due to end on 11-17 at 23:27, and
+/// a renewal ten days later came back ending at 23:26. Swapdex used to renew
+/// inside these last three days on the belief that it kept the account alive;
+/// it did not, and while a session held the slot the sweep could only defer,
+/// into a log nobody read, until Claude Code said "Login expired". Only a
+/// sign-in moves the end, so the time left is told to the person who can do one.
+pub const LOGIN_END_NOTICE_MS: i64 = 3 * 24 * 60 * 60 * 1000;
+
+/// A Claude login against the fixed end of its sign-in, in unix ms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginEnd {
+    /// The end is within `LOGIN_END_NOTICE_MS`.
+    Ends(i64),
+    /// The end has passed. The access token in hand may still work for hours,
+    /// but nothing can renew it.
+    Ended(i64),
+}
+
+/// Whether this credential's sign-in ends soon or has ended. A credential that
+/// states no end says nothing either way.
+pub fn login_end(blob: &[u8], now_ms: i64) -> Option<LoginEnd> {
+    let end = serde_json::from_slice::<serde_json::Value>(blob)
+        .ok()?
+        .get("claudeAiOauth")?
+        .get("refreshTokenExpiresAt")?
+        .as_i64()?;
+    if end <= now_ms {
+        Some(LoginEnd::Ended(end))
+    } else if end - now_ms <= LOGIN_END_NOTICE_MS {
+        Some(LoginEnd::Ends(end))
+    } else {
+        None
+    }
+}
+
+/// `login_end` for a Claude slot, read from the credential its renewals and
+/// the proxy use - for a slot bound to a native login, that login.
+pub(crate) fn claude_login_end(paths: &Paths, dir: &Path, now_ms: i64) -> Option<LoginEnd> {
+    let authority = crate::claude_authority::resolve(paths, dir).ok()?;
+    let credential = authority.read(paths).ok()?;
+    login_end(credential.bytes(), now_ms)
+}
+
+/// The login-end warning for account `name`, with the one way out. The `/login`
+/// has to happen in a session of that account; `swapdex run` opens one.
+pub fn login_end_note(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
+    let clock = |at: i64| crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset);
+    let run = format!("`swapdex run {}`", crate::util::shell_word(name));
+    match end {
+        LoginEnd::Ends(at) => format!(
+            "login ends {} - sign in again before then: /login in a {run} session",
+            clock(*at)
+        ),
+        LoginEnd::Ended(at) => format!(
+            "login ended {} - /login in a {run} session signs it in again",
+            clock(*at)
+        ),
+    }
+}
 
 /// When the login server refused this Claude slot's current refresh token, if
 /// it did. Read from the same credential the renewal path would send.
@@ -2086,12 +2143,12 @@ fn access_lapsed(blob: &[u8], now_ms: i64) -> bool {
 /// and then only a browser sign-in brings it back. Three of this machine's
 /// accounts died exactly that way and stayed dead for a week.
 ///
-/// So the sweep renews ahead of the REFRESH token's end, not the access
-/// token's: a lapsed access token is renewed by the next use, which needs no
-/// sweep. Without a stated refresh-token lifetime the sweep waits for the
-/// access token to lapse. Nothing to renew, or a refresh token already gone,
-/// is not this function's problem: renewing needs a refresh token, and a dead
-/// one needs a human.
+/// A lapsed access token is renewed by the next use, which needs no sweep. A
+/// login whose end the server states is not swept at all: renewing does not
+/// move that end, and only a sign-in does. Without a stated end the sweep
+/// renews once the access token has lapsed. Nothing to renew, or a refresh
+/// token already gone, is not this function's problem: renewing needs a
+/// refresh token, and a dead one needs a human.
 pub fn wants_keep_alive(blob: &[u8], now_ms: i64) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob) else {
         return false;
@@ -2103,8 +2160,10 @@ pub fn wants_keep_alive(blob: &[u8], now_ms: i64) -> bool {
     if refresh_token_expired(blob, now_ms) {
         return false;
     }
+    // A stated end is not moved by renewing (see `LOGIN_END_NOTICE_MS`), so
+    // renewing for it would only spend a refresh token.
     match oauth["refreshTokenExpiresAt"].as_i64() {
-        Some(end) => end - now_ms <= KEEP_ALIVE_REFRESH_WINDOW_MS,
+        Some(_) => false,
         None => oauth["expiresAt"].as_i64().is_some_and(|exp| exp <= now_ms),
     }
 }
@@ -2420,14 +2479,14 @@ mod keep_alive_tests {
     }
     const NOW: i64 = 1_700_000_000_000;
 
-    /// Every renewal rotates the refresh token, and a renewal the server
-    /// processes but answers with a 5xx strands the new token: the old one is
-    /// already retired. An account renewed two hours after its last renewal -
-    /// what a six-hour window did to eight-hour tokens - died exactly that way.
-    /// So an idle account is renewed only when its REFRESH token nears its end,
-    /// and an access token about to lapse is left for the next use to renew.
+    /// A Claude sign-in has a fixed end, and renewing does not move it: on one
+    /// machine an account signed in on 10-21 ended on 11-17 at 23:27, and a
+    /// renewal ten days later came back ending at 23:26. Renewing near the end
+    /// only spends a refresh token - and a renewal the server processes but
+    /// answers with a 5xx strands the new one. So a login whose end is stated
+    /// is never swept, however near that end is.
     #[test]
-    fn an_idle_account_is_renewed_only_when_its_refresh_token_nears_its_end() {
+    fn a_login_whose_end_is_stated_is_never_swept() {
         let hour = 60 * 60 * 1000;
         let day = 24 * hour;
         assert!(
@@ -2436,15 +2495,15 @@ mod keep_alive_tests {
         );
         assert!(
             !wants_keep_alive(&blob(-2 * hour, "r", Some(19 * day)), NOW),
-            "even a lapsed access token waits for its next use"
+            "a lapsed access token waits for its next use"
         );
         assert!(
-            wants_keep_alive(&blob(6 * hour, "r", Some(2 * day)), NOW),
-            "a refresh token two days from its end is renewed"
+            !wants_keep_alive(&blob(6 * hour, "r", Some(2 * day)), NOW),
+            "two days from its end: renewing would not move the end"
         );
         assert!(
-            !wants_keep_alive(&blob(6 * hour, "r", Some(4 * day)), NOW),
-            "four days out needs nothing yet"
+            !wants_keep_alive(&blob(-2 * hour, "r", Some(hour)), NOW),
+            "nor an hour from it with its access lapsed"
         );
     }
 
@@ -2470,6 +2529,55 @@ mod keep_alive_tests {
             !wants_keep_alive(&blob(hour, "r", Some(-1)), NOW),
             "the refresh token itself has expired"
         );
+    }
+
+    /// The fixed end is the one deadline a person has to act on, so it is
+    /// named ahead of time, and again once it has passed - before the access
+    /// token still in hand runs out and Claude Code says "Login expired".
+    #[test]
+    fn a_login_is_named_as_ending_within_three_days_and_as_ended_after() {
+        let hour = 60 * 60 * 1000;
+        let day = 24 * hour;
+        assert_eq!(
+            login_end(&blob(6 * hour, "r", Some(2 * day)), NOW),
+            Some(LoginEnd::Ends(NOW + 2 * day))
+        );
+        assert_eq!(
+            login_end(&blob(6 * hour, "r", Some(4 * day)), NOW),
+            None,
+            "four days out is not news yet"
+        );
+        assert_eq!(
+            login_end(&blob(6 * hour, "r", Some(-hour)), NOW),
+            Some(LoginEnd::Ended(NOW - hour)),
+            "ended while its access token still works"
+        );
+        assert_eq!(
+            login_end(&blob(6 * hour, "r", None), NOW),
+            None,
+            "no stated end, nothing to say"
+        );
+        assert_eq!(login_end(b"not json", NOW), None);
+    }
+
+    #[test]
+    fn the_login_end_note_says_when_and_what_to_run() {
+        let hour = 60 * 60 * 1000;
+        let ends = login_end_note(&LoginEnd::Ends(NOW + 30 * hour), "my work", NOW, 0);
+        assert!(ends.starts_with("login ends "), "{ends}");
+        assert!(ends.contains("before then"), "{ends}");
+        assert!(ends.contains("/login"), "{ends}");
+        assert!(
+            ends.contains("swapdex run 'my work'"),
+            "a name a shell would split is quoted: {ends}"
+        );
+        let ended = login_end_note(&LoginEnd::Ended(NOW - hour), "work", NOW, 0);
+        assert!(ended.starts_with("login ended "), "{ended}");
+        assert!(
+            !ended.contains(" now"),
+            "a past end is a time, not 'now': {ended}"
+        );
+        assert!(ended.contains("swapdex run work"), "{ended}");
     }
 
     #[test]

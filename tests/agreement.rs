@@ -3966,6 +3966,78 @@ fn an_idle_claude_account_is_not_called_expired_until_its_refresh_is_refused() {
     );
 }
 
+/// A Claude sign-in ends at a fixed time that renewing does not move, and when
+/// it passes Claude Code says "Login expired" in every session of the account.
+/// On one machine that came with no warning: keep-alive saw the end coming for
+/// days and only wrote "renewal deferred" to the proxy's log. `ls` and `doctor`
+/// name the end from three days out, and name it again once it has passed -
+/// while the access token in hand still works and nothing else looks wrong.
+#[test]
+fn ls_and_doctor_name_a_claude_login_that_ends_soon_or_has_ended() {
+    let t = fixture();
+    let root = t.path();
+    seed_slot(root, "soon", "soon@example.com");
+    let slot = root.join(".local/share/swapdex/slots/soon");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000i64;
+    let login_ending = |end: i64| {
+        std::fs::write(
+            slot.join(".credentials.json"),
+            serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+                "accessToken":"AT","refreshToken":"RT","expiresAt": now_ms + 6 * 3_600_000,
+                "refreshTokenExpiresAt": end, "subscriptionType":"max"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        chmod600(&slot.join(".credentials.json"));
+    };
+    let row = |listing: &str| -> String {
+        listing
+            .lines()
+            .find(|l| l.trim_start_matches(['*', ' ']).starts_with("soon"))
+            .unwrap_or_else(|| panic!("no soon row:\n{listing}"))
+            .to_string()
+    };
+    let doctor_line = || -> Option<String> {
+        let (out, err, _) = run(root, &["doctor"]);
+        format!("{out}{err}")
+            .lines()
+            .find(|l| l.starts_with("slot:soon") && l.contains("login end"))
+            .map(str::to_string)
+    };
+
+    login_ending(now_ms + 2 * day);
+    let (listing, _, _) = run(root, &["ls"]);
+    let soon = row(&listing);
+    assert!(
+        soon.contains("login ends") && soon.contains("swapdex run soon"),
+        "a login two days from its end is listed as fine: {soon}"
+    );
+    let line = doctor_line().expect("doctor names the end");
+    assert!(line.contains("problem"), "{line}");
+
+    login_ending(now_ms - 3_600_000);
+    let (listing, _, _) = run(root, &["ls"]);
+    let ended = row(&listing);
+    assert!(
+        ended.contains("login ended"),
+        "a login past its end, access token still good, is listed as fine: {ended}"
+    );
+    assert!(
+        doctor_line().is_some_and(|l| l.contains("login ended")),
+        "doctor passes a login past its end"
+    );
+
+    login_ending(now_ms + 20 * day);
+    let (listing, _, _) = run(root, &["ls"]);
+    let fine = row(&listing);
+    assert!(!fine.contains("login end"), "weeks out is not news: {fine}");
+    assert!(doctor_line().is_none(), "doctor warns weeks out");
+}
+
 /// Claude Code empties both tokens when its own renewal is refused, but leaves
 /// the refresh token's stated end in place. That end is no evidence the login
 /// lives: `ls` listed such an account with no note at all.

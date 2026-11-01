@@ -338,6 +338,12 @@ remains valid, but provider expiry, revocation or renewal by another credential
 holder can make a new browser sign-in necessary. Keep-alive reduces avoidable
 idle expiry; it cannot guarantee that a login never expires.
 
+A Claude sign-in also has a fixed end, set when you sign in (27 days later on
+the logins measured), and no renewal moves it. `swapdex ls` and `swapdex doctor`
+name that end from three days out, and again once it has passed, so you can run
+`/login` in a session of that account (`swapdex run <name>`) before Claude Code
+says "Login expired".
+
 Swapdex can renew idle accounts **while its proxy is running**,
 because that is the process holding the timer:
 

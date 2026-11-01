@@ -87,6 +87,19 @@ fn credential(slot: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// Make a seeded Claude slot due for the keep-alive sweep: its access token
+/// has lapsed and it states no sign-in end. A login that states its end is
+/// never swept - renewing does not move that end.
+fn make_due(slot: &std::path::Path) {
+    let path = slot.join(".credentials.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    v["claudeAiOauth"]
+        .as_object_mut()
+        .unwrap()
+        .remove("refreshTokenExpiresAt");
+    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+}
+
 #[test]
 fn a_lapsed_account_is_renewed_in_place() {
     let root = tempfile::tempdir().unwrap();
@@ -230,23 +243,26 @@ fn a_refused_renewal_changes_nothing() {
 /// and one renewed two hours after the last - which that rule did to
 /// eight-hour tokens - was stranded by a login server that processed it and
 /// answered 503.
+/// A Claude sign-in has a fixed end that renewing does not move, so the sweep
+/// never spends a refresh token on a login that states one - not weeks out, not
+/// two days out, not with its access lapsed an hour before the end. It used to
+/// renew inside the last three days, which kept nothing alive. A login that
+/// states no end is still renewed once its access lapses.
 #[test]
-fn keep_alive_renews_by_the_refresh_tokens_end_not_the_access_tokens() {
+fn keep_alive_never_spends_a_login_whose_end_is_stated() {
     let root = tempfile::tempdir().unwrap();
     let slot = seed_lapsed_account(root.path(), "idle", "aaaa1111");
-    // Still VALID, a couple of hours from expiry: the state `swapdex refresh`
-    // leaves alone. What decides a keep-alive is the refresh token's end.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let write = |refresh_end: i64| {
+    let write = |access_left: i64, refresh_end: i64| {
         std::fs::write(
             slot.join(".credentials.json"),
             format!(
                 r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
                    "expiresAt":{},"refreshTokenExpiresAt":{}}}}}"#,
-                now_ms + 2 * 3_600_000,
+                now_ms + access_left,
                 refresh_end
             ),
         )
@@ -272,30 +288,33 @@ fn keep_alive_renews_by_the_refresh_tokens_end_not_the_access_tokens() {
         )
     };
 
-    // Two hours of access left, weeks of refresh token: nothing to renew.
-    write(now_ms + 30 * 86_400_000);
-    let said = sweep();
-    assert_eq!(
-        asked.lock().unwrap().len(),
-        0,
-        "a refresh token weeks from its end was rotated anyway: {said}"
-    );
-    // Two days from the refresh token's end: renewed, once.
-    write(now_ms + 2 * 86_400_000);
+    let hour = 3_600_000i64;
+    let day = 24 * hour;
+    for (access_left, end, case) in [
+        (2 * hour, now_ms + 30 * day, "weeks from its end"),
+        (2 * hour, now_ms + 2 * day, "two days from its end"),
+        (-hour, now_ms + hour, "an hour from its end, access lapsed"),
+    ] {
+        write(access_left, end);
+        let said = sweep();
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            0,
+            "a login {case} was spent: {said}"
+        );
+    }
+
+    make_due(&slot);
     let said = sweep();
     assert_eq!(
         asked.lock().unwrap().len(),
         1,
-        "a refresh token near its end was not renewed: {said}"
+        "a lapsed login that states no end was not renewed: {said}"
     );
     let after = std::fs::read_to_string(slot.join(".credentials.json")).unwrap();
     assert!(
-        after.contains("NEW-AT"),
-        "the renewed token was written: {after}"
-    );
-    assert!(
         after.contains("NEW-RT"),
-        "and the rotated refresh token replaced the spent one: {after}"
+        "the rotated token was written: {after}"
     );
     assert!(
         said.contains("idle"),
@@ -539,7 +558,8 @@ fn explicit_refresh_protects_an_active_codex_twin_but_not_an_unrelated_account()
 fn check_keep_alive_active_twin(tool: &str, account: &str, url_var: &str) {
     let root = tempfile::tempdir().unwrap();
     if tool == "claude" {
-        seed_lapsed_account(root.path(), "idle", "candidate");
+        // Due, so that only the twin guard stands between it and a renewal.
+        make_due(&seed_lapsed_account(root.path(), "idle", "candidate"));
     } else {
         seed_lapsed_codex(root.path(), "idle", "candidate");
     }
@@ -830,21 +850,9 @@ fn the_keep_alive_sweep_renews_an_account_once() {
             ("work-copy", "bbbb2222", "u-shared"),
         ],
     );
-    // Due by the refresh token's end, which is what a sweep renews on.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    // Due: access lapsed, no stated end.
     for id in ["aaaa1111", "bbbb2222"] {
-        let path = root
-            .path()
-            .join(".local/share/swapdex/slots")
-            .join(id)
-            .join(".credentials.json");
-        let mut v: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        v["claudeAiOauth"]["refreshTokenExpiresAt"] = (now_ms + 2 * 86_400_000).into();
-        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        make_due(&root.path().join(".local/share/swapdex/slots").join(id));
     }
     let asked = Arc::new(Mutex::new(Vec::new()));
     let url = rotating_oauth(asked.clone());
@@ -985,14 +993,7 @@ fn restore_says_when_the_backup_it_puts_back_was_retired() {
 fn a_refused_claude_refresh_is_recorded_shown_and_not_swept_again() {
     let root = tempfile::tempdir().unwrap();
     let slot = seed_lapsed_account(root.path(), "gone", "cccc3333");
-    let path = slot.join(".credentials.json");
-    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    v["claudeAiOauth"]["refreshTokenExpiresAt"] = (now_ms + 86_400_000).into();
-    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    make_due(&slot);
 
     let asked = Arc::new(Mutex::new(Vec::new()));
     let url = refusing_oauth(
@@ -1038,14 +1039,7 @@ fn a_refused_claude_refresh_is_recorded_shown_and_not_swept_again() {
 fn a_claude_400_without_invalid_grant_is_not_recorded_as_a_refusal() {
     let root = tempfile::tempdir().unwrap();
     let slot = seed_lapsed_account(root.path(), "odd", "dddd4444");
-    let path = slot.join(".credentials.json");
-    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    v["claudeAiOauth"]["refreshTokenExpiresAt"] = (now_ms + 86_400_000).into();
-    std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    make_due(&slot);
     let asked = Arc::new(Mutex::new(Vec::new()));
     let url = refusing_oauth(
         asked.clone(),

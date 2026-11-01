@@ -925,6 +925,18 @@ fn default_native_authority_survives_holder_exit_without_using_stale_slot() {
     let _serial = test_lock();
     let root = tempfile::tempdir().unwrap();
     let slot = seed_claude(root.path(), "default-source-bound");
+    // Due for the sweep: access lapsed and no stated sign-in end. A login that
+    // states its end is never swept, since renewing does not move that end.
+    let mut due = claude_file(&slot);
+    due["claudeAiOauth"]
+        .as_object_mut()
+        .unwrap()
+        .remove("refreshTokenExpiresAt");
+    std::fs::write(
+        slot.join(".credentials.json"),
+        serde_json::to_vec(&due).unwrap(),
+    )
+    .unwrap();
     let native = root.path().join(".claude");
     std::fs::create_dir(&native).unwrap();
     std::fs::copy(

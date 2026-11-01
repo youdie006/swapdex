@@ -2315,11 +2315,23 @@ fn account_health(
         // A registered live slot supersedes its historical snapshot's status.
         // In particular an unreadable Mac Keychain is not an expired snapshot.
         warnings.retain(|warning| !warning.starts_with(&format!("{tool} ")));
+        // A sign-in's fixed end: the one deadline nothing but a sign-in moves.
+        let login_end = (tool == "claude-code")
+            .then(|| crate::refresh::claude_login_end(paths, &slot.config_dir, now_ms))
+            .flatten();
+        let login_end_note = |end: &crate::refresh::LoginEnd| {
+            format!(
+                "{tool} {}",
+                crate::refresh::login_end_note(end, name, now_ms, crate::proxy::tz_offset())
+            )
+        };
         if let Some(login) = crate::live_login::resolve(paths, &slot.config_dir, tool, now_ms) {
             renewal_owner.insert(tool.clone(), "native".to_owned());
             if let Some(rejected_at) = login.refresh_rejected_at_ms {
                 warnings.push(format!("{tool} refresh rejected - re-login required"));
                 refresh_rejected_at_ms.insert(tool.clone(), rejected_at);
+            } else if let Some(end) = &login_end {
+                warnings.push(login_end_note(end));
             }
             continue;
         }
@@ -2365,6 +2377,13 @@ fn account_health(
                 ));
                 refresh_rejected_at_ms.insert("claude-code".to_string(), at);
             }
+            // Past its end the access token in hand may still work for hours,
+            // so this cannot wait for the token to lapse to be said.
+            "claude-code" if matches!(login_end, Some(crate::refresh::LoginEnd::Ended(_))) => {
+                if let Some(end) = &login_end {
+                    warnings.push(login_end_note(end));
+                }
+            }
             "claude-code"
                 if crate::proxy::creds::slot_token_expired_for(paths, &slot.config_dir, now_ms)
                     && crate::refresh::claude_refresh_token_not_known_live(
@@ -2384,6 +2403,9 @@ fn account_health(
                     warnings.push(
                         "claude-code keychain unavailable - verify in a local terminal".to_string(),
                     );
+                }
+                if let Some(end @ crate::refresh::LoginEnd::Ends(_)) = &login_end {
+                    warnings.push(login_end_note(end));
                 }
             }
             _ => {}
@@ -5630,7 +5652,23 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 // flags only what it can determine.
                 SlotLogin::Present(_) => {}
             }
-            if refresh_rejected_at(paths, tool, &r.config_dir, now_ms()).is_some() {
+            let rejected = refresh_rejected_at(paths, tool, &r.config_dir, now_ms()).is_some();
+            if tool == "claude-code" && !rejected {
+                let now = now_ms();
+                if let Some(end) = crate::refresh::claude_login_end(paths, &r.config_dir, now) {
+                    report(
+                        &key,
+                        false,
+                        crate::refresh::login_end_note(
+                            &end,
+                            &r.name,
+                            now,
+                            crate::proxy::tz_offset(),
+                        ),
+                    );
+                }
+            }
+            if rejected {
                 report(
                     &key,
                     false,

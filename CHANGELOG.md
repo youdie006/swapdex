@@ -4,6 +4,30 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`ls` and `doctor` name a Claude sign-in's end before it arrives, and
+  after.** A Claude login ends at a time fixed when it was signed in - 27
+  days later on the logins measured - and renewing does not move it: one
+  account signed in on 10-21 was due to end on 11-17 at 23:27, and a renewal
+  ten days later came back ending at 23:26. When the end passed, every
+  session of the account said "Login expired · Please run /login" with no
+  warning beforehand: keep-alive had seen it coming for days but wrote only
+  "renewal deferred" to the proxy's log, and went quiet once the end had
+  passed, while the access token in hand kept working for five more hours.
+  `ls` and `doctor` now say "login ends <time> - sign in again before then"
+  from three days out, and "login ended <time>" once it has passed, with the
+  `swapdex run <name>` that opens a session of that account for `/login`.
+- **Keep-alive no longer renews a Claude login in the three days before its
+  end.** It did so on the belief that renewing kept the login alive. It does
+  not, so each of those renewals only spent a refresh token, and one the
+  server processes but answers with an error strands the new token. A login
+  that states no end is still renewed once its access token lapses.
+- **A Claude login past its end is no longer called idle.** The message said
+  "'<name>' has been idle too long to renew", but an account in use all day
+  reaches its end too. It now says the sign-in reached its end, which
+  renewing cannot move.
+
 ## 0.167.32
 
 - **A name whose last tool was removed can be used again.** `rm <name>

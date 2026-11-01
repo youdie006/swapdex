@@ -510,6 +510,12 @@ pub fn reset_clock(at: i64, now: i64, tz_offset: i64) -> String {
     if at <= now {
         return "now".into();
     }
+    clock_at(at, now, tz_offset)
+}
+
+/// Any instant as `reset_clock` writes one, past or future: bare on the same
+/// day, with its weekday otherwise.
+pub fn clock_at(at: i64, now: i64, tz_offset: i64) -> String {
     // Up to the minute, not down: the endpoint gives the same reset as 06:59:59
     // on one read and 07:00:00 on the next, and a time shown should be one by
     // which the window has reset.
@@ -526,7 +532,7 @@ pub fn reset_clock(at: i64, now: i64, tz_offset: i64) -> String {
     // time beside a six-character one leaves a hole the eye reads as a broken
     // layout. Speaking naturally is not worth a column that looks wrong.
     let time = format!("{h12}:{mins:02}{ampm}");
-    if at - now < 86400 && (l / 86400) == ((now + tz_offset) / 86400) {
+    if (at - now).abs() < 86400 && l.div_euclid(86400) == (now + tz_offset).div_euclid(86400) {
         return time;
     }
     const DAY: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
