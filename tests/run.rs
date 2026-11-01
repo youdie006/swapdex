@@ -1265,10 +1265,12 @@ fn shim_moves_back_ahead_of_a_later_profile_line_that_shadows_it() {
     let again = std::fs::read_to_string(root.path().join(".zshrc")).unwrap();
     assert_eq!(again, zshrc, "a second run changed the profile again");
 
+    // The shadowing line also sets a secret, which doctor must not repeat.
     std::fs::write(
         root.path().join(".zshrc"),
         format!(
-            "export PATH=\"{}:$PATH\"\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+            "export PATH=\"{}:$PATH\"\n\
+             export PATH=\"$HOME/.local/bin:$PATH\" API_KEY=\"sk-not-for-output\"\n",
             shim_dir.display()
         ),
     )
@@ -1292,6 +1294,10 @@ fn shim_moves_back_ahead_of_a_later_profile_line_that_shadows_it() {
         .find(|l| l.starts_with("shim ") && l.contains("line 2"))
         .unwrap_or_else(|| panic!("doctor does not name the shadowing line:\n{said}"));
     assert!(shim.contains("problem"), "{shim}");
+    assert!(
+        !said.contains("sk-not-for-output"),
+        "doctor printed the profile line's secret:\n{said}"
+    );
 }
 
 /// PATH entries may be relative to the shell that installs the shim. The shim

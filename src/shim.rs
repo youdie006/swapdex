@@ -507,11 +507,9 @@ pub enum ShimReach {
     Missing,
     /// The profile adds it, and a later line of the same profile puts another
     /// directory holding the binary in front of it.
-    Shadowed {
-        line: usize,
-        text: String,
-        found: PathBuf,
-    },
+    /// The line is named by number only: it may set other things, secrets
+    /// among them, that a diagnostic must not repeat.
+    Shadowed { line: usize, found: PathBuf },
 }
 
 /// Decide between those three from facts the caller has already gathered.
@@ -534,21 +532,21 @@ pub fn shim_reach_in(
         return reach;
     }
     match profile_text.and_then(|t| shadowed_in_profile(t, shim_dir, home, bin)) {
-        Some((line, text, found)) => ShimReach::Shadowed { line, text, found },
+        Some((line, found)) => ShimReach::Shadowed { line, found },
         None => reach,
     }
 }
 
 /// The first line after the profile's last shim line that puts a directory
-/// holding `bin` ahead of everything before it: its 1-based number, its text,
-/// and the binary a new shell would run. Only `PATH=` assignments that keep
-/// `$PATH` are read; a directory that holds no `bin` cannot shadow the shim.
+/// holding `bin` ahead of everything before it: its 1-based number and the
+/// binary a new shell would run. Only `PATH=` assignments that keep `$PATH`
+/// are read; a directory that holds no `bin` cannot shadow the shim.
 pub fn shadowed_in_profile(
     profile_text: &str,
     shim_dir: &Path,
     home: Option<&Path>,
     bin: &str,
-) -> Option<(usize, String, PathBuf)> {
+) -> Option<(usize, PathBuf)> {
     let lines: Vec<&str> = profile_text.lines().collect();
     let last_shim = lines
         .iter()
@@ -563,40 +561,46 @@ pub fn shadowed_in_profile(
                 .filter(|d| d != shim_dir)
                 .map(|d| d.join(bin))
                 .find(|candidate| is_executable_file(candidate))
-                .map(|found| (i + 1, l.to_string(), found))
+                .map(|found| (i + 1, found))
         })
 }
 
 /// The directories a `PATH=` line puts in front of the existing `$PATH`.
 fn prepended_dirs(line: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    // Only a statement that sets the shell's own PATH: `PATH=...` or `export
+    // PATH=...` at the start of the line. `alias x='PATH=... claude'` and
+    // `PATH=... cmd` set it for one command, and `MANPATH=` is another variable.
     let l = line.trim();
-    if l.starts_with('#') {
-        return Vec::new();
-    }
-    let Some(at) = l.find("PATH=") else {
+    let (body, exported) = match l.strip_prefix("export") {
+        Some(rest) if rest.starts_with(char::is_whitespace) => (rest.trim_start(), true),
+        _ => (l, false),
+    };
+    let Some(rest) = body.strip_prefix("PATH=") else {
         return Vec::new();
     };
-    // `MANPATH=` and the like are other variables.
-    if l[..at]
-        .chars()
-        .last()
-        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Vec::new();
-    }
     // The whole shell word: quoted and unquoted runs join into one value, as
     // in `PATH="$HOME/.local/bin":$PATH`. Each character keeps the quote it
     // sat in: a quoted `~` is not expanded, nor anything in single quotes.
     let mut value: Vec<(char, Option<char>)> = Vec::new();
     let mut quote: Option<char> = None;
-    for c in l[at + "PATH=".len()..].chars() {
+    let mut word_end = rest.len();
+    for (at, c) in rest.char_indices() {
         match quote {
             Some(q) if c == q => quote = None,
             Some(q) => value.push((c, Some(q))),
             None if c == '"' || c == '\'' => quote = Some(c),
-            None if c.is_whitespace() || c == ';' => break,
+            None if c.is_whitespace() || c == ';' => {
+                word_end = at;
+                break;
+            }
             None => value.push((c, None)),
         }
+    }
+    // A command after a bare assignment makes it that command's alone. After
+    // `export` the rest are more names to export.
+    let after = rest[word_end..].trim_start();
+    if !exported && !(after.is_empty() || after.starts_with(['#', ';', '&', '|'])) {
+        return Vec::new();
     }
     let parts: Vec<(String, Option<char>)> = value
         .split(|(c, _)| *c == ':')
@@ -1212,6 +1216,14 @@ mod reach_tests {
                 "$HOME in single quotes, which the shell keeps literal",
                 format!("{adds}export PATH='$HOME/.local/bin':$PATH\n"),
             ),
+            (
+                "an alias that sets PATH for one command",
+                format!("{adds}alias bare='PATH=\"$HOME/.local/bin:$PATH\" claude'\n"),
+            ),
+            (
+                "a PATH that applies to one command",
+                format!("{adds}PATH=\"$HOME/.local/bin:$PATH\" /bin/true\n"),
+            ),
         ] {
             assert_eq!(
                 shim_reach_in(false, Some(&profile), &shim, Some(home.path()), "claude"),
@@ -1231,6 +1243,18 @@ mod reach_tests {
             (
                 "single quotes",
                 "PATH='/nowhere':\"$HOME/.local/bin\":$PATH",
+            ),
+            (
+                "export with another variable after it",
+                "export PATH=\"$HOME/.local/bin:$PATH\" EDITOR=vim",
+            ),
+            (
+                "a comment after it",
+                "export PATH=\"$HOME/.local/bin:$PATH\" # local tools",
+            ),
+            (
+                "then exported",
+                "PATH=\"$HOME/.local/bin:$PATH\"; export PATH",
             ),
         ] {
             let profile = format!("{adds}{line}\n");

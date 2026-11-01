@@ -5088,7 +5088,7 @@ fn shim_engagement(paths: &Paths, tool: &str) -> (bool, String) {
         // The profile is right up to a later line that undoes it. A new
         // terminal repeats that order, so "open a new terminal" sends people
         // nowhere, and `export PATH=...` in this shell fixes only this shell.
-        crate::shim::ShimReach::Shadowed { line, text, found } => {
+        crate::shim::ShimReach::Shadowed { line, found } => {
             let p = profile
                 .as_ref()
                 .map(|(p, _)| crate::util::redact_path(&p.display().to_string()))
@@ -5097,10 +5097,9 @@ fn shim_engagement(paths: &Paths, tool: &str) -> (bool, String) {
                 false,
                 format!(
                     "{bin} shim set up in {p}, but line {line} comes after it and puts {} \
-                     first (`{}`), so a new terminal runs that {bin}, not the shim - \
+                     first, so a new terminal runs that {bin}, not the shim - \
                      `swapdex shim` adds swapdex's line again at the end of {p}",
                     crate::util::redact_path(&found.display().to_string()),
-                    crate::util::redact_path(text.trim())
                 ),
             )
         }
