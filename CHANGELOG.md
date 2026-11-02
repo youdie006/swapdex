@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.33
 
 - **`ls` and `doctor` name a Claude sign-in's end before it arrives, and
   after.** A Claude login ends at a time fixed when it was signed in - 27
