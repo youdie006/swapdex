@@ -551,28 +551,37 @@ fn check_explicit_active_twin(tool: &str, candidate_account: &str, url_var: &str
 #[cfg(target_os = "linux")]
 #[test]
 fn a_claude_twin_on_a_separate_login_does_not_hold_up_renewal() {
-    for (case, twin_refresh, should_refresh) in [
-        ("its own refresh token", Some("THEIR-RT"), true),
+    let login = |refresh: &str| {
+        serde_json::json!({"claudeAiOauth": {
+            "accessToken": "", "refreshToken": refresh, "expiresAt": 0}})
+        .to_string()
+    };
+    for (case, twin_file, should_refresh) in [
+        ("its own refresh token", Some(login("THEIR-RT")), true),
         (
             "a login Claude Code emptied after a refusal",
-            Some(""),
+            Some(login("")),
             true,
         ),
-        ("this slot's refresh token", Some("OLD-RT"), false),
+        ("this slot's refresh token", Some(login("OLD-RT")), false),
         ("a login that cannot be read", None, false),
+        (
+            "a login file that does not parse",
+            Some(r#"{"claudeAiOauth":{"refreshTo"#.to_string()),
+            false,
+        ),
+        (
+            "a login that states no refresh token at all",
+            Some(r#"{"claudeAiOauth":{"accessToken":""}}"#.to_string()),
+            false,
+        ),
     ] {
         let root = tempfile::tempdir().unwrap();
         let candidate = seed_lapsed_account(root.path(), "work", "candidate");
         let external = root.path().join(".claude-external");
         seed_external_identity(&external, "claude", "u-work");
-        if let Some(refresh) = twin_refresh {
-            std::fs::write(
-                external.join(".credentials.json"),
-                serde_json::to_vec(&serde_json::json!({"claudeAiOauth": {
-                    "accessToken": "", "refreshToken": refresh, "expiresAt": 0}}))
-                .unwrap(),
-            )
-            .unwrap();
+        if let Some(file) = &twin_file {
+            std::fs::write(external.join(".credentials.json"), file).unwrap();
         }
         let _running = running_tool(root.path(), "claude", &external);
         let curl = fake_refresh_curl(

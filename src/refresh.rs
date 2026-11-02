@@ -1037,18 +1037,25 @@ fn claude_holder_uncoordinated(
         let held_refresh = held_login
             .as_deref()
             .and_then(|bytes| refresh_token_identity(bytes, "claude-code"));
+        // Known only when the login parses and states its refresh token, even
+        // an empty one (Claude Code empties it after a refusal). A file that
+        // does not parse could be hiding the slot's token.
+        let held_refresh_known = held_login.as_deref().is_some_and(|bytes| {
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .is_ok_and(|v| v["claudeAiOauth"]["refreshToken"].is_string())
+        });
         let same_refresh = selected_refresh
             .as_ref()
             .is_some_and(|selected| held_refresh.as_ref() == Some(selected));
-        // A login in its own store that is readable and holds a different
-        // refresh token, or none, is a separate sign-in - the same account's or
+        // A login in its own store that is readable and states a different
+        // refresh token, or an empty one, is a separate sign-in - the same account's or
         // not. Renewing this slot cannot retire anything it holds. Waiting for
         // it to exit left a slot to lapse and the proxy refusing every turn
         // while a plain `claude` sat on a dead native login of the same account.
         if !same_store
             && !same_dir(&process.source_dir, dir)
             && selected_refresh.is_some()
-            && held_login.is_some()
+            && held_refresh_known
             && !same_refresh
         {
             separate.push(process.source_dir.clone());
