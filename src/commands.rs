@@ -8004,11 +8004,18 @@ pub fn serve(
             // proxy costs the tool its own rate_limits block, so a status line
             // reading those prints "N/A" while swapdex holds a reading from a
             // minute ago. No request is made: a bar redraws constantly.
-            let who = label
-                .split_whitespace()
-                .next()
-                .unwrap_or(&label)
-                .to_string();
+            // From the registry, not the label: a name may hold spaces, and
+            // the label's first word named a different account - or none.
+            let who = crate::slots::Slots::open_for(paths, tool)
+                .ok()
+                .and_then(|slots| slots.payer())
+                .unwrap_or_else(|| {
+                    label
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(&label)
+                        .to_string()
+                });
             let cache = crate::quota_cache::load_for(paths, tool);
             let mut brief = cache
                 .get(&who)

@@ -1244,6 +1244,60 @@ fn the_status_bar_names_a_claude_sign_in_that_ends_soon() {
     assert!(!bar.contains("login end"), "nothing ends soon: {bar}");
 }
 
+/// An account name may hold spaces, and the bar named the payer by the first
+/// word of its label: for `work account` it looked up `work`, so the bar showed
+/// no usage and no sign-in end for the account paying - or another account's,
+/// had one been called `work`.
+#[test]
+fn the_status_bar_reads_a_payer_whose_name_has_spaces() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    seed_slot(root, "work account", "a@example.com");
+    seed_slot(root, "work", "w@example.com");
+    run(root, &["use", "work account"]);
+    run(root, &["serve", "work account"]);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000i64;
+    for (name, end) in [("work account", now_ms + 2 * day), ("work", now_ms - day)] {
+        let path = root
+            .join(".local/share/swapdex/slots")
+            .join(name)
+            .join(".credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+                "accessToken":"AT","refreshToken":"RT","expiresAt": now_ms + 3_600_000,
+                "refreshTokenExpiresAt": end, "subscriptionType":"max"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        chmod600(&path);
+    }
+    std::fs::write(
+        root.join(".local/share/swapdex/quota-cache.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "work account": {"seven_d": 40.0, "at": now_ms / 1000 - 30},
+            "work": {"seven_d": 90.0, "at": now_ms / 1000 - 30}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        bar.contains("7d 60%") && bar.contains("work account login ends"),
+        "the bar does not read the payer whose name has a space: {bar}"
+    );
+    assert!(
+        !bar.contains("7d 10%") && !bar.contains("work login ended"),
+        "the bar reads another account named by the first word: {bar}"
+    );
+}
+
 /// Run `proxy --tool <tool>` and require it to EXIT. Returns (stderr, code).
 /// Fails the test if it is still running after a few seconds, which is what
 /// "it started a server instead of refusing" looks like from out here.

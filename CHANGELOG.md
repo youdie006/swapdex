@@ -14,6 +14,9 @@ All notable changes to swapdex are documented here. This project follows
   ending stops a session. It joins the part after the last " - ", which a
   status line script shows as the account's state. It reads only those two
   credentials, so the line stays as quick to redraw.
+- **The status bar reads the paying account when its name has a space.**
+  It looked the payer up by the first word of its label, so for `work
+  account` it showed no usage, or the usage of an account called `work`.
 - **A session on a separate login of the same account no longer stops its
   slot from being renewed.** On one Mac a plain `claude` had started on a
   native login of the same account that had already died. Renewing the
