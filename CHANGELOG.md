@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.34
 
 - **The status bar names a Claude sign-in that ends soon.** `ls` and
   `doctor` name a sign-in's fixed end three days ahead, but only when run;
