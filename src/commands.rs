@@ -7803,6 +7803,38 @@ pub fn unhonoured_ask(
     }
 }
 
+/// The paying account's and the home account's Claude sign-ins that end
+/// within the notice window or have ended, short enough for a status bar.
+/// Reads only their credentials - no process scan - since a bar redraws often.
+fn claude_logins_ending(paths: &Paths, payer: &str) -> Vec<String> {
+    let Ok(slots) = crate::slots::Slots::open_for(paths, "claude-code") else {
+        return Vec::new();
+    };
+    let home = slots.default_dir().and_then(|d| {
+        slots
+            .list()
+            .into_iter()
+            .find(|r| r.config_dir == d)
+            .map(|r| r.name)
+    });
+    let now = now_ms();
+    let mut names = vec![payer.to_string()];
+    names.extend(home.filter(|h| h != payer));
+    names
+        .iter()
+        .filter_map(|name| {
+            let slot = slots.get(name)?;
+            let end = crate::refresh::claude_slot_login_end(paths, &slot.config_dir, now)?;
+            Some(crate::refresh::login_end_brief(
+                &end,
+                name,
+                now,
+                crate::proxy::tz_offset(),
+            ))
+        })
+        .collect()
+}
+
 /// What a screen should call the account paying the next turn.
 ///
 /// Used by Swapdex's status surfaces and `serve --quiet`. Include login health
@@ -7978,11 +8010,25 @@ pub fn serve(
                 .unwrap_or(&label)
                 .to_string();
             let cache = crate::quota_cache::load_for(paths, tool);
-            let brief = cache
+            let mut brief = cache
                 .get(&who)
                 .map(|e| cached_brief(e, now_secs() as i64))
                 // No entry at all is the same news as an entry with no numbers.
                 .unwrap_or_else(|| quota_brief(None, None));
+            // A Claude sign-in near its fixed end, for the account paying and
+            // the one whose sessions these are: either ending stops a session,
+            // and this bar is the one surface in view all day. It joins the
+            // state after the last " - ", which status line scripts show.
+            if tool == "claude-code" {
+                let ending = claude_logins_ending(paths, &who);
+                if !ending.is_empty() {
+                    brief = [brief, ending.join(" · ")]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                }
+            }
             if brief.is_empty() {
                 print!("{label}");
             } else {

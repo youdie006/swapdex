@@ -1171,6 +1171,79 @@ fn the_status_bar_says_a_reading_stopped_arriving_not_that_it_is_late() {
     );
 }
 
+/// The status bar is the one surface in view all day, so a Claude sign-in
+/// nearing its fixed end is named there too - for the account paying and the
+/// account whose sessions these are, since either one ending stops a session.
+/// It goes in the part after the last " - ", which status line scripts read
+/// as the account's state, so a script that shows the usage shows this too.
+#[test]
+fn the_status_bar_names_a_claude_sign_in_that_ends_soon() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    run(root, &["add", "alpha"]);
+    seed_slot(root, "alpha", "a@example.com");
+    seed_slot(root, "home", "h@example.com");
+    run(root, &["use", "home"]);
+    run(root, &["serve", "alpha"]);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000i64;
+    let ending = |name: &str, end: i64| {
+        let path = root
+            .join(".local/share/swapdex/slots")
+            .join(name)
+            .join(".credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+                "accessToken":"AT","refreshToken":"RT","expiresAt": now_ms + 3_600_000,
+                "refreshTokenExpiresAt": end, "subscriptionType":"max"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        chmod600(&path);
+    };
+    std::fs::write(
+        root.join(".local/share/swapdex/quota-cache.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "alpha": {"seven_d": 40.0, "at": now_ms / 1000 - 30}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // What a status line script shows as the account's state.
+    let state = |line: &str| line.rsplit(" - ").next().unwrap_or_default().to_string();
+
+    ending("alpha", now_ms + 2 * day);
+    ending("home", now_ms + 20 * day);
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    let shown = state(bar.trim());
+    assert!(
+        shown.contains("7d 60%") && shown.contains("alpha login ends"),
+        "the paying account's end is not in the bar's state: {bar}"
+    );
+    assert!(
+        !shown.contains("home login"),
+        "weeks out is not news: {bar}"
+    );
+
+    ending("alpha", now_ms + 20 * day);
+    ending("home", now_ms - 3_600_000);
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        state(bar.trim()).contains("home login ended"),
+        "the sessions' own account ending is not in the bar: {bar}"
+    );
+    assert!(!bar.contains("alpha login"), "{bar}");
+
+    ending("home", now_ms + 20 * day);
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(!bar.contains("login end"), "nothing ends soon: {bar}");
+}
+
 /// Run `proxy --tool <tool>` and require it to EXIT. Returns (stderr, code).
 /// Fails the test if it is still running after a few seconds, which is what
 /// "it started a server instead of refusing" looks like from out here.

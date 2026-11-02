@@ -251,7 +251,9 @@ account is always visible inside the tool you are switching
 
 To show who is paying and what that account has left, use
 `swapdex serve --quiet` instead. It prints one line from swapdex's cache, e.g.
-`work (you@example.com) - 5h 95% | 7d 24%`. Claude Code re-runs a status line
+`work (you@example.com) - 5h 95% | 7d 24%`. When the paying account's or your
+sessions' account's Claude sign-in ends within three days, the line says so after
+the usage: `... - 7d 24% · work login ends Mon 9:40am`. Claude Code re-runs a status line
 command only when the conversation changes, so also set `refreshInterval` (in
 seconds); without it the numbers stay where they were while a session waits on
 a long tool call:

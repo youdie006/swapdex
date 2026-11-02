@@ -6,6 +6,14 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **The status bar names a Claude sign-in that ends soon.** `ls` and
+  `doctor` name a sign-in's fixed end three days ahead, but only when run;
+  the status line is what is in view all day. `serve --quiet` now adds
+  "<name> login ends <time>", or "login ended", after the usage for the
+  account paying and for the account the sessions belong to - either one
+  ending stops a session. It joins the part after the last " - ", which a
+  status line script shows as the account's state. It reads only those two
+  credentials, so the line stays as quick to redraw.
 - **A session on a separate login of the same account no longer stops its
   slot from being renewed.** On one Mac a plain `claude` had started on a
   native login of the same account that had already died. Renewing the

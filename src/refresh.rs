@@ -2099,6 +2099,16 @@ pub(crate) fn claude_slot_login_end(paths: &Paths, dir: &Path, now_ms: i64) -> O
     login_end(credential.bytes(), now_ms)
 }
 
+/// The same warning short enough for a status bar: "work login ends Mon
+/// 9:40am". The bar has no room for the remedy, and `ls` gives it.
+pub fn login_end_brief(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
+    let clock = |at: i64| crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset);
+    match end {
+        LoginEnd::Ends(at) => format!("{name} login ends {}", clock(*at)),
+        LoginEnd::Ended(at) => format!("{name} login ended {}", clock(*at)),
+    }
+}
+
 /// The login-end warning for account `name`, with the one way out. The `/login`
 /// has to happen in a session of that account; `swapdex run` opens one.
 pub fn login_end_note(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
