@@ -1009,7 +1009,6 @@ fn claude_holder_uncoordinated(
     dir: &Path,
     authority: &crate::claude_authority::Authority,
 ) -> bool {
-    let held = slot_in_use(paths, dir, "claude-code");
     let expected = identity_file(dir, ".claude.json")
         .and_then(|bytes| crate::live_login::identity_from_credential(&bytes, "claude-code"));
     let selected_refresh = authority
@@ -1017,6 +1016,7 @@ fn claude_holder_uncoordinated(
         .ok()
         .and_then(|credential| refresh_token_identity(credential.bytes(), "claude-code"));
     let mut verified = false;
+    let mut separate = Vec::new();
     for process in crate::proc::running_native_login_processes(paths, "claude-code") {
         let identity = identity_file(
             process.identity_path.parent().unwrap_or(Path::new("")),
@@ -1029,17 +1029,31 @@ fn claude_holder_uncoordinated(
         .and_then(|bytes| crate::live_login::identity_from_credential(&bytes, "claude-code"));
         let same_store = same_dir(&process.source_dir, &authority.storage_dir);
         let same_identity = expected.is_some() && identity == expected;
-        let same_refresh = selected_refresh.as_ref().is_some_and(|selected| {
-            crate::adapters::claude::native_credentials(
-                paths,
-                &process.source_dir,
-                process.claude_keychain_key.as_deref(),
-            )
+        let held_login = crate::adapters::claude::native_credentials(
+            paths,
+            &process.source_dir,
+            process.claude_keychain_key.as_deref(),
+        );
+        let held_refresh = held_login
             .as_deref()
-            .and_then(|bytes| refresh_token_identity(bytes, "claude-code"))
+            .and_then(|bytes| refresh_token_identity(bytes, "claude-code"));
+        let same_refresh = selected_refresh
             .as_ref()
-                == Some(selected)
-        });
+            .is_some_and(|selected| held_refresh.as_ref() == Some(selected));
+        // A login in its own store that is readable and holds a different
+        // refresh token, or none, is a separate sign-in - the same account's or
+        // not. Renewing this slot cannot retire anything it holds. Waiting for
+        // it to exit left a slot to lapse and the proxy refusing every turn
+        // while a plain `claude` sat on a dead native login of the same account.
+        if !same_store
+            && !same_dir(&process.source_dir, dir)
+            && selected_refresh.is_some()
+            && held_login.is_some()
+            && !same_refresh
+        {
+            separate.push(process.source_dir.clone());
+            continue;
+        }
         if !same_identity && !same_store && !same_dir(&process.source_dir, dir) && !same_refresh {
             continue;
         }
@@ -1052,7 +1066,7 @@ fn claude_holder_uncoordinated(
         }
         verified = true;
     }
-    held && !verified
+    slot_in_use_except(paths, dir, "claude-code", &separate) && !verified
 }
 
 fn claude_lock(
@@ -1377,7 +1391,10 @@ fn credential_owner_matches_dir(
     credential_owner_matches_path(&dir.join(name), tool, account, refresh_token)
 }
 
-fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
+/// Whether a running process holds this slot's login, not counting those
+/// whose store is one of `except`.
+fn slot_in_use_except(paths: &Paths, dir: &Path, tool: &str, except: &[PathBuf]) -> bool {
+    let excepted = |store: &Path| except.iter().any(|e| same_dir(e, store));
     let running = crate::proc::running_config_dirs(tool);
     if running.iter().any(|active| same_dir(active, dir)) {
         return true;
@@ -1394,6 +1411,7 @@ fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
     // memory. Use the native accessor's exact identity path for this check.
     if crate::proc::running_native_login_processes(paths, tool)
         .into_iter()
+        .filter(|process| !excepted(&process.source_dir))
         .any(|process| {
             credential_owner_matches_path(
                 &process.identity_path,
@@ -1406,7 +1424,8 @@ fn slot_in_use(paths: &Paths, dir: &Path, tool: &str) -> bool {
         return true;
     }
     running.into_iter().any(|active| {
-        (!paths.sandboxed() || inside_paths(paths, &active))
+        !excepted(&active)
+            && (!paths.sandboxed() || inside_paths(paths, &active))
             && credential_owner_matches_dir(
                 &active,
                 tool,

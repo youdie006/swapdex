@@ -338,6 +338,12 @@ remains valid, but provider expiry, revocation or renewal by another credential
 holder can make a new browser sign-in necessary. Keep-alive reduces avoidable
 idle expiry; it cannot guarantee that a login never expires.
 
+A Claude sign-in also has a fixed end, set when you sign in (27 days later on
+the logins measured), and no renewal moves it. `swapdex ls` and `swapdex doctor`
+name that end from three days out, and again once it has passed, so you can run
+`/login` in a session of that account (`swapdex run <name>`) before Claude Code
+says "Login expired".
+
 Swapdex can renew idle accounts **while its proxy is running**,
 because that is the process holding the timer:
 
@@ -433,7 +439,9 @@ Already-current accounts and successful or empty runs return 0. Missing or
 unreadable logins produce a sign-in remedy without an OAuth request.
 
 `swapdex refresh --keep-alive` runs the same check without a proxy. If a local
-session holds a due account, Swapdex leaves its refresh token alone. A verified
+session holds a due account, Swapdex leaves its refresh token alone. A session
+of the same account signed in separately, whose own refresh token is readable
+and different, holds nothing a renewal could retire, so it does not count. A verified
 usable native login is shown as managed by Claude or Codex, including
 `renewal_owner` in `ls --json`; this is not an OAuth renewal by Swapdex. When
 that native login cannot be verified, renewal remains deferred and unverified.

@@ -540,6 +540,69 @@ fn check_explicit_active_twin(tool: &str, candidate_account: &str, url_var: &str
     }
 }
 
+/// A session of the same account in another store holds its OWN sign-in when
+/// its refresh token is readable and is not this slot's. Renewing the slot
+/// cannot retire anything that session holds, so it is no reason to wait. On
+/// one Mac a plain `claude` had started on a dead native login of the same
+/// account; renewal of the account's slot waited for it to exit, the slot's
+/// access token lapsed, and the proxy refused every turn for "no usable Claude
+/// access token: renewal deferred". A twin holding THIS slot's refresh token,
+/// or one whose login cannot be read, still makes renewal wait.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_claude_twin_on_a_separate_login_does_not_hold_up_renewal() {
+    for (case, twin_refresh, should_refresh) in [
+        ("its own refresh token", Some("THEIR-RT"), true),
+        (
+            "a login Claude Code emptied after a refusal",
+            Some(""),
+            true,
+        ),
+        ("this slot's refresh token", Some("OLD-RT"), false),
+        ("a login that cannot be read", None, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = seed_lapsed_account(root.path(), "work", "candidate");
+        let external = root.path().join(".claude-external");
+        seed_external_identity(&external, "claude", "u-work");
+        if let Some(refresh) = twin_refresh {
+            std::fs::write(
+                external.join(".credentials.json"),
+                serde_json::to_vec(&serde_json::json!({"claudeAiOauth": {
+                    "accessToken": "", "refreshToken": refresh, "expiresAt": 0}}))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let _running = running_tool(root.path(), "claude", &external);
+        let curl = fake_refresh_curl(
+            root.path(),
+            r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+        );
+
+        let out = Command::new(bin())
+            .args(["refresh", "work"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_CURL", curl)
+            .env(
+                "SWAPDEX_TEST_REFRESH_COUNT",
+                root.path().join("refresh-count"),
+            )
+            .env("SWAPDEX_OAUTH_URL", "http://127.0.0.1:1/fake-oauth")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            refresh_calls(root.path()),
+            usize::from(should_refresh),
+            "a twin with {case} gave the wrong verdict:\n{said}"
+        );
+        let renewed = credential(&candidate)["claudeAiOauth"]["accessToken"] == "NEW-AT";
+        assert_eq!(renewed, should_refresh, "{case}: {said}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn explicit_refresh_protects_an_active_claude_twin_but_not_an_unrelated_account() {

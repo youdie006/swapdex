@@ -439,7 +439,9 @@ Already-current accounts and successful or empty runs return 0. Missing or
 unreadable logins produce a sign-in remedy without an OAuth request.
 
 `swapdex refresh --keep-alive` runs the same check without a proxy. If a local
-session holds a due account, Swapdex leaves its refresh token alone. A verified
+session holds a due account, Swapdex leaves its refresh token alone. A session
+of the same account signed in separately, whose own refresh token is readable
+and different, holds nothing a renewal could retire, so it does not count. A verified
 usable native login is shown as managed by Claude or Codex, including
 `renewal_owner` in `ls --json`; this is not an OAuth renewal by Swapdex. When
 that native login cannot be verified, renewal remains deferred and unverified.

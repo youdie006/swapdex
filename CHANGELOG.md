@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A session on a separate login of the same account no longer stops its
+  slot from being renewed.** On one Mac a plain `claude` had started on a
+  native login of the same account that had already died. Renewing the
+  account's slot waited for that session to exit, because a session of the
+  same account might hold the slot's refresh token; the slot's access token
+  lapsed, and the proxy refused every turn with "selected account has no
+  usable Claude access token: renewal deferred". A session whose own login
+  is readable and holds a different refresh token, or none, holds nothing a
+  renewal could retire, so it no longer counts. One holding the slot's
+  refresh token, or whose login cannot be read, still makes renewal wait.
+
 ## 0.167.33
 
 - **`ls` and `doctor` name a Claude sign-in's end before it arrives, and

@@ -1081,9 +1081,12 @@ fn an_expired_default_native_holder_still_blocks_a_twin_refresh() {
     .unwrap();
     let default_dir = root.path().join(".claude");
     std::fs::create_dir_all(&default_dir).unwrap();
+    // Expired access, but the slot's own refresh token: the holder can still
+    // spend it. (A holder whose readable login has a different refresh token
+    // is a separate sign-in; renewing the slot cannot retire anything it holds.)
     std::fs::write(
         default_dir.join(".credentials.json"),
-        br#"{"claudeAiOauth":{"accessToken":"EXPIRED","refreshToken":"NATIVE-RT","expiresAt":1}}"#,
+        br#"{"claudeAiOauth":{"accessToken":"EXPIRED","refreshToken":"OLD-RT","expiresAt":1}}"#,
     )
     .unwrap();
     let process_path = root.path().join("native-bin/claude");

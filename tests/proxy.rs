@@ -6794,6 +6794,91 @@ mod streaming_delivery {
     }
 }
 
+/// On one Mac a plain `claude` had started on a dead native login of the same
+/// account as the serving slot. The slot's access token lapsed, renewal waited
+/// for that session to exit, and the proxy refused every turn: "selected
+/// account has no usable Claude access token: renewal deferred". That session
+/// held a different, emptied login and nothing renewing the slot could retire,
+/// so the turn renews the slot and is served.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dead_native_login_of_the_same_account_does_not_stop_the_slot_serving() {
+    let root = tempfile::tempdir().unwrap();
+    seed_slot(root.path(), "work", "aaaa1111", "AT-OLD", true);
+    let slot = root.path().join(".local/share/swapdex/slots/aaaa1111");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(
+        slot.join(".credentials.json"),
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"AT-OLD","refreshToken":"RT-OLD","expiresAt":{}}}}}"#,
+            now_ms - 3_600_000
+        ),
+    )
+    .unwrap();
+    // The same account in its own store, emptied by Claude Code after its own
+    // renewal was refused, with a session still running on it.
+    let native = root.path().join(".claude-native");
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::copy(slot.join(".claude.json"), native.join(".claude.json")).unwrap();
+    std::fs::write(
+        native.join(".credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}"#,
+    )
+    .unwrap();
+    let fake_cli = root.path().join("bin/claude");
+    std::fs::create_dir_all(fake_cli.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", &fake_cli).unwrap();
+    let cli = Command::new(&fake_cli)
+        .args(["-c", "read _"])
+        .stdin(std::process::Stdio::piped())
+        .env("HOME", root.path())
+        .env("CLAUDE_CONFIG_DIR", &native)
+        .spawn()
+        .unwrap();
+    let pid = cli.id();
+    let _cli = ReapedChild::new(cli);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        != "claude"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake claude not ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let curl = root.path().join("fakebin/curl");
+    std::fs::create_dir_all(curl.parent().unwrap()).unwrap();
+    std::fs::write(
+        &curl,
+        "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *RT-OLD*) printf '{\"access_token\":\"AT-NEW\",\"refresh_token\":\"RT-NEW\",\"expires_in\":28800}\\n200' ;;\n  *) exit 7 ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(sink.clone());
+    let (child, port) = start_proxy_with_env(
+        root.path(),
+        &upstream,
+        &[],
+        &[("SWAPDEX_CURL", curl.to_str().unwrap())],
+    );
+    let proxy = ReapedChild::new(child);
+    let body = post_through(port, "{\"turn\":1}");
+    let output = proxy.stop_with_stdout();
+    assert_eq!(
+        auths(&sink),
+        vec!["Bearer AT-NEW".to_string()],
+        "the turn was not served on the renewed slot: {body}\n{output}"
+    );
+}
+
 /// Choosing the next account must not renew the accounts it does not choose.
 /// The candidate check renewed every idle Claude slot whose access token had
 /// lapsed - an idle account's normal state since keep-alive renews by the
