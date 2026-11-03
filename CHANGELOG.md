@@ -4,6 +4,16 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`swapdex shim` puts the shim back in front from a shell without `claude`
+  on PATH.** `doctor` names a later `~/.zshrc` line that puts another `claude`
+  or `codex` ahead of the shim, from any shell, and says `swapdex shim` fixes
+  it. Run where neither is on PATH, as over `ssh host swapdex shim`, the
+  command stopped with "install Claude Code or Codex" before it reached the
+  profile. It now keeps the shims it installed earlier and still adds their
+  line again at the end. With no shim installed, it stops as before.
+
 ## 0.167.34
 
 - **The status bar names a Claude sign-in that ends soon.** `ls` and

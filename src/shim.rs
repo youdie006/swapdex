@@ -36,6 +36,12 @@ pub fn shim_path_for(paths: &Paths, tool: &str) -> PathBuf {
     paths.store_dir().join("bin").join(bin)
 }
 
+/// `tool`'s shim when one swapdex wrote is already in place.
+pub fn installed_shim(paths: &Paths, tool: &str) -> Option<PathBuf> {
+    let shim = shim_path_for(paths, tool);
+    is_our_shim(&shim).then_some(shim)
+}
+
 /// Single-quote a path for safe embedding in the /bin/sh shim script.
 fn sh_quote(p: &Path) -> String {
     let s = p.to_string_lossy();

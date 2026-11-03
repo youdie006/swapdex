@@ -1300,6 +1300,81 @@ fn shim_moves_back_ahead_of_a_later_profile_line_that_shadows_it() {
     );
 }
 
+/// doctor names a shadowing profile line from any shell, ssh included, and its
+/// fix is `swapdex shim`. With no `claude` or `codex` on that shell's PATH the
+/// command used to stop before reaching the profile; the installed shims are
+/// still there, so it can still put their line last.
+#[test]
+fn shim_repairs_the_profile_from_a_shell_without_claude_on_path() {
+    let root = tempfile::tempdir().unwrap();
+    let local = root.path().join(".local/bin");
+    std::fs::create_dir_all(&local).unwrap();
+    for tool in ["claude", "codex"] {
+        std::fs::write(local.join(tool), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(local.join(tool), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let shim_dir = root.path().join(".local/share/swapdex/bin");
+    let swapdex = |path: &str| {
+        let out = Command::new(bin())
+            .arg("shim")
+            .env("SWAPDEX_ROOT", root.path())
+            .env("PATH", path)
+            .env("HOME", root.path())
+            .env("SHELL", "/bin/zsh")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.code(), said)
+    };
+
+    // A file at the shim's path that swapdex did not write is not a shim to keep.
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    std::fs::write(shim_dir.join("claude"), "#!/bin/sh\n").unwrap();
+    let (code, said) = swapdex("/usr/bin:/bin");
+    assert_eq!(code, Some(1), "{said}");
+    let profile = root.path().join(".zshrc");
+    assert!(!profile.exists(), "{said}");
+
+    let (code, said) = swapdex(&format!("{}:/usr/bin:/bin", local.display()));
+    assert_eq!(code, Some(0), "{said}");
+    let mut zshrc = std::fs::read_to_string(&profile).unwrap();
+    zshrc.push_str("\n# Added by another installer\nexport PATH=\"$HOME/.local/bin:$PATH\"\n");
+    std::fs::write(&profile, &zshrc).unwrap();
+    let shims = |tool: &str| std::fs::read(shim_dir.join(tool)).unwrap();
+    let (claude_shim, codex_shim) = (shims("claude"), shims("codex"));
+
+    let (code, said) = swapdex("/usr/bin:/bin");
+    assert_eq!(code, Some(0), "{said}");
+    let repaired = std::fs::read_to_string(&profile).unwrap();
+    let last_path_line = repaired
+        .lines()
+        .rev()
+        .find(|l| l.contains("PATH="))
+        .unwrap();
+    assert!(
+        last_path_line.contains(&shim_dir.display().to_string()),
+        "the shim's line is not last again:\n{said}\n{repaired}"
+    );
+    assert!(
+        said.contains("another `claude` or `codex` ahead of the shim"),
+        "the repair does not name both kept shims:\n{said}"
+    );
+    assert_eq!(
+        shims("claude"),
+        claude_shim,
+        "the claude shim was rewritten"
+    );
+    assert_eq!(shims("codex"), codex_shim, "the codex shim was rewritten");
+    let (code, said) = swapdex("/usr/bin:/bin");
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&profile).unwrap(),
+        repaired,
+        "a second run changed the profile again"
+    );
+}
+
 /// PATH entries may be relative to the shell that installs the shim. The shim
 /// runs later from arbitrary project directories, so the persisted client path
 /// must be anchored at installation time while leaving a stable symlink intact.

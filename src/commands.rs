@@ -6550,12 +6550,19 @@ pub fn install_shim(paths: &Paths) -> Result<i32> {
 fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
     let shim_dir = crate::shim::shim_bin_dir(paths);
     let mut installed = Vec::new();
+    // Shims left as they are because this shell has no real binary to wrap,
+    // as over ssh. Their PATH line can still be put right below.
+    let mut kept = Vec::new();
 
     if requested.contains(&"claude-code") {
         match crate::shim::install_claude(paths)? {
             Some((shim, _)) => {
                 println!("installed the claude shim at {}", shim.display());
                 installed.push("claude");
+            }
+            None if crate::shim::installed_shim(paths, "claude-code").is_some() => {
+                println!("  (no `claude` on PATH - kept the installed claude shim)");
+                kept.push("claude");
             }
             None => println!("  (no `claude` on PATH - skipped its shim)"),
         }
@@ -6566,10 +6573,14 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
                 println!("installed the codex shim at {}", shim.display());
                 installed.push("codex");
             }
+            None if crate::shim::installed_shim(paths, "codex").is_some() => {
+                println!("  (no `codex` on PATH - kept the installed codex shim)");
+                kept.push("codex");
+            }
             None => println!("  (no `codex` on PATH - skipped its shim)"),
         }
     }
-    if installed.is_empty() {
+    if installed.is_empty() && kept.is_empty() {
         eprintln!(
             "swapdex: no `claude` or `codex` executable found on PATH - install Claude Code or \
              Codex, then rerun `swapdex shim`"
@@ -6605,6 +6616,7 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
         }
     }
 
+    let in_place: Vec<&str> = installed.iter().chain(&kept).copied().collect();
     // Put it on PATH ourselves. Leaving that to the user is how the shim ends up
     // installed but never reached: `swapdex use` then flips a pointer nothing
     // reads, and the switch appears to work while changing nothing.
@@ -6620,7 +6632,7 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
                 .map(str::to_string)
                 .collect();
             let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
-            for binary in &installed {
+            for binary in &in_place {
                 match crate::shim::path_verdict_for(&shim_dir, &refs, binary) {
                     crate::shim::PathVerdict::Wins => println!(
                         "  it is already on your PATH - a plain `{binary}` goes through its shim"
@@ -6645,7 +6657,7 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
                 "  added it to {} - open a new terminal (or `source` that file) and a plain \
                  {} goes through the installed shim",
                 crate::util::redact_path(&profile.display().to_string()),
-                installed
+                in_place
                     .iter()
                     .map(|binary| format!("`{binary}`"))
                     .collect::<Vec<_>>()
@@ -6656,7 +6668,7 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
             println!(
                 "  a later line in {p} put another {} ahead of the shim, so swapdex's line \
                  was added again at the end of {p} - open a new terminal",
-                installed
+                in_place
                     .iter()
                     .map(|binary| format!("`{binary}`"))
                     .collect::<Vec<_>>()
