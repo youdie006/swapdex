@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.36
 
 - **A lapsed Claude login renews while a current Claude Code session holds
   it.** swapdex renews alongside an open session only when that session's
