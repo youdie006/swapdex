@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.35
 
 - **`swapdex shim` puts the shim back in front from a shell without `claude`
   on PATH.** `doctor` names a later `~/.zshrc` line that puts another `claude`
