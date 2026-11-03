@@ -1067,7 +1067,7 @@ fn claude_holder_uncoordinated(
         if !same_store
             || process.claude_keychain_key != authority.securestorage_key
             || !same_identity
-            || !process.supports_refresh_locks
+            || !process.supports_refresh_locks()
         {
             return true;
         }

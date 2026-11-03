@@ -1520,6 +1520,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "memchr",
  "ratatui",
  "rcgen",
  "rusqlite",

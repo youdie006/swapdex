@@ -863,6 +863,106 @@ fn unproved_native_version_still_defers_same_store_refresh() {
     assert_eq!(calls(root.path()), 0);
 }
 
+/// A real executable where the native installer puts a release, carrying
+/// Claude's refresh lock settings or not.
+fn native_release(root: &Path, version: &str, lock_settings: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let versions = root.join("versions");
+    std::fs::create_dir_all(&versions).unwrap();
+    let path = versions.join(version);
+    let mut bytes = std::fs::read("/bin/sh").unwrap();
+    if lock_settings {
+        bytes.extend_from_slice(
+            br#"lockfilePath:Wp(e,".oauth_refresh.lock"),realpath:!1,stale:60000,update:5000,"#,
+        );
+    }
+    std::fs::write(&path, bytes).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn hold_slot(program: &Path, home: &Path, slot: &Path) -> ReapedChild {
+    let held = ReapedChild(
+        Command::new(program)
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
+            .env("HOME", home)
+            .env("CLAUDE_CONFIG_DIR", slot)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(Path::new(&format!("/proc/{}/environ", held.0.id())));
+    held
+}
+
+#[test]
+fn a_current_release_with_claudes_lock_settings_renews_a_held_slot() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "current-native-release");
+    let curl = make_rotating_curl(root.path());
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+    // The installed `claude` command links to the versioned file.
+    let link = root.path().join("claude");
+    std::os::unix::fs::symlink(native_release(root.path(), "2.1.317", true), &link).unwrap();
+    let held = hold_slot(&link, root.path(), &slot);
+
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Ok(RefreshOutcome::Renewed)
+    );
+    expire_claude_file(&slot);
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Ok(RefreshOutcome::Renewed)
+    );
+    assert_eq!(
+        claude_file(&slot)["claudeAiOauth"]["refreshToken"],
+        "NEW-RT-2"
+    );
+    assert_eq!(calls(root.path()), 2);
+    assert!(Path::new(&format!("/proc/{}", held.0.id())).exists());
+}
+
+#[test]
+fn a_release_running_under_its_version_number_renews_a_held_slot() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "version-named-native");
+    let curl = make_rotating_curl(root.path());
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+    // Started by its resolved path, a release runs as `2.1.317`, not `claude`.
+    let release = native_release(root.path(), "2.1.317", true);
+    let _held = hold_slot(&release, root.path(), &slot);
+
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Ok(RefreshOutcome::Renewed)
+    );
+    assert_eq!(calls(root.path()), 1);
+}
+
+#[test]
+fn a_release_without_claudes_lock_settings_still_defers() {
+    let _serial = test_lock();
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_claude(root.path(), "release-without-lock-settings");
+    let curl = make_curl(root.path(), false, 200);
+    let _env = fixture_env(root.path(), &curl);
+    let paths = Paths::rooted(root.path());
+    let release = native_release(root.path(), "2.1.317", false);
+    let _held = hold_slot(&release, root.path(), &slot);
+
+    assert_eq!(
+        refresh_slot(&paths, &slot, now_ms()),
+        Err(RefreshError::InUse)
+    );
+    assert_eq!(calls(root.path()), 0);
+}
+
 #[test]
 fn native_refresh_lock_blocks_oauth_until_it_is_released() {
     let _serial = test_lock();

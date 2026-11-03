@@ -4,6 +4,22 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A lapsed Claude login renews while a current Claude Code session holds
+  it.** swapdex renews alongside an open session only when that session's
+  Claude Code takes the same refresh locks, and it trusted only releases
+  2.1.271-2.1.274. Every later release counted as unverified, so with any
+  session open in the account - a menu bar app that starts `claude` every
+  five minutes is enough - renewal waited for an exit that never came, and
+  each turn was refused until the login ran out. A release after 2.1.274 now
+  counts when its executable carries Claude's lock settings: the
+  `.oauth_refresh.lock` directory with the 60 s stale and 5 s update timing
+  swapdex follows. 2.1.312, 2.1.314, 2.1.316 and 2.1.317 each renewed twice
+  under a live session. A release run as its version number (`2.1.317`)
+  rather than `claude` is now recognised as Claude Code too. A release
+  without those settings still waits.
+
 ## 0.167.35
 
 - **`swapdex shim` puts the shim back in front from a shell without `claude`

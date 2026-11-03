@@ -239,7 +239,7 @@ pub fn resolve(paths: &Paths, dir: &Path, tool: &str, now_ms: i64) -> Option<Liv
             .cmp(&right.source_dir)
             .then_with(|| left.identity_path.cmp(&right.identity_path))
     });
-    processes.dedup();
+    processes.dedup_by(|later, kept| later.same_login(kept));
 
     let mut winner: Option<LiveLogin> = None;
     for process in processes {

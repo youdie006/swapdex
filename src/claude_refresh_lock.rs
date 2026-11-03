@@ -1,4 +1,4 @@
-//! Claude Code 2.1.271–2.1.274 refresh exclusion uses two directory locks.
+//! Claude Code's refresh exclusion (2.1.271 onward) uses two directory locks.
 //! This guard participates in that protocol, including 60-second stale lock
 //! recovery after a crashed owner. Like the native protocol, final path check
 //! and rmdir are not atomic against an adversarial concurrent replacement.

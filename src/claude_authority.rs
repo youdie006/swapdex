@@ -321,7 +321,9 @@ pub(crate) fn reconcile_live(paths: &Paths, slot: &Path) -> anyhow::Result<bool>
         return Ok(false);
     }
     processes.sort_by(|a, b| a.source_dir.cmp(&b.source_dir));
-    processes.dedup();
+    processes.dedup_by(|later, kept| {
+        later.same_login(kept) && later.supports_refresh_locks() == kept.supports_refresh_locks()
+    });
     let slot_credential = crate::adapters::claude::slot_credential(slot)
         .map_err(|_| anyhow::anyhow!("cannot read the selected Claude slot"))?;
     let shared = refresh_fingerprint(slot_credential.bytes());
@@ -359,7 +361,7 @@ pub(crate) fn bind_to_native(
     slot: &Path,
     native: &crate::proc::NativeLoginProcess,
 ) -> anyhow::Result<bool> {
-    if !native.supports_refresh_locks {
+    if !native.supports_refresh_locks() {
         return Ok(false);
     }
     if record(slot)?.is_some() {
@@ -503,7 +505,8 @@ mod tests {
                     source_dir,
                     identity_path,
                     claude_keychain_key: None,
-                    supports_refresh_locks: true,
+                    executable: None,
+                    test_refresh_locks: true,
                 },
             }
         }
@@ -633,7 +636,7 @@ mod tests {
     #[test]
     fn an_unverified_native_version_cannot_establish_authority() {
         let mut f = Fixture::new();
-        f.native.supports_refresh_locks = false;
+        f.native.test_refresh_locks = false;
         assert!(!bind_to_native(&f.paths, &f.slot, &f.native).unwrap());
         assert!(!f.slot.join(RECORD).exists());
     }

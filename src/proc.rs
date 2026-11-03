@@ -371,8 +371,9 @@ const CODEX_SLOT: SlotVars = SlotVars {
 /// This is intentionally narrower than [`running_config_dirs`]. The refresh
 /// guard includes children that inherit a slot variable because they can still
 /// hold a retired token in memory. A native login authority must itself have
-/// the exact `claude` or `codex` process name, and must not be using an
-/// alternate environment credential.
+/// the exact `claude` or `codex` process name - or be a native Claude release
+/// running as its version number - and must not be using an alternate
+/// environment credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NativeLoginProcess {
     pub(crate) source_dir: std::path::PathBuf,
@@ -380,8 +381,30 @@ pub(crate) struct NativeLoginProcess {
     /// Claude's raw secure-storage key. `None` is the bare Keychain service;
     /// `Some` is hashed by the adapter. Unused for Codex.
     pub(crate) claude_keychain_key: Option<String>,
+    /// The running file, where the platform names it.
+    pub(crate) executable: Option<std::path::PathBuf>,
+    /// A sandboxed fixture standing in for a verified native release.
+    pub(crate) test_refresh_locks: bool,
+}
+
+impl NativeLoginProcess {
     /// Only native releases whose lock and reread protocol has been verified.
-    pub(crate) supports_refresh_locks: bool,
+    /// The answer can mean reading the whole executable, so only a renewal or
+    /// binding decision asks.
+    pub(crate) fn supports_refresh_locks(&self) -> bool {
+        self.test_refresh_locks
+            || self
+                .executable
+                .as_deref()
+                .is_some_and(known_refresh_lock_executable)
+    }
+
+    /// Both read the same login, whichever release each runs.
+    pub(crate) fn same_login(&self, other: &Self) -> bool {
+        self.source_dir == other.source_dir
+            && self.identity_path == other.identity_path
+            && self.claude_keychain_key == other.claude_keychain_key
+    }
 }
 
 #[derive(Default)]
@@ -477,7 +500,8 @@ fn native_process_from_env(
         source_dir,
         identity_path,
         claude_keychain_key,
-        supports_refresh_locks: paths.sandboxed()
+        executable: None,
+        test_refresh_locks: paths.sandboxed()
             && text
                 .split([sep, '\n'])
                 .any(|field| field == "SWAPDEX_TEST_NATIVE_REFRESH_LOCKS=1"),
@@ -485,17 +509,13 @@ fn native_process_from_env(
 }
 
 fn known_refresh_lock_executable(path: &std::path::Path) -> bool {
-    let verified_version = |version: Option<&str>| {
-        matches!(version, Some("2.1.271" | "2.1.272" | "2.1.273" | "2.1.274"))
-    };
     // Standalone native installs retain their release number as the basename.
-    if verified_version(path.file_name().and_then(|name| name.to_str()))
-        && path
-            .parent()
-            .and_then(|p| p.file_name())
-            .is_some_and(|p| p == "versions")
+    if path
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|p| p == "versions")
     {
-        return true;
+        return refresh_lock_release(path.file_name().and_then(|name| name.to_str()), path);
     }
     // The native npm package uses bin/claude.exe on macOS as well as Linux.
     // Node wrappers and unrelated executables never inherit this capability.
@@ -523,23 +543,109 @@ fn known_refresh_lock_executable(path: &std::path::Path) -> bool {
     };
     manifest["name"] == "@anthropic-ai/claude-code"
         && manifest["bin"]["claude"] == "bin/claude.exe"
-        && verified_version(manifest["version"].as_str())
+        && refresh_lock_release(manifest["version"].as_str(), path)
+}
+
+/// 2.1.271-2.1.274 were checked against the stock binaries. A later release
+/// counts while its executable still spells Claude's lock options the same
+/// way: releases ship faster than a list can follow, and a list that had
+/// fallen behind deferred every renewal while any session was open.
+fn refresh_lock_release(version: Option<&str>, executable: &std::path::Path) -> bool {
+    match version.and_then(claude_release) {
+        Some((2, 1, 271..=274)) => true,
+        Some(release) if release > (2, 1, 274) => carries_lock_settings(executable),
+        _ => false,
+    }
+}
+
+fn claude_release(version: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = version.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    });
+    let release = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(release)
+}
+
+/// Started by its resolved path, a native release runs as `2.1.317` rather
+/// than `claude`. Only the installer's `versions/<that number>` file counts.
+fn runs_as_its_release(comm: &str, executable: &std::path::Path) -> bool {
+    executable.file_name().is_some_and(|name| name == comm)
+        && executable
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|p| p == "versions")
+}
+
+/// The lock directory, its unresolved path and the 60 s stale / 5 s update
+/// timing `claude_refresh_lock` mirrors, as Claude's executable spells them.
+const LOCK_SETTINGS: &[u8] = br#"".oauth_refresh.lock"),realpath:!1,stale:60000,update:5000"#;
+const SCAN_CHUNK: usize = 1 << 20;
+
+/// Scanned once per executable file in a process.
+fn carries_lock_settings(executable: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    type FileKey = (u64, u64, u64, i64, i64);
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<FileKey, bool>>> =
+        std::sync::OnceLock::new();
+    let Ok(meta) = std::fs::metadata(executable) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let key = (
+        meta.dev(),
+        meta.ino(),
+        meta.size(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+    );
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *seen
+        .entry(key)
+        .or_insert_with(|| file_contains(executable, LOCK_SETTINGS))
+}
+
+fn file_contains(path: &std::path::Path, needle: &[u8]) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let finder = memchr::memmem::Finder::new(needle);
+    let overlap = needle.len().saturating_sub(1);
+    let mut window = Vec::with_capacity(overlap + SCAN_CHUNK);
+    loop {
+        let before = window.len();
+        if (&mut file)
+            .take(SCAN_CHUNK as u64)
+            .read_to_end(&mut window)
+            .is_err()
+            || window.len() == before
+        {
+            return false;
+        }
+        if finder.find(&window).is_some() {
+            return true;
+        }
+        window.drain(..window.len().saturating_sub(overlap));
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn macos_refresh_locks_supported(pid: &str) -> bool {
-    let Ok(pid) = pid.parse::<i32>() else {
-        return false;
-    };
+fn macos_executable(pid: &str) -> Option<std::path::PathBuf> {
+    let pid = pid.parse::<i32>().ok()?;
     let mut bytes = vec![0u8; 4096];
     let count = unsafe { libc::proc_pidpath(pid, bytes.as_mut_ptr().cast(), bytes.len() as u32) };
     if count <= 0 {
-        return false;
+        return None;
     }
     let path = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
-    std::str::from_utf8(path)
-        .ok()
-        .is_some_and(|path| known_refresh_lock_executable(std::path::Path::new(path)))
+    std::str::from_utf8(path).ok().map(std::path::PathBuf::from)
 }
 
 #[cfg(test)]
@@ -565,6 +671,93 @@ mod secure_storage_root_tests {
         .unwrap();
         assert!(!known_refresh_lock_executable(&binary));
         assert!(!known_refresh_lock_executable(&root.path().join("2.1.274")));
+    }
+
+    /// Claude 2.1.317's lock options as its executable spells them.
+    const NATIVE_LOCK_OPTIONS: &[u8] =
+        br#"lockfilePath:Wp(e,".oauth_refresh.lock"),realpath:!1,stale:60000,update:5000,"#;
+
+    #[test]
+    fn a_later_release_participates_while_it_carries_claudes_lock_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let versions = root.path().join("versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        let release = |version: &str, body: &[u8]| {
+            let path = versions.join(version);
+            std::fs::write(&path, [b"native ".as_slice(), body, b" rest"].concat()).unwrap();
+            path
+        };
+        assert!(known_refresh_lock_executable(&release(
+            "2.1.317",
+            NATIVE_LOCK_OPTIONS
+        )));
+        assert!(!known_refresh_lock_executable(&release(
+            "2.1.318",
+            br#"lockfilePath:Wp(e,".oauth_refresh.lock"),realpath:!1,stale:30000,update:5000,"#
+        )));
+        assert!(!known_refresh_lock_executable(&release(
+            "2.1.319",
+            b"fixture-native"
+        )));
+        // Older than any checked release, and not a release number at all.
+        assert!(!known_refresh_lock_executable(&release(
+            "2.1.270",
+            NATIVE_LOCK_OPTIONS
+        )));
+        assert!(!known_refresh_lock_executable(&release(
+            "latest",
+            NATIVE_LOCK_OPTIONS
+        )));
+        let elsewhere = root.path().join("bin");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("2.1.317"), NATIVE_LOCK_OPTIONS).unwrap();
+        assert!(!known_refresh_lock_executable(&elsewhere.join("2.1.317")));
+
+        let package = root.path().join("node_modules/@anthropic-ai/claude-code");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@anthropic-ai/claude-code","version":"2.1.317","bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .unwrap();
+        let binary = package.join("bin/claude.exe");
+        std::fs::write(&binary, b"fixture-native").unwrap();
+        assert!(!known_refresh_lock_executable(&binary));
+        std::fs::write(
+            &binary,
+            [b"npm native ".as_slice(), NATIVE_LOCK_OPTIONS].concat(),
+        )
+        .unwrap();
+        assert!(known_refresh_lock_executable(&binary));
+    }
+
+    #[test]
+    fn only_the_installers_release_file_runs_as_its_version_number() {
+        let path = std::path::Path::new;
+        assert!(runs_as_its_release("2.1.317", path("/x/versions/2.1.317")));
+        assert!(!runs_as_its_release("2.1.317", path("/x/bin/2.1.317")));
+        assert!(!runs_as_its_release("2.1.317", path("/x/versions/2.1.316")));
+    }
+
+    #[test]
+    fn lock_settings_split_across_reads_are_still_found() {
+        let root = tempfile::tempdir().unwrap();
+        let versions = root.path().join("versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        // Only the last byte past the first read, only the first byte
+        // before it, and a straddle at the second read.
+        let starts = [
+            SCAN_CHUNK + 1 - LOCK_SETTINGS.len(),
+            SCAN_CHUNK - 1,
+            2 * SCAN_CHUNK - 7,
+        ];
+        for (patch, start) in starts.into_iter().enumerate() {
+            let mut bytes = vec![b'.'; start];
+            bytes.extend_from_slice(LOCK_SETTINGS);
+            let path = versions.join(format!("2.1.{}", 400 + patch));
+            std::fs::write(&path, bytes).unwrap();
+            assert!(known_refresh_lock_executable(&path), "start {start}");
+        }
     }
 
     #[test]
@@ -713,18 +906,25 @@ pub(crate) fn running_native_login_processes(
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
             let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-            if comm.trim() != vars.comm {
+            let comm = comm.trim();
+            if comm != vars.comm && (tool != "claude-code" || claude_release(comm).is_none()) {
+                continue;
+            }
+            let executable = std::fs::read_link(entry.path().join("exe")).ok();
+            if comm != vars.comm
+                && !executable
+                    .as_deref()
+                    .is_some_and(|path| runs_as_its_release(comm, path))
+            {
                 continue;
             }
             let Ok(bytes) = std::fs::read(entry.path().join("environ")) else {
                 continue;
             };
             let text = String::from_utf8_lossy(&bytes);
-            if let Some(mut process) =
-                native_process_from_env(paths, tool, comm.trim(), &text, '\0')
+            if let Some(mut process) = native_process_from_env(paths, tool, vars.comm, &text, '\0')
             {
-                process.supports_refresh_locks |= std::fs::read_link(entry.path().join("exe"))
-                    .is_ok_and(|path| known_refresh_lock_executable(&path));
+                process.executable = executable;
                 processes.push(process);
             }
         }
@@ -735,7 +935,15 @@ pub(crate) fn running_native_login_processes(
     #[cfg(target_os = "macos")]
     {
         for (pid, comm) in comms {
-            if comm != vars.comm {
+            if comm != vars.comm && (tool != "claude-code" || claude_release(&comm).is_none()) {
+                continue;
+            }
+            let executable = macos_executable(&pid);
+            if comm != vars.comm
+                && !executable
+                    .as_deref()
+                    .is_some_and(|path| runs_as_its_release(&comm, path))
+            {
                 continue;
             }
             let Some(bytes) = pid.parse::<i32>().ok().and_then(macos_process_environ) else {
@@ -744,8 +952,8 @@ pub(crate) fn running_native_login_processes(
             let Ok(text) = std::str::from_utf8(&bytes) else {
                 continue;
             };
-            if let Some(mut process) = native_process_from_env(paths, tool, &comm, text, '\0') {
-                process.supports_refresh_locks |= macos_refresh_locks_supported(&pid);
+            if let Some(mut process) = native_process_from_env(paths, tool, vars.comm, text, '\0') {
+                process.executable = executable;
                 processes.push(process);
             }
         }
