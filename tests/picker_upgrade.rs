@@ -5,9 +5,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 struct Picker {
     child: Child,
@@ -103,9 +103,9 @@ impl Drop for Picker {
     }
 }
 
-fn exercise_picker(unlink: bool) {
-    let root = tempfile::tempdir().unwrap();
-    let store = root.path().join(".local/share/swapdex");
+/// One signed-in Claude slot, and a usage endpoint that is always busy.
+fn seed(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let store = root.join(".local/share/swapdex");
     let slot = store.join("slots/rnd");
     std::fs::create_dir_all(&slot).unwrap();
     std::fs::write(
@@ -126,29 +126,40 @@ fn exercise_picker(unlink: bool) {
         .unwrap(),
     )
     .unwrap();
-    let curl = root.path().join("fake-curl");
+    let curl = root.join("fake-curl");
     std::fs::write(&curl, "#!/bin/sh\ncat >/dev/null\nprintf '{}\\n503'\n").unwrap();
     std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let binary = root.path().join("swapdex");
+    (store, slot, curl)
+}
+
+/// Start the picker from a copy of the binary, so a test can remove it.
+fn launch(root: &Path, curl: &Path) -> (Picker, PathBuf) {
+    let binary = root.join("swapdex");
     // `pre_exec` makes spawn fork. A parallel test can inherit the writable
     // descriptor from this copy until it execs, making our exec fail with
     // ETXTBSY even after fs::copy has returned. Protect only copy + spawn;
-    // both picker scenarios can still exercise their terminals concurrently.
+    // the picker scenarios can still exercise their terminals concurrently.
     static COPY_AND_START: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let mut picker = {
-        let _launch = COPY_AND_START.lock().unwrap();
-        std::fs::copy(env!("CARGO_BIN_EXE_swapdex"), &binary).unwrap();
-        Picker::start(&binary, root.path(), &curl)
-    };
+    let _launch = COPY_AND_START.lock().unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_swapdex"), &binary).unwrap();
+    (Picker::start(&binary, root, curl), binary)
+}
+
+fn exercise_picker(unlink: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let (store, slot, curl) = seed(root.path());
+    let (mut picker, binary) = launch(root.path(), &curl);
     picker.wait_until(|s| s.contains("rnd@example.com"));
     if unlink {
         std::fs::remove_file(&binary).unwrap();
     }
     picker.terminal.write_all(b"\r").unwrap();
     if unlink {
-        picker.wait_until(|s| s.contains("reopen swapdex") || s.contains("os error 2"));
+        picker.wait_until(|s| s.contains("failed: close this screen") || s.contains("os error 2"));
         assert!(
-            picker.output.contains("reopen swapdex"),
+            picker
+                .output
+                .contains("failed: close this screen and reopen swapdex"),
             "an updated picker must explain how to recover:\n{}",
             picker.output
         );
@@ -172,4 +183,34 @@ fn updated_picker_explains_restart_without_changing_the_selected_account() {
 #[test]
 fn freshly_opened_picker_can_select_the_account() {
     exercise_picker(false);
+}
+
+/// Nothing pressed: the usage bars refresh on their own, and every refresh runs
+/// the executable npm just removed. The bars kept their last numbers with no
+/// age and no reason, and never moved again.
+#[test]
+fn updated_picker_says_why_its_usage_stopped_refreshing() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, _, curl) = seed(root.path());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    std::fs::write(
+        store.join("quota-cache.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "rnd": {"seven_d": 37.0, "seven_d_reset": now + 86_400, "at": now - 600}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (mut picker, binary) = launch(root.path(), &curl);
+    std::fs::remove_file(&binary).unwrap();
+    picker.wait_until(|s| s.contains("rnd@example.com") && s.contains("reopen swapdex"));
+    assert!(
+        picker.output.contains("as of 10m"),
+        "the remembered numbers must carry their age:\n{}",
+        picker.output
+    );
+    assert!(!picker.output.contains("failed: close this screen"));
 }

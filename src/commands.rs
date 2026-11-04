@@ -4192,6 +4192,111 @@ fn merge_cached_claude_usage(
     }
 }
 
+/// Claude's rows for the dashboard: one `quota --json` run, with the readings
+/// remembered on disk filling whatever it could not report.
+fn claude_dashboard_usage(
+    reading: std::io::Result<std::process::Output>,
+    cached: crate::quota_cache::Cache,
+) -> Vec<(String, crate::tui::Usage)> {
+    // A read that could not start, or ran and printed no answer, is a refresh
+    // that failed: show what was read before, with its age and the reason. An
+    // open dashboard whose executable an upgrade replaced kept its last
+    // numbers with neither, and they never moved again.
+    let (v, failed) = match reading {
+        Ok(out) => match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+            Ok(v) => (v, None),
+            Err(_) => {
+                let said = String::from_utf8_lossy(&out.stderr);
+                let why = match said.lines().map(str::trim).find(|l| !l.is_empty()) {
+                    Some(line) => format!("usage read failed: {line}"),
+                    None => format!("usage read failed ({})", out.status),
+                };
+                (serde_json::Value::Null, Some(why))
+            }
+        },
+        Err(error) => (serde_json::Value::Null, Some(error.to_string())),
+    };
+    // Accept an array of account objects or {"accounts": [...]}.
+    let arr = v
+        .as_array()
+        .cloned()
+        .or_else(|| v.get("accounts").and_then(|a| a.as_array()).cloned())
+        .unwrap_or_default();
+    let mut claude: Vec<(String, crate::tui::Usage)> = arr
+        .iter()
+        .filter_map(|acc| {
+            // `name` may carry an " (active)" marker; strip it to match Row.name.
+            let name = acc
+                .get("name")?
+                .as_str()?
+                .trim_end_matches(" (active)")
+                .to_string();
+            let win = |key: &str| -> (Option<f64>, Option<i64>) {
+                let w = acc.get(key);
+                (
+                    w.and_then(|w| w.get("used_pct")).and_then(|v| v.as_f64()),
+                    w.and_then(|w| w.get("resets_at")).and_then(|v| v.as_i64()),
+                )
+            };
+            let (five_h, five_h_reset) = win("five_hour");
+            let (seven_d, seven_d_reset) = win("seven_day");
+            // No numbers is still worth a row: empty tracks alone cannot
+            // say whether the account was never asked, could not answer,
+            // or has nothing left, and that ambiguity is exactly what
+            // makes a healthy account look broken. Carry the reason.
+            let note = match acc.get("status").and_then(|s| s.as_str()) {
+                Some("ok") | None => None,
+                Some("throttled") => Some("usage lookup limited - retrying".to_string()),
+                Some("unavailable") => acc
+                    .get("detail")
+                    .and_then(|detail| detail.as_str())
+                    .map(|detail| format!("usage lookup coordination unavailable: {detail}")),
+                Some("expired") => Some("login expired".to_string()),
+                Some("offline") => acc
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    // The long-form fix belongs in `swapdex quota`; the
+                    // row has one column, so keep the first clause.
+                    .map(|d| d.split(" - ").next().unwrap_or(d).to_string()),
+                Some(other) => Some(other.to_string()),
+            };
+            if five_h.is_none() && seven_d.is_none() && note.is_none() {
+                return None;
+            }
+            Some((
+                name,
+                crate::tui::Usage {
+                    five_h,
+                    five_h_reset,
+                    seven_d,
+                    seven_d_reset,
+                    // A reused reading carries its age; a live one has none.
+                    observed_at: acc.get("observed_at").and_then(|v| v.as_i64()),
+                    note,
+                    on_credits: acc
+                        .get("on_credits")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    ident: None,
+                },
+            ))
+        })
+        .collect();
+    // Fill the gaps from what was read before. The usage endpoint
+    // rate-limits when several accounts are asked in a row, and an account
+    // that could not be read this minute is not an account with no quota -
+    // blanking it looks exactly like a broken one. The reading is recorded
+    // by `quota` itself, where it is taken; a run that got nothing has
+    // nothing to record and must not overwrite what it failed to refresh.
+    merge_cached_claude_usage(&mut claude, cached);
+    if let Some(why) = failed {
+        for (_, u) in &mut claude {
+            u.note = Some(why.clone());
+        }
+    }
+    claude
+}
+
 /// The persistent full-screen ui: one alternate-screen session, everything
 /// inside it. Switch/restore run this same binary as a subprocess (output
 /// condensed into the status line - no second switching implementation);
@@ -4229,86 +4334,10 @@ fn ui_tui(paths: &Paths) -> Result<i32> {
         // another; a reading one of them took within the refresh interval is
         // the one this refresh would have got.
         let fresh = crate::tui::QUOTA_REFRESH_SECS.to_string();
-        let Ok(out) = crate::self_exe::output(&["quota", "--json", "--fresh-within", &fresh])
-        else {
-            return Vec::new();
-        };
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-            return Vec::new();
-        };
-        // Accept an array of account objects or {"accounts": [...]}.
-        let arr = v
-            .as_array()
-            .cloned()
-            .or_else(|| v.get("accounts").and_then(|a| a.as_array()).cloned())
-            .unwrap_or_default();
-        let mut claude: Vec<(String, crate::tui::Usage)> = arr
-            .iter()
-            .filter_map(|acc| {
-                // `name` may carry an " (active)" marker; strip it to match Row.name.
-                let name = acc
-                    .get("name")?
-                    .as_str()?
-                    .trim_end_matches(" (active)")
-                    .to_string();
-                let win = |key: &str| -> (Option<f64>, Option<i64>) {
-                    let w = acc.get(key);
-                    (
-                        w.and_then(|w| w.get("used_pct")).and_then(|v| v.as_f64()),
-                        w.and_then(|w| w.get("resets_at")).and_then(|v| v.as_i64()),
-                    )
-                };
-                let (five_h, five_h_reset) = win("five_hour");
-                let (seven_d, seven_d_reset) = win("seven_day");
-                // No numbers is still worth a row: empty tracks alone cannot
-                // say whether the account was never asked, could not answer,
-                // or has nothing left, and that ambiguity is exactly what
-                // makes a healthy account look broken. Carry the reason.
-                let note = match acc.get("status").and_then(|s| s.as_str()) {
-                    Some("ok") | None => None,
-                    Some("throttled") => Some("usage lookup limited - retrying".to_string()),
-                    Some("unavailable") => acc
-                        .get("detail")
-                        .and_then(|detail| detail.as_str())
-                        .map(|detail| format!("usage lookup coordination unavailable: {detail}")),
-                    Some("expired") => Some("login expired".to_string()),
-                    Some("offline") => acc
-                        .get("detail")
-                        .and_then(|d| d.as_str())
-                        // The long-form fix belongs in `swapdex quota`; the
-                        // row has one column, so keep the first clause.
-                        .map(|d| d.split(" - ").next().unwrap_or(d).to_string()),
-                    Some(other) => Some(other.to_string()),
-                };
-                if five_h.is_none() && seven_d.is_none() && note.is_none() {
-                    return None;
-                }
-                Some((
-                    name,
-                    crate::tui::Usage {
-                        five_h,
-                        five_h_reset,
-                        seven_d,
-                        seven_d_reset,
-                        // A reused reading carries its age; a live one has none.
-                        observed_at: acc.get("observed_at").and_then(|v| v.as_i64()),
-                        note,
-                        on_credits: acc
-                            .get("on_credits")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        ident: None,
-                    },
-                ))
-            })
-            .collect();
-        // Fill the gaps from what was read before. The usage endpoint
-        // rate-limits when several accounts are asked in a row, and an account
-        // that could not be read this minute is not an account with no quota -
-        // blanking it looks exactly like a broken one. The reading is recorded
-        // by `quota` itself, where it is taken; a run that got nothing has
-        // nothing to record and must not overwrite what it failed to refresh.
-        merge_cached_claude_usage(&mut claude, crate::quota_cache::load(paths));
+        let mut claude = claude_dashboard_usage(
+            crate::self_exe::output(&["quota", "--json", "--fresh-within", &fresh]),
+            crate::quota_cache::load(paths),
+        );
         // Codex usage comes from two places, and a row takes whichever answers.
         //
         // The account itself answers per CREDENTIAL and names itself. That is
@@ -11504,6 +11533,73 @@ mod tests {
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|i| i.to_string()).collect()
+    }
+
+    /// An upgrade replaces the executable under an open dashboard, so every read
+    /// it starts fails to launch. The rows kept their last live numbers with no
+    /// age and no reason, retried every half second, and never moved again.
+    #[test]
+    fn a_dashboard_whose_reader_fails_shows_remembered_usage_and_why() {
+        use crate::quota_cache::Entry;
+        use std::os::unix::process::ExitStatusExt;
+
+        let cached = || {
+            [(
+                "kong".to_string(),
+                Entry {
+                    seven_d: Some(14.0),
+                    seven_d_reset: Some(1_794_207_600),
+                    at: 1_793_749_683,
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect()
+        };
+        let gone = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "close this screen and reopen swapdex; its executable is unavailable",
+        );
+        let no_json = std::process::Output {
+            status: std::process::ExitStatus::from_raw(101 << 8),
+            stdout: Vec::new(),
+            stderr: b"thread 'main' panicked\nnote: run with RUST_BACKTRACE=1\n".to_vec(),
+        };
+
+        for (reading, why) in [
+            (
+                Err(gone),
+                "close this screen and reopen swapdex; its executable is unavailable",
+            ),
+            (Ok(no_json), "usage read failed: thread 'main' panicked"),
+        ] {
+            let rows = super::claude_dashboard_usage(reading, cached());
+            assert_eq!(rows.len(), 1, "{why}");
+            let (name, u) = &rows[0];
+            assert_eq!(name, "kong");
+            assert_eq!(u.seven_d, Some(14.0), "{why}");
+            assert_eq!(u.seven_d_reset, Some(1_794_207_600), "{why}");
+            assert_eq!(
+                u.observed_at,
+                Some(1_793_749_683),
+                "the figures carry their age"
+            );
+            assert_eq!(u.note.as_deref(), Some(why));
+        }
+
+        // A read that answered is current: its numbers, no age, no reason.
+        let answered = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: br#"[{"name":"kong","status":"ok","seven_day":{"used_pct":15.0,"resets_at":1794207600}}]"#
+                .to_vec(),
+            stderr: Vec::new(),
+        };
+        let rows = super::claude_dashboard_usage(Ok(answered), cached());
+        assert_eq!(rows.len(), 1);
+        let (_, u) = &rows[0];
+        assert_eq!(u.seven_d, Some(15.0));
+        assert_eq!(u.observed_at, None);
+        assert_eq!(u.note, None);
     }
 
     #[test]

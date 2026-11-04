@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **An open dashboard keeps showing usage after swapdex is updated, and says
+  why it is older.** On Linux an update removes the executable an open
+  `swapdex` screen reads usage with. Every read then failed without a word:
+  the bars kept their last numbers with no age, retried every half second and
+  never moved again, while the status bar went on updating. The Claude bars
+  now fall back to the readings the proxy keeps recording, with their age and
+  "close this screen and reopen swapdex"; the Codex bars, which never needed
+  the executable, keep refreshing. A usage read that runs but prints no
+  answer is reported on the bars the same way.
+
 ## 0.167.36
 
 - **A lapsed Claude login renews while a current Claude Code session holds
