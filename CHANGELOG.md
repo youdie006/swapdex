@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.37
 
 - **An open dashboard keeps showing usage after swapdex is updated, and says
   why it is older.** On Linux an update removes the executable an open
@@ -15,6 +15,14 @@ All notable changes to swapdex are documented here. This project follows
   "close this screen and reopen swapdex"; the Codex bars, which never needed
   the executable, keep refreshing. A usage read that runs but prints no
   answer is reported on the bars the same way.
+- Update the rusqlite dependency from 0.40.2 to 0.41.1 (#139), which moves the
+  bundled SQLite from 3.53.2 to 3.54.1. Repairing a copy of a real Codex state
+  database left the same rows and rollouts with both versions.
+- Update the unicode-width dependency from 0.2.2 to 0.2.3 (#138). Characters
+  added in Unicode 17 are measured at their assigned widths instead of one
+  column, and the half-width katakana sound marks U+FF9E and U+FF9F count one
+  column instead of none. Hangul, Latin, common CJK and earlier emoji measure
+  as before.
 
 ## 0.167.36
 
