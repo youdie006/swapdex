@@ -63,9 +63,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
     steps:
       - uses: actions/checkout@v7
       - name: Build and upload

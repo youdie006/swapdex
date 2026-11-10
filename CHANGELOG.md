@@ -4,6 +4,13 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- Build and test on the `macos-15` runner, and build the macOS release
+  binaries there. GitHub retired `macos-14` from Actions on 2026-11-02, so
+  the macOS CI leg and the two macOS release builds would be cancelled before
+  they start, and the next release would ship without its macOS archives.
+
 ## 0.167.37
 
 - **An open dashboard keeps showing usage after swapdex is updated, and says
