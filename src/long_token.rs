@@ -131,16 +131,21 @@ pub fn installed(blob: &[u8], long: &LongToken) -> bool {
         .is_ok_and(|v| v["claudeAiOauth"]["accessToken"].as_str() == Some(long.token()))
 }
 
-/// Whether the sign-in in this store has reached, or is about to reach, its
-/// fixed end. Claude Code marks one it was refused for as `loginEnded:
-/// "time_limit"`. A store with no login at all was signed out on purpose and
-/// is left alone.
+/// Whether the saved token should stand in this store: its sign-in has
+/// reached, or is about to reach, its fixed end, or it already holds a token
+/// that nothing renews - an older one, which a new token replaces. Claude Code
+/// marks a sign-in it was refused for as `loginEnded: "time_limit"`. A store
+/// with no login at all was signed out on purpose and is left alone.
 pub fn due(blob: &[u8], now_ms: i64) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(blob) else {
         return false;
     };
     let oauth = &v["claudeAiOauth"];
-    oauth["loginEnded"].as_str() == Some("time_limit")
+    let unrenewable = oauth["accessToken"].as_str().is_some_and(|t| !t.is_empty())
+        && oauth["refreshToken"].is_null()
+        && oauth["expiresAt"].is_null();
+    unrenewable
+        || oauth["loginEnded"].as_str() == Some("time_limit")
         || oauth["refreshTokenExpiresAt"]
             .as_i64()
             .is_some_and(|end| end - now_ms <= TAKE_OVER_LEAD_MS)
@@ -328,6 +333,8 @@ mod tests {
         }))
         .unwrap();
         assert!(due(&marked, NOW), "Claude Code was already refused");
+        let older = credential_with(&login(Some(NOW + 20 * DAY_MS)), "sk-ant-oat01-older").unwrap();
+        assert!(due(&older, NOW), "a new token replaces an older one");
         assert!(!due(b"{}", NOW), "signed out on purpose");
         assert!(!due(b"not json", NOW));
     }

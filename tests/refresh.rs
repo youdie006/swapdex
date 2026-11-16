@@ -1272,7 +1272,13 @@ fn a_kept_renewal_never_overwrites_a_newer_sign_in() {
 
 const SETUP_TOKEN: &str = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
+const NEXT_TOKEN: &str = "sk-ant-oat01-NEXTYEARTOKENxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
 fn save_setup_token(root: &std::path::Path, name: &str) -> std::process::Output {
+    save_token(root, name, SETUP_TOKEN)
+}
+
+fn save_token(root: &std::path::Path, name: &str, token: &str) -> std::process::Output {
     use std::io::Write as _;
     let mut child = Command::new(bin())
         .args(["token", name])
@@ -1282,7 +1288,7 @@ fn save_setup_token(root: &std::path::Path, name: &str) -> std::process::Output 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{SETUP_TOKEN}").unwrap();
+    writeln!(child.stdin.take().unwrap(), "{token}").unwrap();
     child.wait_with_output().unwrap()
 }
 
@@ -1396,6 +1402,15 @@ fn a_saved_setup_token_takes_over_as_the_sign_in_ends() {
     let ls = String::from_utf8_lossy(&ls.stdout);
     assert!(ls.contains("running on its 1-year token"), "{ls}");
     assert!(!ls.contains(SETUP_TOKEN), "{ls}");
+
+    // A year on, the token that replaces it takes its place at once.
+    let saved = save_token(root.path(), "payer", NEXT_TOKEN);
+    assert!(saved.status.success());
+    assert_eq!(
+        credential(&slot)["claudeAiOauth"]["accessToken"],
+        NEXT_TOKEN
+    );
+    assert_eq!(credential(&slot)["mcpOAuth"]["keep"], "me");
 }
 
 /// A login Claude Code was already refused for - it marks the store
