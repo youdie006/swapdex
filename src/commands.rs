@@ -7629,6 +7629,7 @@ fn relink_own_settings(paths: &Paths) -> Vec<Relinked> {
         let own_file = slot.config_dir.join("settings.json");
         if slot.config_dir == source
             || !std::fs::symlink_metadata(&own_file).is_ok_and(|m| m.is_file())
+            || crate::slots::same_file(&own_file, &shared_file)
         {
             continue;
         }
@@ -7796,6 +7797,37 @@ mod relink_settings_tests {
         std::fs::write(&file, theirs).unwrap();
         unpin_shared_settings(&paths);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
+    }
+
+    /// `~/.claude` can be an alias of an account's own dir - a link to an
+    /// adopted `~/.claude-work`. That account's settings.json IS the shared
+    /// file; putting it aside and linking it to itself would leave every
+    /// account a link that loops.
+    #[test]
+    fn an_account_whose_dir_is_the_shared_dir_by_another_name_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let slot = crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .create("work")
+            .unwrap()
+            .config_dir;
+        std::fs::write(slot.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        std::os::unix::fs::symlink(&slot, paths.claude_dir()).unwrap();
+        assert!(relink_own_settings(&paths).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(slot.join("settings.json")).unwrap(),
+            r#"{"model":"opus"}"#
+        );
+        assert!(
+            crate::slots::unshared_config(
+                &slot,
+                &shared_source(&paths, "claude-code"),
+                "claude-code"
+            )
+            .is_empty(),
+            "doctor does not call it a copy either"
+        );
     }
 
     /// A shared file Claude cannot read is no place to send an account whose

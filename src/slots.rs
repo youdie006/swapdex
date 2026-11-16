@@ -971,9 +971,24 @@ pub fn unshared_config(
             source.join(name).exists()
                 && std::fs::symlink_metadata(slot.join(name))
                     .is_ok_and(|m| !m.file_type().is_symlink())
+                && !same_file(&slot.join(name), &source.join(name))
         })
         .map(|name| (*name).to_string())
         .collect()
+}
+
+/// Whether two paths reach the same file, however either is spelled. A slot dir
+/// can be the shared dir under another name (`~/.claude` linked to an adopted
+/// `~/.claude-work`), and comparing paths cannot see that.
+pub fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return (a.dev(), a.ino()) == (b.dev(), b.ino());
+        }
+    }
+    false
 }
 
 /// What a slot's own copy of settings.json sets that the shared file does not,
