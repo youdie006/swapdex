@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **`swapdex token` reads all of a pasted token.** Claude Code wraps the token
+  `claude setup-token` prints at the terminal's width with real line breaks, so
+  a copy of it arrives as two or three lines. 0.167.39 read the first line only:
+  it saved the first 60 characters of a wrapped token, which would have been
+  refused once it took over, and the rest of a paste that arrived in two bursts
+  was printed back to the terminal after swapdex exited. On a terminal the paste
+  is now read as it arrives, with echo off. A line break with more of the paste
+  right behind it is part of the token, and one followed by a pause ends it.
+  From a pipe, all of stdin is read. Line breaks and spaces are taken out, and
+  the message says how many characters were saved.
+
 ## 0.167.39
 
 - **A Claude account can keep working past its sign-in's end, on a one-year

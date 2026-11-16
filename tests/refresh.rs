@@ -1463,3 +1463,32 @@ fn a_token_that_is_not_from_setup_token_is_refused() {
         .unwrap();
     assert_eq!(gone.status.code(), Some(5));
 }
+
+/// Claude Code wraps the token it prints at the terminal's width, so a copy of
+/// it comes as several lines; all of them are the token.
+#[test]
+fn a_token_pasted_across_lines_is_saved_whole() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "wrapped", "eeee5555");
+    let (head, tail) = SETUP_TOKEN.split_at(40);
+    let (mid, tail) = tail.split_at(10);
+    let saved = save_token(
+        root.path(),
+        "wrapped",
+        &format!("{head}\n{mid}\r\n  {tail}"),
+    );
+    let said = String::from_utf8_lossy(&saved.stdout);
+    assert!(
+        saved.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert!(
+        said.contains(&format!("({} characters)", SETUP_TOKEN.len())),
+        "{said}"
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(slot.join(".swapdex-long-token.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored["token"], SETUP_TOKEN);
+}
