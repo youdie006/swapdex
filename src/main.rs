@@ -166,6 +166,14 @@ enum Cmd {
     Pause { name: String },
     /// Put a paused account back in rotation
     Resume { name: String },
+    /// Keep a Claude account working past its sign-in's end, on a 1-year token
+    /// from `claude setup-token` (read from stdin)
+    Token {
+        name: String,
+        /// Forget the saved token
+        #[arg(long)]
+        remove: bool,
+    },
     /// Remove a saved profile (never touches a live login)
     Rm {
         name: String,
@@ -489,6 +497,7 @@ fn main() {
         Cmd::Status { json, short } => commands::status(&paths, *json, *short),
         Cmd::Pause { name } => commands::pause_rotation(&paths, name, true),
         Cmd::Resume { name } => commands::pause_rotation(&paths, name, false),
+        Cmd::Token { name, remove } => commands::long_token(&paths, name, *remove),
         Cmd::Rm { name, yes, tool } => commands::rm(&paths, name, *yes, *tool),
         Cmd::Setup => commands::setup(&paths),
         Cmd::Login { name, tool } => commands::login(&paths, name, *tool),

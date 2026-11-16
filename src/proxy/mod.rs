@@ -682,7 +682,7 @@ fn measure_interval(tool: &str) -> Option<std::time::Duration> {
 /// and only a browser sign-in brings it back. Three accounts on this machine died
 /// that way and stayed dead a week. Half an hour is far more often than needed to
 /// stay ahead of a six-hour window, and cheap: most sweeps renew nothing.
-const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+pub(crate) const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Renew idle accounts on a timer, for as long as the proxy runs.
 ///
@@ -692,42 +692,70 @@ const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30 
 fn spawn_keep_alive(paths: &Paths, tool: &str) {
     let paths = paths.clone();
     let tool = tool.to_string();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(KEEP_ALIVE_EVERY);
-        let report = keep_alive_once(&paths, &tool);
-        for name in &report.renewed {
-            println!("keep-alive: renewed {name}");
-        }
-        for name in &report.native_managed {
-            println!("keep-alive: '{name}' uses a live {tool} login; renewal is managed by the native session");
-        }
-        for name in &report.deferred {
-            println!(
-                "keep-alive: {}",
-                crate::refresh::RefreshError::InUse.remedy(name, &tool)
-            );
-        }
-        for (name, why) in &report.failed {
-            // The server's code is what tells one cause of a refusal from
-            // another, so the log keeps it next to the time it happened.
-            let reason = crate::slots::Slots::open_for(&paths, &tool)
-                .ok()
-                .and_then(|slots| slots.get(name))
-                .and_then(|slot| crate::refresh::refusal_reason(&paths, &tool, &slot.config_dir));
-            println!(
-                "keep-alive: {}{}",
-                why.remedy(name, &tool),
-                crate::commands::said(reason)
-            );
-        }
-        if !report.renewed.is_empty()
-            || !report.native_managed.is_empty()
-            || !report.deferred.is_empty()
-            || !report.failed.is_empty()
-        {
+    std::thread::spawn(move || {
+        // A sign-in that ended while no proxy ran is replaced now, not half an
+        // hour into serving with an account that cannot be renewed.
+        if tool == "claude-code" {
+            for (name, outcome) in crate::long_token::take_over_all(&paths, now_ms()) {
+                match outcome {
+                    Ok(crate::long_token::TakeOver::Done) => println!("{}", took_over(&name)),
+                    Err(e) => {
+                        println!("keep-alive: '{name}' 1-year token could not take over: {e}")
+                    }
+                    Ok(_) => {}
+                }
+            }
             std::io::stdout().flush().ok();
         }
+        loop {
+            std::thread::sleep(KEEP_ALIVE_EVERY);
+            keep_alive_log(&paths, &tool);
+        }
     });
+}
+
+fn took_over(name: &str) -> String {
+    format!("keep-alive: '{name}' reached the end of its sign-in - serving on its 1-year token now")
+}
+
+fn keep_alive_log(paths: &Paths, tool: &str) {
+    let report = keep_alive_once(paths, tool);
+    for name in &report.long_token {
+        println!("{}", took_over(name));
+    }
+    for name in &report.renewed {
+        println!("keep-alive: renewed {name}");
+    }
+    for name in &report.native_managed {
+        println!("keep-alive: '{name}' uses a live {tool} login; renewal is managed by the native session");
+    }
+    for name in &report.deferred {
+        println!(
+            "keep-alive: {}",
+            crate::refresh::RefreshError::InUse.remedy(name, tool)
+        );
+    }
+    for (name, why) in &report.failed {
+        // The server's code is what tells one cause of a refusal from
+        // another, so the log keeps it next to the time it happened.
+        let reason = crate::slots::Slots::open_for(paths, tool)
+            .ok()
+            .and_then(|slots| slots.get(name))
+            .and_then(|slot| crate::refresh::refusal_reason(paths, tool, &slot.config_dir));
+        println!(
+            "keep-alive: {}{}",
+            why.remedy(name, tool),
+            crate::commands::said(reason)
+        );
+    }
+    if !report.renewed.is_empty()
+        || !report.long_token.is_empty()
+        || !report.native_managed.is_empty()
+        || !report.deferred.is_empty()
+        || !report.failed.is_empty()
+    {
+        std::io::stdout().flush().ok();
+    }
 }
 
 /// One sweep, for one tool. Split out of the timer so it can be run directly.

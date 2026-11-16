@@ -2105,6 +2105,117 @@ pub fn pause_rotation(paths: &Paths, name: &str, pause: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// `swapdex token <name>`: save the 1-year token `claude setup-token` printed
+/// for this Claude account, so it keeps working when its sign-in ends.
+pub fn long_token(paths: &Paths, name: &str, remove: bool) -> Result<i32> {
+    use zeroize::Zeroize as _;
+    let slots = crate::slots::Slots::open_for(paths, "claude-code")?;
+    let Some(slot) = slots.get(name) else {
+        let known: Vec<String> = slots.list().into_iter().map(|r| r.name).collect();
+        let known: Vec<&str> = known.iter().map(String::as_str).collect();
+        eprintln!("swapdex: {}", unknown_account(name, &known));
+        return Ok(5);
+    };
+    let dir = &slot.config_dir;
+    if remove {
+        let in_use = crate::long_token::load(dir).is_some_and(|long| {
+            crate::claude_authority::credential(paths, dir)
+                .is_ok_and(|c| crate::long_token::installed(c.bytes(), &long))
+        });
+        if !crate::long_token::remove(dir)? {
+            println!("{name} has no 1-year token saved");
+        } else if in_use {
+            println!(
+                "{name} - 1-year token forgotten. The account still runs on it until a /login \
+                 in a `swapdex run {}` session replaces it",
+                crate::util::shell_word(name)
+            );
+        } else {
+            println!("{name} - 1-year token forgotten");
+        }
+        return Ok(0);
+    }
+    let mut token = read_token_line()?;
+    if !crate::long_token::well_formed(token.trim()) {
+        token.zeroize();
+        eprintln!(
+            "swapdex: that is not a token from `claude setup-token` - it is one line \
+             starting with sk-ant-oat"
+        );
+        return Ok(2);
+    }
+    let now = now_ms();
+    let saved = crate::long_token::save(dir, token.trim(), now);
+    token.zeroize();
+    saved?;
+    let ends = crate::long_token::load(dir).map(|long| long.ends_at_ms());
+    let until = ends
+        .map(|at| {
+            let (y, m, d) = crate::codex_tls::civil(at / 1000 + crate::proxy::tz_offset());
+            format!(" until about {y}-{m:02}-{d:02}")
+        })
+        .unwrap_or_default();
+    match crate::long_token::take_over(paths, dir, now) {
+        Ok(crate::long_token::TakeOver::Done) => {
+            println!("{name} - its sign-in had reached its end; it runs on this token now{until}")
+        }
+        Ok(_) => println!(
+            "{name} - 1-year token saved. When the sign-in ends, swapdex puts this token in its \
+             place, so the account keeps working{until}"
+        ),
+        Err(e) => {
+            println!("{name} - 1-year token saved");
+            eprintln!("swapdex: it could not take over yet: {e:#}");
+        }
+    }
+    Ok(0)
+}
+
+/// One line from stdin, not echoed when stdin is a terminal.
+fn read_token_line() -> Result<String> {
+    use std::io::{BufRead as _, IsTerminal as _};
+    let stdin = std::io::stdin();
+    let echo = stdin.is_terminal().then(EchoOff::new).flatten();
+    if stdin.is_terminal() {
+        eprint!("Paste the token `claude setup-token` printed, then press Enter: ");
+    }
+    let mut line = String::new();
+    let read = stdin.lock().read_line(&mut line);
+    if echo.is_some() {
+        eprintln!();
+    }
+    drop(echo);
+    read.context("read the token from stdin")?;
+    Ok(line)
+}
+
+/// Terminal echo turned off until dropped.
+struct EchoOff(libc::termios);
+
+impl EchoOff {
+    fn new() -> Option<Self> {
+        // SAFETY: tcgetattr/tcsetattr on fd 0 with a termios we own.
+        unsafe {
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut term) != 0 {
+                return None;
+            }
+            let saved = term;
+            term.c_lflag &= !libc::ECHO;
+            (libc::tcsetattr(0, libc::TCSANOW, &term) == 0).then_some(Self(saved))
+        }
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        // SAFETY: restores the attributes read in `new`.
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &self.0);
+        }
+    }
+}
+
 pub fn unknown_account(asked: &str, known: &[&str]) -> String {
     if known.is_empty() {
         return "no accounts saved yet - `swapdex add <name>` saves the login you are on"
@@ -2315,12 +2426,25 @@ fn account_health(
         // A registered live slot supersedes its historical snapshot's status.
         // In particular an unreadable Mac Keychain is not an expired snapshot.
         warnings.retain(|warning| !warning.starts_with(&format!("{tool} ")));
+        // With a 1-year token saved, the end needs nothing done by then.
+        let covered =
+            tool == "claude-code" && crate::long_token::current(&slot.config_dir, now_ms).is_some();
         let login_end_note = |end: &crate::refresh::LoginEnd| {
-            format!(
-                "{tool} {}",
-                crate::refresh::login_end_note(end, name, now_ms, crate::proxy::tz_offset())
-            )
+            let tz = crate::proxy::tz_offset();
+            let note = if covered {
+                crate::long_token::covered_end_note(end, now_ms, tz)
+            } else {
+                crate::refresh::login_end_note(end, name, now_ms, tz)
+            };
+            format!("{tool} {note}")
         };
+        if tool == "claude-code" {
+            if let Some((note, _)) =
+                crate::long_token::status_note(paths, &slot.config_dir, name, now_ms)
+            {
+                warnings.push(format!("{tool} {note}"));
+            }
+        }
         if let Some(login) = crate::live_login::resolve(paths, &slot.config_dir, tool, now_ms) {
             renewal_owner.insert(tool.clone(), "native".to_owned());
             if let Some(rejected_at) = login.refresh_rejected_at_ms {
@@ -5713,17 +5837,23 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             let rejected = refresh_rejected_at(paths, tool, &r.config_dir, now_ms()).is_some();
             if tool == "claude-code" && !rejected {
                 let now = now_ms();
+                let covered = crate::long_token::current(&r.config_dir, now).is_some();
                 if let Some(end) = crate::refresh::claude_login_end(paths, &r.config_dir, now) {
+                    let tz = crate::proxy::tz_offset();
                     report(
                         &key,
-                        false,
-                        crate::refresh::login_end_note(
-                            &end,
-                            &r.name,
-                            now,
-                            crate::proxy::tz_offset(),
-                        ),
+                        covered,
+                        if covered {
+                            crate::long_token::covered_end_note(&end, now, tz)
+                        } else {
+                            crate::refresh::login_end_note(&end, &r.name, now, tz)
+                        },
                     );
+                }
+                if let Some((note, act)) =
+                    crate::long_token::status_note(paths, &r.config_dir, &r.name, now)
+                {
+                    report(&key, !act, note);
                 }
             }
             if rejected {
@@ -8193,6 +8323,10 @@ fn claude_logins_ending(paths: &Paths, payer: &str) -> Vec<String> {
         .iter()
         .filter_map(|name| {
             let slot = slots.get(name)?;
+            // Its 1-year token takes over at the end, so there is nothing to warn of.
+            if crate::long_token::current(&slot.config_dir, now).is_some() {
+                return None;
+            }
             let end = crate::refresh::claude_slot_login_end(paths, &slot.config_dir, now)?;
             Some(crate::refresh::login_end_brief(
                 &end,
@@ -9138,6 +9272,9 @@ pub fn keep_alive(paths: &Paths) -> Result<i32> {
         .map(|(n, e)| (n, "claude-code", e))
         .chain(codex.failed.into_iter().map(|(n, e)| (n, "codex", e)))
         .collect();
+    for name in &claude.long_token {
+        println!("{name} reached the end of its sign-in - it runs on its 1-year token now");
+    }
     for name in &claude.renewed {
         println!("renewed {name}");
     }
@@ -9151,6 +9288,7 @@ pub fn keep_alive(paths: &Paths) -> Result<i32> {
         eprintln!("{}", why.remedy(name, tool));
     }
     if claude.renewed.is_empty()
+        && claude.long_token.is_empty()
         && native_managed.is_empty()
         && deferred.is_empty()
         && failed.is_empty()

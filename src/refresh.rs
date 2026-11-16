@@ -1076,7 +1076,7 @@ fn claude_holder_uncoordinated(
     slot_in_use_except(paths, dir, "claude-code", &separate) && !verified
 }
 
-fn claude_lock(
+pub(crate) fn claude_lock(
     storage_dir: &Path,
 ) -> Result<crate::claude_refresh_lock::NativeRefreshLock, RefreshError> {
     let started = Instant::now();
@@ -2327,6 +2327,8 @@ pub(crate) struct KeepAliveReport {
     pub(crate) native_managed: Vec<String>,
     pub(crate) deferred: Vec<String>,
     pub(crate) failed: Vec<(String, RefreshError)>,
+    /// Accounts whose sign-in reached its end and now run on their 1-year token.
+    pub(crate) long_token: Vec<String>,
 }
 
 /// Whether current local evidence says this Codex slot is due for renewal but
@@ -2684,6 +2686,25 @@ pub(crate) fn keep_alive_sweep_report(
                 continue;
             }
         };
+        // Before renewing: a sign-in at its end cannot be renewed, and one
+        // with a 1-year token saved does not need to be.
+        if crate::long_token::due(credential.bytes(), now_ms) {
+            match crate::long_token::take_over(paths, dir, now_ms) {
+                Ok(crate::long_token::TakeOver::Done) => {
+                    report.long_token.push(name.clone());
+                    continue;
+                }
+                Ok(crate::long_token::TakeOver::Already) => continue,
+                Ok(_) => {}
+                Err(e) => {
+                    report.failed.push((
+                        name.clone(),
+                        RefreshError::Refused(format!("its 1-year token could not take over: {e}")),
+                    ));
+                    continue;
+                }
+            }
+        }
         if !wants_keep_alive(credential.bytes(), now_ms) {
             continue;
         }
