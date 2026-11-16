@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.39
 
 - **A Claude account can keep working past its sign-in's end, on a one-year
   token.** A Claude sign-in ends about 27 days after it is made and no renewal

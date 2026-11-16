@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH swapdex 1  "swapdex 0.167.38" 
+.TH swapdex 1  "swapdex 0.167.39" 
 .SH NAME
 swapdex \- Switch Claude Code / Codex / Gemini / Antigravity login accounts, locally and safely.
 .SH SYNOPSIS
@@ -69,6 +69,9 @@ Keep an account out of the proxy\*(Aqs AUTOMATIC rotation (`use`/`serve` still w
 .TP
 swapdex\-resume(1)
 Put a paused account back in rotation
+.TP
+swapdex\-token(1)
+Keep a Claude account working past its sign\-in\*(Aqs end, on a 1\-year token from `claude setup\-token` (read from stdin)
 .TP
 swapdex\-rm(1)
 Remove a saved profile (never touches a live login)
@@ -139,4 +142,4 @@ Print the man page (roff) to stdout
 swapdex\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v0.167.38
+v0.167.39
