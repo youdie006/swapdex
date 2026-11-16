@@ -380,9 +380,14 @@ def verify(codex, swapdex, root):
             assert resumed["result"]["modelProvider"] == "openai"
             assert resumed["result"]["thread"]["id"] == tid
         final_transport = recorder.snapshot()
+        # Codex 0.169.0 also opens a WebSocket when it resumes a thread, before
+        # any turn; each attempt must still be refused, and only the one turn
+        # may reach /responses over HTTP.
         assert sum(method == "GET" and path.endswith("/responses")
                    and (upgrade or "").lower() == "websocket" and status == 426
-                   for method, path, upgrade, status in final_transport) == 1, final_transport
+                   for method, path, upgrade, status in final_transport) >= 1, final_transport
+        assert all(status == 426 for method, path, upgrade, status in final_transport
+                   if (upgrade or "").lower() == "websocket"), final_transport
         assert sum(method == "POST" and path.endswith("/responses") and status == 200
                    for method, path, _upgrade, status in final_transport) == 1, final_transport
         final_upstream = upstream.snapshot()
