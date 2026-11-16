@@ -2135,17 +2135,19 @@ pub fn long_token(paths: &Paths, name: &str, remove: bool) -> Result<i32> {
         }
         return Ok(0);
     }
-    let mut token = read_token_line()?;
-    if !crate::long_token::well_formed(token.trim()) {
+    let mut token = read_token()?;
+    if !crate::long_token::well_formed(&token) {
+        let length = token.chars().count();
         token.zeroize();
         eprintln!(
-            "swapdex: that is not a token from `claude setup-token` - it is one line \
-             starting with sk-ant-oat"
+            "swapdex: that is not a token from `claude setup-token` ({length} characters \
+             read) - it starts with sk-ant-oat; paste all of it, every line"
         );
         return Ok(2);
     }
+    let length = token.len();
     let now = now_ms();
-    let saved = crate::long_token::save(dir, token.trim(), now);
+    let saved = crate::long_token::save(dir, &token, now);
     token.zeroize();
     saved?;
     let ends = crate::long_token::load(dir).map(|long| long.ends_at_ms());
@@ -2160,8 +2162,8 @@ pub fn long_token(paths: &Paths, name: &str, remove: bool) -> Result<i32> {
             println!("{name} - its sign-in had reached its end; it runs on this token now{until}")
         }
         Ok(_) => println!(
-            "{name} - 1-year token saved. When the sign-in ends, swapdex puts this token in its \
-             place, so the account keeps working{until}"
+            "{name} - 1-year token saved ({length} characters). When the sign-in ends, swapdex \
+             puts this token in its place, so the account keeps working{until}"
         ),
         Err(e) => {
             println!("{name} - 1-year token saved");
@@ -2171,28 +2173,100 @@ pub fn long_token(paths: &Paths, name: &str, remove: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// One line from stdin, not echoed when stdin is a terminal.
-fn read_token_line() -> Result<String> {
-    use std::io::{BufRead as _, IsTerminal as _};
-    let stdin = std::io::stdin();
-    let echo = stdin.is_terminal().then(EchoOff::new).flatten();
-    if stdin.is_terminal() {
+/// The token from stdin, joined across lines and spaces.
+///
+/// Claude Code wraps the token it prints at the terminal's width with real
+/// line breaks, so a copy of it arrives as two or three lines. Reading one line
+/// kept a piece of the token and left the rest for the shell to run as a
+/// command once swapdex exited. On a terminal the paste is read as it comes,
+/// with echo off: a line break with more of the paste right behind it belongs
+/// to the paste, and one followed by a pause is the Enter that ends it. A pipe
+/// is read to its end.
+fn read_token() -> Result<String> {
+    use std::io::{IsTerminal as _, Read as _};
+    use zeroize::Zeroize as _;
+    let mut text = Vec::new();
+    if std::io::stdin().is_terminal() {
+        let quiet = QuietTerminal::new();
         eprint!("Paste the token `claude setup-token` printed, then press Enter: ");
-    }
-    let mut line = String::new();
-    let read = stdin.lock().read_line(&mut line);
-    if echo.is_some() {
+        let read = if quiet.is_some() {
+            read_paste(&mut text)
+        } else {
+            std::io::stdin()
+                .lock()
+                .take(MAX_TOKEN_INPUT)
+                .read_to_end(&mut text)
+                .map(drop)
+        };
+        drop(quiet);
         eprintln!();
+        read.context("read the token from the terminal")?;
+    } else {
+        std::io::stdin()
+            .lock()
+            .take(MAX_TOKEN_INPUT)
+            .read_to_end(&mut text)
+            .context("read the token from stdin")?;
     }
-    drop(echo);
-    read.context("read the token from stdin")?;
-    Ok(line)
+    let joined = token_from_paste(&text);
+    text.zeroize();
+    Ok(joined)
 }
 
-/// Terminal echo turned off until dropped.
-struct EchoOff(libc::termios);
+const MAX_TOKEN_INPUT: u64 = 16 * 1024;
 
-impl EchoOff {
+/// How long after a line break more of a paste may still be arriving. Longer
+/// than a paste takes to cross an ssh link, shorter than a person takes to
+/// press Enter after pasting.
+const PASTE_GAP_MS: i32 = 300;
+
+/// Every piece of the paste with what separates them taken out: the line
+/// breaks the wrapping put in, the spaces a terminal pads lines with, and the
+/// Ctrl-D a person may end with.
+fn token_from_paste(text: &[u8]) -> String {
+    String::from_utf8_lossy(text)
+        .split(|c: char| c.is_whitespace() || c == '\u{4}')
+        .collect()
+}
+
+fn read_paste(out: &mut Vec<u8>) -> std::io::Result<()> {
+    let mut buf = [0u8; 1024];
+    loop {
+        // SAFETY: reads into a buffer we own, at most its length.
+        let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        if out.contains(&4) || out.len() as u64 > MAX_TOKEN_INPUT {
+            return Ok(());
+        }
+        if out.ends_with(b"\n") || out.ends_with(b"\r") {
+            let mut poll = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd we own.
+            if unsafe { libc::poll(&mut poll, 1, PASTE_GAP_MS) } <= 0 {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// The terminal with echo and line editing off until dropped, so a paste is
+/// neither shown nor held back line by line.
+struct QuietTerminal(libc::termios);
+
+impl QuietTerminal {
     fn new() -> Option<Self> {
         // SAFETY: tcgetattr/tcsetattr on fd 0 with a termios we own.
         unsafe {
@@ -2201,13 +2275,15 @@ impl EchoOff {
                 return None;
             }
             let saved = term;
-            term.c_lflag &= !libc::ECHO;
+            term.c_lflag &= !(libc::ECHO | libc::ICANON);
+            term.c_cc[libc::VMIN] = 1;
+            term.c_cc[libc::VTIME] = 0;
             (libc::tcsetattr(0, libc::TCSANOW, &term) == 0).then_some(Self(saved))
         }
     }
 }
 
-impl Drop for EchoOff {
+impl Drop for QuietTerminal {
     fn drop(&mut self) {
         // SAFETY: restores the attributes read in `new`.
         unsafe {
@@ -2556,6 +2632,22 @@ fn tui_row_names_tool(row: &crate::tui::Row, name: &str, tool: &str) -> bool {
             .split(',')
             .map(|listed| listed.trim().trim_end_matches('*'))
             .any(|listed| listed == tool)
+}
+
+#[cfg(test)]
+mod token_paste_tests {
+    use super::token_from_paste;
+
+    #[test]
+    fn a_token_wrapped_across_lines_is_put_back_together() {
+        let pasted =
+            b"sk-ant-oat01-AAAAAAAAAAAAAAAAAAAA\nBBBBBBBBBBBBBBBBBBBB\r\n  CCCCCC-DD\n\x04";
+        assert_eq!(
+            token_from_paste(pasted),
+            "sk-ant-oat01-AAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBCCCCCC-DD"
+        );
+        assert_eq!(token_from_paste(b"  sk-ant-oat01-X  \n"), "sk-ant-oat01-X");
+    }
 }
 
 #[cfg(test)]
