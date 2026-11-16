@@ -976,6 +976,78 @@ pub fn unshared_config(
         .collect()
 }
 
+/// What a slot's own copy of settings.json sets that the shared file does not,
+/// as dotted key paths: what linking the slot back takes from its sessions. A
+/// value the copy merely lacks is not listed - the link brings it back.
+pub fn settings_only_in(own: &serde_json::Value, shared: &serde_json::Value) -> Vec<String> {
+    fn leaves(v: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, v) in m {
+                    let p = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    leaves(v, &p, out);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for v in a {
+                    out.push((path.to_string(), v.to_string()));
+                }
+            }
+            _ => out.push((path.to_string(), v.to_string())),
+        }
+    }
+    let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+    leaves(own, "", &mut mine);
+    leaves(shared, "", &mut theirs);
+    let theirs: std::collections::HashSet<_> = theirs.into_iter().collect();
+    let mut keys: Vec<String> = mine
+        .into_iter()
+        .filter(|leaf| !theirs.contains(leaf))
+        .map(|(path, _)| path)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+#[cfg(test)]
+mod settings_only_in_tests {
+    use super::*;
+
+    #[test]
+    fn only_what_the_copy_adds_is_listed() {
+        let shared = serde_json::json!({
+            "model": "opus[1m]",
+            "permissions": {"allow": ["Read", "Bash(git status)"]},
+            "env": {"A": "1"}
+        });
+        assert!(settings_only_in(&shared, &shared).is_empty());
+
+        // Lacking what the shared file has costs nothing: the link brings it.
+        let behind = serde_json::json!({"model": "opus[1m]", "permissions": {"allow": ["Read"]}});
+        assert!(settings_only_in(&behind, &shared).is_empty());
+
+        let own = serde_json::json!({
+            "model": "opus",
+            "permissions": {"allow": ["Read", "Edit", "Write"]},
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}},
+            "env": {"A": "1"}
+        });
+        assert_eq!(
+            settings_only_in(&own, &shared),
+            [
+                "model",
+                "modelSettings.claude-opus-5-5.effortLevel",
+                "permissions.allow"
+            ]
+        );
+    }
+}
+
 #[cfg(test)]
 mod shared_history_tests {
     use super::*;

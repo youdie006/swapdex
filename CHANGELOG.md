@@ -6,6 +6,19 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- `swapdex shim` no longer writes the proxy address into Claude's
+  `settings.json`, and takes out the one older versions wrote. Claude reads
+  that address once, at startup, so a session started while the proxy was down
+  could not start at all. Run inside an account's session, the old pin also
+  replaced that account's link to the shared `~/.claude/settings.json` with a
+  copy that stopped following it: on a real machine both accounts in use had
+  missed two weeks of shared permissions, model settings and environment
+  variables. The shim already passes the address to every session it starts,
+  starting the proxy first. A `claude` started outside the shim (an editor
+  extension, a script with its own PATH) now uses its config dir's own login
+  instead of the proxy. `swapdex shim` also links each account's own copy back
+  to the shared file. It keeps the copy as `settings.json.before-sharing` and
+  names the keys only the copy set. `doctor`'s `sharing` row points to it.
 - Build and test on the `macos-15` runner, and build the macOS release
   binaries there. GitHub retired `macos-14` from Actions on 2026-11-02, so
   the macOS CI leg and the two macOS release builds would be cancelled before

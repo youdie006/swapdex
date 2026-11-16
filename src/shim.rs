@@ -841,49 +841,6 @@ pub fn ensure_on_path_for(paths: &Paths, shim_dir: &Path) -> Result<PathSetup> {
     Ok(PathSetup::Added(profile))
 }
 
-/// Whether it is safe to pin the proxy's address into the tool's own config.
-#[derive(Debug, PartialEq)]
-pub enum PinVerdict {
-    /// Pin it at this port: a service keeps the proxy alive.
-    Pin(u16),
-    /// Do not pin: nothing would restart the proxy, and a pinned address with
-    /// no proxy behind it makes the tool unusable rather than merely unswitched.
-    RefuseNoService,
-}
-
-/// PATH is not a reliable way to reach the proxy.
-///
-/// The shim only fires when it WINS the PATH, and on a real machine another
-/// `claude` sat ahead of it - so the proxy was never used and `serve` silently
-/// changed nothing, on two machines, for a day. Every competing proxy-based
-/// switcher writes the base URL into the tool's own config instead, which no
-/// PATH ordering can undo.
-///
-/// The catch is the failure mode: a pinned address with no proxy behind it
-/// makes the tool unusable, not merely unswitched. So this only says yes when
-/// something will restart the proxy.
-pub fn pin_verdict(service_installed: bool, port: u16) -> PinVerdict {
-    if service_installed {
-        PinVerdict::Pin(port)
-    } else {
-        PinVerdict::RefuseNoService
-    }
-}
-
-/// The settings object with the proxy address added, everything else intact.
-///
-/// These settings hold the user's model, hooks and permissions; rewriting them
-/// to add one key would be a far worse bug than the one being fixed.
-/// The loopback port a settings file pins Claude Code to, if it pins one.
-///
-/// `pin_base_url` refuses to write the address unless a proxy is alive, so the
-/// moment of pinning is safe - and then nothing watched it. When the proxy later
-/// went away, every session on that machine got "Connection refused", because
-/// the settings still named an address nobody was answering. Reading the pin
-/// back is what lets the health check say so.
-///
-/// `None` for an address this check cannot speak for: only a loopback pin is
-/// swapdex's to verify.
 /// Is the pinned address this proxy's own?
 ///
 /// When the proxy stops, the address in settings.json goes on naming a port
@@ -897,21 +854,12 @@ pub fn pin_is_ours(pinned: Option<u16>, mine: u16) -> bool {
     pinned == Some(mine)
 }
 
-/// Take the pin out of the settings file, if it is this proxy's.
-///
-/// Every other key is preserved - the file holds the user's model, hooks and
-/// permissions - and the write is atomic, so a stop cannot leave a half-written
-/// settings file behind.
-pub fn withdraw_pin(paths: &Paths, mine: u16) -> bool {
-    let file = paths.claude_dir().join("settings.json");
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        return false;
-    };
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
+/// `settings` without this proxy's pin, and without `env` when the pin was all
+/// it held. Any other address stays.
+pub fn without_pin(settings: &serde_json::Value, mine: u16) -> serde_json::Value {
+    let mut v = settings.clone();
     if !pin_is_ours(pinned_port(&v), mine) {
-        return false;
+        return v;
     }
     let emptied = match v.get_mut("env").and_then(|e| e.as_object_mut()) {
         Some(env) => {
@@ -925,12 +873,43 @@ pub fn withdraw_pin(paths: &Paths, mine: u16) -> bool {
             o.remove("env");
         }
     }
-    let Ok(body) = serde_json::to_vec_pretty(&v) else {
-        return false;
-    };
-    crate::atomic::write_secret(&file, &body).is_ok()
+    v
 }
 
+/// Take the pin out of the settings file, if it is this proxy's.
+///
+/// Every other key is preserved - the file holds the user's model, hooks and
+/// permissions - and the write is atomic, so a stop cannot leave a half-written
+/// settings file behind.
+pub fn withdraw_pin(paths: &Paths, mine: u16) -> bool {
+    withdraw_pin_from(&paths.claude_dir().join("settings.json"), mine)
+}
+
+/// `withdraw_pin` for one named settings file.
+pub fn withdraw_pin_from(file: &Path, mine: u16) -> bool {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    if !pin_is_ours(pinned_port(&v), mine) {
+        return false;
+    }
+    let Ok(body) = serde_json::to_vec_pretty(&without_pin(&v, mine)) else {
+        return false;
+    };
+    crate::atomic::write_secret(file, &body).is_ok()
+}
+
+/// The loopback port a settings file pins Claude Code to, if it pins one.
+///
+/// swapdex no longer writes one, but up to 0.167.37 `swapdex shim` did, and a
+/// user can set one by hand. A pin nobody answers stops every session from
+/// starting, so the health check reads it back.
+///
+/// `None` for an address this check cannot speak for: only a loopback pin is
+/// swapdex's to verify.
 pub fn pinned_port(settings: &serde_json::Value) -> Option<u16> {
     let url = settings.get("env")?.get("ANTHROPIC_BASE_URL")?.as_str()?;
     let rest = url.strip_prefix("http://")?;
@@ -939,59 +918,6 @@ pub fn pinned_port(settings: &serde_json::Value) -> Option<u16> {
         return None;
     }
     port.parse().ok()
-}
-
-pub fn with_base_url(settings: &serde_json::Value, port: u16) -> serde_json::Value {
-    let mut out = settings.clone();
-    if !out.is_object() {
-        out = serde_json::json!({});
-    }
-    let obj = out.as_object_mut().expect("object");
-    let env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
-    if !env.is_object() {
-        *env = serde_json::json!({});
-    }
-    env.as_object_mut().expect("env object").insert(
-        "ANTHROPIC_BASE_URL".to_string(),
-        serde_json::Value::String(format!("http://127.0.0.1:{port}")),
-    );
-    out
-}
-
-/// Pin the proxy's address into the tool's own settings, so reaching it no
-/// longer depends on winning the PATH.
-///
-/// Returns the path written, or `None` when there is no service to keep the
-/// proxy alive - pinning then would trade "switching does nothing" for "the
-/// tool does not start", which is worse.
-pub fn pin_base_url(paths: &Paths, port: u16, service_installed: bool) -> Result<Option<PathBuf>> {
-    if pin_verdict(service_installed, port) == PinVerdict::RefuseNoService {
-        return Ok(None);
-    }
-    let file = paths.claude_dir().join("settings.json");
-    let current: serde_json::Value = std::fs::read(&file)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let next = with_base_url(&current, port);
-    if next == current {
-        return Ok(Some(file));
-    }
-    // These settings hold the user's model, hooks and permissions. Keep a copy
-    // before touching them, and write atomically so a crash cannot leave the
-    // file half-written and the tool unable to start.
-    if file.exists() {
-        let _ = std::fs::copy(&file, file.with_extension("json.swapdex-bak"));
-    }
-    if let Some(d) = file.parent() {
-        std::fs::create_dir_all(d).ok();
-    }
-    let bytes = serde_json::to_vec_pretty(&next).context("serialize settings.json")?;
-    // 0600 via the same atomic path the credential writes use: this file is
-    // the user's own and only ever read as them, and a half-written
-    // settings.json would stop the tool from starting.
-    crate::atomic::write_secret(&file, &bytes).context("write settings.json")?;
-    Ok(Some(file))
 }
 
 /// Where the shim stands in the PATH race.
@@ -2096,64 +2022,15 @@ mod shadow_tests {
 }
 
 #[cfg(test)]
-mod pin_base_url_tests {
-    use super::*;
-
-    /// PATH is not a reliable way to reach the proxy. The shim only fires when
-    /// it WINS the PATH, and on a real machine another `claude` sat ahead of
-    /// it - so the proxy was never used and `serve` silently changed nothing,
-    /// on two machines, for a day. Every competing proxy-based switcher
-    /// (cc-switch, claude-code-router, codex-pooler) writes the base URL into
-    /// the tool's own config instead, which no PATH ordering can undo.
-    ///
-    /// The catch: a pinned base URL with no proxy behind it makes the tool
-    /// unusable rather than merely unswitched. So it is only safe to pin when
-    /// something restarts the proxy - a service - and refusing is the right
-    /// answer otherwise.
-    #[test]
-    fn a_base_url_is_pinned_only_when_a_service_keeps_the_proxy_alive() {
-        assert_eq!(pin_verdict(true, 8787), PinVerdict::Pin(8787));
-        assert_eq!(pin_verdict(false, 8787), PinVerdict::RefuseNoService);
-    }
-
-    /// Pinning must not disturb the rest of the file: these settings hold the
-    /// user's model, hooks and permissions, and rewriting them to add one key
-    /// would be a far worse bug than the one being fixed.
-    #[test]
-    fn pinning_preserves_every_other_setting() {
-        let before = serde_json::json!({
-            "model": "opus",
-            "env": {"FOO": "1"},
-            "permissions": {"allow": ["Bash"]}
-        });
-        let after = with_base_url(&before, 8787);
-        assert_eq!(after["model"], "opus");
-        assert_eq!(after["permissions"]["allow"][0], "Bash");
-        assert_eq!(after["env"]["FOO"], "1");
-        assert_eq!(after["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8787");
-    }
-
-    /// A file with no env object at all still gets one.
-    #[test]
-    fn pinning_works_on_settings_that_have_no_env_yet() {
-        let after = with_base_url(&serde_json::json!({"model": "opus"}), 9001);
-        assert_eq!(after["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:9001");
-        assert_eq!(after["model"], "opus");
-    }
-}
-
-#[cfg(test)]
 mod pinned_port_tests {
     use super::*;
 
     /// The pin has to be readable back, or nothing can check it is still good.
     ///
-    /// `pin_base_url` refuses to write the address unless a proxy is alive, so
-    /// the moment of pinning is safe. Nothing watched it afterwards. When the
-    /// proxy later went away, every session on that machine got "Connection
-    /// refused" - the settings still named an address nobody was answering -
-    /// and `doctor` said the service was fine, because it looked at the unit
-    /// and the process and never at the address itself.
+    /// When the proxy behind a pin went away, every session on that machine got
+    /// "Connection refused" - the settings still named an address nobody was
+    /// answering - and `doctor` said the service was fine, because it looked at
+    /// the unit and the process and never at the address itself.
     #[test]
     fn the_pinned_port_can_be_read_back_out_of_settings() {
         let pinned = serde_json::json!({
