@@ -1508,8 +1508,11 @@ fn shim_skips_a_non_executable_path_shadow() {
     );
 }
 
+/// `swapdex shim` no longer pins the proxy address into settings.json, and
+/// takes out the one an older version pinned - in the supplied root only, never
+/// in the ambient HOME. An account's own copy of the settings is linked back.
 #[test]
-fn shim_service_detection_uses_the_supplied_home() {
+fn shim_removes_the_old_pin_and_relinks_copies_in_the_supplied_home() {
     let root = tempfile::tempdir().unwrap();
     let ambient_home = root.path().join("ambient-home");
     let supplied_home = root.path().join("supplied-home");
@@ -1517,17 +1520,13 @@ fn shim_service_detection_uses_the_supplied_home() {
     std::fs::create_dir_all(&supplied_home).unwrap();
     let bin_dir = fake_claude(root.path());
     let path = format!("{}:/usr/bin:/bin", bin_dir.display());
-    let unit = |home: &Path| {
-        if cfg!(target_os = "macos") {
-            swapdex::service::launchd_path(home, "claude-code")
-        } else {
-            swapdex::service::systemd_path(home, "claude-code")
-        }
+    let unit = if cfg!(target_os = "macos") {
+        swapdex::service::launchd_path(&supplied_home, "claude-code")
+    } else {
+        swapdex::service::systemd_path(&supplied_home, "claude-code")
     };
-
-    let decoy = unit(&ambient_home);
-    std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
-    std::fs::write(&decoy, "decoy service\n").unwrap();
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(&unit, "synthetic service\n").unwrap();
     let run = || {
         Command::new(bin())
             .arg("shim")
@@ -1541,17 +1540,42 @@ fn shim_service_detection_uses_the_supplied_home() {
     assert!(run().status.success());
     assert!(
         !supplied_home.join(".claude/settings.json").exists(),
-        "an unrelated ambient-home service must not authorize a proxy pin"
+        "a service no longer leads to a pin"
     );
 
-    std::fs::remove_file(decoy).unwrap();
-    let supplied_unit = unit(&supplied_home);
-    std::fs::create_dir_all(supplied_unit.parent().unwrap()).unwrap();
-    std::fs::write(supplied_unit, "synthetic service\n").unwrap();
-    assert!(run().status.success());
-    let settings = std::fs::read_to_string(supplied_home.join(".claude/settings.json"))
-        .expect("the supplied service authorizes the synthetic root's proxy pin");
-    assert!(settings.contains("127.0.0.1:8787"), "{settings}");
+    let pinned = r#"{"theme":"dark","env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8787"}}"#;
+    for home in [&supplied_home, &ambient_home] {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/settings.json"), pinned).unwrap();
+    }
+    let paths = swapdex::paths::Paths::rooted(&supplied_home);
+    let slot = swapdex::slots::Slots::open_for_update(&paths, "claude-code")
+        .unwrap()
+        .create("work")
+        .unwrap()
+        .config_dir;
+    std::fs::write(slot.join("settings.json"), pinned).unwrap();
+
+    let out = run();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let settings = std::fs::read_to_string(supplied_home.join(".claude/settings.json")).unwrap();
+    assert!(!settings.contains("127.0.0.1:8787"), "{settings}");
+    assert!(settings.contains("dark"), "{settings}");
+    assert_eq!(
+        std::fs::read_to_string(ambient_home.join(".claude/settings.json")).unwrap(),
+        pinned,
+        "the ambient HOME is not ours to edit"
+    );
+    assert_eq!(
+        std::fs::read_link(slot.join("settings.json")).unwrap(),
+        supplied_home.join(".claude/settings.json")
+    );
+    assert_eq!(
+        std::fs::read_to_string(slot.join("settings.json.before-sharing")).unwrap(),
+        pinned
+    );
+    assert!(stdout.contains("work - settings.json follows"), "{stdout}");
 }
 
 #[test]

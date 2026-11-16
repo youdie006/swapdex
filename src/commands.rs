@@ -5371,10 +5371,15 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                 "Claude accounts share their settings and history".to_string()
             } else {
                 format!(
-                    "{}, so a change in {} does not reach those sessions - edit these too: {}",
+                    "{}, so a change in {} does not reach those sessions - edit these too: {}{}",
                     private.join("; "),
                     crate::util::redact_path(&source.display().to_string()),
-                    copies.join(", ")
+                    copies.join(", "),
+                    if copies.iter().any(|c| c.ends_with("/settings.json")) {
+                        ". `swapdex shim` links each settings.json back and keeps the copy"
+                    } else {
+                        ""
+                    }
                 )
             },
         );
@@ -6617,32 +6622,17 @@ fn install_requested_shims(paths: &Paths, requested: &[&str]) -> Result<i32> {
         return Ok(1);
     }
 
-    // Reaching the proxy must not depend on winning the PATH. The shim only
-    // fires when it does, and on a real machine another `claude` sat ahead of
-    // it - so the proxy went unused and `serve` silently changed nothing for a
-    // day, on two machines. Pinning the address in the tool's own settings is
-    // what every competing proxy switcher does, and no PATH ordering undoes it.
+    // Up to 0.167.37 this also pinned the proxy address into settings.json, so
+    // a `claude` started outside the shim reached the proxy too. Claude reads
+    // that address once, at startup, so a session started while the proxy was
+    // down could not start at all. Run inside an account's session, the pin
+    // also replaced that account's link to the shared settings with a copy,
+    // and the copy stopped following ~/.claude - hooks and permissions
+    // included. The shim hands the address to every session it starts, and
+    // starts the proxy first. Undo what the older versions wrote.
     if installed.contains(&"claude") {
-        let svc = {
-            let h = paths.home();
-            if cfg!(target_os = "macos") {
-                crate::service::launchd_path(h, "claude-code").exists()
-            } else {
-                crate::service::systemd_path(h, "claude-code").exists()
-            }
-        };
-        match crate::shim::pin_base_url(paths, 8787, svc)? {
-            Some(f) => println!(
-                "  pinned the proxy address in {} - a plain `claude` reaches it \
-                 however it is started",
-                crate::util::redact_path(&f.display().to_string())
-            ),
-            None => println!(
-                "  not pinning the proxy address: no service keeps the proxy alive, and a \
-                 pinned address with nothing behind it would stop `claude` from starting.\n\
-                 \x20     run `swapdex service install --tool claude` first"
-            ),
-        }
+        unpin_shared_settings(paths);
+        report_relinked(paths, &relink_own_settings(paths));
     }
 
     let in_place: Vec<&str> = installed.iter().chain(&kept).copied().collect();
@@ -7550,16 +7540,31 @@ fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
     // linked into it. Its links name the dir they came from - which is not
     // `~/.claude` when the user keeps their config elsewhere.
     let slots = paths.store_dir().join("slots");
+    let linked_from = |dir: &std::path::Path| {
+        crate::slots::shared_files(tool).iter().find_map(|name| {
+            let target = std::fs::read_link(dir.join(name)).ok()?;
+            let from = target.parent()?;
+            (target.file_name()? == *name && !from.starts_with(&slots)).then(|| from.to_path_buf())
+        })
+    };
     if configured.starts_with(&slots) {
-        return crate::slots::shared_files(tool)
+        return linked_from(configured).unwrap_or_else(|| paths.home().join(bare));
+    }
+    // An adopted account keeps its dir where it already was, so a session for
+    // it carries a dir outside the store that is still not the shared one. Its
+    // own links may be the user's (dotfiles); the ones swapdex made in its
+    // managed slots name the shared dir.
+    let records = crate::slots::Slots::open_for(paths, tool)
+        .map(|s| s.list())
+        .unwrap_or_default();
+    if records
+        .iter()
+        .any(|r| r.adopted && r.config_dir == configured)
+    {
+        return records
             .iter()
-            .filter_map(|name| {
-                let target = std::fs::read_link(configured.join(name)).ok()?;
-                let from = target.parent()?;
-                (target.file_name()? == *name && !from.starts_with(&slots))
-                    .then(|| from.to_path_buf())
-            })
-            .next()
+            .filter(|r| r.config_dir.starts_with(&slots))
+            .find_map(|r| linked_from(&r.config_dir))
             .unwrap_or_else(|| paths.home().join(bare));
     }
     configured.to_path_buf()
@@ -7579,6 +7584,286 @@ fn link_missing_shared(paths: &Paths, tool: &str) -> Vec<(String, Vec<String>)> 
             (!linked.is_empty()).then_some((r.name, linked))
         })
         .collect()
+}
+
+/// Take the proxy address an older `swapdex shim` pinned out of the shared
+/// Claude settings. Only swapdex's own address; any other is the user's.
+fn unpin_shared_settings(paths: &Paths) {
+    let file = shared_source(paths, "claude-code").join("settings.json");
+    let ours = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .is_some_and(|v| {
+            crate::shim::pin_is_ours(crate::shim::pinned_port(&v), DEFAULT_PROXY_PORT)
+        });
+    if !ours {
+        return;
+    }
+    let shown = crate::util::redact_path(&file.display().to_string());
+    if crate::shim::withdraw_pin_from(&file, DEFAULT_PROXY_PORT) {
+        println!("  removed the proxy address an older swapdex pinned in {shown}");
+    } else {
+        eprintln!(
+            "swapdex: {shown} still pins the proxy address (env.ANTHROPIC_BASE_URL) and could \
+             not be rewritten - remove that key by hand; the shim passes the address itself"
+        );
+    }
+}
+
+/// An account whose own settings.json was put aside and linked to the shared one.
+struct Relinked {
+    name: String,
+    kept: std::path::PathBuf,
+    /// What only the copy set, as dotted key paths; `None` when it did not parse.
+    own: Option<Vec<String>>,
+}
+
+/// Link each Claude account's own copy of settings.json back to the shared file.
+///
+/// `link_shared_config` never replaces a name a slot already has, so a copy an
+/// older version left behind never followed ~/.claude again. The copy is
+/// renamed aside, not deleted, and what only it set is reported.
+fn relink_own_settings(paths: &Paths) -> Vec<Relinked> {
+    let source = shared_source(paths, "claude-code");
+    let shared_file = source.join("settings.json");
+    let Ok(text) = std::fs::read_to_string(&shared_file) else {
+        return Vec::new();
+    };
+    let Ok(shared) = serde_json::from_str::<serde_json::Value>(&text) else {
+        eprintln!(
+            "swapdex: {} does not parse, so no account was linked back to it",
+            crate::util::redact_path(&shared_file.display().to_string())
+        );
+        return Vec::new();
+    };
+    let mut relinked = Vec::new();
+    for slot in crate::slots::Slots::open(paths)
+        .map(|s| s.list())
+        .unwrap_or_default()
+    {
+        let own_file = slot.config_dir.join("settings.json");
+        if slot.config_dir == source
+            || !std::fs::symlink_metadata(&own_file).is_ok_and(|m| m.is_file())
+            || crate::slots::same_file(&own_file, &shared_file)
+        {
+            continue;
+        }
+        let kept = slot.config_dir.join("settings.json.before-sharing");
+        if std::fs::symlink_metadata(&kept).is_ok() {
+            eprintln!(
+                "swapdex: '{}' keeps its own settings.json and {} already exists - move it \
+                 away and rerun `swapdex shim`",
+                slot.name,
+                crate::util::redact_path(&kept.display().to_string())
+            );
+            continue;
+        }
+        let own = std::fs::read_to_string(&own_file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|v| {
+                crate::slots::settings_only_in(
+                    &crate::shim::without_pin(&v, DEFAULT_PROXY_PORT),
+                    &shared,
+                )
+            });
+        if let Err(e) = std::fs::rename(&own_file, &kept) {
+            eprintln!(
+                "swapdex: could not put '{}' settings.json aside: {e}",
+                slot.name
+            );
+            continue;
+        }
+        #[cfg(unix)]
+        if let Err(e) = std::os::unix::fs::symlink(&shared_file, &own_file) {
+            let _ = std::fs::rename(&kept, &own_file);
+            eprintln!(
+                "swapdex: could not link '{}' settings.json back: {e}",
+                slot.name
+            );
+            continue;
+        }
+        relinked.push(Relinked {
+            name: slot.name,
+            kept,
+            own,
+        });
+    }
+    relinked
+}
+
+fn report_relinked(paths: &Paths, relinked: &[Relinked]) {
+    let shared = shared_source(paths, "claude-code").join("settings.json");
+    let shared = crate::util::redact_path(&shared.display().to_string());
+    for r in relinked {
+        println!(
+            "  {} - settings.json follows {shared} again; its own copy is kept at {}",
+            r.name,
+            crate::util::redact_path(&r.kept.display().to_string())
+        );
+        match &r.own {
+            Some(keys) if !keys.is_empty() => println!(
+                "    only the copy set {} - the shared values apply now",
+                keys.join(", ")
+            ),
+            Some(_) => {}
+            None => println!("    the copy did not parse"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod relink_settings_tests {
+    use super::*;
+
+    /// What older versions of `swapdex shim` left behind: the proxy address in
+    /// the settings, and accounts holding their own copy of them. Running the
+    /// shim now takes our address out, links every copy back, and keeps each
+    /// copy aside - except where an older copy is already kept there.
+    #[test]
+    fn the_old_pin_goes_and_every_copy_follows_the_shared_file_again() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let shared_file = paths.claude_dir().join("settings.json");
+        std::fs::create_dir_all(paths.claude_dir()).unwrap();
+        let pin = "http://127.0.0.1:8787";
+        let shared = serde_json::json!({
+            "model": "opus[1m]",
+            "permissions": {"allow": ["Read", "Edit"]},
+            "env": {"KEEP": "1"}
+        });
+        let mut pinned_shared = shared.clone();
+        pinned_shared["env"]["ANTHROPIC_BASE_URL"] = pin.into();
+        std::fs::write(&shared_file, pinned_shared.to_string()).unwrap();
+
+        let slot = |name: &str| {
+            crate::slots::Slots::open_for_update(&paths, "claude-code")
+                .unwrap()
+                .create(name)
+                .unwrap()
+                .config_dir
+        };
+        let behind = serde_json::json!({
+            "model": "opus",
+            "permissions": {"allow": ["Read"]},
+            "env": {"ANTHROPIC_BASE_URL": pin}
+        });
+        let bsgong = slot("bsgong");
+        std::fs::write(bsgong.join("settings.json"), behind.to_string()).unwrap();
+        let kong = slot("kong");
+        std::fs::write(kong.join("settings.json"), pinned_shared.to_string()).unwrap();
+        let held = slot("held");
+        std::fs::write(held.join("settings.json"), "{}").unwrap();
+        std::fs::write(held.join("settings.json.before-sharing"), "older").unwrap();
+        let linked = slot("linked");
+        std::os::unix::fs::symlink(&shared_file, linked.join("settings.json")).unwrap();
+
+        unpin_shared_settings(&paths);
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&shared_file).unwrap()).unwrap();
+        assert_eq!(after, shared, "only our address left the shared file");
+
+        let relinked = relink_own_settings(&paths);
+        let mut names: Vec<&str> = relinked.iter().map(|r| r.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["bsgong", "kong"]);
+        for dir in [&bsgong, &kong] {
+            assert_eq!(
+                std::fs::read_link(dir.join("settings.json")).unwrap(),
+                shared_file
+            );
+        }
+        let own = |name: &str| {
+            relinked
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .own
+                .clone()
+        };
+        assert_eq!(own("bsgong"), Some(vec!["model".to_string()]));
+        assert_eq!(own("kong"), Some(vec![]), "the pin alone is not a setting");
+        assert_eq!(
+            std::fs::read_to_string(bsgong.join("settings.json.before-sharing")).unwrap(),
+            behind.to_string(),
+            "the copy is kept as it was"
+        );
+        assert!(std::fs::symlink_metadata(held.join("settings.json"))
+            .unwrap()
+            .is_file());
+        assert_eq!(
+            std::fs::read_to_string(held.join("settings.json.before-sharing")).unwrap(),
+            "older"
+        );
+        assert!(
+            relink_own_settings(&paths).is_empty(),
+            "a second run has nothing to do"
+        );
+    }
+
+    /// Another address in the settings is the user's: it stays.
+    #[test]
+    fn another_address_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        std::fs::create_dir_all(paths.claude_dir()).unwrap();
+        let file = paths.claude_dir().join("settings.json");
+        let theirs = r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9001"}}"#;
+        std::fs::write(&file, theirs).unwrap();
+        unpin_shared_settings(&paths);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
+    }
+
+    /// `~/.claude` can be an alias of an account's own dir - a link to an
+    /// adopted `~/.claude-work`. That account's settings.json IS the shared
+    /// file; putting it aside and linking it to itself would leave every
+    /// account a link that loops.
+    #[test]
+    fn an_account_whose_dir_is_the_shared_dir_by_another_name_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let slot = crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .create("work")
+            .unwrap()
+            .config_dir;
+        std::fs::write(slot.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        std::os::unix::fs::symlink(&slot, paths.claude_dir()).unwrap();
+        assert!(relink_own_settings(&paths).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(slot.join("settings.json")).unwrap(),
+            r#"{"model":"opus"}"#
+        );
+        assert!(
+            crate::slots::unshared_config(
+                &slot,
+                &shared_source(&paths, "claude-code"),
+                "claude-code"
+            )
+            .is_empty(),
+            "doctor does not call it a copy either"
+        );
+    }
+
+    /// A shared file Claude cannot read is no place to send an account whose
+    /// own copy still works.
+    #[test]
+    fn a_shared_file_that_does_not_parse_is_not_linked_to() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        std::fs::create_dir_all(paths.claude_dir()).unwrap();
+        std::fs::write(paths.claude_dir().join("settings.json"), "{\"model\":").unwrap();
+        let slot = crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .create("work")
+            .unwrap()
+            .config_dir;
+        std::fs::write(slot.join("settings.json"), "{}").unwrap();
+        assert!(relink_own_settings(&paths).is_empty());
+        assert!(std::fs::symlink_metadata(slot.join("settings.json"))
+            .unwrap()
+            .is_file());
+    }
 }
 
 fn report_linked(linked: &[(String, Vec<String>)]) {
@@ -7633,6 +7918,49 @@ mod shared_source_in_slot_tests {
             ),
             own,
             "the source a slot's own links name"
+        );
+    }
+
+    /// An adopted account keeps its dir where it already was, outside the
+    /// store, and a session for it carries that dir. It is not the shared dir,
+    /// and its own links may be the user's (dotfiles); the links swapdex made in
+    /// its managed slots say which dir is shared.
+    #[test]
+    fn a_session_for_an_adopted_account_links_from_the_shared_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let adopted = root.path().join(".claude-work");
+        let dotfiles = root.path().join("dotfiles");
+        for dir in [&adopted, &dotfiles] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(adopted.join("settings.json"), b"{}").unwrap();
+        std::fs::write(dotfiles.join("CLAUDE.md"), b"mine").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("CLAUDE.md"), adopted.join("CLAUDE.md")).unwrap();
+        crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .adopt("work", &adopted)
+            .unwrap();
+        let inside = paths.with_tool_dir("claude-code", &adopted);
+        assert_eq!(
+            shared_source(&inside, "claude-code"),
+            root.path().join(".claude")
+        );
+
+        let own = root.path().join("my-claude");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("settings.json"), b"{}").unwrap();
+        let managed = crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .create("managed")
+            .unwrap()
+            .config_dir;
+        std::os::unix::fs::symlink(own.join("settings.json"), managed.join("settings.json"))
+            .unwrap();
+        assert_eq!(
+            shared_source(&inside, "claude-code"),
+            own,
+            "the dir a managed slot links into"
         );
     }
 }

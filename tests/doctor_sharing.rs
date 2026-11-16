@@ -42,6 +42,7 @@ fn doctor_names_each_account_keeping_its_own_settings() {
         "kong",
         "settings.json",
         "edit these too",
+        "`swapdex shim` links each settings.json back",
     ] {
         assert!(
             row.contains(expected),
