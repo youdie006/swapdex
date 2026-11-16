@@ -346,6 +346,27 @@ name that end from three days out, and again once it has passed, so you can run
 `/login` in a session of that account (`swapdex run <name>`) before Claude Code
 says "Login expired".
 
+To go past that end without signing in, give the account a one-year token.
+`claude setup-token` prints one after the same browser sign-in as `/login`;
+run it in a throwaway config dir so it touches no account, then hand the token
+to swapdex on stdin:
+
+```sh
+CLAUDE_CONFIG_DIR=$(mktemp -d) claude setup-token   # sign in as that account
+swapdex token work                                  # paste the token, Enter
+```
+
+swapdex keeps the token beside the account (mode 0600) and leaves the login in
+place until about 45 minutes before its end. Then the proxy's sweep puts the
+token where the login was, in the shape Claude Code builds for
+`CLAUDE_CODE_OAUTH_TOKEN`: it never expires and never renews. The proxy serves
+the account with it, and sessions in that account carry on instead of stopping
+with "Login expired". The token can only make model requests, so claude.ai
+connectors and Remote Control are off until a `/login` puts a full sign-in
+back. `swapdex ls` says when an account runs on its token, and names the
+token's own end a month before the year is up. `swapdex token <name> --remove`
+forgets it.
+
 Swapdex can renew idle accounts **while its proxy is running**,
 because that is the process holding the timer:
 

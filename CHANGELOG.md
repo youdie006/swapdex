@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.40
 
 - **`swapdex token` reads all of a pasted token.** Claude Code wraps the token
   `claude setup-token` prints at the terminal's width with real line breaks, so
