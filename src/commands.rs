@@ -7540,16 +7540,31 @@ fn shared_source(paths: &Paths, tool: &str) -> std::path::PathBuf {
     // linked into it. Its links name the dir they came from - which is not
     // `~/.claude` when the user keeps their config elsewhere.
     let slots = paths.store_dir().join("slots");
+    let linked_from = |dir: &std::path::Path| {
+        crate::slots::shared_files(tool).iter().find_map(|name| {
+            let target = std::fs::read_link(dir.join(name)).ok()?;
+            let from = target.parent()?;
+            (target.file_name()? == *name && !from.starts_with(&slots)).then(|| from.to_path_buf())
+        })
+    };
     if configured.starts_with(&slots) {
-        return crate::slots::shared_files(tool)
+        return linked_from(configured).unwrap_or_else(|| paths.home().join(bare));
+    }
+    // An adopted account keeps its dir where it already was, so a session for
+    // it carries a dir outside the store that is still not the shared one. Its
+    // own links may be the user's (dotfiles); the ones swapdex made in its
+    // managed slots name the shared dir.
+    let records = crate::slots::Slots::open_for(paths, tool)
+        .map(|s| s.list())
+        .unwrap_or_default();
+    if records
+        .iter()
+        .any(|r| r.adopted && r.config_dir == configured)
+    {
+        return records
             .iter()
-            .filter_map(|name| {
-                let target = std::fs::read_link(configured.join(name)).ok()?;
-                let from = target.parent()?;
-                (target.file_name()? == *name && !from.starts_with(&slots))
-                    .then(|| from.to_path_buf())
-            })
-            .next()
+            .filter(|r| r.config_dir.starts_with(&slots))
+            .find_map(|r| linked_from(&r.config_dir))
             .unwrap_or_else(|| paths.home().join(bare));
     }
     configured.to_path_buf()
@@ -7903,6 +7918,49 @@ mod shared_source_in_slot_tests {
             ),
             own,
             "the source a slot's own links name"
+        );
+    }
+
+    /// An adopted account keeps its dir where it already was, outside the
+    /// store, and a session for it carries that dir. It is not the shared dir,
+    /// and its own links may be the user's (dotfiles); the links swapdex made in
+    /// its managed slots say which dir is shared.
+    #[test]
+    fn a_session_for_an_adopted_account_links_from_the_shared_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        let adopted = root.path().join(".claude-work");
+        let dotfiles = root.path().join("dotfiles");
+        for dir in [&adopted, &dotfiles] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(adopted.join("settings.json"), b"{}").unwrap();
+        std::fs::write(dotfiles.join("CLAUDE.md"), b"mine").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("CLAUDE.md"), adopted.join("CLAUDE.md")).unwrap();
+        crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .adopt("work", &adopted)
+            .unwrap();
+        let inside = paths.with_tool_dir("claude-code", &adopted);
+        assert_eq!(
+            shared_source(&inside, "claude-code"),
+            root.path().join(".claude")
+        );
+
+        let own = root.path().join("my-claude");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("settings.json"), b"{}").unwrap();
+        let managed = crate::slots::Slots::open_for_update(&paths, "claude-code")
+            .unwrap()
+            .create("managed")
+            .unwrap()
+            .config_dir;
+        std::os::unix::fs::symlink(own.join("settings.json"), managed.join("settings.json"))
+            .unwrap();
+        assert_eq!(
+            shared_source(&inside, "claude-code"),
+            own,
+            "the dir a managed slot links into"
         );
     }
 }
