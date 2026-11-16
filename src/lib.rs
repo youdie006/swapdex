@@ -9,6 +9,7 @@ pub mod codex_tls;
 pub mod codex_usage;
 pub mod commands;
 pub mod live_login;
+pub mod long_token;
 pub mod mcp;
 pub mod native_sessions;
 pub mod paths;

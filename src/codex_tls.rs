@@ -131,7 +131,7 @@ fn load(dir: &Path) -> Result<Arc<tokio_rustls::rustls::ServerConfig>> {
 }
 
 /// (year, month, day) in UTC for a unix time, without a date crate.
-fn civil(secs: i64) -> (i32, u8, u8) {
+pub(crate) fn civil(secs: i64) -> (i32, u8, u8) {
     let z = secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

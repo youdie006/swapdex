@@ -1269,3 +1269,182 @@ fn a_kept_renewal_never_overwrites_a_newer_sign_in() {
         "the new sign-in was not renewed with its own token: {second}"
     );
 }
+
+const SETUP_TOKEN: &str = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+fn save_setup_token(root: &std::path::Path, name: &str) -> std::process::Output {
+    use std::io::Write as _;
+    let mut child = Command::new(bin())
+        .args(["token", name])
+        .env("SWAPDEX_ROOT", root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.take().unwrap(), "{SETUP_TOKEN}").unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// A sign-in ends about 27 days after it is made and nothing renews past that
+/// end. With a token from `claude setup-token` saved, the sweep puts it where the
+/// login was as the end arrives - without spending the refresh token - and what
+/// the proxy reads is then that token, which nothing will try to renew.
+#[test]
+fn a_saved_setup_token_takes_over_as_the_sign_in_ends() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "payer", "bbbb2222");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let hour = 3_600_000i64;
+    let write = |refresh_end: i64| {
+        std::fs::write(
+            slot.join(".credentials.json"),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"OLD-AT","refreshToken":"OLD-RT",
+                   "expiresAt":{},"refreshTokenExpiresAt":{},"subscriptionType":"max",
+                   "scopes":["user:inference","user:profile"]}},"mcpOAuth":{{"keep":"me"}}}}"#,
+                now_ms + 6 * hour,
+                refresh_end
+            ),
+        )
+        .unwrap();
+    };
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let url = fake_oauth(
+        asked.clone(),
+        r#"{"access_token":"NEW-AT","refresh_token":"NEW-RT","expires_in":3600}"#,
+    );
+    let sweep = || {
+        let out = Command::new(bin())
+            .args(["refresh", "--keep-alive"])
+            .env("SWAPDEX_ROOT", root.path())
+            .env("SWAPDEX_OAUTH_URL", &url)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+
+    write(now_ms + 5 * hour);
+    let saved = save_setup_token(root.path(), "payer");
+    let said = String::from_utf8_lossy(&saved.stdout);
+    assert!(
+        saved.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert!(said.contains("1-year token saved"), "{said}");
+    assert!(
+        !said.contains(SETUP_TOKEN)
+            && !String::from_utf8_lossy(&saved.stderr).contains(SETUP_TOKEN)
+    );
+    let file = slot.join(".swapdex-long-token.json");
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o077,
+        0
+    );
+
+    // Hours from its end: the login stays, claude.ai connectors and all.
+    let said = sweep();
+    assert_eq!(
+        credential(&slot)["claudeAiOauth"]["accessToken"],
+        "OLD-AT",
+        "{said}"
+    );
+    let ls = Command::new(bin())
+        .arg("ls")
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout);
+    assert!(!ls.contains("sign in again"), "nothing to do by then: {ls}");
+
+    // Half an hour from it: the token takes over.
+    write(now_ms + hour / 2);
+    let said = sweep();
+    let after = credential(&slot);
+    let oauth = &after["claudeAiOauth"];
+    assert_eq!(oauth["accessToken"], SETUP_TOKEN, "{said}");
+    assert!(oauth["refreshToken"].is_null() && oauth["expiresAt"].is_null());
+    assert_eq!(oauth["subscriptionType"], "max");
+    assert_eq!(
+        after["mcpOAuth"]["keep"], "me",
+        "the store's other logins stay"
+    );
+    assert!(
+        said.contains("payer") && said.contains("1-year token"),
+        "{said}"
+    );
+    assert!(!said.contains(SETUP_TOKEN), "{said}");
+    assert_eq!(asked.lock().unwrap().len(), 0, "no refresh token was spent");
+
+    // And from then on nothing renews it, and `ls` says what it runs on.
+    let said = sweep();
+    assert_eq!(asked.lock().unwrap().len(), 0, "{said}");
+    let ls = Command::new(bin())
+        .arg("ls")
+        .env("SWAPDEX_ROOT", root.path())
+        .output()
+        .unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout);
+    assert!(ls.contains("running on its 1-year token"), "{ls}");
+    assert!(!ls.contains(SETUP_TOKEN), "{ls}");
+}
+
+/// A login Claude Code was already refused for - it marks the store
+/// `loginEnded: "time_limit"` - is replaced the moment the token is saved.
+#[test]
+fn a_login_already_past_its_end_is_replaced_when_the_token_is_saved() {
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "late", "cccc3333");
+    std::fs::write(
+        slot.join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","loginEnded":"time_limit",
+           "scopes":["user:inference","user:profile"],"subscriptionType":"max"}}"#,
+    )
+    .unwrap();
+    let saved = save_setup_token(root.path(), "late");
+    let said = String::from_utf8_lossy(&saved.stdout);
+    assert!(said.contains("runs on this token now"), "{said}");
+    assert_eq!(
+        credential(&slot)["claudeAiOauth"]["accessToken"],
+        SETUP_TOKEN
+    );
+}
+
+#[test]
+fn a_token_that_is_not_from_setup_token_is_refused() {
+    use std::io::Write as _;
+    let root = tempfile::tempdir().unwrap();
+    let slot = seed_lapsed_account(root.path(), "work", "dddd4444");
+    let mut child = Command::new(bin())
+        .args(["token", "work"])
+        .env("SWAPDEX_ROOT", root.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "sk-ant-api03-notasetuptokenxxxxxxxxxxxxxxxxxxxxxxx"
+    )
+    .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!slot.join(".swapdex-long-token.json").exists());
+    let gone = Command::new(bin())
+        .args(["token", "nobody"])
+        .env("SWAPDEX_ROOT", root.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(gone.status.code(), Some(5));
+}

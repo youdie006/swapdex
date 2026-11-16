@@ -4,6 +4,24 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A Claude account can keep working past its sign-in's end, on a one-year
+  token.** A Claude sign-in ends about 27 days after it is made and no renewal
+  moves that end, so each account needed a browser `/login` every month, and
+  an account whose end passed unnoticed stopped every session in it with
+  "Login expired". `swapdex token <name>` now takes the token `claude
+  setup-token` prints (on stdin, never in argv or the log) and keeps it beside
+  the account. About 45 minutes before the sign-in's end the proxy's sweep
+  puts it where the login was, in the shape Claude Code builds for
+  `CLAUDE_CODE_OAUTH_TOKEN` (no refresh token, no expiry), under Claude
+  Code's own refresh lock; a proxy that starts after the end does it at
+  startup. The proxy then serves the account with it and sessions carry on.
+  The token is inference-only, so claude.ai connectors and Remote Control
+  stay off until the next `/login`, which `swapdex ls` says. With a token
+  saved, the three-day "sign in again" warning says the token takes over
+  instead, and the status line drops it.
+
 ## 0.167.38
 
 - **`swapdex shim` no longer writes the proxy address into Claude's
