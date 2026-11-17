@@ -1370,7 +1370,10 @@ fn a_saved_setup_token_takes_over_as_the_sign_in_ends() {
         .output()
         .unwrap();
     let ls = String::from_utf8_lossy(&ls.stdout);
-    assert!(!ls.contains("sign in again"), "nothing to do by then: {ls}");
+    assert!(
+        ls.contains("keeps claude.ai connectors") && ls.contains("1-year token takes over"),
+        "a /login before the end keeps everything, and the token covers a missed one: {ls}"
+    );
 
     // Half an hour from it: the token takes over.
     write(now_ms + hour / 2);
