@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.42
 
 - **An account that only pays runs on its 1-year token without a word.**
   0.167.41 warned about every account with a saved token: the status line named
