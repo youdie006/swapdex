@@ -4,6 +4,28 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **An account that only pays runs on its 1-year token without a word.**
+  0.167.41 warned about every account with a saved token: the status line named
+  its sign-in's end and, once the token took over, "connectors off", and `ls`
+  and `doctor` counted both as something to do. That is true only of the
+  account plain `claude` runs in, where sessions and their claude.ai connectors
+  live. An account that only pays through the proxy needs nothing from it but
+  model requests, which the token makes, so the status line and `ls` now say
+  nothing about it and `doctor` lists it as fine. A `swapdex run <name>`
+  session in an account on its token says at launch that claude.ai connectors
+  are off there.
+- **An account on its 1-year token shows its usage instead of a login to
+  renew.** The usage endpoint needs the `user:profile` scope, which a 1-year
+  token does not carry, and its refusal read as a rejected login: `swapdex
+  quota` and the dashboard said "expired", and the proxy could not measure the
+  account, so its threshold could not apply. swapdex no longer asks the
+  endpoint about such an account. Each response the proxy serves with it states
+  the 5-hour and 7-day use, and that is now its reading for the status line,
+  the dashboard, `quota` and the threshold. Until it has served a turn it says
+  its usage shows once it does.
+
 ## 0.167.41
 
 - **A saved 1-year token no longer hides the sign-in's end.** With a token

@@ -129,6 +129,10 @@ case "$cfg" in
     printf x >> "$HOME/old-usage-calls"
     printf '{"error":"old access rejected"}\n401'
     ;;
+  *sk-ant-oat01-LONG*)
+    printf x >> "$HOME/long-token-usage-calls"
+    printf '{"error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}\n403'
+    ;;
   *VALID-ACCESS*)
     printf x >> "$HOME/valid-usage-calls"
     printf '{"five_hour":{"utilization":12}}\n200'
@@ -614,4 +618,63 @@ fn matching_unslotted_profile_does_not_send_an_expired_live_credential() {
         std::fs::read(profile.join("credentials")).unwrap(),
         saved_before
     );
+}
+
+/// A 1-year token is for model requests only, and the usage endpoint answers
+/// it 403 for want of `user:profile`. Read as a rejected login, that told the
+/// user to sign in again on every screen, about an account serving fine. Its
+/// usage is what the proxy saw on the responses it served.
+#[test]
+fn an_account_on_its_1_year_token_is_not_asked_and_not_called_expired() {
+    let fixture = Fixture::new(false);
+    let token = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let write = |path: PathBuf, value: serde_json::Value| {
+        std::fs::write(&path, value.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    write(
+        fixture.slot.join(".credentials.json"),
+        serde_json::json!({"claudeAiOauth": {
+            "accessToken": token, "refreshToken": null, "expiresAt": null,
+            "scopes": ["user:inference"], "subscriptionType": "max"}}),
+    );
+    write(
+        fixture.slot.join(".swapdex-long-token.json"),
+        serde_json::json!({"version": 1, "token": token, "saved_at_ms": now_ms}),
+    );
+
+    let row = fixture.row(&fixture.quota()).clone();
+    assert!(
+        !fixture.root.path().join("long-token-usage-calls").exists(),
+        "the usage endpoint was asked about a token it cannot answer: {row}"
+    );
+    assert_ne!(row["status"], "expired", "{row}");
+    assert!(
+        row["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("1-year token")),
+        "{row}"
+    );
+
+    // What the proxy recorded from served responses is shown, however old.
+    let now = now_ms / 1000;
+    write(
+        fixture
+            .root
+            .path()
+            .join(".local/share/swapdex/quota-cache.json"),
+        serde_json::json!({"work": {"five_h": 42.0, "five_h_reset": now + 3600,
+            "seven_d": 17.0, "seven_d_reset": now + 86_400, "at": now - 1800}}),
+    );
+    let row = fixture.row(&fixture.quota()).clone();
+    assert!(
+        !fixture.root.path().join("long-token-usage-calls").exists(),
+        "{row}"
+    );
+    assert_eq!(row["status"], "ok", "{row}");
+    assert_eq!(row["five_hour"]["used_pct"], 42.0, "{row}");
 }

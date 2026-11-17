@@ -18,6 +18,9 @@ pub struct Quota {
     /// Each window's own reset, by window name (`5h`, `7d`, ...). The soonest is
     /// what the rotation needs; the bar needs to know WHICH window it belongs to.
     pub resets: Vec<(String, i64)>,
+    /// Each window's use in percent, by window name. The header states a
+    /// fraction (`0.42`), which Claude Code shows times 100.
+    pub used: Vec<(String, f64)>,
 }
 
 fn rejected_plan_status(name: &str, value: &str) -> bool {
@@ -56,6 +59,14 @@ impl Quota {
             .map(|(_, at)| *at)
     }
 
+    /// How much of one named window is used, in percent.
+    pub fn used_of(&self, window: &str) -> Option<f64> {
+        self.used
+            .iter()
+            .find(|(w, _)| w == window)
+            .map(|(_, pct)| *pct)
+    }
+
     /// Which included-plan windows reported `rejected` (e.g. `5h-status`,
     /// `7d-status`). Named in the log so "SPENT" on a successful response is
     /// explainable rather than mysterious. Paid overage is telemetry, not plan
@@ -91,6 +102,12 @@ pub fn from_headers(headers: &[(String, String)]) -> Option<Quota> {
                 q.reset_secs = Some(q.reset_secs.map_or(n, |cur| cur.min(n)));
                 q.resets
                     .push((rest.trim_end_matches("-reset").to_string(), n));
+            }
+        } else if let Some(window) = rest.strip_suffix("-utilization") {
+            if let Ok(f) = value.trim().parse::<f64>() {
+                if f.is_finite() && f >= 0.0 {
+                    q.used.push((window.to_string(), f * 100.0));
+                }
             }
         }
     }
@@ -177,6 +194,23 @@ mod tests {
         ]))
         .expect("quota seen");
         assert!(!q.rejected);
+    }
+
+    #[test]
+    fn each_window_states_its_use_as_a_fraction() {
+        let q = from_headers(&h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-7d-utilization", "1"),
+            (
+                "anthropic-ratelimit-unified-overage-utilization",
+                "nonsense",
+            ),
+        ]))
+        .expect("quota seen");
+        assert_eq!(q.used_of("5h"), Some(42.0));
+        assert_eq!(q.used_of("7d"), Some(100.0));
+        assert_eq!(q.used_of("overage"), None);
+        assert!(!q.rejected, "a use is not a refusal");
     }
 
     #[test]
@@ -306,6 +340,7 @@ mod spent_expiry_tests {
             statuses: Vec::new(),
             reset_secs: Some(1_000),
             resets: Vec::new(),
+            used: Vec::new(),
         };
         assert!(q.still_spent(999), "before the reset it is out");
         assert!(!q.still_spent(1_000), "at the reset it is back");
@@ -322,6 +357,7 @@ mod spent_expiry_tests {
             statuses: Vec::new(),
             reset_secs: None,
             resets: Vec::new(),
+            used: Vec::new(),
         };
         assert!(q.still_spent_since(100, 100), "just now");
         assert!(q.still_spent_since(100, 100 + SPENT_FOR_SECS - 1));

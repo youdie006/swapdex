@@ -1300,6 +1300,12 @@ fn save_token(root: &std::path::Path, name: &str, token: &str) -> std::process::
 fn a_saved_setup_token_takes_over_as_the_sign_in_ends() {
     let root = tempfile::tempdir().unwrap();
     let slot = seed_lapsed_account(root.path(), "payer", "bbbb2222");
+    // Plain `claude` runs in it, so its connectors are the ones a token drops.
+    std::fs::write(
+        root.path().join(".local/share/swapdex/active-claude"),
+        slot.to_str().unwrap(),
+    )
+    .unwrap();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

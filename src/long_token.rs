@@ -35,6 +35,10 @@ const _: () = assert!(TAKE_OVER_LEAD_MS as u128 > crate::proxy::KEEP_ALIVE_EVERY
 /// How close the token's own end is before `ls` names it.
 pub const END_NOTICE_MS: i64 = 30 * DAY_MS;
 
+/// Why an account on its token has no usage reading yet.
+pub const USAGE_NOTE: &str = "on its 1-year token, which the usage endpoint does not answer - \
+     usage shows once the proxy serves a turn with it";
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
     version: u8,
@@ -131,6 +135,22 @@ pub fn installed(blob: &[u8], long: &LongToken) -> bool {
         .is_ok_and(|v| v["claudeAiOauth"]["accessToken"].as_str() == Some(long.token()))
 }
 
+/// Whether the account runs on its saved token now, in place of a login.
+pub fn running_on(paths: &Paths, dir: &Path) -> bool {
+    load(dir).is_some_and(|long| {
+        crate::claude_authority::credential(paths, dir).is_ok_and(|c| installed(c.bytes(), &long))
+    })
+}
+
+/// Whether a request's `authorization` value carries the account's saved
+/// token. The proxy asks this of every response, so it reads no credential
+/// store - on macOS that is a Keychain call.
+pub fn sent_with(dir: &Path, authorization: Option<&str>) -> bool {
+    authorization
+        .and_then(|a| a.strip_prefix("Bearer "))
+        .is_some_and(|sent| load(dir).is_some_and(|long| long.token() == sent))
+}
+
 /// Whether the saved token should stand in this store: its sign-in has
 /// reached, or is about to reach, its fixed end, or it already holds a token
 /// that nothing renews - an older one, which a new token replaces. Claude Code
@@ -220,10 +240,28 @@ fn date(at_ms: i64, tz_offset: i64) -> String {
 
 /// The login-end note for an account whose token will take over. Sessions go
 /// on either way, but the token cannot reach claude.ai connectors or Remote
-/// Control, so it still offers the /login that keeps them.
-pub fn covered_end_note(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
+/// Control, so it still offers the /login that keeps them - unless the account
+/// only pays, where the proxy needs nothing but model requests from it.
+pub fn covered_end_note(
+    end: &LoginEnd,
+    name: &str,
+    pays_only: bool,
+    now_ms: i64,
+    tz_offset: i64,
+) -> String {
     let clock = |at: i64| crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset);
     let run = format!("`swapdex run {}`", crate::util::shell_word(name));
+    if pays_only {
+        let (verb, at) = match end {
+            LoginEnd::Ends(at) => ("ends", at),
+            LoginEnd::Ended(at) => ("ended", at),
+        };
+        return format!(
+            "login {verb} {} - its 1-year token takes over, and paying needs nothing \
+             more; only a {run} session would miss claude.ai connectors",
+            clock(*at)
+        );
+    }
     match end {
         LoginEnd::Ends(at) => format!(
             "login ends {} - /login in a {run} session before then keeps claude.ai \
@@ -245,8 +283,15 @@ pub fn running_brief(name: &str) -> String {
 
 /// What `ls` and `doctor` say about an account's saved token, and whether it
 /// asks for something to be done: its year nearly up does, and so does running
-/// on it, since claude.ai connectors are off until a /login. Nothing otherwise.
-pub fn status_note(paths: &Paths, dir: &Path, name: &str, now_ms: i64) -> Option<(String, bool)> {
+/// on it, since claude.ai connectors are off until a /login - but not for an
+/// account that only pays. Nothing otherwise.
+pub fn status_note(
+    paths: &Paths,
+    dir: &Path,
+    name: &str,
+    pays_only: bool,
+    now_ms: i64,
+) -> Option<(String, bool)> {
     let long = load(dir)?;
     let tz = crate::proxy::tz_offset();
     let ends = date(long.ends_at_ms(), tz);
@@ -262,11 +307,18 @@ pub fn status_note(paths: &Paths, dir: &Path, name: &str, now_ms: i64) -> Option
     }
     let in_use =
         crate::claude_authority::credential(paths, dir).is_ok_and(|c| installed(c.bytes(), &long));
+    let run = format!("`swapdex run {}`", crate::util::shell_word(name));
     in_use.then(|| {
+        if pays_only {
+            let note = format!(
+                "running on its 1-year token until about {ends} - paying needs nothing \
+                 more; a {run} session has no claude.ai connectors"
+            );
+            return (note, false);
+        }
         let note = format!(
-            "running on its 1-year token until about {ends} - /login in a `swapdex run {}` \
-             session brings back claude.ai connectors",
-            crate::util::shell_word(name)
+            "running on its 1-year token until about {ends} - /login in a {run} session \
+             brings back claude.ai connectors"
         );
         (note, true)
     })
@@ -394,17 +446,30 @@ mod tests {
 
     #[test]
     fn the_note_offers_the_login_that_keeps_connectors() {
-        let ends = covered_end_note(&LoginEnd::Ends(NOW + 3_600_000), "work", NOW, 0);
+        let ends = covered_end_note(&LoginEnd::Ends(NOW + 3_600_000), "work", false, NOW, 0);
         assert!(
             ends.contains("/login in a `swapdex run work` session")
                 && ends.contains("keeps claude.ai connectors")
                 && ends.contains("1-year token takes over"),
             "{ends}"
         );
-        let ended = covered_end_note(&LoginEnd::Ended(NOW - 1), "work", NOW, 0);
+        let ended = covered_end_note(&LoginEnd::Ended(NOW - 1), "work", false, NOW, 0);
         assert!(
             ended.contains("takes over") && ended.contains("brings back claude.ai connectors"),
             "{ended}"
         );
+    }
+
+    #[test]
+    fn the_note_for_an_account_that_only_pays_asks_for_nothing() {
+        for end in [LoginEnd::Ends(NOW + 3_600_000), LoginEnd::Ended(NOW - 1)] {
+            let note = covered_end_note(&end, "work", true, NOW, 0);
+            assert!(
+                note.contains("1-year token takes over")
+                    && note.contains("only a `swapdex run work` session")
+                    && !note.contains("/login"),
+                "{note}"
+            );
+        }
     }
 }

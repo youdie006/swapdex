@@ -8259,3 +8259,77 @@ fn taking_over_the_port_waits_for_the_holder_to_finish_streaming() {
     }
     panic!("the taker never took the port: {said:?}");
 }
+
+/// An account on its 1-year token cannot be measured: the usage endpoint
+/// refuses a token without `user:profile`. The responses it serves state its
+/// windows anyway, as fractions, and those are its reading.
+#[test]
+fn an_account_on_its_1_year_token_is_measured_from_the_turns_it_serves() {
+    let root = tempfile::tempdir().unwrap();
+    let token = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    seed_slot(root.path(), "solo", "aaaa1111", token, true);
+    let slot = root.path().join(".local/share/swapdex/slots/aaaa1111");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for (file, value) in [
+        (
+            ".credentials.json",
+            serde_json::json!({"claudeAiOauth": {"accessToken": token, "refreshToken": null,
+                "expiresAt": null, "scopes": ["user:inference"]}}),
+        ),
+        (
+            ".swapdex-long-token.json",
+            serde_json::json!({"version": 1, "token": token, "saved_at_ms": now * 1000}),
+        ),
+    ] {
+        let path = slot.join(file);
+        std::fs::write(&path, value.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (hour, week) = ((now + 3600).to_string(), (now + 86_400).to_string());
+    let upstream = ControlledUpstream::start(move |mut request| {
+        let mut body = Vec::new();
+        request.as_reader().read_to_end(&mut body).ok();
+        let mut response = tiny_http::Response::from_string("{\"ok\":true}");
+        for (name, value) in [
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-5h-reset", hour.as_str()),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.17"),
+            ("anthropic-ratelimit-unified-7d-reset", week.as_str()),
+        ] {
+            response = response.with_header(
+                tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap(),
+            );
+        }
+        let _ = request.respond(response);
+    });
+    let (proxy, port) = start_proxy(root.path(), upstream.url(), &[]);
+    let proxy = ReapedChild::new(proxy);
+    let body = post_through(port, "{\"turn\":1}");
+    assert!(body.contains("\"ok\":true"), "{body}");
+
+    let cache = root.path().join(".local/share/swapdex/quota-cache.json");
+    let started = std::time::Instant::now();
+    let entry = loop {
+        let entry = std::fs::read(&cache)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .map(|v| v["solo"].clone())
+            .unwrap_or_default();
+        if entry["five_h"].is_number() || started.elapsed() > std::time::Duration::from_secs(5) {
+            break entry;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let log = proxy.stop_with_stdout();
+    assert_eq!(entry["five_h"], 42.0, "{entry}\n{log}");
+    assert_eq!(entry["seven_d"], 17.0, "{entry}\n{log}");
+    assert_eq!(entry["five_h_reset"], now + 3600, "{entry}");
+    assert!(
+        !log.contains("solo (could not reach the endpoint)"),
+        "the usage endpoint was asked about a token it refuses:\n{log}"
+    );
+}
