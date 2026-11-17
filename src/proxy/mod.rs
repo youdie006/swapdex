@@ -1208,6 +1208,7 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
             (
                 n.clone(),
                 crate::quota_cache::Entry {
+                    from_responses: false,
                     five_h: m.five_h,
                     five_h_reset: m.five_h_reset,
                     seven_d: m.seven_d,
@@ -3371,6 +3372,7 @@ mod seed_tests {
 
     fn entry(at: i64, five_h: f64) -> crate::quota_cache::Entry {
         crate::quota_cache::Entry {
+            from_responses: false,
             five_h: Some(five_h),
             five_h_reset: Some(at + 3600),
             seven_d: Some(10.0),

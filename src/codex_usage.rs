@@ -324,6 +324,7 @@ pub fn remember(
 fn entry_of(a: &Account, at: i64) -> crate::quota_cache::Entry {
     let p = crate::codex_limits::place(&a.limits);
     crate::quota_cache::Entry {
+        from_responses: false,
         five_h: p.five_h.map(|w| w.used_pct),
         five_h_reset: p.five_h.and_then(|w| w.resets_at),
         seven_d: p.seven_d.map(|w| w.used_pct),

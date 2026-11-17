@@ -8921,6 +8921,7 @@ fn remember_codex_reading(paths: &Paths, name: &str, u: &crate::tui::Usage) {
         return; // nothing read is not a reading
     }
     let entry = crate::quota_cache::Entry {
+        from_responses: false,
         five_h: u.five_h,
         five_h_reset: u.five_h_reset,
         seven_d: u.seven_d,
@@ -11237,6 +11238,7 @@ pub fn quota(paths: &Paths, json: bool, fresh_within: Option<u64>) -> Result<i32
             Fetch::Ok(qd) => Some((
                 rows[*i].name.clone(),
                 crate::quota_cache::Entry {
+                    from_responses: false,
                     five_h: qd.five_hour.map(|w| w.used_pct),
                     five_h_reset: qd.five_hour.and_then(|w| w.resets_at),
                     seven_d: qd.seven_day.map(|w| w.used_pct),

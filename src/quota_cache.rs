@@ -28,6 +28,10 @@ pub struct Entry {
     /// row back to "spent" between live reads.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub on_credits: bool,
+    /// Taken off a served response rather than the usage endpoint. Such a
+    /// full window is a measurement, never the old misread that loading drops.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_responses: bool,
     /// Why the account is refusing, in the API's own words, when the reading
     /// carried a reason. Kept with the numbers because it arrived with them:
     /// Codex states `rate_limit_reached_type` on the same response as the
@@ -214,7 +218,10 @@ fn load_file_at(path: &std::path::Path, now: i64, drop_clamped: bool) -> Cache {
 /// measurement, an artefact of the misread.
 fn was_clamped(e: &Entry) -> bool {
     let at_ceiling = |v: Option<f64>| v.is_none_or(|p| p >= 100.0);
-    at_ceiling(e.five_h) && at_ceiling(e.seven_d) && (e.five_h.is_some() || e.seven_d.is_some())
+    !e.from_responses
+        && at_ceiling(e.five_h)
+        && at_ceiling(e.seven_d)
+        && (e.five_h.is_some() || e.seven_d.is_some())
 }
 
 /// Merge fresh readings in and save. Only accounts that were actually read are
@@ -324,6 +331,7 @@ pub fn note_served_usage(
         e.seven_d_reset = seven_d.1.or(e.seven_d_reset);
     }
     e.at = now_secs();
+    e.from_responses = true;
     e.token_rejected_at = None;
     if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
         let _ = std::fs::create_dir_all(paths.store_dir());
@@ -550,6 +558,35 @@ mod tests {
         assert!(!c.contains_key("clamped"), "the artefact is dropped");
         assert_eq!(c["measured"].five_h, Some(4.0));
         assert_eq!(c["half"].five_h, Some(100.0), "a real 100 survives");
+    }
+
+    /// A full window stated on a served response is a measurement, not the
+    /// misread: an account on its 1-year token has no endpoint reading to
+    /// replace it, so dropping it lost the one sign that the account is spent.
+    #[test]
+    fn a_full_window_stated_on_a_response_is_remembered() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted(root.path());
+        note_served_usage(
+            &paths,
+            "spent",
+            (Some(100.0), Some(9_999_999_999)),
+            (None, None),
+        );
+        assert_eq!(load(&paths)["spent"].five_h, Some(100.0));
+        // An endpoint reading in its place is judged as before.
+        update(
+            &paths,
+            &[(
+                "spent".into(),
+                Entry {
+                    five_h: Some(100.0),
+                    at: 1,
+                    ..Default::default()
+                },
+            )],
+        );
+        assert!(!load(&paths).contains_key("spent"));
     }
 
     #[test]
