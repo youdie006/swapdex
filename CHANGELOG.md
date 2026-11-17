@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.41
 
 - **A saved 1-year token no longer hides the sign-in's end.** With a token
   saved, the status line dropped the three-day warning and `swapdex doctor`
@@ -15,6 +15,13 @@ All notable changes to swapdex are documented here. This project follows
   and `doctor` say a `/login` before then keeps connectors and that the token
   takes over otherwise, and an account running on its token shows "on 1-year
   token, connectors off" in the status line and as a problem in `doctor`.
+- Update the ureq dependency from 3.5.1 to 3.5.2 (#150): a response body's
+  size limit now applies after it is decompressed and accepts a body exactly
+  at the limit, and a connection that fails with "network down" tries the
+  host's next address.
+- Update the rusqlite dependency from 0.41.1 to 0.42.0 (#151). The bundled
+  SQLite stays at 3.54.1; the fixes in this version are to features swapdex
+  does not use (sessions, collations, scalar functions, SQLCipher).
 
 ## 0.167.40
 
