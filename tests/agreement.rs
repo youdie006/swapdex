@@ -1315,6 +1315,86 @@ fn the_status_bar_still_names_an_end_a_saved_token_covers() {
     );
 }
 
+/// An account that only pays loses nothing to its token: sessions run in the
+/// home account, and the proxy needs nothing but model requests from the payer.
+/// Warning about its end, or about connectors it never serves, was a monthly
+/// nag with nothing to do about it. A session opened in it still says so.
+#[test]
+fn an_account_that_only_pays_runs_on_its_token_quietly() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    seed_slot(root, "alpha", "a@example.com");
+    seed_slot(root, "beta", "b@example.com");
+    run(root, &["use", "alpha"]);
+    run(root, &["serve", "beta"]);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let ending = |end: i64| {
+        let path = root
+            .join(".local/share/swapdex/slots/beta")
+            .join(".credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+                "accessToken":"AT","refreshToken":"RT","expiresAt": now_ms + 3_600_000,
+                "refreshTokenExpiresAt": end, "subscriptionType":"max"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        chmod600(&path);
+    };
+    let token = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let quiet = |when: &str| {
+        let (bar, _, _) = run(root, &["serve", "--quiet"]);
+        assert!(
+            !bar.contains("beta login") && !bar.contains("beta on 1-year token"),
+            "{when}: the bar warns about an account that only pays: {bar}"
+        );
+        let (ls, _, _) = run(root, &["ls", "--json"]);
+        let rows: serde_json::Value = serde_json::from_str(&ls).unwrap();
+        let beta = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "beta")
+            .unwrap();
+        assert!(
+            beta["warning"].is_null(),
+            "{when}: ls warns about an account that only pays: {beta}"
+        );
+        let (doctor, _, _) = run(root, &["doctor"]);
+        assert!(
+            !doctor
+                .lines()
+                .any(|l| l.contains("slot:beta") && l.contains("problem")),
+            "{when}: doctor counts an account that only pays as a problem: {doctor}"
+        );
+    };
+
+    ending(now_ms + 2 * 86_400_000);
+    let (said, err, code) = run_stdin(root, &["token", "beta"], token);
+    assert_eq!(code, 0, "{said}{err}");
+    quiet("before the end");
+
+    ending(now_ms + 20 * 60_000);
+    let (said, err, code) = run_stdin(root, &["token", "beta"], token);
+    assert!(
+        code == 0 && said.contains("runs on this token now"),
+        "{said}{err}"
+    );
+    quiet("on the token");
+
+    let (out, err, code) = run(root, &["run", "beta", "--no-launch"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        format!("{out}{err}").contains("claude.ai connectors are off"),
+        "a session opened in it is not told its connectors are off: {out}{err}"
+    );
+}
+
 /// An account name may hold spaces, and the bar named the payer by the first
 /// word of its label: for `work account` it looked up `work`, so the bar showed
 /// no usage and no sign-in end for the account paying - or another account's,

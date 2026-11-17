@@ -1019,6 +1019,32 @@ fn measure_now(paths: &Paths, slots: &[crate::slots::SlotRecord], sh: &Shared) {
                 continue;
             }
         }
+        // The endpoint refuses a 1-year token. What the account's own served
+        // responses stated is in the cache, written as each one arrived.
+        if crate::long_token::running_on(paths, &r.config_dir) {
+            let cache = crate::quota_cache::load(paths);
+            match cache
+                .get(&r.name)
+                .filter(|e| e.five_h.is_some() || e.seven_d.is_some())
+            {
+                Some(e) => {
+                    let age = std::time::Duration::from_secs((now_secs() - e.at).max(0) as u64);
+                    out.insert(
+                        r.name.clone(),
+                        Measurement {
+                            five_h: e.five_h,
+                            seven_d: e.seven_d,
+                            credits: e.on_credits,
+                            five_h_reset: e.five_h_reset,
+                            seven_d_reset: e.seven_d_reset,
+                            taken: Some(now.checked_sub(age).unwrap_or(now)),
+                        },
+                    );
+                }
+                None => unread.push((r.name.clone(), crate::long_token::USAGE_NOTE.to_string())),
+            }
+            continue;
+        }
         // Both of these used to `continue` without a word, which is where the
         // account that serves fine can still vanish from this line: serving
         // RENEWS a lapsed token on the way past, and measuring does not - so an
@@ -2948,6 +2974,17 @@ fn forward_turn(
                 q.reset_of("5h"),
                 q.reset_of("7d"),
             );
+            // The endpoint refuses a 1-year token, so the response is its reading.
+            if opts.tool == "claude-code"
+                && crate::long_token::sent_with(&slot.config_dir, sent_auth.as_deref())
+            {
+                crate::quota_cache::note_served_usage(
+                    paths,
+                    &slot.name,
+                    (q.used_of("5h"), q.reset_of("5h")),
+                    (q.used_of("7d"), q.reset_of("7d")),
+                );
+            }
             sh.quota.held().insert(slot.name.clone(), (q, now_secs()));
         }
         if up.status == 403 {

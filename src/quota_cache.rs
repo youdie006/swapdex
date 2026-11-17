@@ -297,6 +297,40 @@ pub fn note_resets(
     }
 }
 
+/// Record the windows a served response stated, as a reading taken now. For
+/// an account the usage endpoint cannot be asked about - one on its 1-year
+/// token - this is the only reading there is.
+pub fn note_served_usage(
+    paths: &Paths,
+    name: &str,
+    five_h: (Option<f64>, Option<i64>),
+    seven_d: (Option<f64>, Option<i64>),
+) {
+    if five_h.0.is_none() && seven_d.0.is_none() {
+        return;
+    }
+    let Some(_lock) = lock_for(paths, "claude-code") else {
+        return;
+    };
+    let path = file_for(paths, "claude-code");
+    let mut c = load_file_at(&path, now_secs(), drops_clamped("claude-code"));
+    let e = c.entry(name.to_string()).or_default();
+    if let Some(pct) = five_h.0 {
+        e.five_h = Some(pct);
+        e.five_h_reset = five_h.1.or(e.five_h_reset);
+    }
+    if let Some(pct) = seven_d.0 {
+        e.seven_d = Some(pct);
+        e.seven_d_reset = seven_d.1.or(e.seven_d_reset);
+    }
+    e.at = now_secs();
+    e.token_rejected_at = None;
+    if let Ok(bytes) = serde_json::to_vec_pretty(&c) {
+        let _ = std::fs::create_dir_all(paths.store_dir());
+        let _ = crate::atomic::write_secret(&path, &bytes);
+    }
+}
+
 /// Record that a live read of `name` was rejected by the account's own token.
 ///
 /// Merged onto whatever is remembered rather than replacing it: the numbers

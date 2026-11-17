@@ -2503,20 +2503,25 @@ fn account_health(
         // In particular an unreadable Mac Keychain is not an expired snapshot.
         warnings.retain(|warning| !warning.starts_with(&format!("{tool} ")));
         // With a 1-year token saved, sessions outlive the end; connectors do not.
+        // An account plain `claude` does not run in only pays, and loses nothing.
         let covered =
             tool == "claude-code" && crate::long_token::current(&slot.config_dir, now_ms).is_some();
+        let pays_only = tool == "claude-code" && only_pays(paths, name);
         let login_end_note = |end: &crate::refresh::LoginEnd| {
+            if covered && pays_only {
+                return None;
+            }
             let tz = crate::proxy::tz_offset();
             let note = if covered {
-                crate::long_token::covered_end_note(end, name, now_ms, tz)
+                crate::long_token::covered_end_note(end, name, false, now_ms, tz)
             } else {
                 crate::refresh::login_end_note(end, name, now_ms, tz)
             };
-            format!("{tool} {note}")
+            Some(format!("{tool} {note}"))
         };
         if tool == "claude-code" {
-            if let Some((note, _)) =
-                crate::long_token::status_note(paths, &slot.config_dir, name, now_ms)
+            if let Some((note, true)) =
+                crate::long_token::status_note(paths, &slot.config_dir, name, pays_only, now_ms)
             {
                 warnings.push(format!("{tool} {note}"));
             }
@@ -2529,7 +2534,7 @@ fn account_health(
             } else if let Some(end) = &login.claude_login_end {
                 // The native login serves this slot, so its end is the one
                 // that matters - not the slot's own copy.
-                warnings.push(login_end_note(end));
+                warnings.extend(login_end_note(end));
             }
             continue;
         }
@@ -2583,7 +2588,7 @@ fn account_health(
             // so this cannot wait for the token to lapse to be said.
             "claude-code" if matches!(login_end, Some(crate::refresh::LoginEnd::Ended(_))) => {
                 if let Some(end) = &login_end {
-                    warnings.push(login_end_note(end));
+                    warnings.extend(login_end_note(end));
                 }
             }
             "claude-code"
@@ -2607,7 +2612,7 @@ fn account_health(
                     );
                 }
                 if let Some(end @ crate::refresh::LoginEnd::Ends(_)) = &login_end {
-                    warnings.push(login_end_note(end));
+                    warnings.extend(login_end_note(end));
                 }
             }
             _ => {}
@@ -2697,6 +2702,13 @@ pub(crate) fn active_by_tool(store: &Store, paths: &Paths) -> Vec<(&'static str,
                 .map(|name| (tool, name))
         })
         .collect()
+}
+
+/// Whether a Claude account is not the one plain `claude` runs in. Sessions,
+/// and the claude.ai connectors they reach, live in that one; the proxy needs
+/// nothing from another account but model requests, which its token can make.
+fn only_pays(paths: &Paths, name: &str) -> bool {
+    slot_default_name(paths, "claude-code").as_deref() != Some(name)
 }
 
 /// The name of the slot a tool's default pointer names, when it has one.
@@ -5930,20 +5942,21 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
             if tool == "claude-code" && !rejected {
                 let now = now_ms();
                 let covered = crate::long_token::current(&r.config_dir, now).is_some();
+                let pays_only = only_pays(paths, &r.name);
                 if let Some(end) = crate::refresh::claude_login_end(paths, &r.config_dir, now) {
                     let tz = crate::proxy::tz_offset();
                     report(
                         &key,
-                        false,
+                        covered && pays_only,
                         if covered {
-                            crate::long_token::covered_end_note(&end, &r.name, now, tz)
+                            crate::long_token::covered_end_note(&end, &r.name, pays_only, now, tz)
                         } else {
                             crate::refresh::login_end_note(&end, &r.name, now, tz)
                         },
                     );
                 }
                 if let Some((note, act)) =
-                    crate::long_token::status_note(paths, &r.config_dir, &r.name, now)
+                    crate::long_token::status_note(paths, &r.config_dir, &r.name, pays_only, now)
                 {
                     report(&key, !act, note);
                 }
@@ -7448,6 +7461,12 @@ pub fn run_account(
     // returns, so the lock must be given back here rather than at a scope end
     // that `exec` will not reach.
     drop(slots);
+    if tool == "claude-code" && crate::long_token::running_on(paths, &rec.config_dir) {
+        eprintln!(
+            "swapdex: '{name}' runs on its 1-year token, so claude.ai connectors are off \
+             in this session - /login brings them back"
+        );
+    }
     if no_launch {
         println!("account '{name}' is ready ({tool})");
         println!(
@@ -8410,17 +8429,20 @@ fn claude_logins_ending(paths: &Paths, payer: &str) -> Vec<String> {
     });
     let now = now_ms();
     let mut names = vec![payer.to_string()];
-    names.extend(home.filter(|h| h != payer));
+    names.extend(home.clone().filter(|h| h != payer));
     names
         .iter()
         .filter_map(|name| {
             let slot = slots.get(name)?;
+            let long = crate::long_token::current(&slot.config_dir, now);
+            // A payer that is not home loses nothing to its token.
+            if long.is_some() && home.as_deref() != Some(name.as_str()) {
+                return None;
+            }
             let credential = crate::claude_authority::credential(paths, &slot.config_dir).ok()?;
             // A saved 1-year token keeps sessions going past the end, not
             // claude.ai connectors: the end still shows, and so does running on it.
-            if crate::long_token::current(&slot.config_dir, now)
-                .is_some_and(|long| crate::long_token::installed(credential.bytes(), &long))
-            {
+            if long.is_some_and(|long| crate::long_token::installed(credential.bytes(), &long)) {
                 return Some(crate::long_token::running_brief(name));
             }
             let end = crate::refresh::login_end(credential.bytes(), now)?;
@@ -11106,6 +11128,23 @@ pub fn quota(paths: &Paths, json: bool, fresh_within: Option<u64>) -> Result<i32
     let cached = crate::quota_cache::load(paths);
     let mut reused: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     for (i, r) in rows.iter().enumerate() {
+        // A 1-year token makes model requests only. The usage endpoint wants
+        // `user:profile` and refuses it, which read as a login to renew; what
+        // the proxy recorded off the responses it served is all there is.
+        if slot_dir_named(paths, &r.name).is_some_and(|d| crate::long_token::running_on(paths, &d))
+        {
+            match cached
+                .get(&r.name)
+                .filter(|e| e.five_h.is_some() || e.seven_d.is_some())
+            {
+                Some(e) => {
+                    reused.insert(i, e.at);
+                    results.push((i, Fetch::Ok(quota_from_cache(e))));
+                }
+                None => results.push((i, Fetch::Offline(crate::long_token::USAGE_NOTE.into()))),
+            }
+            continue;
+        }
         if let (Some(secs), Some(e)) = (fresh_within, cached.get(&r.name)) {
             if r.token.is_some()
                 && !r.expired
