@@ -4,6 +4,18 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **A saved 1-year token no longer hides the sign-in's end.** With a token
+  saved, the status line dropped the three-day warning and `swapdex doctor`
+  counted the end as fine, so nothing prompted the `/login` that keeps claude.ai
+  connectors and Remote Control, and the account slid onto the inference-only
+  token unnoticed. Once the token had taken over, the status line said nothing
+  either. Now the status line names the end as it does without a token, `ls`
+  and `doctor` say a `/login` before then keeps connectors and that the token
+  takes over otherwise, and an account running on its token shows "on 1-year
+  token, connectors off" in the status line and as a problem in `doctor`.
+
 ## 0.167.40
 
 - **`swapdex token` reads all of a pasted token.** Claude Code wraps the token

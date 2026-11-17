@@ -2502,13 +2502,13 @@ fn account_health(
         // A registered live slot supersedes its historical snapshot's status.
         // In particular an unreadable Mac Keychain is not an expired snapshot.
         warnings.retain(|warning| !warning.starts_with(&format!("{tool} ")));
-        // With a 1-year token saved, the end needs nothing done by then.
+        // With a 1-year token saved, sessions outlive the end; connectors do not.
         let covered =
             tool == "claude-code" && crate::long_token::current(&slot.config_dir, now_ms).is_some();
         let login_end_note = |end: &crate::refresh::LoginEnd| {
             let tz = crate::proxy::tz_offset();
             let note = if covered {
-                crate::long_token::covered_end_note(end, now_ms, tz)
+                crate::long_token::covered_end_note(end, name, now_ms, tz)
             } else {
                 crate::refresh::login_end_note(end, name, now_ms, tz)
             };
@@ -5934,9 +5934,9 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                     let tz = crate::proxy::tz_offset();
                     report(
                         &key,
-                        covered,
+                        false,
                         if covered {
-                            crate::long_token::covered_end_note(&end, now, tz)
+                            crate::long_token::covered_end_note(&end, &r.name, now, tz)
                         } else {
                             crate::refresh::login_end_note(&end, &r.name, now, tz)
                         },
@@ -8415,11 +8415,15 @@ fn claude_logins_ending(paths: &Paths, payer: &str) -> Vec<String> {
         .iter()
         .filter_map(|name| {
             let slot = slots.get(name)?;
-            // Its 1-year token takes over at the end, so there is nothing to warn of.
-            if crate::long_token::current(&slot.config_dir, now).is_some() {
-                return None;
+            let credential = crate::claude_authority::credential(paths, &slot.config_dir).ok()?;
+            // A saved 1-year token keeps sessions going past the end, not
+            // claude.ai connectors: the end still shows, and so does running on it.
+            if crate::long_token::current(&slot.config_dir, now)
+                .is_some_and(|long| crate::long_token::installed(credential.bytes(), &long))
+            {
+                return Some(crate::long_token::running_brief(name));
             }
-            let end = crate::refresh::claude_slot_login_end(paths, &slot.config_dir, now)?;
+            let end = crate::refresh::login_end(credential.bytes(), now)?;
             Some(crate::refresh::login_end_brief(
                 &end,
                 name,

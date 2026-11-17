@@ -1244,6 +1244,77 @@ fn the_status_bar_names_a_claude_sign_in_that_ends_soon() {
     assert!(!bar.contains("login end"), "nothing ends soon: {bar}");
 }
 
+/// A saved 1-year token keeps sessions going past a sign-in's end, but it
+/// cannot reach claude.ai connectors or Remote Control. The bar dropped the end
+/// once a token was saved, so nothing prompted the /login that keeps them, and
+/// once the token took over nothing said they were gone.
+#[test]
+fn the_status_bar_still_names_an_end_a_saved_token_covers() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    seed_slot(root, "alpha", "a@example.com");
+    run(root, &["use", "alpha"]);
+    run(root, &["serve", "alpha"]);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let ending = |end: i64| {
+        let path = root
+            .join(".local/share/swapdex/slots/alpha")
+            .join(".credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+                "accessToken":"AT","refreshToken":"RT","expiresAt": now_ms + 3_600_000,
+                "refreshTokenExpiresAt": end, "subscriptionType":"max"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        chmod600(&path);
+    };
+    let token = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let state = |line: &str| line.rsplit(" - ").next().unwrap_or_default().to_string();
+
+    ending(now_ms + 2 * 86_400_000);
+    let (said, err, code) = run_stdin(root, &["token", "alpha"], token);
+    assert_eq!(code, 0, "{said}{err}");
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        state(bar.trim()).contains("alpha login ends"),
+        "a token is saved, and the end that drops connectors is gone from the bar: {bar}"
+    );
+    let (doctor, _, _) = run(root, &["doctor"]);
+    assert!(
+        doctor
+            .lines()
+            .any(|l| l.contains("problem") && l.contains("keeps claude.ai connectors")),
+        "doctor counts a /login that keeps connectors as nothing to do: {doctor}"
+    );
+
+    // Minutes from the end, saving it again lets it take over at once.
+    ending(now_ms + 20 * 60_000);
+    let (said, err, code) = run_stdin(root, &["token", "alpha"], token);
+    assert!(
+        code == 0 && said.contains("runs on this token now"),
+        "{said}{err}"
+    );
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        state(bar.trim()).contains("alpha on 1-year token, connectors off"),
+        "the bar does not say the account lost its connectors: {bar}"
+    );
+    assert!(!bar.contains(token), "{bar}");
+    let (doctor, _, _) = run(root, &["doctor"]);
+    assert!(
+        doctor
+            .lines()
+            .any(|l| l.contains("problem") && l.contains("running on its 1-year token")),
+        "doctor counts connectors off as fine: {doctor}"
+    );
+}
+
 /// An account name may hold spaces, and the bar named the payer by the first
 /// word of its label: for `work account` it looked up `work`, so the bar showed
 /// no usage and no sign-in end for the account paying - or another account's,

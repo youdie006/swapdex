@@ -363,9 +363,12 @@ token where the login was, in the shape Claude Code builds for
 the account with it, and sessions in that account carry on instead of stopping
 with "Login expired". The token can only make model requests, so claude.ai
 connectors and Remote Control are off until a `/login` puts a full sign-in
-back. `swapdex ls` says when an account runs on its token, and names the
-token's own end a month before the year is up. `swapdex token <name> --remove`
-forgets it.
+back. So the token is a fallback, not a replacement: the status line,
+`swapdex ls` and `swapdex doctor` still name the sign-in's end from three days
+out, since a `/login` before then keeps everything, and once the token has
+taken over the status line says the account's connectors are off. `swapdex ls`
+also names the token's own end a month before the year is up.
+`swapdex token <name> --remove` forgets it.
 
 Swapdex can renew idle accounts **while its proxy is running**,
 because that is the process holding the timer:

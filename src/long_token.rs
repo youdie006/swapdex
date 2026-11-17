@@ -218,25 +218,34 @@ fn date(at_ms: i64, tz_offset: i64) -> String {
     format!("{y}-{m:02}-{d:02}")
 }
 
-/// The login-end note for an account whose token will take over: nothing has
-/// to be done by then, so it says what will happen instead.
-pub fn covered_end_note(end: &LoginEnd, now_ms: i64, tz_offset: i64) -> String {
+/// The login-end note for an account whose token will take over. Sessions go
+/// on either way, but the token cannot reach claude.ai connectors or Remote
+/// Control, so it still offers the /login that keeps them.
+pub fn covered_end_note(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
     let clock = |at: i64| crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset);
+    let run = format!("`swapdex run {}`", crate::util::shell_word(name));
     match end {
         LoginEnd::Ends(at) => format!(
-            "login ends {} - its 1-year token takes over then",
+            "login ends {} - /login in a {run} session before then keeps claude.ai \
+             connectors; otherwise its 1-year token takes over",
             clock(*at)
         ),
         LoginEnd::Ended(at) => format!(
-            "login ended {} - its 1-year token takes over within half an hour",
+            "login ended {} - its 1-year token takes over within half an hour; /login in \
+             a {run} session brings back claude.ai connectors",
             clock(*at)
         ),
     }
 }
 
+/// The status bar's word for an account serving on its token.
+pub fn running_brief(name: &str) -> String {
+    format!("{name} on 1-year token, connectors off")
+}
+
 /// What `ls` and `doctor` say about an account's saved token, and whether it
-/// asks for something to be done: its year nearly up does, running on it does
-/// not. Nothing otherwise.
+/// asks for something to be done: its year nearly up does, and so does running
+/// on it, since claude.ai connectors are off until a /login. Nothing otherwise.
 pub fn status_note(paths: &Paths, dir: &Path, name: &str, now_ms: i64) -> Option<(String, bool)> {
     let long = load(dir)?;
     let tz = crate::proxy::tz_offset();
@@ -259,7 +268,7 @@ pub fn status_note(paths: &Paths, dir: &Path, name: &str, now_ms: i64) -> Option
              session brings back claude.ai connectors",
             crate::util::shell_word(name)
         );
-        (note, false)
+        (note, true)
     })
 }
 
@@ -384,11 +393,18 @@ mod tests {
     }
 
     #[test]
-    fn the_note_says_what_happens_instead_of_what_to_do() {
-        let ends = covered_end_note(&LoginEnd::Ends(NOW + 3_600_000), NOW, 0);
-        assert!(ends.contains("takes over then"), "{ends}");
-        assert!(!ends.contains("/login"), "{ends}");
-        let ended = covered_end_note(&LoginEnd::Ended(NOW - 1), NOW, 0);
-        assert!(ended.contains("takes over"), "{ended}");
+    fn the_note_offers_the_login_that_keeps_connectors() {
+        let ends = covered_end_note(&LoginEnd::Ends(NOW + 3_600_000), "work", NOW, 0);
+        assert!(
+            ends.contains("/login in a `swapdex run work` session")
+                && ends.contains("keeps claude.ai connectors")
+                && ends.contains("1-year token takes over"),
+            "{ends}"
+        );
+        let ended = covered_end_note(&LoginEnd::Ended(NOW - 1), "work", NOW, 0);
+        assert!(
+            ended.contains("takes over") && ended.contains("brings back claude.ai connectors"),
+            "{ended}"
+        );
     }
 }
