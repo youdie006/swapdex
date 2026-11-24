@@ -4,6 +4,15 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **Dependency auto-merge accepts the titles Dependabot uses here.** Dependabot
+  titles its pull requests `build(deps): bump X from A to B`, and
+  `build(deps-dev):` for a development dependency. The gate matched only
+  `Bump X from A to B`, so it held every update for review, including the
+  patch updates #156, #157, #159 and #160. A title with any other prefix is
+  still held, and the version and file checks are unchanged.
+
 ## 0.167.42
 
 - **An account that only pays runs on its 1-year token without a word.**
