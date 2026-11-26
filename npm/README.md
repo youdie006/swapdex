@@ -366,7 +366,8 @@ connectors and Remote Control are off until a `/login` puts a full sign-in
 back. That matters in the account plain `claude` runs in, where sessions and
 their connectors live, so for it the token is a fallback, not a replacement:
 the status line, `swapdex ls` and `swapdex doctor` still name the sign-in's end
-from three days out, since a `/login` before then keeps everything, and once
+from three days out, as the time the token takes over, since a `/login` before
+then keeps everything, and once
 the token has taken over the status line says its connectors are off. An
 account that only pays through the proxy needs nothing but model requests, so
 it runs on its token without a word; a `swapdex run <name>` session in it says

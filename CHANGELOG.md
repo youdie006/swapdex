@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.43
 
 - **A sign-in that a saved 1-year token covers no longer reads as about to
   lapse.** After `swapdex token <name>`, the status line still said
