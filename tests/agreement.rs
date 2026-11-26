@@ -1247,7 +1247,8 @@ fn the_status_bar_names_a_claude_sign_in_that_ends_soon() {
 /// A saved 1-year token keeps sessions going past a sign-in's end, but it
 /// cannot reach claude.ai connectors or Remote Control. The bar dropped the end
 /// once a token was saved, so nothing prompted the /login that keeps them, and
-/// once the token took over nothing said they were gone.
+/// once the token took over nothing said they were gone. Naming it as "login
+/// ends" then read as a login about to lapse, so it says what happens at it.
 #[test]
 fn the_status_bar_still_names_an_end_a_saved_token_covers() {
     let t = fixture();
@@ -1281,9 +1282,20 @@ fn the_status_bar_still_names_an_end_a_saved_token_covers() {
     let (said, err, code) = run_stdin(root, &["token", "alpha"], token);
     assert_eq!(code, 0, "{said}{err}");
     let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    let shown = state(bar.trim());
     assert!(
-        state(bar.trim()).contains("alpha login ends"),
+        shown.contains("alpha moves to 1-year token by "),
         "a token is saved, and the end that drops connectors is gone from the bar: {bar}"
+    );
+    assert!(
+        !shown.contains("alpha login ends"),
+        "the bar reads as a login about to lapse although the token covers it: {bar}"
+    );
+    let (ls, _, _) = run(root, &["ls"]);
+    assert!(
+        ls.contains("(claude-code 1-year token takes over by ")
+            && !ls.contains("(claude-code login ends"),
+        "ls leads with the end, not with what happens at it: {ls}"
     );
     let (doctor, _, _) = run(root, &["doctor"]);
     assert!(

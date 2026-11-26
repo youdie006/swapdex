@@ -6,6 +6,16 @@ All notable changes to swapdex are documented here. This project follows
 
 ## Unreleased
 
+- **A sign-in that a saved 1-year token covers no longer reads as about to
+  lapse.** After `swapdex token <name>`, the status line still said
+  `<name> login ends Fri 8:19pm`, word for word what it says when nothing
+  covers the end, and `ls` and `doctor` opened with the same "login ends", so
+  saving the token looked like it had done nothing. The status line now says
+  `<name> moves to 1-year token by Fri 8:19pm`, and `ls` and `doctor` lead with
+  the token taking over at that time, followed by the /login that keeps
+  claude.ai connectors. `doctor` still counts that /login as something to do
+  for the account plain `claude` runs in, since its connectors stop once the
+  token takes over.
 - **Dependency auto-merge accepts the titles Dependabot uses here.** Dependabot
   titles its pull requests `build(deps): bump X from A to B`, and
   `build(deps-dev):` for a development dependency. The gate matched only
