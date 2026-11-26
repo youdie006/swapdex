@@ -8442,16 +8442,19 @@ fn claude_logins_ending(paths: &Paths, payer: &str) -> Vec<String> {
             let credential = crate::claude_authority::credential(paths, &slot.config_dir).ok()?;
             // A saved 1-year token keeps sessions going past the end, not
             // claude.ai connectors: the end still shows, and so does running on it.
-            if long.is_some_and(|long| crate::long_token::installed(credential.bytes(), &long)) {
+            if long
+                .as_ref()
+                .is_some_and(|long| crate::long_token::installed(credential.bytes(), long))
+            {
                 return Some(crate::long_token::running_brief(name));
             }
             let end = crate::refresh::login_end(credential.bytes(), now)?;
-            Some(crate::refresh::login_end_brief(
-                &end,
-                name,
-                now,
-                crate::proxy::tz_offset(),
-            ))
+            let tz = crate::proxy::tz_offset();
+            Some(if long.is_some() {
+                crate::long_token::covered_end_brief(&end, name, now, tz)
+            } else {
+                crate::refresh::login_end_brief(&end, name, now, tz)
+            })
         })
         .collect()
 }

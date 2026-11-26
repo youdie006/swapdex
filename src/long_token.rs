@@ -251,28 +251,37 @@ pub fn covered_end_note(
 ) -> String {
     let clock = |at: i64| crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset);
     let run = format!("`swapdex run {}`", crate::util::shell_word(name));
+    let when = match end {
+        LoginEnd::Ends(at) => format!("by {}, when the login ends", clock(*at)),
+        LoginEnd::Ended(at) => format!("within half an hour, as the login ended {}", clock(*at)),
+    };
     if pays_only {
-        let (verb, at) = match end {
-            LoginEnd::Ends(at) => ("ends", at),
-            LoginEnd::Ended(at) => ("ended", at),
-        };
         return format!(
-            "login {verb} {} - its 1-year token takes over, and paying needs nothing \
-             more; only a {run} session would miss claude.ai connectors",
-            clock(*at)
+            "1-year token takes over {when}; paying needs nothing more, only a {run} \
+             session would miss claude.ai connectors"
         );
     }
     match end {
+        LoginEnd::Ends(_) => format!(
+            "1-year token takes over {when}; /login in a {run} session before then keeps \
+             claude.ai connectors"
+        ),
+        LoginEnd::Ended(_) => format!(
+            "1-year token takes over {when}; /login in a {run} session brings back \
+             claude.ai connectors"
+        ),
+    }
+}
+
+/// The status bar's word for an account whose token will take over: what
+/// happens at the end, since "login ends" reads as a login about to lapse.
+pub fn covered_end_brief(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
+    match end {
         LoginEnd::Ends(at) => format!(
-            "login ends {} - /login in a {run} session before then keeps claude.ai \
-             connectors; otherwise its 1-year token takes over",
-            clock(*at)
+            "{name} moves to 1-year token by {}",
+            crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset)
         ),
-        LoginEnd::Ended(at) => format!(
-            "login ended {} - its 1-year token takes over within half an hour; /login in \
-             a {run} session brings back claude.ai connectors",
-            clock(*at)
-        ),
+        LoginEnd::Ended(_) => format!("{name} moves to 1-year token shortly"),
     }
 }
 
