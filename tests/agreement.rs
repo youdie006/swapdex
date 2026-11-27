@@ -1327,6 +1327,76 @@ fn the_status_bar_leaves_an_end_a_saved_token_covers_to_ls_and_doctor() {
     );
 }
 
+/// The picker's status column answers "can this account serve?". A saved
+/// 1-year token's note took that column, pushed the usage bars off the row and
+/// left the account out of the ready count, although it served throughout.
+#[cfg(unix)]
+#[test]
+fn the_picker_keeps_an_account_a_saved_token_covers_ready() {
+    let t = fixture();
+    let root = t.path();
+    seed_claude(root, "uuid-a", "a@example.com");
+    seed_slot(root, "alpha", "a@example.com");
+    // Two accounts, since the heading counts ready ones only for a group.
+    seed_slot(root, "beta", "b@example.com");
+    run(root, &["use", "alpha"]);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let ending = |end: i64| {
+        let path = root
+            .join(".local/share/swapdex/slots/alpha")
+            .join(".credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"claudeAiOauth":{
+                "accessToken":"AT","refreshToken":"RT","expiresAt": now_ms + 3_600_000,
+                "refreshTokenExpiresAt": end, "subscriptionType":"max"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        chmod600(&path);
+    };
+    let token = "sk-ant-oat01-LONGLIVEDTESTTOKENxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+    ending(now_ms + 2 * 86_400_000);
+    let (out, code) = run_fullscreen_ui(root, b"q");
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("login ends") && out.contains("1/2 ready"),
+        "without a token the end still flags the row: {out}"
+    );
+
+    let (said, err, code) = run_stdin(root, &["token", "alpha"], token);
+    assert_eq!(code, 0, "{said}{err}");
+    let (out, code) = run_fullscreen_ui(root, b"q");
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("1-year token") && out.contains("2/2 ready"),
+        "the token's note took the row of an account that serves: {out}"
+    );
+
+    // Once the token has taken over, the account serves on it.
+    ending(now_ms + 20 * 60_000);
+    let (said, err, code) = run_stdin(root, &["token", "alpha"], token);
+    assert!(
+        code == 0 && said.contains("runs on this token now"),
+        "{said}{err}"
+    );
+    let (out, code) = run_fullscreen_ui(root, b"q");
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("1-year token") && out.contains("2/2 ready"),
+        "the picker flags an account serving on its token: {out}"
+    );
+    let (ls, _, _) = run(root, &["ls"]);
+    assert!(
+        ls.contains("running on its 1-year token"),
+        "ls stops saying the account runs on its token: {ls}"
+    );
+}
+
 /// An account that only pays loses nothing to its token: sessions run in the
 /// home account, and the proxy needs nothing but model requests from the payer.
 /// Warning about its end, or about connectors it never serves, was a monthly

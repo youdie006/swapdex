@@ -273,17 +273,28 @@ pub fn covered_end_note(
     }
 }
 
-/// What `ls` and `doctor` say about an account's saved token, and whether it
-/// asks for something to be done: its year nearly up does, and so does running
-/// on it, since claude.ai connectors are off until a /login - but not for an
-/// account that only pays. Nothing otherwise.
+/// What a note about a saved token asks of the owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asks {
+    /// Nothing: an account that only pays loses nothing to its token.
+    Nothing,
+    /// A /login for claude.ai connectors. The account serves meanwhile.
+    Login,
+    /// A new token, as the year is nearly or already up.
+    NewToken,
+}
+
+/// What `ls` and `doctor` say about an account's saved token, and what it asks
+/// for: a new token when its year is nearly up, a /login when running on it,
+/// since claude.ai connectors are off until then - but nothing for an account
+/// that only pays. `None` otherwise.
 pub fn status_note(
     paths: &Paths,
     dir: &Path,
     name: &str,
     pays_only: bool,
     now_ms: i64,
-) -> Option<(String, bool)> {
+) -> Option<(String, Asks)> {
     let long = load(dir)?;
     let tz = crate::proxy::tz_offset();
     let ends = date(long.ends_at_ms(), tz);
@@ -292,10 +303,16 @@ pub fn status_note(
         crate::util::shell_word(name)
     );
     if long.ends_at_ms() <= now_ms {
-        return Some((format!("1-year token ended about {ends} - {renew}"), true));
+        return Some((
+            format!("1-year token ended about {ends} - {renew}"),
+            Asks::NewToken,
+        ));
     }
     if long.ends_at_ms() - now_ms <= END_NOTICE_MS {
-        return Some((format!("1-year token ends about {ends} - {renew}"), true));
+        return Some((
+            format!("1-year token ends about {ends} - {renew}"),
+            Asks::NewToken,
+        ));
     }
     let in_use =
         crate::claude_authority::credential(paths, dir).is_ok_and(|c| installed(c.bytes(), &long));
@@ -306,13 +323,13 @@ pub fn status_note(
                 "running on its 1-year token until about {ends} - paying needs nothing \
                  more; a {run} session has no claude.ai connectors"
             );
-            return (note, false);
+            return (note, Asks::Nothing);
         }
         let note = format!(
             "running on its 1-year token until about {ends} - /login in a {run} session \
              brings back claude.ai connectors"
         );
-        (note, true)
+        (note, Asks::Login)
     })
 }
 
