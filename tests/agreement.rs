@@ -1245,12 +1245,11 @@ fn the_status_bar_names_a_claude_sign_in_that_ends_soon() {
 }
 
 /// A saved 1-year token keeps sessions going past a sign-in's end, but it
-/// cannot reach claude.ai connectors or Remote Control. The bar dropped the end
-/// once a token was saved, so nothing prompted the /login that keeps them, and
-/// once the token took over nothing said they were gone. Naming it as "login
-/// ends" then read as a login about to lapse, so it says what happens at it.
+/// cannot reach claude.ai connectors or Remote Control. `ls` and `doctor` say
+/// so. The bar, in view all day, said it for three days before the end and then
+/// for the token's whole year, about something that needs nothing done.
 #[test]
-fn the_status_bar_still_names_an_end_a_saved_token_covers() {
+fn the_status_bar_leaves_an_end_a_saved_token_covers_to_ls_and_doctor() {
     let t = fixture();
     let root = t.path();
     seed_claude(root, "uuid-a", "a@example.com");
@@ -1279,17 +1278,18 @@ fn the_status_bar_still_names_an_end_a_saved_token_covers() {
     let state = |line: &str| line.rsplit(" - ").next().unwrap_or_default().to_string();
 
     ending(now_ms + 2 * 86_400_000);
+    let (bar, _, _) = run(root, &["serve", "--quiet"]);
+    assert!(
+        state(bar.trim()).contains("alpha login ends"),
+        "without a token the end is in the bar: {bar}"
+    );
     let (said, err, code) = run_stdin(root, &["token", "alpha"], token);
     assert_eq!(code, 0, "{said}{err}");
     let (bar, _, _) = run(root, &["serve", "--quiet"]);
     let shown = state(bar.trim());
     assert!(
-        shown.contains("alpha moves to 1-year token by "),
-        "a token is saved, and the end that drops connectors is gone from the bar: {bar}"
-    );
-    assert!(
-        !shown.contains("alpha login ends"),
-        "the bar reads as a login about to lapse although the token covers it: {bar}"
+        !shown.contains("login end") && !shown.contains("1-year"),
+        "the bar keeps an end the saved token covers: {bar}"
     );
     let (ls, _, _) = run(root, &["ls"]);
     assert!(
@@ -1314,8 +1314,8 @@ fn the_status_bar_still_names_an_end_a_saved_token_covers() {
     );
     let (bar, _, _) = run(root, &["serve", "--quiet"]);
     assert!(
-        state(bar.trim()).contains("alpha on 1-year token, connectors off"),
-        "the bar does not say the account lost its connectors: {bar}"
+        !state(bar.trim()).contains("1-year") && !bar.contains("connectors"),
+        "the bar names the token for the whole year it serves: {bar}"
     );
     assert!(!bar.contains(token), "{bar}");
     let (doctor, _, _) = run(root, &["doctor"]);

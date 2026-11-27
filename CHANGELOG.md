@@ -4,6 +4,17 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The status line no longer names an account's saved 1-year token.** Once a
+  token was saved, the status line said `<name> moves to 1-year token by Fri
+  8:19pm` for the three days before the sign-in's end, and then
+  `<name> on 1-year token, connectors off` for the token's whole year: a
+  permanent addition to a line in view all day, about something that needs
+  nothing done. The status line now names a sign-in's end only when nothing
+  covers it. `swapdex ls` and `swapdex doctor` still say when the token takes
+  over and that claude.ai connectors stop there until a `/login`.
+
 ## 0.167.43
 
 - **A sign-in that a saved 1-year token covers no longer reads as about to
