@@ -273,23 +273,6 @@ pub fn covered_end_note(
     }
 }
 
-/// The status bar's word for an account whose token will take over: what
-/// happens at the end, since "login ends" reads as a login about to lapse.
-pub fn covered_end_brief(end: &LoginEnd, name: &str, now_ms: i64, tz_offset: i64) -> String {
-    match end {
-        LoginEnd::Ends(at) => format!(
-            "{name} moves to 1-year token by {}",
-            crate::proxy::pick::clock_at(at / 1000, now_ms / 1000, tz_offset)
-        ),
-        LoginEnd::Ended(_) => format!("{name} moves to 1-year token shortly"),
-    }
-}
-
-/// The status bar's word for an account serving on its token.
-pub fn running_brief(name: &str) -> String {
-    format!("{name} on 1-year token, connectors off")
-}
-
 /// What `ls` and `doctor` say about an account's saved token, and whether it
 /// asks for something to be done: its year nearly up does, and so does running
 /// on it, since claude.ai connectors are off until a /login - but not for an

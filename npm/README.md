@@ -252,8 +252,9 @@ account is always visible inside the tool you are switching
 To show who is paying and what that account has left, use
 `swapdex serve --quiet` instead. It prints one line from swapdex's cache, e.g.
 `work (you@example.com) - 5h 95% | 7d 24%`. When the paying account's or your
-sessions' account's Claude sign-in ends within three days, the line says so after
-the usage: `... - 7d 24% · work login ends Mon 9:40am`. Claude Code re-runs a status line
+sessions' account's Claude sign-in ends within three days, and no saved 1-year
+token covers it, the line says so after the usage:
+`... - 7d 24% · work login ends Mon 9:40am`. Claude Code re-runs a status line
 command only when the conversation changes, so also set `refreshInterval` (in
 seconds); without it the numbers stay where they were while a session waits on
 a long tool call:
@@ -365,10 +366,10 @@ with "Login expired". The token can only make model requests, so claude.ai
 connectors and Remote Control are off until a `/login` puts a full sign-in
 back. That matters in the account plain `claude` runs in, where sessions and
 their connectors live, so for it the token is a fallback, not a replacement:
-the status line, `swapdex ls` and `swapdex doctor` still name the sign-in's end
-from three days out, as the time the token takes over, since a `/login` before
-then keeps everything, and once
-the token has taken over the status line says its connectors are off. An
+`swapdex ls` and `swapdex doctor` still name the sign-in's end from three days
+out, as the time the token takes over, since a `/login` before then keeps
+everything, and once the token has taken over they say its connectors are off.
+The status line leaves both out, since sessions carry on either way. An
 account that only pays through the proxy needs nothing but model requests, so
 it runs on its token without a word; a `swapdex run <name>` session in it says
 connectors are off there. The usage endpoint does not answer a 1-year token, so
