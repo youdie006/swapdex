@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.45
 
 - **The `swapdex ui` picker keeps an account a saved 1-year token covers
   ready.** The token's note, "claude-code 1-year token takes over by 8:19pm,
