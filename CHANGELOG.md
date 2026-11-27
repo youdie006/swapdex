@@ -4,6 +4,19 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
+## Unreleased
+
+- **The `swapdex ui` picker keeps an account a saved 1-year token covers
+  ready.** The token's note, "claude-code 1-year token takes over by 8:19pm,
+  when the login ends; /login in a ...", and later "running on its 1-year
+  token", took the row's status column in place of `active` or `ready`. It
+  pushed that account's 5h and 7d bars off the row, and the heading counted it
+  as unable to serve (`1/2 ready`), although it served throughout. The row now
+  shows its status and bars as any other account's. `swapdex ls` and
+  `swapdex doctor` still say when the token takes over and that claude.ai
+  connectors stop until a `/login`, and a token whose year is nearly up still
+  flags the row.
+
 ## 0.167.44
 
 - **The status line no longer names an account's saved 1-year token.** Once a

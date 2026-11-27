@@ -2451,6 +2451,9 @@ fn profile_summary(
 #[derive(Default)]
 struct AccountHealth {
     warning: Option<String>,
+    /// Said by `ls` beside the warning, but nothing that stops the account
+    /// serving, so the picker's status column leaves it out.
+    note: Option<String>,
     access_expired: bool,
     refresh_rejected_at_ms: std::collections::BTreeMap<String, i64>,
     renewal_owner: std::collections::BTreeMap<String, String>,
@@ -2488,6 +2491,7 @@ fn account_health(
         .into_iter()
         .flat_map(|warning| warning.split(", ").map(str::to_owned).collect::<Vec<_>>())
         .collect();
+    let mut notes: Vec<String> = Vec::new();
     let mut access_expired = false;
     let mut refresh_rejected_at_ms = std::collections::BTreeMap::new();
     let mut renewal_owner = std::collections::BTreeMap::new();
@@ -2519,11 +2523,24 @@ fn account_health(
             };
             Some(format!("{tool} {note}"))
         };
+        // Past an end the token covers the account still serves, so it is a
+        // note; a warning says the row cannot serve.
+        let file_end = |end: &crate::refresh::LoginEnd,
+                        warnings: &mut Vec<String>,
+                        notes: &mut Vec<String>| {
+            let said = login_end_note(end);
+            if covered {
+                notes.extend(said);
+            } else {
+                warnings.extend(said);
+            }
+        };
         if tool == "claude-code" {
-            if let Some((note, true)) =
-                crate::long_token::status_note(paths, &slot.config_dir, name, pays_only, now_ms)
-            {
-                warnings.push(format!("{tool} {note}"));
+            use crate::long_token::Asks;
+            match crate::long_token::status_note(paths, &slot.config_dir, name, pays_only, now_ms) {
+                Some((note, Asks::NewToken)) => warnings.push(format!("{tool} {note}")),
+                Some((note, Asks::Login)) => notes.push(format!("{tool} {note}")),
+                Some((_, Asks::Nothing)) | None => {}
             }
         }
         if let Some(login) = crate::live_login::resolve(paths, &slot.config_dir, tool, now_ms) {
@@ -2534,7 +2551,7 @@ fn account_health(
             } else if let Some(end) = &login.claude_login_end {
                 // The native login serves this slot, so its end is the one
                 // that matters - not the slot's own copy.
-                warnings.extend(login_end_note(end));
+                file_end(end, &mut warnings, &mut notes);
             }
             continue;
         }
@@ -2588,7 +2605,7 @@ fn account_health(
             // so this cannot wait for the token to lapse to be said.
             "claude-code" if matches!(login_end, Some(crate::refresh::LoginEnd::Ended(_))) => {
                 if let Some(end) = &login_end {
-                    warnings.extend(login_end_note(end));
+                    file_end(end, &mut warnings, &mut notes);
                 }
             }
             "claude-code"
@@ -2612,7 +2629,7 @@ fn account_health(
                     );
                 }
                 if let Some(end @ crate::refresh::LoginEnd::Ends(_)) = &login_end {
-                    warnings.extend(login_end_note(end));
+                    file_end(end, &mut warnings, &mut notes);
                 }
             }
             _ => {}
@@ -2621,6 +2638,7 @@ fn account_health(
 
     AccountHealth {
         warning: (!warnings.is_empty()).then(|| warnings.join(", ")),
+        note: (!notes.is_empty()).then(|| notes.join(", ")),
         // A definitive rejection is the stronger diagnosis. The TUI renders
         // `stale` before `warn`, so leaving this true would hide the re-login
         // verdict behind the weaker word "expired".
@@ -2970,6 +2988,11 @@ pub fn ls(paths: &Paths, json: bool, names: bool) -> Result<i32> {
     let summary_for = |p: &crate::store::ProfileInfo| {
         let (_, _, marker) = profile_summary(&store, &p.name, &p.tools);
         let mut health = account_health(paths, &p.name, &p.tools, marker, now_ms());
+        // `ls` says all of it, including what does not stop the account serving.
+        health.warning = match (health.warning.take(), health.note.take()) {
+            (Some(warning), Some(note)) => Some(format!("{warning}, {note}")),
+            (warning, note) => warning.or(note),
+        };
         // Legacy ls rows aggregate providers. Keep their displayed email and
         // tier together under one primary provider (adapter order), never an
         // arbitrary same-name directory from another tool.
@@ -5955,10 +5978,10 @@ pub fn doctor(paths: &Paths) -> Result<i32> {
                         },
                     );
                 }
-                if let Some((note, act)) =
+                if let Some((note, asks)) =
                     crate::long_token::status_note(paths, &r.config_dir, &r.name, pays_only, now)
                 {
-                    report(&key, !act, note);
+                    report(&key, asks == crate::long_token::Asks::Nothing, note);
                 }
             }
             if rejected {

@@ -369,7 +369,9 @@ their connectors live, so for it the token is a fallback, not a replacement:
 `swapdex ls` and `swapdex doctor` still name the sign-in's end from three days
 out, as the time the token takes over, since a `/login` before then keeps
 everything, and once the token has taken over they say its connectors are off.
-The status line leaves both out, since sessions carry on either way. An
+The status line leaves both out, and so does the `swapdex ui` picker, which
+keeps the account ready with its usage bars, since sessions carry on either
+way. An
 account that only pays through the proxy needs nothing but model requests, so
 it runs on its token without a word; a `swapdex run <name>` session in it says
 connectors are off there. The usage endpoint does not answer a 1-year token, so
