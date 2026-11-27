@@ -4,7 +4,7 @@ All notable changes to swapdex are documented here. This project follows
 [Semantic Versioning](https://semver.org) and
 [Keep a Changelog](https://keepachangelog.com).
 
-## Unreleased
+## 0.167.44
 
 - **The status line no longer names an account's saved 1-year token.** Once a
   token was saved, the status line said `<name> moves to 1-year token by Fri
